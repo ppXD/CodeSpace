@@ -33,8 +33,14 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     /// <summary>The env var Codex reads its model API key from (OpenAI + OpenAI-compatible providers). Pinned by a test (Rule 8) — the agent authenticates with whatever lands here.</summary>
     public const string ApiKeyEnvVar = "OPENAI_API_KEY";
 
-    /// <summary>The env var Codex reads a base-URL override from (OpenRouter / a self-hosted OpenAI-compatible gateway / a local Ollama). Pinned by a test (Rule 8).</summary>
+    /// <summary>The env var the credential projection carries the base-URL override on. Codex 0.142.x IGNORES it as an env var (it routes through a config-file model-provider, not <c>OPENAI_BASE_URL</c>), so the harness reads it back here and re-injects it as a <c>-c</c> model-provider override — see <see cref="AppendModelProviderConfig"/>. Pinned by a test (Rule 8).</summary>
     public const string BaseUrlEnvVar = "OPENAI_BASE_URL";
+
+    /// <summary>The model-provider id Codex routes a gateway through (injected via <c>-c</c> overrides). Arbitrary but stable — pinned by a test.</summary>
+    public const string ModelProviderId = "codespace";
+
+    /// <summary>Codex 0.142.x supports ONLY the <c>responses</c> wire protocol (it dropped <c>chat</c>), so a custom gateway must speak the OpenAI Responses API. Pinned by a test (Rule 8).</summary>
+    public const string ModelProviderWireApi = "responses";
 
     /// <summary>
     /// Codex's config-home override (relocates <c>~/.codex</c>). The runner points it at a per-run isolated dir so
@@ -72,6 +78,10 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
         args.Add("--sandbox");
         args.Add(SandboxMode(task.Permissions));
+
+        // Point Codex at a custom gateway (when one was projected) BEFORE the prompt positional — Codex parses `-c`
+        // overrides as flags, so they must precede the goal.
+        AppendModelProviderConfig(args, task);
 
         // B1 asymmetry: Codex exec has NO native system-prompt flag (Claude uses --append-system-prompt). Prepending the
         // operating contract to the prompt positional conflates it with the goal (and pollutes goal-reading consumers),
@@ -135,14 +145,19 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
     }
 
-    /// <summary>Codex drives OpenAI + any OpenAI-API-compatible endpoint (OpenRouter, a self-hosted gateway, a local Ollama) via a base-URL override.</summary>
+    /// <summary>
+    /// Codex drives OpenAI + any endpoint that speaks the OpenAI <b>Responses</b> API, via a base-URL override (a
+    /// self-hosted gateway, OpenRouter / Ollama IFF they expose <c>/responses</c>). Codex 0.142.x dropped the
+    /// chat-completions wire, so a custom endpoint that only does <c>/chat/completions</c> won't work — see
+    /// <see cref="AppendModelProviderConfig"/>.
+    /// </summary>
     public IReadOnlyList<string> SupportedProviders { get; } = new[] { "OpenAI", "OpenRouter", "Ollama", "Custom" };
 
     /// <summary>
     /// Project a resolved credential onto Codex's env: the api key under <see cref="ApiKeyEnvVar"/> (omitted for a
-    /// keyless local provider) and any base-URL override under <see cref="BaseUrlEnvVar"/>. Codex's OpenAI provider
-    /// reads both, so the same shape covers OpenAI (key only), OpenRouter / Custom (key + base URL), and Ollama
-    /// (base URL only).
+    /// keyless local provider) and any base-URL override under <see cref="BaseUrlEnvVar"/>. The key is read directly
+    /// from the env; the base URL is NOT (Codex 0.142.x ignores <c>OPENAI_BASE_URL</c>) — it rides on the env only as
+    /// the carrier <see cref="AppendModelProviderConfig"/> reads back to build the <c>-c</c> model-provider override.
     /// </summary>
     public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential)
     {
@@ -160,6 +175,32 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     {
         if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
             throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
+    }
+
+    /// <summary>
+    /// Route Codex at a custom OpenAI-compatible gateway via inline <c>-c</c> config overrides. Codex 0.142.x ignores
+    /// the <c>OPENAI_BASE_URL</c> env var (it picks the endpoint from a config-file model-provider, not env), so the
+    /// base URL the credential projection carried on <see cref="BaseUrlEnvVar"/> is re-injected here as a model-provider
+    /// over the <see cref="ModelProviderWireApi"/> wire, reading the key from <see cref="ApiKeyEnvVar"/> (set by
+    /// <see cref="ProjectToEnv"/>). Emitted ONLY when a base URL was projected — plain OpenAI keeps Codex's built-in
+    /// provider (api.openai.com). The base URL is non-secret, so the argv carries it safely; the key stays in env. It
+    /// must be the full OpenAI-compatible base (e.g. <c>https://host/v1</c>) — Codex appends <c>/responses</c>.
+    /// </summary>
+    private static void AppendModelProviderConfig(List<string> args, AgentTask task)
+    {
+        if (!task.Environment.TryGetValue(BaseUrlEnvVar, out var baseUrl) || string.IsNullOrWhiteSpace(baseUrl)) return;
+
+        // Each override is a bare `key=value` argv element (exec, not a shell — no shell-escaping needed). Codex splits
+        // on the FIRST `=`, so a query string in the URL is safe; values are assumed URL-safe (operator-set DB config),
+        // never TOML-quoted. `wire_api` is pinned to `responses` — the only protocol Codex 0.142.x accepts. The provider
+        // id reuses the MCP server name string coincidentally; the two live in independent TOML tables (no collision).
+        void Override(string keyValue) { args.Add("-c"); args.Add(keyValue); }
+
+        Override($"model_provider={ModelProviderId}");
+        Override($"model_providers.{ModelProviderId}.name={ModelProviderId}");
+        Override($"model_providers.{ModelProviderId}.base_url={baseUrl}");
+        Override($"model_providers.{ModelProviderId}.wire_api={ModelProviderWireApi}");
+        Override($"model_providers.{ModelProviderId}.env_key={ApiKeyEnvVar}");
     }
 
     /// <summary>Codex hosts an MCP server from an <c>[mcp_servers.&lt;name&gt;]</c> table in its config home's <c>config.toml</c>. The harness owns the format — it renders the TOML content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>
