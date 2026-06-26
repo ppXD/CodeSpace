@@ -70,6 +70,29 @@ public sealed class SupervisorDependencyOrderingFlowTests
     }
 
     [Fact]
+    public async Task A_non_trailing_deferred_subtask_is_dropped_from_the_persisted_payload_keeping_the_join_aligned()
+    {
+        // The regression for the positional-join blocker: the model spawns [a, b, c] where the MIDDLE one (b) depends on
+        // the not-yet-done a. The clamp must drop b from the PERSISTED payload (not just the staged set), so the recorded
+        // subtaskIds match the recorded agents one-for-one — otherwise a later turn's positional subtaskIds[i] <-> results[i]
+        // fold would credit the never-run b with c's result.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, ("a", null, "implement-a"), ("b", new[] { "a" }, "implement-b"), ("c", null, "implement-c"));
+
+        await RunSpawnTurnAsync(runId, teamId, "a", "b", "c");
+
+        var payload = JsonDocument.Parse(await SpawnPayloadAsync(runId, teamId)).RootElement;
+        payload.GetProperty("subtaskIds").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "a", "c" },
+            customMessage: "the deferred non-trailing b is dropped from the persisted payload — subtaskIds now align with the staged agents");
+
+        var staged = await StagedAgentTasksAsync(runId, teamId);
+        staged.Count.ShouldBe(2);
+        staged.Any(t => t.Contains("implement-b")).ShouldBeFalse("b was deferred and never staged");
+    }
+
+    [Fact]
     public async Task A_flat_plan_stages_every_requested_subtask()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -108,6 +131,16 @@ public sealed class SupervisorDependencyOrderingFlowTests
             .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
             .Select(r => r.TaskJson!)
             .ToListAsync();
+    }
+
+    /// <summary>The persisted payload of the run's spawn decision (the one the model authored this turn) — to assert the clamp narrowed it.</summary>
+    private async Task<string> SpawnPayloadAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Spawn && d.Sequence > 1)
+            .Select(d => d.PayloadJson)
+            .SingleAsync();
     }
 
     private async Task SeedPlanAsync(Guid runId, Guid teamId, int sequence, params (string Id, string[]? DependsOn, string Instruction)[] subtasks)

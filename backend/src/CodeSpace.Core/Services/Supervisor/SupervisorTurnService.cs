@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
@@ -110,7 +111,47 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
 
+        decision = ClampSpawnToDependencyFrontier(context, decision);
+
         return ApplyPostDecisionGate(context, plan, decision);
+    }
+
+    /// <summary>
+    /// Clamp a spawn decision to its dependency-ready frontier (loopability) BEFORE it is claimed + frozen, so the
+    /// PERSISTED payload's <c>subtaskIds</c> match the agents that actually stage one-for-one — the positional
+    /// <c>subtaskIds[i] ↔ agentResults[i]</c> invariant every downstream fold (per-unit acceptance, the dependency gate,
+    /// the merge) relies on stays intact. A subtask whose <c>DependsOn</c> are not yet a non-rejected success is DROPPED;
+    /// the model re-proposes it on a later turn once they settle (it sees the dependency frontier in the prompt). PURE +
+    /// deterministic over the tape → a replay re-derives the identical clamp + idempotency key. A flat plan (no
+    /// <c>DependsOn</c>) or an all-ready spawn returns the decision UNCHANGED (byte-identical, the dominant case). An
+    /// all-deferred spawn clamps to an EMPTY fan-out (a zero-agent synchronous self-advance that trips the no-progress
+    /// bound, so a cyclic / unsatisfiable DAG converges to a clean stop rather than looping).
+    /// </summary>
+    private SupervisorDecision ClampSpawnToDependencyFrontier(SupervisorTurnContext context, SupervisorDecision decision)
+    {
+        if (decision.Kind != SupervisorDecisionKinds.Spawn) return decision;
+
+        SupervisorSpawnPayload? spawn;
+        try { spawn = JsonSerializer.Deserialize<SupervisorSpawnPayload>(decision.PayloadJson, AgentJson.Options); }
+        catch (JsonException) { return decision; }
+
+        if (spawn is null) return decision;
+
+        var (ready, deferred) = SupervisorDependencyGate.Partition(context, spawn.SubtaskIds);
+
+        if (deferred.Count == 0) return decision;   // every requested subtask is ready → byte-identical (the dominant case)
+
+        _logger.LogInformation("Supervisor deferred {Deferred} subtask(s) with unmet dependencies at turn {Turn} on node {NodeId}, clamping the spawn to {Ready} ready subtask(s)", deferred.Count, context.TurnNumber, context.NodeId, ready.Count);
+
+        var readySet = ready.ToHashSet();
+
+        var clamped = new SupervisorSpawnPayload
+        {
+            SubtaskIds = ready,
+            Agents = spawn.Agents?.Where(a => readySet.Contains(a.SubtaskId)).ToList() is { Count: > 0 } kept ? kept : null,
+        };
+
+        return decision with { PayloadJson = JsonSerializer.Serialize(clamped, AgentJson.Options) };
     }
 
     /// <summary>
