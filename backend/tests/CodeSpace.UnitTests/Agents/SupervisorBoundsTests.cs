@@ -269,6 +269,7 @@ public class SupervisorBoundsTests
         SupervisorStopReasons.DepthCapExceeded.ShouldBe("supervisor nesting cap exceeded");
         SupervisorStopReasons.NoProgress.ShouldBe("no progress");
         SupervisorStopReasons.GovernanceDenied.ShouldBe("governance denied the side effect");
+        SupervisorStopReasons.PlanInvalid.ShouldBe("plan structurally invalid");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────────

@@ -163,6 +163,14 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     internal SupervisorDecision ApplyPostDecisionGate(SupervisorTurnContext context, SupervisorGoalPlan plan, SupervisorDecision decision)
     {
+        // Tier-0 FIRST: a structurally invalid plan (a dangling DependsOn ref or a cycle) force-STOPs at plan time —
+        // before the dependency gate would otherwise defer its subtasks forever into a no-progress stall. Structure is
+        // more fundamental than the fan-out count, so it precedes the bound (a plan that is BOTH malformed and over-cap
+        // reports PlanInvalid first). Pure → a re-entry re-derives the same stop.
+        var planInvalid = SupervisorPlanValidator.Validate(decision);
+
+        if (planInvalid != null) return ForcedStop(planInvalid);
+
         var postBound = SupervisorBounds.PostDecision(context, plan, decision);
 
         if (postBound != null) return ForcedStop(postBound);
