@@ -189,10 +189,16 @@ public static class SupervisorOutcome
         agentResults.Any(ResultHasEvidence);
 
     private static bool ResultHasEvidence(SupervisorAgentResult result) =>
-        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
-        || result.ChangedFiles.Count > 0
-        || !string.IsNullOrEmpty(result.ProducedBranch)
-        || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
+        // Loopability slice 3: an OBJECTIVELY-REJECTED unit is NOT settled evidence — even if it pushed a branch or
+        // self-reported Succeeded. Without this, a unit that pushes a branch but FAILS its per-unit acceptance resets
+        // the no-progress streak (ProducedBranch counts below), so an acceptance-failing retry loop never trips the
+        // stall bound (only the total-spawn cap), burning the budget on never-passing work. An ungraded unit
+        // (AcceptancePassed null — no per-unit contract, the pre-slice case) is byte-identically unaffected.
+        result.AcceptancePassed != false
+        && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
+            || result.ChangedFiles.Count > 0
+            || !string.IsNullOrEmpty(result.ProducedBranch)
+            || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0));
 
     /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo
@@ -690,6 +696,22 @@ public static class SupervisorOutcome
         catch (JsonException)
         {
             return Array.Empty<SupervisorPlanPhase>();
+        }
+    }
+
+    /// <summary>Read the model-authored planned SUBTASKS off a <c>plan</c> decision's PAYLOAD (loopability slice 1) — each carrying its optional <c>dependsOn</c> + <c>acceptance</c> contract. Empty when absent/malformed. The per-unit acceptance fold reads each spawned unit's subtask <c>Acceptance</c> through here (joined positionally to the agent that ran it). Pure + best-effort.</summary>
+    public static IReadOnlyList<SupervisorPlannedSubtask> ReadPlanSubtasks(string? planPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(planPayloadJson)) return Array.Empty<SupervisorPlannedSubtask>();
+
+        try
+        {
+            return JsonSerializer.Deserialize<SupervisorPlanPayload>(planPayloadJson, AgentJson.Options)?.Subtasks
+                   ?? Array.Empty<SupervisorPlannedSubtask>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorPlannedSubtask>();
         }
     }
 

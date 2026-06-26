@@ -119,6 +119,57 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("codespace/agent/foo", Case.Insensitive, "the decider sees the produced branch");
     }
 
+    [Theory]
+    [InlineData(true, "acceptance PASSED", "objectively verified")]
+    [InlineData(false, "acceptance FAILED", "RETRY this exact subtask")]
+    public void The_user_prompt_surfaces_a_units_per_unit_acceptance_verdict(bool passed, string expectedHeadline, string expectedGuidance)
+    {
+        // Loopability slice 3: a unit's OBJECTIVE per-unit verdict must reach the brain so it RETRIES a rejected unit
+        // (objective truth overrides the agent's self-report) and trusts a verified one.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/foo",
+                    AcceptancePassed = passed, AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain(expectedHeadline, Case.Sensitive, "the per-unit verdict reaches the decide prompt");
+        prompt.ShouldContain(expectedGuidance, Case.Insensitive, "the verdict carries the act-on-it guidance");
+        if (!passed) prompt.ShouldContain("tests-failed-exit-1", Case.Insensitive, "a failed verdict surfaces its detail");
+    }
+
+    [Fact]
+    public void The_user_prompt_has_no_acceptance_line_for_an_ungraded_unit()
+    {
+        // A unit whose subtask authored no acceptance carries no verdict — the prompt is byte-identical to before the slice.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[] { new SupervisorAgentResult { AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "b" } });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn))
+            .ShouldNotContain("acceptance", Case.Insensitive, "an ungraded unit renders no acceptance line — byte-identical to pre-slice");
+    }
+
     [Fact]
     public void The_user_prompt_is_UNCHANGED_by_per_repo_RepositoryResults()
     {
