@@ -14,7 +14,7 @@ import { RunDetailView } from "./RunDetailView";
 const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
   useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
-  useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined }>(() => ({ data: undefined })),
+  useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined; isLoading?: boolean }>(() => ({ data: undefined })),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
