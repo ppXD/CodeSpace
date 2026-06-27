@@ -31,4 +31,26 @@ public class AgentRunExecutorMappingTests
         result.Status.ShouldBe(AgentRunStatus.TimedOut);
         result.ExitReason.ShouldBe("timed-out");
     }
+
+    [Theory]
+    [InlineData(SandboxStatus.TimedOut)]
+    [InlineData(SandboxStatus.Stalled)]
+    public void A_forced_terminal_still_captures_the_tokens_the_agent_burned(SandboxStatus status)
+    {
+        // A timed-out / stalled agent consumed budget before we killed it — its usage must be captured from the
+        // events, so the spend shows on the run regardless of outcome (parity with the harness fold for a clean exit).
+        var events = new[] { UsageEvent(input: 1200, output: 340) };
+
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, events);
+
+        result.TokenUsage.ShouldNotBeNull();
+        result.TokenUsage!.InputTokens.ShouldBe(1200);
+        result.TokenUsage.OutputTokens.ShouldBe(340);
+    }
+
+    private static AgentEvent UsageEvent(int input, int output)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse($"{{\"input_tokens\":{input},\"output_tokens\":{output}}}");
+        return new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "", Data = doc.RootElement.Clone() };
+    }
 }

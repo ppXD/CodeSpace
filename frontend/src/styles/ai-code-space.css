@@ -2455,6 +2455,8 @@ textarea:-webkit-autofill {
    icon. Persistent (no hover-reveal). The tile's overflow:hidden clips a dropdown, so the tile rerun is `bare` (label,
    no menu) — the full dropdown lives on the expanded terminal. */
 .acs-root .agent-tile-rerun { display: flex; justify-content: flex-start; padding: 6px 8px; border-top: 1px solid var(--line); }
+/* The rerun row is empty while the run is still live (RerunMenu renders nothing until terminal) — don't draw a bare bordered strip then. */
+.acs-root .agent-tile-rerun:empty { display: none; }
 .acs-root .run-tl-rerun-tile .wf-rerun-primary { background: var(--accent-soft); color: var(--accent); padding: 3px 8px; font-size: 10.5px; }
 .acs-root .run-tl-rerun-tile .wf-rerun-primary:hover { background: #EBD9CC; }
 .acs-root .agent-tile:hover { border-color: var(--line-2); }
