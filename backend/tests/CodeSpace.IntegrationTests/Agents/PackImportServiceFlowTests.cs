@@ -16,8 +16,10 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// The unified URL preview end-to-end through the REAL <see cref="PackImportService"/> (fetcher → walker →
 /// per-team conflict check) + real git clone of a LOCAL repo (no network): a pack with agents AND skills,
 /// some of whose handles already exist in the team, previews into a <see cref="PackPreview"/> whose agents +
-/// skills carry the right slug-conflict / importable flags. Proves the discover→conflict→preview vertical and
-/// that the transient clone is reclaimed (the service disposes the checkout).
+/// skills carry the right slug-conflict / importable flags. Proves the discover→conflict→preview vertical,
+/// that conflicts do NOT bleed across the agent/skill namespaces (the load-bearing property of unifying the two
+/// into one service), and that a nameless artifact previews as un-importable with diagnostics rather than
+/// crashing. (Clone reclamation is proven separately in <c>PackCloneFetcherFlowTests</c>.)
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -37,8 +39,13 @@ public class PackImportServiceFlowTests
         if (!await GitReadyAsync(runners)) return;
 
         var (teamId, userId) = await SeedTeamAsync();
-        await SeedAgentAsync(teamId, userId, "reviewer");   // an existing handle the pack will collide with
-        await SeedSkillAsync(teamId, userId, "tdd");
+        await SeedAgentAsync(teamId, userId, "reviewer");   // an existing AGENT handle the pack agent collides with
+        await SeedSkillAsync(teamId, userId, "tdd");        // an existing SKILL handle the pack skill collides with
+
+        // Cross-namespace bait: an existing SKILL sharing the pack AGENT's handle and an existing AGENT sharing the
+        // pack SKILL's handle. Conflict sets are per-namespace, so neither must bleed onto the other's preview item.
+        await SeedSkillAsync(teamId, userId, "backend-architect");
+        await SeedAgentAsync(teamId, userId, "systematic-debugging");
 
         var src = await CreateSourceRepoAsync(runners);
         try
@@ -59,8 +66,10 @@ public class PackImportServiceFlowTests
             reviewer.SlugConflict.ShouldBeTrue("an agent whose handle already exists in the team is a conflict");
             reviewer.Importable.ShouldBeFalse();
 
+            // backend-architect is importable EVEN THOUGH a SKILL named backend-architect exists — agent conflicts
+            // are checked against agent handles only, so the cross-namespace skill must not bleed in.
             var fresh = preview.Agents.Single(a => a.DerivedSlug == "backend-architect");
-            fresh.SlugConflict.ShouldBeFalse();
+            fresh.SlugConflict.ShouldBeFalse("a same-named SKILL must not make a pack AGENT conflict");
             fresh.Importable.ShouldBeTrue();
 
             // Skills: same conflict semantics on the skill handle.
@@ -68,8 +77,20 @@ public class PackImportServiceFlowTests
             tdd.SlugConflict.ShouldBeTrue();
             tdd.Importable.ShouldBeFalse();
 
+            // Mirror image: systematic-debugging is importable even though a same-named AGENT exists.
             var freshSkill = preview.Skills.Single(s => s.DerivedSlug == "systematic-debugging");
+            freshSkill.SlugConflict.ShouldBeFalse("a same-named AGENT must not make a pack SKILL conflict");
             freshSkill.Importable.ShouldBeTrue();
+
+            // A nameless SKILL.md is still discovered (every SKILL.md is a skill) but previews as un-importable with
+            // a diagnostic — never importable, never a crash.
+            var namelessSkill = preview.Skills.Single(s => s.SourcePath.Contains("nameless"));
+            namelessSkill.Importable.ShouldBeFalse();
+            namelessSkill.SlugConflict.ShouldBeFalse();
+            namelessSkill.Diagnostics.ShouldNotBeEmpty();
+
+            // A frontmatter-less .md is a doc, NOT an agent — the walker filters it, so it never reaches the preview.
+            preview.Agents.ShouldNotContain(a => a.SourcePath.Contains("nameless"));
         }
         finally
         {
@@ -93,6 +114,8 @@ public class PackImportServiceFlowTests
         WriteFile(src, "agents/backend-architect.md", "---\nname: backend-architect\ndescription: Use for backend.\n---\nYou architect.");
         WriteFile(src, "skills/tdd/SKILL.md", "---\nname: tdd\ndescription: Use when implementing.\n---\n# TDD");
         WriteFile(src, "skills/systematic-debugging/SKILL.md", "---\nname: systematic-debugging\ndescription: Use when stuck.\n---\n# Debug");
+        WriteFile(src, "agents/nameless.md", "Just prose, no frontmatter and no name.");
+        WriteFile(src, "skills/nameless/SKILL.md", "---\ndescription: has a description but no name.\n---\n# Nameless");
         await RunGitAsync(runners, new[] { "-C", src, "-c", "user.email=t@codespace.test", "-c", "user.name=Test", "add", "-A" });
         await RunGitAsync(runners, new[] { "-C", src, "-c", "user.email=t@codespace.test", "-c", "user.name=Test", "commit", "-m", "init" });
         return src;

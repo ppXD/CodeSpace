@@ -32,6 +32,9 @@ public sealed class PackImportService : IPackImportService, IScopedDependency
 
         var pack = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
+        // Conflict is checked against the team's PERSISTED handles only — two items in the SAME pack that derive
+        // to one slug both preview Importable=true; the per-team unique index resolves that at commit (first wins,
+        // the rest are Skipped). Importable is a "no existing conflict" signal, not a commit guarantee.
         var agentSlugs = await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false);
         var skillSlugs = await ActiveSlugsAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null).Select(s => s.Slug), cancellationToken).ConfigureAwait(false);
 

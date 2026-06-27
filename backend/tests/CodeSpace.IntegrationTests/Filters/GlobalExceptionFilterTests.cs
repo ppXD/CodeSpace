@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Api.Filters;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
 using Microsoft.AspNetCore.Http;
@@ -108,6 +109,21 @@ public class GlobalExceptionFilterTests
         // ArgumentNullException / ArgumentOutOfRangeException derive from ArgumentException — the single arm covers them.
         Run(new ArgumentNullException("repositoryId")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
         Run(new ArgumentOutOfRangeException("maxRounds", "must be >= 1")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+    }
+
+    [Fact]
+    public void Pack_import_exception_maps_to_400_with_the_actionable_message_not_a_masked_500()
+    {
+        // The URL pack-preview surface (POST /api/agents/import-preview-url) reaches the egress allowlist + git
+        // clone. A non-allowlisted/non-https host or a clone failure throws PackImportException — operator-supplied
+        // bad input. It must surface 400 with the actionable reason (which names CODESPACE_PACK_ALLOWED_HOSTS for
+        // the host case), NOT the masked 500 default arm that swallows the remediation.
+        var result = Run(new PackImportException("Host 'evil.internal' is not in the pack-source allowlist [github.com, gitlab.com]. An operator can add it via CODESPACE_PACK_ALLOWED_HOSTS."));
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+        body.GetProperty("code").GetString().ShouldBe("pack_import_failed");
+        body.GetProperty("message").GetString()!.ShouldContain("CODESPACE_PACK_ALLOWED_HOSTS");
     }
 
     private static ObjectResult Run(Exception exception)
