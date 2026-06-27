@@ -41,5 +41,11 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>When <see cref="CapabilityTier"/> was last written — the staleness gate so re-tiering is a cached fact, never a per-launch call. Null = never tiered.</summary>
     public DateTimeOffset? LastTieredAt { get; set; }
 
+    /// <summary>Cached, advisory REACHABILITY of this model's endpoint (a SEPARATE axis from <see cref="CapabilityTier"/>): a recurring probe pings each self-hosted Custom-gateway model — true = the endpoint responded (any HTTP status, even auth/rate-limit), false = a genuine no-response transport failure (connection refused / reset / timeout). NULL = never probed (vendor models are not pinged) = ASSUMED AVAILABLE. A SOFT auto-pick hint (an unpinned pick prefers available != false, falling back to all if none), never a hard pool filter; pins / dispatch / catalog ignore it.</summary>
+    public bool? Available { get; set; }
+
+    /// <summary>When <see cref="Available"/> was last probed — the staleness gate (a 30-minute re-probe window; availability is volatile, so unlike <see cref="LastTieredAt"/> it RE-evaluates). Null = never probed.</summary>
+    public DateTimeOffset? LastPingedAt { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }
