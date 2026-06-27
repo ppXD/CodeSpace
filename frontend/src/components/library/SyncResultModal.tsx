@@ -25,11 +25,14 @@ export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; 
   const [selected, setSelected] = useState<Set<string>>(() => new Set(defaultSelectedPaths(result.newArtifacts)));
   const importPack = useImportPack();
 
+  // While an add is committing, dismissal is blocked so a partial-failure error can't be lost with the modal.
+  const dismiss = () => { if (!importPack.isPending) onClose(); };
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !importPack.isPending) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, importPack.isPending]);
 
   function toggle(sourcePath: string) {
     setSelected((s) => {
@@ -47,14 +50,14 @@ export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; 
 
   return createPortal(
     <>
-      <div className="mdl-mask" onClick={onClose} />
+      <div className="mdl-mask" onClick={dismiss} />
       <div className="mdl" role="dialog" aria-modal="true" style={{ width: 560, maxWidth: "94vw" }}>
         <div className="mdl-head">
           <div className="mdl-title-wrap">
             <div className="mdl-title">Synced {pack.name}</div>
             <div className="mdl-sub">{syncSummaryLabel(result)}{result.reference ? ` · ${result.reference}` : ""}</div>
           </div>
-          <button type="button" className="mdl-x" onClick={onClose} title="Close" aria-label="Close"><Ic.X size={14} /></button>
+          <button type="button" className="mdl-x" onClick={dismiss} disabled={importPack.isPending} title="Close" aria-label="Close"><Ic.X size={14} /></button>
         </div>
 
         <div className="mdl-body">
@@ -81,7 +84,7 @@ export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; 
             <>
               <div className="mdl-foot-info">{selected.size} selected · {rows.filter((r) => r.importable).length} importable</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button type="button" className="btn" onClick={onClose}>Cancel</button>
+                <button type="button" className="btn" onClick={dismiss} disabled={importPack.isPending}>Cancel</button>
                 <button type="button" className="btn btn-primary" onClick={add} disabled={selected.size === 0 || importPack.isPending}>
                   <Ic.Plus size={14} /> {importPack.isPending ? "Adding…" : `Add ${selected.size}`}
                 </button>

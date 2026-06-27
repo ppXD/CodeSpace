@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
@@ -76,7 +76,10 @@ export function LibraryPage() {
                 <PackRailItem key={p.id} pack={p} active={p.id === selectedId} onSelect={() => setPicked(p.id)} />
               ))}
             </div>
-            {selectedId && <PackDetailPane packId={selectedId} />}
+            {/* Keyed by pack: a pack switch remounts the pane, resetting the per-pack Sync mutation + result so
+                an in-flight sync's late onSuccess lands on the unmounted instance (a harmless no-op) instead of
+                popping pack A's result over pack B, and a failed sync's error banner can't leak to another pack. */}
+            {selectedId && <PackDetailPane key={selectedId} packId={selectedId} />}
           </div>
         )}
       </div>
@@ -116,7 +119,10 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
 function PackDetailPane({ packId }: { packId: string }) {
   const detail = usePack(packId);
   const sync = useSyncPack();
-  const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult } | null>(null);
+  // seq makes each sync result a distinct modal identity, so a same-pack re-sync remounts the result modal and
+  // its selection re-seeds from the new preview (no remount → the old result's selection would linger).
+  const syncSeq = useRef(0);
+  const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult; seq: number } | null>(null);
 
   if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
 
@@ -141,7 +147,7 @@ function PackDetailPane({ packId }: { packId: string }) {
   const syncErr = sync.error ? sync.error.message : null;
 
   function runSync() {
-    sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result }) });
+    sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result, seq: ++syncSeq.current }) });
   }
 
   return (
@@ -177,7 +183,7 @@ function PackDetailPane({ packId }: { packId: string }) {
       <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} />
       <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} />
 
-      {syncResult && <SyncResultModal pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
+      {syncResult && <SyncResultModal key={syncResult.seq} pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
     </div>
   );
 }
