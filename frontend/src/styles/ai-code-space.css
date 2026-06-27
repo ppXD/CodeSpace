@@ -2941,20 +2941,28 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-term-st[data-status="failure"] { color: #9E3535; }
 .acs-root .wf-rf-fanout-term-st[data-status="success"] { color: #1F6B3F; }
 
-/* Rerun control on a fan-out card's focused item — a compact split button (primary + caret) right-aligned on the
-   #i status row, with an in-card dropdown for the secondary actions. Warm-accent, sized to the card's 10–11px scale. */
-.acs-root .wf-rf-rerun { position: relative; margin-left: auto; }
-.acs-root .wf-rf-rerun-split { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel); }
-.acs-root .wf-rf-rerun-primary,
-.acs-root .wf-rf-rerun-caret { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--accent); background: transparent; border: 0; cursor: pointer; padding: 3px 8px; line-height: 1.4; }
-.acs-root .wf-rf-rerun-caret { padding: 3px 5px; border-left: 1px solid var(--line); }
-.acs-root .wf-rf-rerun-primary:hover, .acs-root .wf-rf-rerun-caret:hover { background: var(--accent-soft); }
-.acs-root .wf-rf-rerun-primary[disabled], .acs-root .wf-rf-rerun-caret[disabled] { opacity: .55; cursor: default; }
-.acs-root .wf-rf-rerun-primary[disabled]:hover, .acs-root .wf-rf-rerun-caret[disabled]:hover { background: transparent; }
-.acs-root .wf-rf-rerun-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 6; min-width: 172px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: 0 4px 14px rgba(31,30,29,.10); overflow: hidden; }
-.acs-root .wf-rf-rerun-menu button { text-align: left; font-size: 11px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; padding: 7px 10px; white-space: nowrap; }
-.acs-root .wf-rf-rerun-menu button:hover { background: var(--accent-soft); color: var(--ink); }
-.acs-root .wf-rf-rerun-menu button + button { border-top: 1px solid var(--line); }
+/* Unified Rerun control (RerunMenu) — a filled-accent split button (primary + caret) + a dropdown of every rerun the
+   surface offers: the current action checkmarked, the bulk "Rerun all failed items" badged "suggested", and "Rerun
+   entire run" always available. `wf-rerun-onrow` right-aligns it on a fan-out card's #i status row; `wf-rerun-node`
+   sits it below a failed node's result bar. */
+.acs-root .wf-rerun { position: relative; display: inline-flex; flex-direction: column; align-items: flex-start; }
+.acs-root .wf-rerun-onrow { margin-left: auto; }
+.acs-root .wf-rerun-node { margin-top: 8px; }
+.acs-root .wf-rerun-split { display: inline-flex; align-items: stretch; border-radius: var(--radius-sm); overflow: hidden; }
+.acs-root .wf-rerun-primary, .acs-root .wf-rerun-caret { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #fff; background: var(--accent); border: 0; cursor: pointer; padding: 5px 11px; line-height: 1.5; }
+.acs-root .wf-rerun-caret { padding: 5px 7px; border-left: 1px solid rgba(255,255,255,.28); }
+.acs-root .wf-rerun-primary:hover, .acs-root .wf-rerun-caret:hover { background: #C66B4B; }
+.acs-root .wf-rerun-primary[disabled], .acs-root .wf-rerun-caret[disabled] { opacity: .6; cursor: default; }
+.acs-root .wf-rerun-primary[disabled]:hover, .acs-root .wf-rerun-caret[disabled]:hover { background: var(--accent); }
+.acs-root .wf-rerun-menu { position: absolute; top: calc(100% + 5px); left: 0; z-index: 8; min-width: 232px; display: flex; flex-direction: column; gap: 1px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 6px 20px rgba(31,30,29,.12); overflow: hidden; padding: 5px; }
+.acs-root .wf-rerun-onrow .wf-rerun-menu { left: auto; right: 0; }
+.acs-root .wf-rerun-menu-item { display: flex; align-items: center; gap: 9px; text-align: left; font-size: 13px; color: var(--ink); background: transparent; border: 0; border-radius: var(--radius-sm); cursor: pointer; padding: 8px 10px; white-space: nowrap; }
+.acs-root .wf-rerun-menu-item:hover { background: var(--accent-soft); }
+.acs-root .wf-rerun-menu-item[disabled] { opacity: .6; cursor: default; }
+.acs-root .wf-rerun-menu-ic { display: inline-flex; color: var(--accent); }
+.acs-root .wf-rerun-menu-label { flex: 1; }
+.acs-root .wf-rerun-menu-sug { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 20px; padding: 1px 9px; }
+.acs-root .wf-rerun-menu-check { color: var(--accent); }
 
 /* A flow.map COLLAPSED to a single fan-out card node (run view): a ~340px auto-HEIGHT card (overrides the
    row-flex .wf-rf-node) whose body is the inline MapFanout (summary + dot strip + terminal). */

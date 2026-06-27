@@ -618,6 +618,13 @@ export const workflowsApi = {
       body: JSON.stringify(body),
     }),
 
+  /** Re-run FROM a node ("Rerun from here") — forks a run that reuses everything upstream and re-runs this node + its downstream. */
+  rerunFromNode: (runId: string, body: { fromNodeId: string }) =>
+    fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/rerun-from-node`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   /** Resolve a pending approval on a Suspended run + resume it. Returns whether it resumed. */
   resumeRun: (runId: string, body: { approved: boolean; comment?: string }) =>
     fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/resume`, {
