@@ -166,6 +166,26 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .FirstOrDefault();
     }
 
+    public async Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
+    {
+        if (eligibleProviders.Count == 0) return null;
+
+        // The operator's brain pin is honored IFF it's a real ENABLED row under an ACTIVE team credential whose provider a
+        // structured client serves — the SAME guards as the auto brain pick (SelectBrainRowIdAsync), so a pinned and an
+        // auto brain are interchangeable. We read only the provider (the cheapest check) and compare it case-insensitively
+        // in-memory against the eligible set (a handful of structured-provider names). A missing / disabled / revoked /
+        // cross-team / non-structured pin yields null → the caller falls back to auto (never bakes a NoBrainModelStop brain).
+        var provider = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Id == modelCredentialModelId && m.Enabled
+                && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => m.Credential.Provider)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        var eligible = eligibleProviders.Select(p => p.ToLower()).ToHashSet();
+
+        return provider != null && eligible.Contains(provider.ToLower()) ? modelCredentialModelId : null;
+    }
+
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {
         ModelId = modelId,

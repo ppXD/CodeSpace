@@ -45,6 +45,10 @@ export interface LaunchTaskInput {
   agentDefinitionId?: string | null;
   runnerKind?: string | null;
   modelCredentialId?: string | null;
+  /** A picked credentialed-model ROW id (`ModelCredentialModel` id) — the operator's one (model, credential) choice.
+   *  On a Deep launch it pins the supervisor BRAIN; on single-agent it pins the agent model. Omitted ⇒ the loose
+   *  `model` / `modelCredentialId` ⇒ auto. Takes precedence over those loose fields when present. */
+  modelCredentialModelId?: string | null;
   /** The agent run's wall-clock cap, in seconds. Omitted ⇒ the backend's bounded 1h default. 0 ⇒ NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). */
   timeoutSeconds?: number | null;
   relatedRepositories?: LaunchRelatedRepository[];
