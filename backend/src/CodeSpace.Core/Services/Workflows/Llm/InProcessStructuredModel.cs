@@ -27,4 +27,22 @@ public static class InProcessStructuredModel
 
         return null;
     }
+
+    /// <summary>
+    /// Resolve an OPERATOR-PINNED brain model by its <c>ModelCredentialModel</c> row id → its (structured client, pick) —
+    /// the same row-id path the supervisor decider uses, so a pinned planner brain and a pinned supervisor brain resolve
+    /// identically. The client is the structured one whose provider matches the PINNED model's own provider. <c>null</c>
+    /// when the row is missing / disabled / revoked / cross-team OR no registered structured client serves its provider
+    /// (the caller fails closed — an explicit pin must resolve verbatim, never silently fall back to another model).
+    /// </summary>
+    public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveByRowIdAsync(ILLMClientRegistry clients, IModelPoolSelector models, Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken)
+    {
+        if (await models.ResolveByRowIdAsync(teamId, modelCredentialModelId, cancellationToken).ConfigureAwait(false) is not { } pick)
+            return null;
+
+        var client = clients.All.OfType<IStructuredLLMClient>()
+            .FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
+
+        return client == null ? null : (client, pick);
+    }
 }

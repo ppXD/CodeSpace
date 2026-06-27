@@ -31,6 +31,7 @@ public sealed class PlanWorkflowFromTaskCommandHandler : IRequestHandler<PlanWor
             RepositoryId = request.RepositoryId,
             Coordinated = request.Coordinated,
             Coordination = request.Coordinated ? BuildCoordination(request) : null,
+            BrainModelId = request.BrainModelId,
         }, cancellationToken);
 
     /// <summary>The operator's coordination goals → the projection's <see cref="CoordinationOptions"/>; absent knobs fall back to the option defaults.</summary>

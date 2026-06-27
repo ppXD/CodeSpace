@@ -36,6 +36,15 @@ public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTask
 
     /// <summary>Per-round fan-out cap for the coordinated projection (the map's <c>maxParallelism</c>). Null ⇒ the engine-wide default. Ignored when <see cref="Coordinated"/> is false.</summary>
     public int? MaxParallelism { get; init; }
+
+    /// <summary>
+    /// The operator-pinned BRAIN model the planner reasons on — a <c>ModelCredentialModel</c> ROW id (validated
+    /// TEAM-SCOPED). The same "selected = verbatim, auto = ladder" contract the Deep supervisor brain uses: when set,
+    /// the planner resolves THIS exact model (and fails clearly if it's not a structured-eligible team row); when null,
+    /// it auto-resolves the first structured-capable pool model (byte-identical to before). The planner + the supervisor
+    /// are both the run's reasoning brain, so they consume the SAME pinnable id.
+    /// </summary>
+    public Guid? BrainModelId { get; init; }
 }
 
 /// <summary>

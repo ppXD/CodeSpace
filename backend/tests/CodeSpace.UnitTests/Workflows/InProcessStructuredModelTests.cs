@@ -74,4 +74,60 @@ public class InProcessStructuredModelTests
         public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken ct) => Task.FromResult<Guid?>(null);
         public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
     }
+
+    // ── ResolveByRowIdAsync: the operator-pinned brain path (planner + supervisor share it) ──
+
+    [Fact]
+    public async Task ResolveByRowId_resolves_the_pinned_model_on_the_client_matching_its_own_provider()
+    {
+        var rowId = Guid.NewGuid();
+        var clients = new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Custom"));
+        var models = new RowSelector(rowId, provider: "Custom");
+
+        var resolved = await InProcessStructuredModel.ResolveByRowIdAsync(clients, models, Guid.NewGuid(), rowId, CancellationToken.None);
+
+        resolved.ShouldNotBeNull();
+        resolved!.Value.Client.Provider.ShouldBe("Custom", "the pinned model resolves on the structured client matching ITS OWN provider, not the first-registered");
+        resolved.Value.Pick.ModelId.ShouldBe("pinned-model");
+    }
+
+    [Fact]
+    public async Task ResolveByRowId_fails_closed_when_no_structured_client_serves_the_pinned_provider()
+    {
+        var rowId = Guid.NewGuid();
+        var clients = new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Anthropic"));
+        var models = new RowSelector(rowId, provider: "Ollama");   // pinned model under Ollama; no Ollama structured client
+
+        (await InProcessStructuredModel.ResolveByRowIdAsync(clients, models, Guid.NewGuid(), rowId, CancellationToken.None))
+            .ShouldBeNull("an explicit pin whose provider no structured client serves fails closed — never silently falls back to another model");
+    }
+
+    [Fact]
+    public async Task ResolveByRowId_returns_null_for_an_unresolvable_row()
+    {
+        var clients = new FakeRegistry(new FakeStructured("OpenAI"));
+        var models = new RowSelector(Guid.NewGuid(), provider: "OpenAI");
+
+        (await InProcessStructuredModel.ResolveByRowIdAsync(clients, models, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None))
+            .ShouldBeNull("a missing / disabled / revoked / cross-team row → null (the selector's fail-closed contract)");
+    }
+
+    /// <summary>Resolves exactly ONE row id to a pick under a configured provider (the pinned-brain path); every other call returns null.</summary>
+    private sealed class RowSelector : IModelPoolSelector
+    {
+        private readonly Guid _rowId;
+        private readonly string _provider;
+        public RowSelector(Guid rowId, string provider) { _rowId = rowId; _provider = provider; }
+
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken ct) =>
+            Task.FromResult(modelCredentialModelId == _rowId
+                ? new ModelPoolPick { ModelId = "pinned-model", Credential = new ResolvedModelCredential { Provider = _provider, ApiKey = "k" } }
+                : null);
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken ct) => Task.FromResult<ModelPoolPick?>(null);
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken ct) => Task.FromResult<ModelDispatchRef?>(null);
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken ct) => Task.FromResult<IReadOnlyList<PoolModelInfo>>(Array.Empty<PoolModelInfo>());
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken ct) => Task.FromResult<Guid?>(null);
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+    }
 }
