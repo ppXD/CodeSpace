@@ -2549,6 +2549,11 @@ textarea:-webkit-autofill {
 /* The header "control state" sentence — one glance at where the run is + what needs you. */
 .acs-root .run-state { margin-top: 7px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink-2); }
 .acs-root .run-state-lead { font-weight: 600; }
+
+/* Run lineage chip — on a fork (replay / rerun) it threads back to the run it was forked from, so the fork reads as
+   "this run, re-run" rather than a stray new run. */
+.acs-root .run-lineage-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; font-size: 12px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border: 0; border-radius: var(--radius-sm); padding: 3px 10px; cursor: pointer; }
+.acs-root .run-lineage-link:hover { background: #EBD9CC; }
 .acs-root .run-state[data-status="running"]   .run-state-lead { color: var(--accent); }
 .acs-root .run-state[data-status="success"]   .run-state-lead { color: #1F6B3F; }
 .acs-root .run-state[data-status="failure"]   .run-state-lead { color: #9E3535; }

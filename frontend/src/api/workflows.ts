@@ -302,6 +302,8 @@ export interface WorkflowRunDetail {
   workflowVersion: number;
   /** Sourced from run_request.source_type. */
   sourceType: WorkflowRunSourceType;
+  /** The run this one forked from — set for a replay / rerun. The header threads the lineage off it. */
+  parentRunId?: string | null;
   /** Normalised payload from the upstream run request — what the engine sees as {{trigger.*}}. */
   normalizedPayload: unknown;
   status: WorkflowRunStatus;
