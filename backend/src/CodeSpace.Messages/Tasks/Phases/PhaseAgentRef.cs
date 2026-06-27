@@ -25,6 +25,12 @@ public sealed record PhaseAgentRef
     /// <summary>An optional cheap display label (the harness kind today).</summary>
     public string? Label { get; init; }
 
+    /// <summary>The model-authored semantic ROLE this agent runs in (e.g. "backend implementer", "security reviewer"), off the spawn's per-agent dispatch spec — so the fan-out reads as a division of labour, not anonymous clones. Null for a homogeneous spawn (no per-agent role) or a non-supervisor agent. Open string — display only, never switched on.</summary>
+    public string? Role { get; init; }
+
+    /// <summary>The TITLE of the planned subtask this agent was assigned (the model's decomposition), joined from the plan's subtasks through the spawn's <c>subtaskIds[i]</c> ↔ <c>agentRunIds[i]</c> staging order. Null when the agent isn't a supervisor spawn or the plan carried no matching subtask. Display only.</summary>
+    public string? AssignedSubtask { get; init; }
+
     /// <summary>The model the agent ran on (e.g. a pinned <c>claude-*</c>), or null when unpinned/unknown. Populated for SUPERVISOR-spawned agents (off the folded <c>agentResults</c> compact); null for a plain node/map agent (a later projection slice). Open string — never switched on.</summary>
     public string? Model { get; init; }
 

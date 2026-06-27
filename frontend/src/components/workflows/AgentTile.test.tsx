@@ -34,6 +34,18 @@ describe("AgentTile", () => {
     expect(useAgentRunEventsMock).toHaveBeenCalledWith("a1", true, 2000);
   });
 
+  it("shows the model's allocation — the agent's role + the subtask it was assigned", () => {
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "agent", role: "Tracer", assignedSubtask: "Trace DI registration of nodes" })} />);
+    expect(screen.getByText("Tracer")).toBeInTheDocument();
+    expect(screen.getByText("Trace DI registration of nodes")).toBeInTheDocument();
+    expect(container.querySelector(".agent-tile-alloc")).not.toBeNull();
+  });
+
+  it("omits the allocation row for a homogeneous spawn (no role, no subtask)", () => {
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1" })} />);
+    expect(container.querySelector(".agent-tile-alloc")).toBeNull();
+  });
+
   it("shows a running tile with its latest line as the live command + a cursor", () => {
     useAgentRunEventsMock.mockReturnValue({ data: [evt("FileChanged", "editing auth/session.ts")] });
 

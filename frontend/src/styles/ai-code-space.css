@@ -2508,6 +2508,9 @@ textarea:-webkit-autofill {
 .acs-root .agent-tile-lights > i:nth-child(3) { background: #28c840; }
 .acs-root .agent-tile-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .acs-root .agent-tile-flag { margin-left: auto; display: inline-flex; flex: none; color: var(--muted-2); }
+.acs-root .agent-tile-alloc { display: flex; align-items: center; gap: 6px; padding: 5px 9px; border-bottom: 1px solid var(--line); min-width: 0; }
+.acs-root .agent-tile-role { flex: none; font-size: 10px; font-weight: 550; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 5px; white-space: nowrap; }
+.acs-root .agent-tile-subtask { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .acs-root .agent-tile-body { padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.6; min-height: 46px; }
 .acs-root .agent-tile-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .agent-tile-cmd { color: var(--ink); }
@@ -2539,6 +2542,9 @@ textarea:-webkit-autofill {
 /* the identity strip — harness · model · tool count · run time, the agent's whole identity in one line */
 .acs-root .agent-terminal-meta { display: flex; flex-wrap: wrap; align-items: center; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 .acs-root .agent-terminal-meta > span:not(:first-child)::before { content: "·"; margin: 0 8px; color: var(--muted-2); }
+.acs-root .agent-terminal-alloc { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); min-width: 0; }
+.acs-root .agent-terminal-role { flex: none; font-size: 11px; font-weight: 550; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+.acs-root .agent-terminal-subtask { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* Per-cell rerun history — pick an earlier attempt of THIS node/branch to read that run's record. */
 .acs-root .agent-terminal-attempts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-terminal-attempts-label { font-size: 11px; color: var(--muted); margin-right: 1px; }

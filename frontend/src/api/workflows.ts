@@ -423,6 +423,10 @@ export interface PhaseAgentRef {
   iterationKey?: string | null;
   status: string;
   label?: string | null;
+  /** The model-authored semantic ROLE this agent runs in (e.g. "backend implementer"), off the spawn's per-agent dispatch. null/absent for a homogeneous spawn or a non-supervisor agent. */
+  role?: string | null;
+  /** The TITLE of the planned subtask this agent was assigned (the model's decomposition). null/absent when not a supervisor spawn. */
+  assignedSubtask?: string | null;
   /** The model the agent ran on, or null/absent when unpinned/unknown. Populated for supervisor-spawned agents. */
   model?: string | null;
   /** Input (prompt) tokens the agent consumed, or null/absent when unknown. Supervisor-spawned agents only. */
