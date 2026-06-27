@@ -10,7 +10,9 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// <summary>
 /// EF-backed <see cref="IModelPoolSelector"/>. Queries the team's credentialed-model pool for a qualifying model,
 /// applies the provider / structured / allowed-pool / pin bounds, decrypts the chosen row's backing credential just-in-
-/// time, and returns the model id + key. Pure pool-driven: no env read, no default model.
+/// time, and returns the model id + key. Pure pool-driven: no env read, no hardcoded system default — an UNPINNED auto
+/// pick is ordered by the operator's per-credential default (<c>IsDefault</c>, #746) first, then model id / row id, so a
+/// starred model drives the brain plane (planner / supervisor / synthesis) the same way it already drives the agent plane.
 /// </summary>
 public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 {
@@ -46,11 +48,14 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         else if (allowed != null)
             query = query.Where(m => allowed.Contains(m.ModelId.ToLower()));
 
-        // Deterministic total order (model id, then row id) so an unpinned pick is stable even when two credentials of
-        // the same provider carry the same model id. The supervisor brain is picked by row id (ResolveByRowIdAsync), so
-        // this name/provider path only decides an unpinned/ambient pick (planner / synthesis / llm.complete).
+        // Precedence ladder for an UNPINNED auto pick: the operator's per-credential default (IsDefault, #746) wins
+        // first, then a deterministic total order (model id, then row id) so the pick is stable even when two credentials
+        // of the same provider carry the same model id. Mirrors the agent plane (ModelCredentialResolver) so a starred
+        // model drives EVERY auto pick — the brain (planner / synthesis / llm.complete) included, not just agents. The
+        // supervisor brain is picked by row id (ResolveByRowIdAsync); this name/provider path decides the ambient picks.
         var row = await query
-            .OrderBy(m => m.ModelId)
+            .OrderByDescending(m => m.IsDefault)
+            .ThenBy(m => m.ModelId)
             .ThenBy(m => m.Id)
             .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -107,7 +112,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         // Project the two columns on the DB side; dedupe + total-order + map in memory (a team's pool is small, and EF
         // can't translate Distinct→OrderBy over a constructed record). A model name can exist under two providers (both
-        // harnesses list Custom), so the (id, provider) pair is the dedup key + the stable render order.
+        // harnesses list Custom), so the (id, provider) pair is the dedup key + the stable render order. The catalog
+        // render order intentionally stays ALPHABETICAL and does NOT surface IsDefault — the operator default orders the
+        // PICK (SelectAsync / SelectBrainRowIdAsync), not this displayed menu; capability-aware ordering of this catalog
+        // is the follow-up (when the brain authors against a tier/score signal, not just id+provider).
         var rows = await query
             .Select(m => new { m.ModelId, m.Credential.Provider })
             .ToListAsync(cancellationToken)
@@ -131,11 +139,13 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .OrderBy(m => m.ModelId).ThenBy(m => m.Id)
+            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
             .Select(m => new { m.Id, Provider = m.Credential.Provider })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // First row (in the deterministic order) whose provider a structured client serves → a replay re-derives the SAME brain.
+        // First STRUCTURED-eligible row in precedence order — the operator's default (IsDefault, #746) first, then model
+        // id / row id — so a starred brain model wins the auto pick (a non-eligible default is skipped to the next). A
+        // replay re-derives the SAME brain (the order is a stable total order over a frozen pool snapshot).
         return rows.FirstOrDefault(r => eligible.Contains(r.Provider.ToLower()))?.Id;
     }
 
