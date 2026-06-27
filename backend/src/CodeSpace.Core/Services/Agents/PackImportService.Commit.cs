@@ -11,43 +11,64 @@ namespace CodeSpace.Core.Services.Agents;
 /// (never trusting the preview's content), re-walks it, resolves the team's <c>Pack</c> for that source, and
 /// upserts each selected artifact on its (pack, source-path) sync identity — so a re-sync UPDATES rather than
 /// duplicates. Agent + skill row-writing is the import concern's own logic; slug derivation reuses
-/// <see cref="AgentDefinitionService.DeriveSlug"/>, and a handle that collides with a DIFFERENT active
-/// definition is reported as <see cref="PackImportOutcome.Skipped"/> (an import never overwrites an unrelated
-/// persona/skill). Saves per artifact (the selection is a handful of files) so a slug race translates locally.
+/// <see cref="AgentDefinitionService.DeriveSlug"/>.
+///
+/// <para>ATOMIC by design — the whole import is ONE <c>SaveChangesAsync</c> inside the command's ambient
+/// transaction (<c>TransactionalBehavior</c>). Known handle collisions are decided IN MEMORY before the save
+/// (a handle that already belongs to a DIFFERENT active definition, or a second artifact in the same pack that
+/// derives an already-claimed handle, is <see cref="PackImportOutcome.Skipped"/> — never a failed INSERT that
+/// would abort the transaction). The only thing that can still throw at the save is a genuine concurrent-request
+/// race (another request committed the same source / handle in between): the transaction rolls the whole import
+/// back and the operator retries — nothing half-applies.</para>
 /// </summary>
 public sealed partial class PackImportService
 {
     public async Task<PackImportResult> ImportFromUrlAsync(string url, string? reference, IReadOnlyList<string> sourcePaths, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
     {
+        var selected = sourcePaths.Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToList();
+
+        // Nothing selected → a clean no-op: never clone or touch a Pack for an empty commit.
+        if (selected.Count == 0) return new PackImportResult { PackId = Guid.Empty, Items = Array.Empty<PackArtifactImportResult>() };
+
         using var checkout = await _fetcher.FetchAsync(url, reference, cancellationToken).ConfigureAwait(false);
 
         var discovered = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
-        var pack = await ResolvePackAsync(url, reference, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+        var now = DateTimeOffset.UtcNow;
+        var pack = await ResolvePackAsync(url, reference, teamId, actorUserId, now, cancellationToken).ConfigureAwait(false);
 
         var agentsByPath = IndexByPath(discovered.Agents, a => a.SourcePath);
         var skillsByPath = IndexByPath(discovered.Skills, s => s.SourcePath);
 
+        // This pack's already-imported rows (tracked, so an Update flushes), keyed by source-path = the sync identity.
+        var existingAgents = await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingSkills = await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
+
+        // The team's active handles, loaded once and EXTENDED in memory as we claim new ones — so an intra-pack
+        // duplicate handle is the 2nd..Nth Skipped here, never a transaction-aborting 23505 at the save.
+        var agentSlugs = new HashSet<string>(await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false), StringComparer.Ordinal);
+        var skillSlugs = new HashSet<string>(await ActiveSlugsAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null).Select(s => s.Slug), cancellationToken).ConfigureAwait(false), StringComparer.Ordinal);
+
         var items = new List<PackArtifactImportResult>();
 
-        foreach (var path in sourcePaths.Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal))
+        foreach (var path in selected)
         {
             if (agentsByPath.TryGetValue(path, out var agent))
-                items.Add(await UpsertAgentAsync(pack, agent, teamId, actorUserId, cancellationToken).ConfigureAwait(false));
+                items.Add(UpsertAgent(pack, agent, existingAgents, agentSlugs, teamId, actorUserId, now));
             else if (skillsByPath.TryGetValue(path, out var skill))
-                items.Add(await UpsertSkillAsync(pack, skill, teamId, actorUserId, cancellationToken).ConfigureAwait(false));
+                items.Add(UpsertSkill(pack, skill, existingSkills, skillSlugs, teamId, actorUserId, now));
             else
                 items.Add(new PackArtifactImportResult { SourcePath = path, Kind = null, Outcome = PackImportOutcome.Failed, Reason = "Not found in the pack at this ref — it may have been removed or renamed since the preview." });
         }
 
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
         return new PackImportResult { PackId = pack.Id, Items = items };
     }
 
-    /// <summary>Find the team's active pack for this source (one per team+url+subpath, per the unique index) and refresh its ref/sync time, or create it. The URL flow has no subpath (the whole repo).</summary>
-    private async Task<Pack> ResolvePackAsync(string url, string? reference, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    /// <summary>Find the team's active pack for this source (one per team+url+subpath, per the unique index) and refresh its ref/sync time, or stage a new one. Tracked, not saved — the single import save persists it. The URL flow has no subpath (the whole repo).</summary>
+    private async Task<Pack> ResolvePackAsync(string url, string? reference, Guid teamId, Guid actorUserId, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow;
-
         var existing = await _db.Pack.SingleOrDefaultAsync(p => p.TeamId == teamId && p.Url == url && p.Subpath == null && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
         if (existing != null)
@@ -56,8 +77,6 @@ public sealed partial class PackImportService
             existing.LastSyncedDate = now;
             existing.LastModifiedDate = now;
             existing.LastModifiedBy = actorUserId;
-
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             return existing;
         }
 
@@ -77,33 +96,16 @@ public sealed partial class PackImportService
         };
 
         _db.Pack.Add(pack);
-
-        try
-        {
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return pack;
-        }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex, "uq_pack_team_source"))
-        {
-            // Race-loss: a concurrent import created the same pack first. Detach our loser and use the winner.
-            _db.Entry(pack).State = EntityState.Detached;
-            return await _db.Pack.SingleAsync(p => p.TeamId == teamId && p.Url == url && p.Subpath == null && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
-        }
+        return pack;
     }
 
-    private async Task<PackArtifactImportResult> UpsertAgentAsync(Pack pack, ParsedAgentDefinition parsed, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    private PackArtifactImportResult UpsertAgent(Pack pack, ParsedAgentDefinition parsed, IReadOnlyDictionary<string, AgentDefinition> existingByPath, HashSet<string> claimedSlugs, Guid teamId, Guid actorUserId, DateTimeOffset now)
     {
-        var now = DateTimeOffset.UtcNow;
-
-        var existing = await _db.AgentDefinition.SingleOrDefaultAsync(a => a.PackId == pack.Id && a.SourcePath == parsed.SourcePath && a.DeletedDate == null, cancellationToken).ConfigureAwait(false);
-
-        if (existing != null)
+        if (existingByPath.TryGetValue(parsed.SourcePath, out var existing))
         {
-            ApplyAgentContent(existing, parsed);
+            ApplyAgentContent(existing, parsed);   // refresh content; slug/identity stay put — the handle is stable
             existing.LastModifiedDate = now;
             existing.LastModifiedBy = actorUserId;
-
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             return AgentResult(parsed.SourcePath, PackImportOutcome.Updated, existing.Id);
         }
 
@@ -112,7 +114,7 @@ public sealed partial class PackImportService
 
         var slug = AgentDefinitionService.DeriveSlug(parsed.Name);
 
-        if (await _db.AgentDefinition.AnyAsync(a => a.TeamId == teamId && a.Slug == slug && a.DeletedDate == null, cancellationToken).ConfigureAwait(false))
+        if (!claimedSlugs.Add(slug))
             return AgentResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"An agent with handle '{slug}' already exists in this team — left untouched.");
 
         var agent = new AgentDefinition
@@ -131,32 +133,16 @@ public sealed partial class PackImportService
         ApplyAgentContent(agent, parsed);
 
         _db.AgentDefinition.Add(agent);
-
-        try
-        {
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return AgentResult(parsed.SourcePath, PackImportOutcome.Imported, agent.Id);
-        }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex, "uq_agent_definition_team_slug"))
-        {
-            _db.Entry(agent).State = EntityState.Detached;
-            return AgentResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"An agent with handle '{slug}' already exists in this team — left untouched.");
-        }
+        return AgentResult(parsed.SourcePath, PackImportOutcome.Imported, agent.Id);
     }
 
-    private async Task<PackArtifactImportResult> UpsertSkillAsync(Pack pack, ParsedSkillDefinition parsed, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    private PackArtifactImportResult UpsertSkill(Pack pack, ParsedSkillDefinition parsed, IReadOnlyDictionary<string, SkillDefinition> existingByPath, HashSet<string> claimedSlugs, Guid teamId, Guid actorUserId, DateTimeOffset now)
     {
-        var now = DateTimeOffset.UtcNow;
-
-        var existing = await _db.SkillDefinition.SingleOrDefaultAsync(s => s.PackId == pack.Id && s.SourcePath == parsed.SourcePath && s.DeletedDate == null, cancellationToken).ConfigureAwait(false);
-
-        if (existing != null)
+        if (existingByPath.TryGetValue(parsed.SourcePath, out var existing))
         {
             ApplySkillContent(existing, parsed);
             existing.LastModifiedDate = now;
             existing.LastModifiedBy = actorUserId;
-
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             return SkillResult(parsed.SourcePath, PackImportOutcome.Updated, existing.Id);
         }
 
@@ -165,7 +151,7 @@ public sealed partial class PackImportService
 
         var slug = AgentDefinitionService.DeriveSlug(parsed.Name);
 
-        if (await _db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == slug && s.DeletedDate == null, cancellationToken).ConfigureAwait(false))
+        if (!claimedSlugs.Add(slug))
             return SkillResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"A skill with handle '{slug}' already exists in this team — left untouched.");
 
         var skill = new SkillDefinition
@@ -184,17 +170,7 @@ public sealed partial class PackImportService
         ApplySkillContent(skill, parsed);
 
         _db.SkillDefinition.Add(skill);
-
-        try
-        {
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return SkillResult(parsed.SourcePath, PackImportOutcome.Imported, skill.Id);
-        }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex, "uq_skill_definition_team_slug"))
-        {
-            _db.Entry(skill).State = EntityState.Detached;
-            return SkillResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"A skill with handle '{slug}' already exists in this team — left untouched.");
-        }
+        return SkillResult(parsed.SourcePath, PackImportOutcome.Imported, skill.Id);
     }
 
     /// <summary>Sets the content columns from the parsed artifact. Never touches slug / origin / pack / source-path (identity) — a re-sync refreshes the body, not the handle.</summary>
@@ -228,11 +204,20 @@ public sealed partial class PackImportService
         return path.Length > 0 ? path : uri.Host;
     }
 
-    /// <summary>Github only for the github.com host; any other allowlisted host is a generic git URL. Pure + internal so it's unit-pinned.</summary>
+    /// <summary>Github only for the github.com host (trailing-dot normalized); any other allowlisted host is a generic git URL. Pure + internal so it's unit-pinned.</summary>
     internal static PackKind DeterminePackKind(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var uri) && string.Equals(uri.Host.TrimEnd('.'), "github.com", StringComparison.OrdinalIgnoreCase)
             ? PackKind.Github
             : PackKind.GitUrl;
+
+    private static async Task<Dictionary<string, T>> ExistingByPathAsync<T>(IQueryable<T> query, Func<T, string> path, CancellationToken cancellationToken)
+    {
+        var rows = await query.ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var map = new Dictionary<string, T>(StringComparer.Ordinal);
+        foreach (var row in rows) map[path(row)] = row;   // one active row per (pack, source) — the unique index guarantees it
+        return map;
+    }
 
     private static Dictionary<string, T> IndexByPath<T>(IEnumerable<T> items, Func<T, string> path)
     {
@@ -240,11 +225,6 @@ public sealed partial class PackImportService
         foreach (var item in items) map[path(item)] = item;   // one entry per file; last wins defensively
         return map;
     }
-
-    private static bool IsUniqueViolation(DbUpdateException ex, string constraintFragment) =>
-        ex.InnerException is Npgsql.PostgresException pg
-            && pg.SqlState == "23505"
-            && (pg.ConstraintName?.Contains(constraintFragment, StringComparison.Ordinal) ?? false);
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 

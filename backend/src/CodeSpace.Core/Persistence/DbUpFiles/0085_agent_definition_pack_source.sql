@@ -1,4 +1,4 @@
--- 0081_agent_definition_pack_source.sql
+-- 0085_agent_definition_pack_source.sql
 --
 -- The unified SYNC identity for IMPORTED agents, mirroring skill_definition's uq_skill_definition_pack_source
 -- (0079): one active agent_definition row per (pack, file). A re-sync upserts on this pair, never duplicating —

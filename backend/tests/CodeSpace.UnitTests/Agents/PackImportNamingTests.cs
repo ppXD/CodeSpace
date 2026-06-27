@@ -30,6 +30,7 @@ public class PackImportNamingTests
     [Theory]
     [InlineData("https://github.com/owner/repo", PackKind.Github)]
     [InlineData("https://GITHUB.com/owner/repo", PackKind.Github)]
+    [InlineData("https://github.com./owner/repo", PackKind.Github)]   // trailing-dot FQDN must normalize, not bypass
     [InlineData("https://gitlab.com/owner/repo", PackKind.GitUrl)]
     [InlineData("https://git.example.com/owner/repo", PackKind.GitUrl)]
     public void DeterminePackKind_is_github_only_for_github_host(string url, PackKind expected)
