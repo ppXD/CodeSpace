@@ -41,6 +41,7 @@ public class CodeSpaceModule : Autofac.Module
         RegisterLLMProviderModules(builder);
         RegisterFirstPartyAgentTools(builder);
         RegisterDependency(builder);
+        RegisterDecorators(builder);
         RegisterCurrentUser(builder);
         RegisterAmbient(builder);
         RegisterVariableEncryption(builder);
@@ -227,6 +228,17 @@ public class CodeSpaceModule : Autofac.Module
         if (!Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled()) return;
 
         builder.RegisterType<Services.Agents.Tools.DecisionRequestTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
+    }
+
+    /// <summary>
+    /// Decorators wrap a convention-registered service AFTER <see cref="RegisterDependency"/> has registered the
+    /// implementation. The critic planner decorator wraps <c>IWorkflowPlanner</c> with the generic adversarial-review
+    /// primitive — inert by default (per-request <c>ReviewMode.None</c> + the <c>CriticToggle</c> kill-switch), so an
+    /// unconfigured plan is byte-identical to the bare planner.
+    /// </summary>
+    private static void RegisterDecorators(ContainerBuilder builder)
+    {
+        builder.RegisterDecorator<Services.Workflows.Planning.Planners.CriticPlannerDecorator, Services.Workflows.Planning.IWorkflowPlanner>();
     }
 
     private void RegisterDependency(ContainerBuilder builder)
