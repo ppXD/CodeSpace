@@ -43,9 +43,10 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
   const openAgent = wave.agents.find((a) => a.agentRunId === selectedAgentRunId) ?? null;
   const toggleAgent = (id: string) => onSelectAgent?.(id === selectedAgentRunId ? null : id);
 
-  // The bulk "Rerun N failed items" sits on a map fan-out's HEADER; the per-item / "Rerun from here" goes INSIDE the
-  // focused agent's terminal footer (where the failure reads), matching the design.
-  const headerTarget = wave.kind === "map" ? phaseRerunTarget(wave) : null;
+  // EVERY phase box carries its rerun on its own bottom row, right below the status dots — a map fan-out gets the bulk
+  // "Rerun N failed items", a single-agent / node phase gets "Rerun from here". phaseRerunTarget returns null for a
+  // clean phase, so the row only appears where there's something to rerun. The expanded terminal keeps its own copy.
+  const headerTarget = phaseRerunTarget(wave);
   const terminalRerun = (agent: PhaseAgentRef) => {
     const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : phaseRerunTarget(wave);
     return t ? <RerunMenu target={t} className="run-tl-rerun-term" /> : null;
