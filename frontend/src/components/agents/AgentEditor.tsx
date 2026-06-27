@@ -108,7 +108,7 @@ function ModalFrame({ title, sub, onClose, foot, escapeDisabled, children }: { t
   return createPortal(
     <>
       <div className="mdl-mask" onClick={onClose} />
-      <div className="mdl" role="dialog" aria-modal="true" style={{ width: 560, maxWidth: "94vw" }}>
+      <div className="mdl" role="dialog" aria-modal="true" style={{ width: 680, maxWidth: "94vw" }}>
         <div className="mdl-head">
           <div className="mdl-title-wrap">
             <div className="mdl-title">{title}</div>
@@ -145,15 +145,16 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   const saving = createAgent.isPending || updateAgent.isPending;
   const canSave = name.trim().length > 0 && handle.length > 0 && !saving;
 
-  // Real credentialed models, deduped by model id (the persona stores a model id, not a credential).
-  const modelOpts: Option[] = [{ value: "", label: "Auto (harness default)" }];
-  const seen = new Set<string>();
-  for (const o of credModels.data ?? []) {
-    if (seen.has(o.modelId)) continue;
-    seen.add(o.modelId);
-    modelOpts.push({ value: o.modelId, label: o.modelId, desc: `${o.provider}${o.tier && o.tier !== "Unknown" ? ` · ${o.tier}` : ""}${o.available === false ? " · offline" : ""}` });
-  }
-  if (model && !seen.has(model)) modelOpts.push({ value: model, label: model, desc: "not in your model list" });
+  // Every credentialed model the team exposes (NOT deduped — same as the launch composer; the credential
+  // name in the description distinguishes two credentials offering the same model id). The persona stores
+  // just the model id, so picking either row of a shared id persists that id.
+  const modelDesc = (o: { provider: string; credentialName: string; tier?: string | null; available?: boolean | null }) =>
+    `${o.provider} · ${o.credentialName}${o.tier && o.tier !== "Unknown" ? ` · ${o.tier}` : ""}${o.available === false ? " · offline" : ""}`;
+  const modelOpts: Option[] = [
+    { value: "", label: "Auto (harness default)" },
+    ...(credModels.data ?? []).map((o) => ({ value: o.modelId, label: o.modelId, desc: modelDesc(o) })),
+  ];
+  if (model && !(credModels.data ?? []).some((o) => o.modelId === model)) modelOpts.push({ value: model, label: model, desc: "not in your model list" });
 
   async function handleSave() {
     setError(null);
