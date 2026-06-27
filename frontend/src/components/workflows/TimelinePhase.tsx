@@ -5,6 +5,7 @@ import type { PhaseAgentRef } from "@/api/workflows";
 
 import { AgentTerminal } from "./AgentTerminal";
 import { AgentTile } from "./AgentTile";
+import { NodeRerunBadge } from "./NodeRerunBadge";
 import { formatDuration, itemRerunTarget, phaseRerunTarget, tileState, waveBreakdown, type AgentWave, type WaveBreakdown } from "./runActivity";
 import { RerunMenu } from "./RerunMenu";
 
@@ -73,6 +74,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
       >
         <span className="run-tl-box-head">
           <span className="run-tl-box-name" title={wave.label}>{wave.label}</span>
+          <NodeRerunBadge nodeId={wave.id} className="run-tl-box-rerun" />
           <Ic.ChevronRight className="run-tl-box-caret" size={14} aria-hidden="true" />
         </span>
         <span className="run-tl-box-meta">{boxMeta(wave, breakdown)}</span>

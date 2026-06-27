@@ -186,6 +186,8 @@ export interface RunAttempt {
   attemptNumber: number;
   status: WorkflowRunStatus;
   sourceType: WorkflowRunSourceType;
+  /** The node this attempt re-ran from (the map node for a branch rerun); null for the original / a whole-run replay. */
+  rerunFromNodeId: string | null;
   createdDate: string;
   /** The newest attempt — selected by default in the detail. */
   isLatest: boolean;
