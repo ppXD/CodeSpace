@@ -20,6 +20,9 @@ public sealed record WorkflowRunDetail
     /// <summary>Open-string source identifier (from request.source_type). e.g. "manual", "provider.github.pull_request".</summary>
     public required string SourceType { get; init; }
 
+    /// <summary>The run this one forked from — set for a replay / rerun (its <see cref="SourceType"/> is "replay" / "rerun"). The UI threads the lineage off it ("Rerun of {parent}").</summary>
+    public Guid? ParentRunId { get; init; }
+
     /// <summary>Normalised payload the engine sees as <c>{{trigger.*}}</c>. Sourced from request.normalized_payload_json.</summary>
     public required JsonElement NormalizedPayload { get; init; }
 

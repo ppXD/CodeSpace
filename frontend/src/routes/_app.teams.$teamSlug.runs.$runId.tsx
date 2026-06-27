@@ -67,6 +67,16 @@ function RunDetailPage() {
               <RunStateHeader runStatus={run.data.status} phases={phases.data.phases}
                 pendingDecisions={decisions.data ? runDecisions.length : undefined} />
             )}
+            {run.data?.parentRunId && (
+              <button
+                className="run-lineage-link"
+                onClick={() => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.data!.parentRunId! } })}
+                title="Open the run this one was forked from"
+              >
+                <Ic.Branch size={12} aria-hidden="true" />
+                {run.data.sourceType === "replay" ? "Replay of" : "Rerun of"} run {run.data.parentRunId.slice(0, 8)}
+              </button>
+            )}
           </div>
           <div className="ct-actions">
             {run.data && <StopRunButton runId={runId} status={run.data.status} />}

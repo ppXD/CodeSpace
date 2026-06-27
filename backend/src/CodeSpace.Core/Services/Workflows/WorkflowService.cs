@@ -1198,6 +1198,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             WorkflowId = run.WorkflowId,
             WorkflowVersion = run.WorkflowVersion,
             SourceType = run.RunRequest?.SourceType ?? string.Empty,
+            ParentRunId = run.ParentRunId,
             NormalizedPayload = normalizedPayload,
             Status = run.Status,
             Error = run.Error,

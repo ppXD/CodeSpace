@@ -172,6 +172,29 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public async Task A_rerun_fork_threads_its_lineage_back_to_the_original_via_parent_run_id()
+    {
+        // The run-detail DTO exposes ParentRunId + SourceType so the UI can thread a fork back to the run it reran
+        // ("Rerun of {original}") — the fork reads as that run's re-run, not a stray new run.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplineage-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var forkId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId);
+
+        using var scope = _fixture.BeginScope();
+        var detail = await scope.Resolve<IWorkflowService>().GetRunAsync(forkId, teamId, CancellationToken.None);
+        detail.ShouldNotBeNull();
+        detail!.ParentRunId.ShouldBe(originalRunId, "the rerun fork points back to the original run");
+        detail.SourceType.ShouldBe(WorkflowRunSourceTypes.Rerun);
+
+        var original = await scope.Resolve<IWorkflowService>().GetRunAsync(originalRunId, teamId, CancellationToken.None);
+        original!.ParentRunId.ShouldBeNull("the original run has no parent");
+    }
+
+    [Fact]
     public async Task Rerun_the_full_branch_set_reruns_every_branch()
     {
         // The whole set {0,1,2,3} → every branch re-runs (nothing reused); the map re-aggregates over all-fresh results.
