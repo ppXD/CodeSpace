@@ -12,6 +12,7 @@ import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
 import { RunActionsContext } from "./runActionsContext";
 import { RunActivityTimeline } from "./RunActivityTimeline";
+import { RunOpenContext } from "./runOpenContext";
 import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
@@ -182,7 +183,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
               as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
           {!nested && (
             <RunActionsContext.Provider value={{ runId, isTerminal: !isRunActive(r.status) }}>
-              <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
+              <RunOpenContext.Provider value={onOpenRun ?? null}>
+                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
+              </RunOpenContext.Provider>
             </RunActionsContext.Provider>
           )}
 
