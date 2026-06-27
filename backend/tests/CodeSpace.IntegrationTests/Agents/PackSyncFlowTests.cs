@@ -32,7 +32,7 @@ public class PackSyncFlowTests
     public PackSyncFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Sync_refreshes_changed_leaves_unchanged_and_surfaces_new()
+    public async Task Sync_splits_up_to_date_vs_updated_across_kinds_and_change_kinds()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -45,38 +45,64 @@ public class PackSyncFlowTests
 
         try
         {
-            // Initial import: code-reviewer + tdd are now pack-rooted.
-            var commit = await SendAsync(teamId, userId, new ImportPackFromUrlCommand { Url = src, SourcePaths = new[] { "agents/code-reviewer.md", "skills/tdd/SKILL.md" } });
+            var commit = await SendAsync(teamId, userId, new ImportPackFromUrlCommand
+            {
+                Url = src,
+                SourcePaths = new[] { "agents/reviewer.md", "agents/architect.md", "agents/toolsmith.md", "agents/frontmatter-agent.md", "skills/tdd/SKILL.md", "skills/debugging/SKILL.md" },
+            });
             var packId = commit.PackId;
 
-            // Source moves: code-reviewer's body changes; tdd is untouched; a brand-new skill appears.
+            var unchangedBefore = await LastModifiedAsync(teamId, "architect", "debugging", "frontmatter-agent");
+
+            // Each change kind exercised: a body change (agent + skill), a tools-only change, a frontmatter-only
+            // (cosmetic) change → UpToDate, two artifacts left byte-identical, and a brand-new skill.
             await RewriteAndCommitAsync(runners, src, new[]
             {
-                ("agents/code-reviewer.md", "---\nname: code-reviewer\ndescription: Reviews PRs.\n---\nYou review v2 now."),
-                ("skills/new-skill/SKILL.md", "---\nname: new-skill\ndescription: Brand new.\n---\n# New"),
+                ("agents/reviewer.md", "---\nname: reviewer\ndescription: Reviews PRs.\n---\nYou review v2 now."),               // body → Updated
+                ("agents/toolsmith.md", "---\nname: toolsmith\ndescription: Tools.\ntools: Read, Grep\n---\nYou tool."),         // tools → Updated
+                ("agents/frontmatter-agent.md", "---\nname: frontmatter-agent\ndescription: FM.\ncolor: purple\n---\nYou fm."),  // frontmatter only → UpToDate
+                ("skills/tdd/SKILL.md", "---\nname: tdd\ndescription: Use when implementing.\n---\n# TDD v2"),                    // body → Updated
+                ("skills/new-skill/SKILL.md", "---\nname: new-skill\ndescription: Brand new.\n---\n# New"),                      // new → preview only
+                // architect + debugging untouched → UpToDate
             });
 
             var sync = await SendAsync(teamId, userId, new SyncPackCommand { PackId = packId });
 
             sync.PackId.ShouldBe(packId);
-            sync.UpToDate.ShouldBe(1, "tdd is unchanged");
-            sync.Updated.ShouldBe(1, "code-reviewer's body changed");
-            sync.NewArtifacts.Skills.Select(s => s.DerivedSlug).ShouldContain("new-skill");
+            sync.Updated.ShouldBe(3, "reviewer body, toolsmith tools, tdd body");
+            sync.UpToDate.ShouldBe(3, "architect + debugging unchanged, frontmatter-agent changed only its frontmatter");
             sync.NewArtifacts.Skills.Single(s => s.DerivedSlug == "new-skill").Importable.ShouldBeTrue();
 
             await AssertStateAsync(async db =>
             {
-                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "code-reviewer" && a.DeletedDate == null))
-                    .SystemPrompt.ShouldContain("You review v2 now", customMessage: "the changed artifact is refreshed in place");
+                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "reviewer" && a.DeletedDate == null)).SystemPrompt.ShouldContain("v2 now");
+                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "toolsmith" && a.DeletedDate == null)).ToolsJson!.ShouldContain("Grep", customMessage: "a tools-only change refreshes the tool list");
+                (await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.DeletedDate == null)).Body.ShouldContain("# TDD v2");
 
-                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "new-skill" && s.DeletedDate == null))
-                    .ShouldBeFalse("a sync surfaces new artifacts as a preview but never auto-imports them");
+                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "new-skill" && s.DeletedDate == null)).ShouldBeFalse("a sync surfaces new artifacts but never auto-imports them");
             });
+
+            // The UpToDate artifacts were not written — their LastModified did not move (incl. the frontmatter-only one).
+            var unchangedAfter = await LastModifiedAsync(teamId, "architect", "debugging", "frontmatter-agent");
+            foreach (var slug in unchangedBefore.Keys)
+                unchangedAfter[slug].ShouldBe(unchangedBefore[slug], customMessage: $"{slug} is UpToDate and must issue no write");
         }
         finally
         {
             try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
         }
+    }
+
+    [Fact]
+    public async Task Sync_of_another_teams_pack_is_not_found()
+    {
+        var (teamA, userA) = await SeedTeamAsync();
+        var (teamB, userB) = await SeedTeamAsync();
+
+        var packInB = await SeedRemotePackAsync(teamB, userB);   // owned by B, with a remote URL (otherwise syncable)
+
+        // Team A presenting B's pack id: the team-scoped load finds nothing → not-found, no clone, no leak.
+        await Should.ThrowAsync<KeyNotFoundException>(() => SendAsync(teamA, userA, new SyncPackCommand { PackId = packInB }));
     }
 
     [Fact]
@@ -121,8 +147,12 @@ public class PackSyncFlowTests
         Directory.CreateDirectory(src);
 
         await RunGitAsync(runners, new[] { "init", "-b", "main", src });
-        WriteFile(src, "agents/code-reviewer.md", "---\nname: code-reviewer\ndescription: Reviews PRs.\n---\nYou review.");
-        WriteFile(src, "skills/tdd/SKILL.md", "---\nname: tdd\ndescription: Use when implementing.\n---\n# TDD\nWrite the failing test first.");
+        WriteFile(src, "agents/reviewer.md", "---\nname: reviewer\ndescription: Reviews PRs.\n---\nYou review v1.");
+        WriteFile(src, "agents/architect.md", "---\nname: architect\ndescription: Designs.\n---\nYou design.");
+        WriteFile(src, "agents/toolsmith.md", "---\nname: toolsmith\ndescription: Tools.\ntools: Read\n---\nYou tool.");
+        WriteFile(src, "agents/frontmatter-agent.md", "---\nname: frontmatter-agent\ndescription: FM.\n---\nYou fm.");
+        WriteFile(src, "skills/tdd/SKILL.md", "---\nname: tdd\ndescription: Use when implementing.\n---\n# TDD v1");
+        WriteFile(src, "skills/debugging/SKILL.md", "---\nname: debugging\ndescription: Debug.\n---\n# Debug");
         await CommitAllAsync(runners, src, "init");
         return src;
     }
@@ -156,6 +186,29 @@ public class PackSyncFlowTests
         var full = Path.Combine(root, relPath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         File.WriteAllText(full, content);
+    }
+
+    private async Task<Dictionary<string, DateTimeOffset>> LastModifiedAsync(Guid teamId, params string[] slugs)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var map = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        foreach (var a in await db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && slugs.Contains(a.Slug) && a.DeletedDate == null).Select(a => new { a.Slug, a.LastModifiedDate }).ToListAsync())
+            map[a.Slug] = a.LastModifiedDate;
+        foreach (var s in await db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && slugs.Contains(s.Slug) && s.DeletedDate == null).Select(s => new { s.Slug, s.LastModifiedDate }).ToListAsync())
+            map[s.Slug] = s.LastModifiedDate;
+        return map;
+    }
+
+    private async Task<Guid> SeedRemotePackAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        db.Pack.Add(new Pack { Id = id, TeamId = teamId, Kind = PackKind.Github, Name = "owner/repo", Url = "https://github.com/owner/repo", Reference = "main", CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
+        await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task<Guid> SeedCustomPackAsync(Guid teamId, Guid userId)

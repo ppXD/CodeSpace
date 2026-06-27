@@ -14,6 +14,13 @@ namespace CodeSpace.Core.Services.Agents;
 ///
 /// <para>The whole refresh is ONE <c>SaveChangesAsync</c> inside the command's ambient transaction; a concurrent
 /// sync of the same pack loses on the xmin token and rolls back for retry, never half-applies.</para>
+///
+/// <para>v1 contract — sync is NON-destructive and refreshes only what the walk still contains: an artifact that
+/// was imported but no longer appears upstream (deleted / renamed) is silently RETAINED at its last-synced
+/// content (not refreshed, not removed, not reported). The operator removes a stale artifact via the library
+/// CRUD. Likewise a frontmatter-only change with no projected-field change is reported UpToDate and its verbatim
+/// frontmatter is NOT re-persisted (it refreshes on the next projected change) — the deliberate cost of not
+/// comparing the jsonb-round-tripped blob.</para>
 /// </summary>
 public sealed partial class PackImportService
 {
