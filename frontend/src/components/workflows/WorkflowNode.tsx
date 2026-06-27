@@ -10,6 +10,7 @@ import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { RerunMenu } from "./RerunMenu";
 import { loopMinSize } from "./loopResize";
 import { branchBadge, fanBranches } from "./mapBranches";
 import { MapFanout } from "./MapFanout";
@@ -205,9 +206,14 @@ function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
  * fan-out) keeps the coze-style {@link RunResultBar}, whose single-row path embeds the agent run richly. Both hang
  * in the free space below the node.
  */
-function NodeRunFooter({ status, rows, title }: { status: NodeStatus; rows: WorkflowRunNodeSummary[]; title?: string }) {
+function NodeRunFooter({ status, rows, title, nodeId }: { status: NodeStatus; rows: WorkflowRunNodeSummary[]; title?: string; nodeId?: string }) {
   if (fanBranches(rows).length >= 2) return <MapFanout rows={rows} renderBranch={(row) => <RunRowDetail row={row} />} />;
-  return <RunResultBar status={status} rows={rows} title={title} />;
+  return (
+    <>
+      <RunResultBar status={status} rows={rows} title={title} />
+      {nodeId && status === "Failure" && <RerunMenu target={{ kind: "node", nodeId }} className="wf-rerun-node" />}
+    </>
+  );
 }
 
 /** A row earns the expand caret when it carries anything inspectable — output, input, error, an agent run, or a child run. */
@@ -413,7 +419,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
         />
       )}
       {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
-      {runStatus && d.runRows && <NodeRunFooter status={runStatus} rows={d.runRows} title={parkedTitle} />}
+      {runStatus && d.runRows && <NodeRunFooter status={runStatus} rows={d.runRows} title={parkedTitle} nodeId={id} />}
     </div>
   );
 }

@@ -2,8 +2,21 @@ import { useState, type ReactNode } from "react";
 
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
 
-import { fanBranches, fanBreakdown } from "./mapBranches";
-import { RerunControl } from "./RerunControl";
+import { fanBranches, fanBreakdown, MAP_CONTAINER_KIND, parseIterationKey, type FanBranch } from "./mapBranches";
+import { RerunMenu, type RerunTarget } from "./RerunMenu";
+
+/** The rerun target for a focused fan-out item — only a TOP-LEVEL flow.map branch (single-segment key + map container) is rerunnable; a nested / loop body returns null. */
+function mapItemTarget(branches: readonly FanBranch[], focused: FanBranch): RerunTarget | null {
+  const segments = parseIterationKey(focused.row.iterationKey);
+  if (segments.length !== 1 || focused.row.containerKind !== MAP_CONTAINER_KIND) return null;
+  return {
+    kind: "mapItem",
+    mapNodeId: segments[0].containerId,
+    focusedIndex: focused.index,
+    failedIndices: branches.filter((b) => b.row.status === "Failure").map((b) => b.index),
+    totalCount: branches.length,
+  };
+}
 
 /** A node status → the fan-out tile's render state: running folds Suspended, done folds Skipped, queued is Pending. */
 function tileStateOf(status: NodeStatus): "running" | "done" | "failed" | "queued" {
@@ -68,7 +81,7 @@ export function MapFanout({ rows, renderBranch, inline }: { rows: WorkflowRunNod
           <div className="wf-rf-fanout-term-h">
             <span className="wf-rf-fanout-term-ix">{cur.badge}</span>
             <span className="wf-rf-fanout-term-st" data-status={cur.row.status.toLowerCase()}>{cur.row.status}</span>
-            <RerunControl branches={branches} focused={cur} />
+            {(() => { const t = mapItemTarget(branches, cur); return t && <RerunMenu target={t} className="wf-rerun-onrow" />; })()}
           </div>
           {renderBranch(cur.row)}
         </div>

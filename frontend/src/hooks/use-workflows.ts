@@ -305,6 +305,19 @@ export function useRerunMapBranches(runId: string) {
   });
 }
 
+/** Re-run FROM a node ("Rerun from here") — forks a run reusing everything upstream and re-running this node + its downstream. Returns the new run id. */
+export function useRerunFromNode(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { fromNodeId: string }) => workflowsApi.rerunFromNode(runId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["team-runs"] });
+    },
+  });
+}
+
 /**
  * Cancel (hard-stop) a still-live run — the operator action. Invalidates the run's views so the terminal
  * Cancelled state shows at once (the 2s status poll would also catch it). The backend POST /cancel is idempotent.
