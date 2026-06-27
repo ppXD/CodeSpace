@@ -31,4 +31,13 @@ public sealed record CellAttempt
 
     /// <summary>True for the newest attempt that ran the cell — the one the merged detail shows by default.</summary>
     public required bool IsLatest { get; init; }
+
+    // THIS attempt's own metrics (so switching shows the picked attempt's spend/timing, not the latest's).
+    public long? DurationMs { get; init; }
+    public int? InputTokens { get; init; }
+    public int? OutputTokens { get; init; }
+    public decimal? CostUsd { get; init; }
+    public int? FilesChanged { get; init; }
+    public int? ToolCount { get; init; }
+    public string? Model { get; init; }
 }

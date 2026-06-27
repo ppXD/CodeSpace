@@ -210,6 +210,14 @@ export interface CellAttempt {
   createdDate: string;
   /** The newest attempt that ran the cell — the merged detail's default. */
   isLatest: boolean;
+  /** THIS attempt's own metrics — so switching shows the picked attempt's spend/timing, not the latest's. */
+  durationMs?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  costUsd?: number | null;
+  filesChanged?: number | null;
+  toolCount?: number | null;
+  model?: string | null;
 }
 
 /**

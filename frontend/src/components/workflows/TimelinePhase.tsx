@@ -100,7 +100,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
               ))}
             </div>
 
-            {openAgent && <AgentTerminal agent={openAgent} onClose={() => onSelectAgent?.(null)} rerun={terminalRerun(openAgent)} />}
+            {openAgent && <AgentTerminal key={openAgent.agentRunId} agent={openAgent} onClose={() => onSelectAgent?.(null)} rerun={terminalRerun(openAgent)} />}
           </>
         ))}
     </div>

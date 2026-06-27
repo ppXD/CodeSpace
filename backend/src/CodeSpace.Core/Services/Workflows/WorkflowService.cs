@@ -1238,17 +1238,40 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .Select(w => new { w.RunId, w.Token }).ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToDictionary(w => w.RunId, w => w.Token);
 
+        // THIS attempt's own metrics (spend/timing/model) — so switching shows the picked attempt's figures, not the
+        // merged latest's. Computed off each attempt's agent run via the same reader the phase tiles use.
+        var agentRunIds = agentByRun.Values.Where(t => Guid.TryParse(t, out _)).Select(Guid.Parse).ToList();
+        var now = DateTimeOffset.UtcNow;
+        var toolCounts = await Tasks.Phases.AgentMetricsReader.ToolCountsByAgentAsync(_db, teamId, agentRunIds, cancellationToken).ConfigureAwait(false);
+        var metricsByAgent = (await _db.AgentRun.AsNoTracking()
+                .Where(a => a.TeamId == teamId && agentRunIds.Contains(a.Id))
+                .Select(a => new { a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson })
+                .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToDictionary(a => a.Id, a => Tasks.Phases.AgentMetricsReader.Build(a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson, toolCounts.GetValueOrDefault(a.Id), now));
+
         // Only the attempts that actually RAN the cell (have a node row); attempt number is the run's lineage position.
         var ran = lineage.Select((r, i) => (r.Id, r.CreatedDate, AttemptNumber: i + 1)).Where(x => statusByRun.ContainsKey(x.Id)).ToList();
 
-        var attempts = ran.Select((x, idx) => new CellAttempt
+        var attempts = ran.Select((x, idx) =>
         {
-            AttemptNumber = x.AttemptNumber,
-            RunId = x.Id,
-            AgentRunId = agentByRun.GetValueOrDefault(x.Id),
-            Status = statusByRun[x.Id],
-            CreatedDate = x.CreatedDate,
-            IsLatest = idx == ran.Count - 1,
+            var agentRunId = agentByRun.GetValueOrDefault(x.Id);
+            var m = agentRunId != null && Guid.TryParse(agentRunId, out var arid) ? metricsByAgent.GetValueOrDefault(arid) : null;
+            return new CellAttempt
+            {
+                AttemptNumber = x.AttemptNumber,
+                RunId = x.Id,
+                AgentRunId = agentRunId,
+                Status = statusByRun[x.Id],
+                CreatedDate = x.CreatedDate,
+                IsLatest = idx == ran.Count - 1,
+                DurationMs = m?.DurationMs,
+                InputTokens = m?.InputTokens,
+                OutputTokens = m?.OutputTokens,
+                CostUsd = m?.CostUsd,
+                FilesChanged = m?.FilesChanged,
+                ToolCount = m?.ToolCount,
+                Model = m?.Model,
+            };
         }).ToList();
 
         return new CellAttemptsResponse { Attempts = attempts };
