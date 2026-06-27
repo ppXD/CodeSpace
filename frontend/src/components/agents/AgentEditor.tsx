@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentBoundSkill, AgentDefinitionInput, AgentDefinitionSummary } from "@/api/agents";
@@ -151,8 +151,9 @@ function AgentEditorForm({ mode, teamSlug, agentId, initial, boundSkills, immuta
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
-          <span className="cur-link" onClick={toList} style={{ cursor: "pointer" }}>Agents</span>
-          <span> › {mode === "create" ? "New agent" : name || "Edit"}</span>
+          <Link to="/teams/$teamSlug/agents" params={{ teamSlug }}>Agents</Link>
+          <span className="sep">/</span>
+          <span className="cur">{mode === "create" ? "New agent" : name || "Edit"}</span>
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">{mode === "create" ? "New agent" : "Edit agent"}</h1>

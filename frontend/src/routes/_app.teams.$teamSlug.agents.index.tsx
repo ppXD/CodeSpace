@@ -121,7 +121,13 @@ function AgentsListPage() {
                 </thead>
                 <tbody>
                   {visible.map((a) => (
-                    <tr key={a.id} onClick={() => openAgent(a.id)}>
+                    <tr
+                      key={a.id}
+                      tabIndex={0}
+                      aria-label={`Edit ${a.name}`}
+                      onClick={() => openAgent(a.id)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openAgent(a.id); } }}
+                    >
                       <td>
                         <div className="repo-cell">
                           <div className="repo-mark" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
