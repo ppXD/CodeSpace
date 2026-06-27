@@ -118,6 +118,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Dry-run: clone a pack from a git URL (host-allowlist-guarded) and discover its agents AND skills (no persistence) so the operator can inspect + select before importing.</summary>
+    [HttpPost("import-preview-url")]
+    public async Task<IActionResult> ImportPreviewFromUrl([FromBody] PreviewPackFromUrlQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Commit the selected agents from a previewed pack — returns a per-path outcome (imported / skipped / failed).</summary>
     [HttpPost("import")]
     public async Task<IActionResult> Import([FromBody] ImportAgentPackCommand command, CancellationToken cancellationToken)
