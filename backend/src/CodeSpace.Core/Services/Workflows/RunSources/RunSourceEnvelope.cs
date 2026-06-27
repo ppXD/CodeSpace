@@ -54,6 +54,9 @@ public sealed record RunSourceEnvelope
     /// <summary>The lineage root for a fork (<c>parent.RootRunId ?? parent.Id</c>); NULL for a first-time run. Written verbatim to <c>WorkflowRun.RootRunId</c>.</summary>
     public Guid? RootRunId { get; init; }
 
+    /// <summary>The node a rerun fork re-ran from (the map node for a branch rerun); NULL for a first run / whole-run replay. Written to <c>WorkflowRun.RerunFromNodeId</c>.</summary>
+    public string? RerunFromNodeId { get; init; }
+
     public string? ReleaseHashAtRun { get; init; }
 
     /// <summary>

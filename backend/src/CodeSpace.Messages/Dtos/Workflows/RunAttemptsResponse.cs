@@ -28,6 +28,9 @@ public sealed record RunAttemptSummary
     /// <summary>This attempt's own source — "replay"/"rerun" for a fork, the original's source for attempt 1.</summary>
     public required string SourceType { get; init; }
 
+    /// <summary>The node this attempt re-ran from (the map node for a branch rerun); null for the original or a whole-run replay. Drives the per-node rerun history.</summary>
+    public string? RerunFromNodeId { get; init; }
+
     public required DateTimeOffset CreatedDate { get; init; }
 
     /// <summary>True for the newest attempt — the one the detail selects by default.</summary>
