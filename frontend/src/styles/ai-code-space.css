@@ -2561,18 +2561,31 @@ textarea:-webkit-autofill {
    "this run, re-run" rather than a stray new run. */
 .acs-root .run-lineage-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; font-size: 12px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border: 0; border-radius: var(--radius-sm); padding: 3px 10px; cursor: pointer; }
 .acs-root .run-lineage-link:hover { background: #EBD9CC; }
-/* The lineage attempt switcher — a row of pills (oldest → newest), the picked one accented, the newest flagged "latest". */
-.acs-root .attempt-switcher { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
-.acs-root .attempt-switcher-label { font-size: 12px; color: var(--ink-2); margin-right: 1px; }
-.acs-root .attempt-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 3px 9px; cursor: pointer; transition: border-color .12s ease, background .12s ease; }
-.acs-root .attempt-pill:hover { border-color: var(--line-2); }
-.acs-root .attempt-pill[data-selected] { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); font-weight: 500; }
-.acs-root .attempt-glyph { display: inline-flex; }
-.acs-root .attempt-glyph[data-tone="success"] { color: #1D9E75; }
-.acs-root .attempt-glyph[data-tone="failed"] { color: #9E3535; }
-.acs-root .attempt-glyph[data-tone="live"] { color: #2F6FE0; }
-.acs-root .attempt-pill-latest { font-size: 10.5px; color: var(--accent); background: var(--accent-soft); border-radius: 20px; padding: 0 6px; margin-left: 1px; }
-.acs-root .attempt-pill[data-selected] .attempt-pill-latest { background: var(--panel); }
+/* Rerun lineage UI: an informational "N attempts" header summary + a per-node "reran ·N" badge (each opens a popover
+   listing the attempts — all of which belong to this one root run). Shared popover look across both. */
+.acs-root .run-attempts, .acs-root .node-rerun { position: relative; display: inline-flex; }
+.acs-root .run-attempts { margin-top: 9px; }
+.acs-root .run-attempts-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border: 0; border-radius: var(--radius-sm); padding: 3px 10px; cursor: pointer; }
+.acs-root .run-attempts-pill:hover { background: #EBD9CC; }
+.acs-root .node-rerun-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border: 0; border-radius: 20px; padding: 1px 7px; cursor: pointer; }
+.acs-root .node-rerun-badge:hover { background: #EBD9CC; }
+.acs-root .run-attempts-pop, .acs-root .node-rerun-pop { position: absolute; top: calc(100% + 5px); left: 0; z-index: 30; min-width: 232px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 6px 20px rgba(31,30,29,.12); padding: 7px; cursor: default; }
+.acs-root .run-attempts-pop-head, .acs-root .node-rerun-pop-head { font-size: 11px; color: var(--muted); padding: 2px 6px 6px; }
+.acs-root .run-attempts-row, .acs-root .node-rerun-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); padding: 4px 6px; border-radius: var(--radius-sm); white-space: nowrap; }
+.acs-root .run-attempts-row-n, .acs-root .node-rerun-row-n { font-weight: 500; }
+.acs-root .run-attempts-row-node { color: var(--ink-2); }
+.acs-root .node-rerun-row-st[data-tone="success"] { color: #1D9E75; }
+.acs-root .node-rerun-row-st[data-tone="failed"] { color: #9E3535; }
+.acs-root .node-rerun-row-st[data-tone="live"] { color: #2F6FE0; }
+.acs-root .run-attempts-row-when, .acs-root .node-rerun-row-when { color: var(--muted); margin-left: auto; padding-left: 8px; }
+.acs-root .run-attempts-glyph, .acs-root .node-rerun-glyph { display: inline-flex; flex: none; }
+.acs-root .run-attempts-glyph[data-tone="success"], .acs-root .node-rerun-glyph[data-tone="success"] { color: #1D9E75; }
+.acs-root .run-attempts-glyph[data-tone="failed"], .acs-root .node-rerun-glyph[data-tone="failed"] { color: #9E3535; }
+.acs-root .run-attempts-glyph[data-tone="live"], .acs-root .node-rerun-glyph[data-tone="live"] { color: #2F6FE0; }
+/* Per-surface placement of the node badge — a gentle inset so it reads as part of the node header. */
+.acs-root .wf-rf-node-rerun { margin: 3px 0 1px; }
+.acs-root .wf-rf-fanout-node-rerun, .acs-root .wf-rf-loop-rerun { margin-left: 7px; }
+.acs-root .run-tl-box-rerun { margin-left: 7px; }
 .acs-root .run-state[data-status="running"]   .run-state-lead { color: var(--accent); }
 .acs-root .run-state[data-status="success"]   .run-state-lead { color: #1F6B3F; }
 .acs-root .run-state[data-status="failure"]   .run-state-lead { color: #9E3535; }

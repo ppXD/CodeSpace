@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import { AttemptSwitcher } from "@/components/workflows/AttemptSwitcher";
+import { RunAttemptsSummary } from "@/components/workflows/RunAttemptsSummary";
+import { RerunProvenanceContext } from "@/components/workflows/rerunProvenanceContext";
+import { rerunsByNode } from "@/components/workflows/runRerunProvenance";
 import { DecisionInbox } from "@/components/workflows/DecisionInbox";
 import { RunDetailView } from "@/components/workflows/RunDetailView";
 import { RunFacts } from "@/components/workflows/RunFacts";
@@ -22,9 +24,8 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runId")({
   component: RunDetailPage,
 });
 
-// Remount per URL run id so the selected-attempt + outline state resets cleanly on navigation (changing a path param
-// does NOT remount by default). Without this, replaying / navigating to a different run would carry a stale
-// `selectedAttempt` into the next lineage — pinning the page to an attempt that isn't even in the new ladder.
+// Remount per URL run id so the outline state resets cleanly on navigation (changing a path param does NOT remount
+// by default).
 function RunDetailPage() {
   const { teamSlug, runId } = Route.useParams();
   return <RunDetailRoom key={runId} teamSlug={teamSlug} runId={runId} />;
@@ -33,14 +34,20 @@ function RunDetailPage() {
 function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string }) {
   const navigate = useNavigate();
 
-  // The lineage's attempt ladder — the URL run id is any member; the detail shows ONE attempt at a time, defaulting to
-  // the latest (so opening the original from the runs list lands on the newest attempt, with the older ones one pill
-  // away). `rootId` is the lineage identity the page titles on.
+  // ONE root-run view: a rerun forks a new attempt, but the detail always shows the lineage's CURRENT state (the
+  // latest attempt — it already carries every node's result, reused + freshly re-run). The attempt ladder isn't a
+  // page switcher; it feeds the per-node rerun history (each node shows which attempts re-ran it) + the informational
+  // "N attempts" summary. `rootId` is the lineage identity the page titles on.
   const attempts = useRunAttempts(runId);
   const rootId = attempts.data?.rootRunId ?? runId;
-  const latestRunId = attempts.data?.attempts.find((a) => a.isLatest)?.runId;
-  const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null);
-  const effectiveRunId = selectedAttempt ?? latestRunId ?? runId;
+  const ladder = attempts.data?.attempts;
+  const latestRunId = ladder?.find((a) => a.isLatest)?.runId;
+  const effectiveRunId = latestRunId ?? runId;
+  // Memo on the ladder's CONTENT — useRunAttempts returns a fresh array on every 3s poll while a rerun is live, so a
+  // `[attempts.data]` dep would rebuild the context (and re-render every node badge) each poll for no change.
+  const provKey = (ladder ?? []).map((a) => `${a.runId}:${a.status}:${a.rerunFromNodeId ?? ""}`).join("|");
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- provKey is the content digest of `ladder`
+  const provenance = useMemo(() => ({ attempts: ladder ?? [], rerunsByNode: rerunsByNode(ladder ?? []) }), [provKey]);
 
   // Shared with RunDetailView via the same query key (React Query dedups) — used here for the Re-run target,
   // the run-state header, and the "Back to workflow" link when the run came from an authored workflow.
@@ -61,9 +68,6 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   // Selecting a phase is a fresh focus — clear any open agent so its terminal can't linger after the tiles filter away
   // from it. (Selecting an AGENT sets its phase then itself, in that order, so the agent still wins.)
   const selectPhase = (phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); };
-
-  // Switching attempts is a fresh focus — the outline selections belong to the old attempt's run, so clear them.
-  const selectAttempt = (attemptRunId: string) => { setSelectedAttempt(attemptRunId); setSelectedPhaseId(null); setSelectedAgentRunId(null); };
 
   const onReplay = async () => {
     const result = await replay.mutateAsync(effectiveRunId);
@@ -88,9 +92,7 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
               <RunStateHeader runStatus={run.data.status} phases={phases.data.phases}
                 pendingDecisions={decisions.data ? runDecisions.length : undefined} />
             )}
-            {attempts.data && (
-              <AttemptSwitcher attempts={attempts.data.attempts} selectedRunId={effectiveRunId} onSelect={selectAttempt} />
-            )}
+            {attempts.data && <RunAttemptsSummary attempts={attempts.data.attempts} />}
           </div>
           <div className="ct-actions">
             {run.data && <StopRunButton runId={effectiveRunId} status={run.data.status} />}
@@ -114,33 +116,37 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
         </div>
       </div>
 
-      <div className="ct-body run-room-body">
-        <aside className="run-room-rail">
-          <div className="rail-card">
-            <div className="rail-card-head"><Ic.Workflow size={12} aria-hidden="true" /> Outline</div>
-            {phases.data
-              ? <RunOutline phases={phases.data.phases} selectedPhaseId={selectedPhaseId} onSelectPhase={selectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={setSelectedAgentRunId} />
-              : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
+      {/* Share the lineage's rerun provenance down the whole detail so each node (Canvas + Activity) can show its own
+          rerun history without prop-drilling. */}
+      <RerunProvenanceContext.Provider value={provenance}>
+        <div className="ct-body run-room-body">
+          <aside className="run-room-rail">
+            <div className="rail-card">
+              <div className="rail-card-head"><Ic.Workflow size={12} aria-hidden="true" /> Outline</div>
+              {phases.data
+                ? <RunOutline phases={phases.data.phases} selectedPhaseId={selectedPhaseId} onSelectPhase={selectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={setSelectedAgentRunId} />
+                : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
+            </div>
+          </aside>
+          <div className="run-room-main">
+            {/* Framed as a panel so the center aligns with the left/right rail cards (same border + top edge),
+                and the Activity·Canvas·Changes·Trace tabs read as that panel's header. */}
+            <div className="run-panel">
+              <RunDetailView
+                runId={effectiveRunId}
+                selectedPhaseId={selectedPhaseId}
+                selectedAgentRunId={selectedAgentRunId}
+                onSelectAgent={setSelectedAgentRunId}
+                onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
+              />
+            </div>
           </div>
-        </aside>
-        <div className="run-room-main">
-          {/* Framed as a panel so the center aligns with the left/right rail cards (same border + top edge),
-              and the Activity·Canvas·Changes·Trace tabs read as that panel's header. */}
-          <div className="run-panel">
-            <RunDetailView
-              runId={effectiveRunId}
-              selectedPhaseId={selectedPhaseId}
-              selectedAgentRunId={selectedAgentRunId}
-              onSelectAgent={setSelectedAgentRunId}
-              onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
-            />
-          </div>
+          <aside className="run-room-context">
+            {decisions.data && <DecisionInbox decisions={runDecisions} />}
+            {run.data && <RunFacts run={run.data} />}
+          </aside>
         </div>
-        <aside className="run-room-context">
-          {decisions.data && <DecisionInbox decisions={runDecisions} />}
-          {run.data && <RunFacts run={run.data} />}
-        </aside>
-      </div>
+      </RerunProvenanceContext.Provider>
     </section>
   );
 }

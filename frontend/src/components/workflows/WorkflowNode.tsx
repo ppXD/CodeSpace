@@ -10,6 +10,7 @@ import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { NodeRerunBadge } from "./NodeRerunBadge";
 import { RerunMenu } from "./RerunMenu";
 import { loopMinSize } from "./loopResize";
 import { branchBadge, fanBranches } from "./mapBranches";
@@ -306,6 +307,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
         <span className="wf-rf-loop-icon">{iconFor(d)}</span>
         <span className="wf-rf-loop-title">{d.label ?? d.displayName}</span>
         <span className="wf-rf-loop-ref">{d.nodeId}</span>
+        <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-loop-rerun" />
       </div>
       <Handle type="source" position={Position.Right} className="wf-rf-handle" />
       {isTry ? (
@@ -335,6 +337,7 @@ function FanoutNode({ d, selected }: { d: WorkflowNodeData; selected: boolean | 
         <span className="wf-rf-node-icon">{iconFor(d)}</span>
         <span className="wf-rf-fanout-node-title">{d.label ?? d.displayName}</span>
         <span className="wf-rf-node-ref">{d.nodeId}</span>
+        <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-fanout-node-rerun" />
       </div>
       <Handle type="source" position={Position.Right} className="wf-rf-handle" />
       <MapFanout rows={d.fanout ?? []} renderBranch={(row) => <RunRowDetail row={row} />} inline />
@@ -383,6 +386,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
             muted sub-line so it's visible to copy but no longer dominates the card. */}
         <div className="wf-rf-node-title">{d.label ?? d.displayName}</div>
         <div className="wf-rf-node-ref">{d.nodeId}</div>
+        <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-node-rerun" />
         {fields.length > 0 && (
           <ul className="wf-rf-node-fields">
             {fields.map((f) => (
