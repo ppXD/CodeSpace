@@ -169,6 +169,26 @@ export interface WorkflowRunSummary {
   rootRunId: string;
   /** How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip. */
   attemptCount: number;
+  /** The ORIGINAL run's source type (= `sourceType` for a never-rerun run). The row shows the root's identity, so a rerun titles as the original, not "Replay". */
+  rootSourceType: WorkflowRunSourceType;
+}
+
+/** Mirrors backend `RunAttemptsResponse` — a lineage's attempt ladder (original + every rerun fork), oldest first. */
+export interface RunAttemptsResponse {
+  rootRunId: string;
+  attempts: RunAttempt[];
+}
+
+/** Mirrors backend `RunAttemptSummary` — one attempt in a lineage. */
+export interface RunAttempt {
+  runId: string;
+  /** 1-based ordinal within the lineage (1 = the original). */
+  attemptNumber: number;
+  status: WorkflowRunStatus;
+  sourceType: WorkflowRunSourceType;
+  createdDate: string;
+  /** The newest attempt — selected by default in the detail. */
+  isLatest: boolean;
 }
 
 /**
@@ -578,6 +598,9 @@ export const workflowsApi = {
     fetchJson<RunSummary>(`/api/workflows/runs/summary?${buildRunListParams(filter, 1)}&today=${encodeURIComponent(todayStartIso)}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
+
+  /** The lineage's attempt ladder (original + every rerun fork) — drives the run-detail attempt switcher. */
+  getRunAttempts: (runId: string) => fetchJson<RunAttemptsResponse>(`/api/workflows/runs/${runId}/attempts`),
 
   /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
   getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),

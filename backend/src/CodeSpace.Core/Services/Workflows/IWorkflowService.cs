@@ -93,6 +93,13 @@ public interface IWorkflowService
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The attempt ladder of the lineage <paramref name="runId"/> belongs to — the original plus every replay/rerun
+    /// fork sharing its <c>RootRunId ?? Id</c> key, oldest first, 1-based and latest-flagged. Team-scoped; a foreign /
+    /// absent run returns null (the controller 404-conflates).
+    /// </summary>
+    Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Resolve a pending <c>Approval</c> wait on a Suspended run with a human decision
     /// (approved + optional comment) and resume it. Tenancy: the run's workflow must belong to
     /// the caller's team (<see cref="KeyNotFoundException"/> conflated with not-yours). Returns

@@ -122,25 +122,35 @@ function Zone({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
+// Every cockpit row represents a LINEAGE, shown by its ORIGINAL run's identity — so opening a row that's actually the
+// latest rerun lands on the original (no confusing "Replay of …"), and a reran task titles as the task, not "Replay".
+/** The lineage's display title — the original run's name / source, never the fork's. */
+function lineageTitle(run: WorkflowRunSummary): string { return run.workflowName ?? sourceLabel(run.rootSourceType); }
+/** The run to open for this row — the lineage ROOT (the original), so the attempt switcher opens there. */
+function lineageOpenId(run: WorkflowRunSummary): string { return run.rootRunId; }
+/** True when this row's representative is itself a rerun fork (its root is a different run) — drives the "rerunning" brief. */
+function isRerun(run: WorkflowRunSummary): boolean { return run.rootRunId !== run.id; }
+
 /** A suspended run in the attention zone — its wait, how long it has been parked, and a Review action into the Run Room. */
 function SuspendedRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = run.workflowName ?? sourceLabel(run.sourceType);
+  const title = lineageTitle(run);
 
   return (
-    <div className="cockpit-attn-row" onClick={() => onOpen(run.id)}>
+    <div className="cockpit-attn-row" onClick={() => onOpen(lineageOpenId(run))}>
       <span className="cockpit-attn-glyph" data-tone="suspended" aria-hidden="true"><Ic.Pause size={12} /></span>
       <div className="cockpit-attn-body">
         <div className="cockpit-attn-title">{title} <span className="cockpit-attn-sub">suspended</span></div>
-        <div className="cockpit-attn-meta">{sourceLabel(run.sourceType)} · waiting {compactAge(run.startedAt ?? run.createdDate, nowMs)}</div>
+        <div className="cockpit-attn-meta">{sourceLabel(run.rootSourceType)} · waiting {compactAge(run.startedAt ?? run.createdDate, nowMs)}</div>
       </div>
-      <button type="button" className="btn cockpit-attn-act" onClick={(e) => { e.stopPropagation(); onOpen(run.id); }}>Review →</button>
+      <button type="button" className="btn cockpit-attn-act" onClick={(e) => { e.stopPropagation(); onOpen(lineageOpenId(run)); }}>Review →</button>
     </div>
   );
 }
 
 /** A live run's current-state sentence — derived from its phase projection (focus phase + agents) when loaded. */
 function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phases?: RunPhasesResponse; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = run.workflowName ?? sourceLabel(run.sourceType);
+  const title = lineageTitle(run);
+  const rerunning = isRerun(run);   // this live run is a rerun fork — its phases (the meta) say which node is rerunning
   const state = phases ? summarizeRunState(phases.runStatus, phases.phases) : null;
   const elapsed = run.startedAt ? compactAge(run.startedAt, nowMs) : null;
 
@@ -151,10 +161,13 @@ function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phas
   ].filter(Boolean);
 
   return (
-    <div className="cockpit-live-row" onClick={() => onOpen(run.id)}>
+    <div className="cockpit-live-row" onClick={() => onOpen(lineageOpenId(run))}>
       <span className="cockpit-live-dot" aria-hidden="true" />
       <div className="cockpit-live-body">
-        <div className="cockpit-live-title">{title}</div>
+        <div className="cockpit-live-title">
+          <span className="cockpit-live-name">{title}</span>
+          {rerunning && <span className="cockpit-live-rerun"><Ic.Branch size={10} aria-hidden="true" /> rerunning · attempt {run.attemptCount}</span>}
+        </div>
         <div className="cockpit-live-meta">{parts.length > 0 ? parts.join(" · ") : run.status}</div>
       </div>
       <span className="cockpit-live-status">{run.status}</span>
@@ -180,7 +193,7 @@ function CompactList({ runs, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[
  * on the left and the status word, so the state reads at a glance without a separate badge column.
  */
 function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = run.workflowName ?? sourceLabel(run.sourceType);
+  const title = lineageTitle(run);
   const type = runType(run);
   const tone = runStatusTone(run.status);
   const version = run.workflowVersion != null ? `v${run.workflowVersion}` : null;
@@ -189,7 +202,7 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
   const error = run.status === "Failure" ? run.error : null;
 
   return (
-    <li className="run-row2" onClick={() => onOpen(run.id)}>
+    <li className="run-row2" onClick={() => onOpen(lineageOpenId(run))}>
       <span className="run-row2-tile" data-tone={tone} aria-hidden="true"><RunGlyph status={run.status} /></span>
       <div className="run-row2-body">
         <div className="run-row2-l1">
@@ -208,7 +221,7 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
           <span className="run-row2-sw" data-tone={tone}>{runStatusWord(run.status)}</span>
           {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
           <span className="run-row2-gap" />
-          <span className="run-row2-id">{run.id.slice(0, 8)}</span>
+          <span className="run-row2-id">{run.rootRunId.slice(0, 8)}</span>
         </div>
         {error && (
           <div className="run-row2-l3">

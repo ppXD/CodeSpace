@@ -186,6 +186,23 @@ export function useWorkflowRun(runId: string | null) {
 }
 
 /**
+ * The lineage's attempt ladder for the run-detail switcher — resolved from any member (the URL run id). Polls while
+ * any attempt is still active so a live rerun's status (and a freshly-spawned attempt) stay fresh in the pills.
+ */
+export function useRunAttempts(runId: string | null) {
+  return useQuery({
+    queryKey: ["run-attempts", runId],
+    queryFn: () => workflowsApi.getRunAttempts(runId!),
+    enabled: runId != null,
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return false;
+      return data.attempts.some((a) => isRunActive(a.status)) ? 3000 : false;
+    },
+  });
+}
+
+/**
  * The run's outline — the merged phase tree (the run-neutral projection). Separate query from the run detail
  * (a different endpoint with its own shape), polled on the same 2s cadence while the run is non-terminal so the
  * outline + the canvas/timeline advance in lockstep.

@@ -65,6 +65,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>The lineage's attempt ladder — the original run + every replay/rerun fork of it, oldest first, latest flagged. Drives the run-detail attempt switcher. Foreign / absent → 404.</summary>
+    [HttpGet("{runId:guid}/attempts")]
+    public async Task<IActionResult> GetAttempts([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRunAttemptsQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The run's narrative timeline — the merged, chronologically-sorted events across every source (run/node lifecycle, …). Foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/timeline")]
     public async Task<IActionResult> GetTimeline([FromRoute] Guid runId, CancellationToken cancellationToken)

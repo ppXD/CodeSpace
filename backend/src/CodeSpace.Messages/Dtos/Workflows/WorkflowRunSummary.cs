@@ -36,4 +36,11 @@ public sealed record WorkflowRunSummary
 
     /// <summary>How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip.</summary>
     public required int AttemptCount { get; init; }
+
+    /// <summary>
+    /// The lineage ROOT's source type — equal to <see cref="SourceType"/> for a never-rerun run, but the ORIGINAL's
+    /// source for a rerun representative (whose own <see cref="SourceType"/> is "replay"/"rerun"). The row shows the
+    /// root's identity, so a task lineage's title reads as the original task, not "Replay".
+    /// </summary>
+    public required string RootSourceType { get; init; }
 }
