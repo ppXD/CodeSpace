@@ -127,6 +127,25 @@ public class ClaudeCodeSkillParserTests
     }
 
     [Fact]
+    public void Tolerates_non_strict_yaml_frontmatter_and_recovers_the_skill()
+    {
+        // A description that isn't strict YAML (embedded colon-space, like an agent's <example> block) must not drop
+        // the skill — the shared lenient fallback recovers the top-level scalars.
+        const string md =
+            "---\n" +
+            "name: systematic-debugging\n" +
+            "description: Use when stuck. Steps:\\n1. Form a hypothesis: the cause\\n2. Test it: run\n" +
+            "---\n" +
+            "# Debugging\n\nForm a hypothesis.\n";
+
+        var s = Parser.Parse(md, "skills/systematic-debugging/SKILL.md");
+
+        s.Name.ShouldBe("systematic-debugging", customMessage: "the skill must not be dropped just because its description isn't strict YAML");
+        s.Description.ShouldNotBeNull();
+        s.Diagnostics.ShouldContain(d => d.Contains("not strict YAML"));
+    }
+
+    [Fact]
     public void Missing_description_is_a_diagnostic()
     {
         const string md =
@@ -154,7 +173,7 @@ public class ClaudeCodeSkillParserTests
     }
 
     [Fact]
-    public void Invalid_yaml_is_a_diagnostic_not_a_throw()
+    public void Invalid_yaml_recovers_the_name_leniently_with_a_diagnostic()
     {
         const string md =
             "---\n" +
@@ -165,6 +184,17 @@ public class ClaudeCodeSkillParserTests
 
         var s = Parser.Parse(md, "skills/broken/SKILL.md");
 
+        s.Name.ShouldBe("broken", customMessage: "the lenient fallback recovers the name from non-strict YAML rather than dropping the skill");
         s.Diagnostics.ShouldContain(d => d.Contains("YAML"));
+    }
+
+    [Fact]
+    public void Malformed_yaml_with_no_name_stays_un_importable()
+    {
+        // The fallback must NOT fabricate a name: a malformed block with no parseable name yields Name="" → excluded.
+        var s = Parser.Parse("---\ndescription: \"unterminated\n---\nBody.\n", "skills/x/SKILL.md");
+
+        s.Name.ShouldBe("");
+        s.Diagnostics.ShouldNotBeEmpty();
     }
 }
