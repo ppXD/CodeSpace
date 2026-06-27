@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef } from "@/api/workflows";
@@ -19,7 +19,7 @@ import { RerunMenu } from "./RerunMenu";
  * keyed off `selectedAgentRunId` (lifted to the route) so the outline + timeline share one selection. Scrolls into view
  * when the outline selects this phase.
  */
-export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
+function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
   wave: AgentWave;
   selectedPhaseId?: string | null;
   selectedAgentRunId?: string | null;
@@ -106,6 +106,15 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
     </div>
   );
 }
+
+/**
+ * Memoized: a phase only re-renders when its OWN inputs change. The Activity timeline polls events + phases on
+ * separate 2s cadences; an events-only tick rebuilds the item list but reuses the (memoized) wave objects, so without
+ * this every phase box + its tiles re-render each tick. Props are referentially stable — `wave` survives an
+ * events-only poll (memoized in RunActivityTimeline), `onSelectAgent` is the route's state setter, and selection ids
+ * change only on a click — so the memo confines re-renders to the phases that actually changed.
+ */
+export const TimelinePhase = memo(TimelinePhaseImpl);
 
 /** The box's one-line meta — "{N} agents · {what}": the in-flight counts while running, the wall-clock when settled, the failure count on error. */
 function boxMeta(wave: AgentWave, b: WaveBreakdown): string {

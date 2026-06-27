@@ -2356,16 +2356,22 @@ textarea:-webkit-autofill {
 /* Entering a run: each section EASES in as its own query resolves, so the staggered loads read as one smooth reveal
    instead of a flicker of pop-ins. The loading placeholders fade in with a DELAY, so a fast load never shows them at
    all (empty → content) — only a genuinely slow fetch surfaces "Loading…". Re-mount-driven, so polls don't re-animate. */
-@keyframes runFadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+/* Pure OPACITY fade — no translateY. A positional slide on the body (which mounts once the run query settles, a beat
+   before the phases query fans the timeline out) reads as a "settle/zoom" jump stacked on the content reveal; a flat
+   opacity fade lets each section appear in place. */
+@keyframes runFadeIn { from { opacity: 0; } to { opacity: 1; } }
 .acs-root .wf-detail-body,
 .acs-root .run-state,
 .acs-root .run-outline,
 .acs-root .run-room-body .rail-card { animation: runFadeIn .24s ease both; }
+/* The Activity fanout fades in once (it mounts when the phases query first resolves) instead of POPPING from the
+   "Loading the run…" line straight to a tall stack of phase boxes — the pop is the entry "expand" the user sees. */
+.acs-root .run-activity-list { animation: runFadeIn .2s ease both; }
 .acs-root .run-panel > .ct-empty,
 .acs-root .run-outline-empty { animation: runFadeIn .2s ease .3s both; }
 @media (prefers-reduced-motion: reduce) {
   .acs-root .wf-detail-body, .acs-root .run-state, .acs-root .run-outline, .acs-root .run-room-body .rail-card,
-  .acs-root .run-panel > .ct-empty, .acs-root .run-outline-empty { animation: none; }
+  .acs-root .run-activity-list, .acs-root .run-panel > .ct-empty, .acs-root .run-outline-empty { animation: none; }
 }
 
 /* The right column is ONE framed panel; the decision queue + run facts become borderless, divider-separated sections. */

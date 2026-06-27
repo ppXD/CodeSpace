@@ -14,7 +14,7 @@ import { RunDetailView } from "./RunDetailView";
 const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
   useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
-  useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined }>(() => ({ data: undefined })),
+  useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined; isLoading?: boolean }>(() => ({ data: undefined })),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
@@ -329,5 +329,18 @@ describe("RunDetailView — Live-work center", () => {
 
     expect(screen.getByText("Node execution")).toBeInTheDocument();     // primary, not folded
     expect(screen.queryByText("Workflow nodes")).not.toBeInTheDocument();
+  });
+
+  it("folds the raw detail WHILE phases are still loading, so an agent run never expands the node trace then collapses it", () => {
+    // The entry flicker: before phases resolve, "no agents (yet)" would render the node trace EXPANDED — then it
+    // collapses into a fold the instant agents arrive. While genuinely loading we fold from the start (stable layout);
+    // only once loaded does a real agent-less run get the primary trace (the test above).
+    useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "code", agentRunId: "ar1" })] })));
+    useRunPhasesMock.mockReturnValue({ data: undefined, isLoading: true });
+
+    render(<RunDetailView runId="parent-1" />);
+
+    expect(screen.getByText("Workflow nodes")).toBeInTheDocument();        // folded (collapsed disclosure), not expanded
+    expect(screen.queryByText("Node execution")).not.toBeInTheDocument();  // …so the trace can't show-then-collapse
   });
 });
