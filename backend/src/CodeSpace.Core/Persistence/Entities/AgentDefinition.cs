@@ -44,9 +44,6 @@ public class AgentDefinition : IEntity<Guid>, IAuditable
     /// <summary>Tool allow-list as JSON (array of names/patterns); NULL = the harness's default toolset (distinct from "[]" = no tools). jsonb.</summary>
     public string? ToolsJson { get; set; }
 
-    /// <summary>Skill references as JSON (<c>[{slug, packId?}]</c>); the harness mounts them at run. jsonb, default "[]".</summary>
-    public string SkillsJson { get; set; } = "[]";
-
     /// <summary>MCP server references / configs as JSON; the harness injects them at run. jsonb, default "[]".</summary>
     public string McpServersJson { get; set; } = "[]";
 

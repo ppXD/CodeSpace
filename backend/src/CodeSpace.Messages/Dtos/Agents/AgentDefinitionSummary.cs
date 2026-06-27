@@ -7,7 +7,9 @@ namespace CodeSpace.Messages.Dtos.Agents;
 /// stable handle an <c>agent.code</c> node / a chat mention resolves against. <see cref="Tools"/> is
 /// null when the persona inherits the harness's default toolset (distinct from an empty list = no tools).
 /// <see cref="Origin"/> distinguishes an authored persona from an imported one (the latter is re-syncable
-/// from its pack). Skills / MCP / verbatim frontmatter are owned by the import slice and not surfaced here.
+/// from its pack). <see cref="BoundSkills"/> are the skills the persona carries, read from the
+/// <c>AgentSkillBinding</c> join (the relational replacement for the dropped <c>skills_jsonb</c> blob).
+/// MCP / verbatim frontmatter remain import-owned and are not surfaced here.
 /// </summary>
 public sealed record AgentDefinitionSummary
 {
@@ -21,5 +23,9 @@ public sealed record AgentDefinitionSummary
     public string? DefaultAutonomy { get; init; }
     public IReadOnlyList<string>? Tools { get; init; }
     public required AgentDefinitionOrigin Origin { get; init; }
+
+    /// <summary>The skills bound to this persona (handle + name), ordered by handle. Empty when none are bound.</summary>
+    public IReadOnlyList<AgentBoundSkill> BoundSkills { get; init; } = Array.Empty<AgentBoundSkill>();
+
     public required DateTimeOffset CreatedDate { get; init; }
 }

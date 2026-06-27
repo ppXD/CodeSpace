@@ -50,7 +50,6 @@ public class AgentDefinitionPersistenceTests
             // jsonb preserves semantics (keys/values + array element order), not byte-exact formatting,
             // so assert structurally rather than on the exact string.
             JsonSerializer.Deserialize<string[]>(a.ToolsJson!).ShouldBe(new[] { "Read", "Grep" });
-            a.SkillsJson.ShouldContain("tdd");
             JsonDocument.Parse(a.RawFrontmatterJson).RootElement.GetProperty("custom_future_key").GetInt32().ShouldBe(42);  // unknown key survives (forward-compat)
             a.SourcePath.ShouldBe("agents/backend-architect.md");
             a.DeletedDate.ShouldBeNull();
@@ -91,7 +90,6 @@ public class AgentDefinitionPersistenceTests
         Model = null,
         DefaultAutonomy = "guarded",
         ToolsJson = "[\"Read\",\"Grep\"]",
-        SkillsJson = "[{\"slug\":\"tdd\"}]",
         McpServersJson = "[]",
         RawFrontmatterJson = "{\"name\":\"backend-architect\",\"custom_future_key\":42}",
         Origin = AgentDefinitionOrigin.Imported,

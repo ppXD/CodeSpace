@@ -34,7 +34,11 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
             .Select(SummaryProjection())
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(ToSummary).ToList();
+        var summaries = rows.Select(ToSummary).ToList();
+
+        var boundSkills = await LoadBoundSkillsAsync(teamId, summaries.Select(s => s.Id).ToList(), cancellationToken).ConfigureAwait(false);
+
+        return summaries.Select(s => s with { BoundSkills = boundSkills.GetValueOrDefault(s.Id, Array.Empty<AgentBoundSkill>()) }).ToList();
     }
 
     public async Task<AgentDefinitionSummary?> GetAsync(Guid teamId, Guid agentDefinitionId, CancellationToken cancellationToken)
@@ -44,7 +48,29 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
             .Select(SummaryProjection())
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return row == null ? null : ToSummary(row);
+        if (row == null) return null;
+
+        var summary = ToSummary(row);
+        var boundSkills = await LoadBoundSkillsAsync(teamId, new[] { summary.Id }, cancellationToken).ConfigureAwait(false);
+
+        return summary with { BoundSkills = boundSkills.GetValueOrDefault(summary.Id, Array.Empty<AgentBoundSkill>()) };
+    }
+
+    /// <summary>The skills bound to each of <paramref name="agentIds"/>, via the AgentSkillBinding join through to ACTIVE skills in <paramref name="teamId"/>, ordered by handle — one batched query, no N+1. The skill side is team-scoped as defense-in-depth (matching <c>AgentDefinitionResolver.LoadSkillsAsync</c>): the binding writer already enforces same-team, but the read never trusts a stray row. Agents with no bindings are simply absent from the map.</summary>
+    private async Task<IReadOnlyDictionary<Guid, IReadOnlyList<AgentBoundSkill>>> LoadBoundSkillsAsync(Guid teamId, IReadOnlyCollection<Guid> agentIds, CancellationToken cancellationToken)
+    {
+        if (agentIds.Count == 0) return new Dictionary<Guid, IReadOnlyList<AgentBoundSkill>>();
+
+        var rows = await (from b in _db.AgentSkillBinding.AsNoTracking()
+                          join s in _db.SkillDefinition.AsNoTracking() on b.SkillDefinitionId equals s.Id
+                          where agentIds.Contains(b.AgentDefinitionId) && s.TeamId == teamId && s.DeletedDate == null
+                          orderby s.Slug
+                          select new { b.AgentDefinitionId, s.Id, s.Slug, s.Name })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows
+            .GroupBy(r => r.AgentDefinitionId)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<AgentBoundSkill>)g.Select(r => new AgentBoundSkill { SkillDefinitionId = r.Id, Slug = r.Slug, Name = r.Name }).ToList());
     }
 
     public async Task<Guid> CreateAsync(Guid teamId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
@@ -95,7 +121,6 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
             Model = NullIfBlank(input.Model),
             DefaultAutonomy = NullIfBlank(input.DefaultAutonomy),
             ToolsJson = SerializeTools(input.Tools),
-            SkillsJson = string.IsNullOrWhiteSpace(input.SkillsJson) ? "[]" : input.SkillsJson,
             McpServersJson = string.IsNullOrWhiteSpace(input.McpServersJson) ? "[]" : input.McpServersJson,
             RawFrontmatterJson = string.IsNullOrWhiteSpace(input.RawFrontmatterJson) ? "{}" : input.RawFrontmatterJson,
             CreatedDate = now,

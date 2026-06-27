@@ -15,7 +15,6 @@ public class AgentDefinitionConfiguration : IEntityTypeConfiguration<AgentDefini
 
         // jsonb blobs kept as strings (same convention as AgentRun.TaskJson) — modelled by the service layer later.
         builder.Property(a => a.ToolsJson).HasColumnName("tools_jsonb").HasColumnType("jsonb");
-        builder.Property(a => a.SkillsJson).HasColumnName("skills_jsonb").HasColumnType("jsonb");
         builder.Property(a => a.McpServersJson).HasColumnName("mcp_servers_jsonb").HasColumnType("jsonb");
         builder.Property(a => a.RawFrontmatterJson).HasColumnName("raw_frontmatter_jsonb").HasColumnType("jsonb");
 
