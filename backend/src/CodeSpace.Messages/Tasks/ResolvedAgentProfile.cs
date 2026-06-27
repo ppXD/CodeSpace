@@ -43,6 +43,9 @@ public sealed record ResolvedAgentProfile
     /// <summary>Per-run opt-in to the MCP tool-fabric endpoint. Null → defer to the ambient deployment flag (an ordinary run is unchanged).</summary>
     public bool? EnableMcp { get; init; }
 
+    /// <summary>Deep/supervisor only: per-run opt-in to integrating the spawned agents' diffs into one reviewable branch at merge. Null → defer to the ambient flag. Inert on a single-agent run.</summary>
+    public bool? IntegrateBranches { get; init; }
+
     /// <summary>The tool allow-list the agent is restricted to. Null → the harness default; non-empty → exactly these (UNIONed with a persona's tools by the dispatch-time resolver).</summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 

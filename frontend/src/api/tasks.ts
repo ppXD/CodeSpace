@@ -61,6 +61,8 @@ export interface LaunchTaskInput {
    *  `LaunchTaskCommand.AutonomyCeiling`, merged onto the effort preset's ceiling (can only lower it). Absent /
    *  "" = inherit the preset. Sent only on deep/auto (the Coordination tab that sets it). */
   autonomyCeiling?: string;
+  /** Deep-only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Omitted ⇒ defer to the ambient flag. */
+  integrateBranches?: boolean;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

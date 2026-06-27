@@ -26,6 +26,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   budget: "none",
   agentModels: [],
   autonomyCeiling: "",
+  integrateBranches: false,
   timeLimit: "3600",
   ...over,
 });
@@ -96,6 +97,12 @@ describe("buildLaunchInput — base fields", () => {
   it("sends the picked model ROW id (pins the brain / agent model by row), null when unset", () => {
     expect(buildLaunchInput(form()).modelCredentialModelId).toBeNull();
     expect(buildLaunchInput(form({ modelCredentialModelId: "row-1" })).modelCredentialModelId).toBe("row-1");
+  });
+
+  it("sends integrateBranches only on a Deep tier and only when on (default off ⇒ omitted, byte-identical)", () => {
+    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: true })).integrateBranches).toBe(true);
+    expect(buildLaunchInput(form({ effort: "deep", integrateBranches: false }))).not.toHaveProperty("integrateBranches");
+    expect(buildLaunchInput(form({ effort: "quick", integrateBranches: true }))).not.toHaveProperty("integrateBranches", "inert on a single-agent tier");
   });
 });
 
