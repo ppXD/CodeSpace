@@ -133,4 +133,12 @@ public class AgentsController : ControllerBase
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
+
+    /// <summary>Commit the selected agents AND skills from a previewed URL pack — clones the URL (allowlist-guarded), persists each under a resolved pack, and returns a per-path outcome (imported / updated / skipped / failed). Idempotent: a re-run upserts rather than duplicating.</summary>
+    [HttpPost("import-url")]
+    public async Task<IActionResult> ImportFromUrl([FromBody] ImportPackFromUrlCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
 }

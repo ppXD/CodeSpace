@@ -12,4 +12,7 @@ public interface IPackImportService
 {
     /// <summary>Clone <paramref name="url"/> (at the optional branch/tag <paramref name="reference"/>) and return a dry-run preview of every discovered agent + skill with its derived handle, slug-conflict flag, and importability for <paramref name="teamId"/>.</summary>
     Task<PackPreview> PreviewFromUrlAsync(string url, string? reference, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>Re-clone <paramref name="url"/>, re-walk it, resolve (or create) its <c>Pack</c>, and persist exactly the chosen <paramref name="sourcePaths"/> — agents and skills — for <paramref name="teamId"/>. Idempotent: a re-run upserts on (pack, source-path) rather than duplicating. Returns a per-path outcome.</summary>
+    Task<PackImportResult> ImportFromUrlAsync(string url, string? reference, IReadOnlyList<string> sourcePaths, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 }
