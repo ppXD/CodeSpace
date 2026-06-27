@@ -2449,7 +2449,14 @@ textarea:-webkit-autofill {
 
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
-.acs-root .agent-tile { appearance: none; width: 100%; display: block; text-align: left; font: inherit; color: inherit; padding: 0; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease, border-color .15s ease; }
+.acs-root .agent-tile { position: relative; appearance: none; width: 100%; display: block; text-align: left; font: inherit; color: inherit; padding: 0; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease, border-color .15s ease; }
+/* Per-tile rerun: clean at rest, revealed on hover, always shown on the selected tile (so it never hides the focused item's action). */
+.acs-root .agent-tile-rerun { position: absolute; bottom: 7px; right: 7px; z-index: 2; opacity: 0; transition: opacity .12s ease; }
+.acs-root .agent-tile:hover .agent-tile-rerun,
+.acs-root .agent-tile:focus-within .agent-tile-rerun,
+.acs-root .agent-tile[data-selected] .agent-tile-rerun { opacity: 1; }
+.acs-root .run-tl-rerun-tile .wf-rerun-primary { background: var(--accent-soft); color: var(--accent); padding: 3px 7px; box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
+.acs-root .run-tl-rerun-tile .wf-rerun-primary:hover { background: #EBD9CC; }
 .acs-root .agent-tile:hover { border-color: var(--line-2); }
 .acs-root .agent-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .acs-root .agent-tile[data-selected] { box-shadow: 0 0 0 2px var(--accent); }
@@ -2966,12 +2973,14 @@ textarea:-webkit-autofill {
 .acs-root .wf-rerun-menu-sug { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 20px; padding: 1px 9px; }
 .acs-root .wf-rerun-menu-check { color: var(--accent); }
 
-/* Compact icon-only variant — a small split button for a tight surface. `wf-rerun-corner` floats it in the TOP-RIGHT
-   of a failed canvas node (absolute, so it never reflows/covers the node body, and the node stays clickable). */
+/* Compact icon-only variant — a small split button for a tight surface (e.g. an Activity agent tile). */
 .acs-root .wf-rerun-compact .wf-rerun-primary { padding: 3px 6px; }
 .acs-root .wf-rerun-compact .wf-rerun-caret { padding: 3px 5px; }
-.acs-root .wf-rerun-corner { position: absolute; top: 7px; right: 12px; z-index: 6; }
-.acs-root .wf-rerun-corner .wf-rerun-menu { min-width: 198px; }
+/* A failed canvas node carries its "Rerun from here" as a THIRD ROW below the title + ref (in the body's column flow),
+   so it never overlays / blocks the node — and the menu opens below it. */
+.acs-root .wf-rerun-node-row { margin-top: 8px; }
+.acs-root .wf-rerun-node-row .wf-rerun-primary, .acs-root .wf-rerun-node-row .wf-rerun-caret { font-size: 11px; padding: 4px 9px; }
+.acs-root .wf-rerun-node-row .wf-rerun-menu { min-width: 198px; }
 
 /* A flow.map COLLAPSED to a single fan-out card node (run view): a ~340px auto-HEIGHT card (overrides the
    row-flex .wf-rf-node) whose body is the inline MapFanout (summary + dot strip + terminal). */

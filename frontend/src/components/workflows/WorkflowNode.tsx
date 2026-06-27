@@ -374,7 +374,6 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={runStatus}>
       {runStatus && <RunStatusDot status={runStatus} />}
-      {runStatus === "Failure" && <RerunMenu target={{ kind: "node", nodeId: id }} compact className="wf-rerun-corner nodrag nopan" />}
       {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Left} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />
       <div className="wf-rf-node-icon">{iconFor(d)}</div>
@@ -400,6 +399,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
             ))}
           </ul>
         )}
+        {runStatus === "Failure" && <RerunMenu target={{ kind: "node", nodeId: id }} className="wf-rerun-node-row nodrag nopan" />}
       </div>
       {d.kind !== "Terminal" && <Handle type="source" position={Position.Right} className="wf-rf-handle" />}
       {/* Error output — connect it to a handler node to catch this node's failure (route the run
