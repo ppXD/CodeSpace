@@ -98,6 +98,11 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The operator's free-text acceptance CRITERIA — rendered into the decider prompt as the definition of done (the
         // model targets them; NOT executed, distinct from the acceptanceChecks argv floor). Omitted when empty (byte-identical).
         AddIfPresent(config, "acceptanceCriteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
+        // The operator's tool allow-list lives on the parent supervisor config (NOT the nested agentProfile — it threads
+        // into each spawned AgentTask.Tools via SpawnedAgentTools, the same place an authored allowedTools lands). Read
+        // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the
+        // harness default ⇒ byte-identical. Closes the gap where a launched pool was dropped on the supervisor lane.
+        AddIfPresent(config, "allowedTools", context.AgentProfile?.AllowedTools is { Count: > 0 } tools ? tools.ToList() : null);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);

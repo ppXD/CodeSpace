@@ -22,6 +22,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   runnerKind: "",
   cwdMode: "auto",
   enableMcp: false,
+  tools: [],
   maxParallel: "5",
   maxRounds: "6",
   maxAgents: "20",
@@ -157,6 +158,21 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ enableMcp: true })).enableMcp).toBe(true);
     expect(buildLaunchInput(form({ effort: "quick", enableMcp: true })).enableMcp).toBe(true);
     expect(buildLaunchInput(form({ effort: "deep", enableMcp: true })).enableMcp).toBe(true);
+  });
+
+  it("omits allowedTools at the empty default (⇒ harness default, byte-identical)", () => {
+    expect(buildLaunchInput(form({ tools: [] }))).not.toHaveProperty("allowedTools");
+    expect(buildLaunchInput(form())).not.toHaveProperty("allowedTools");
+  });
+
+  it("sends allowedTools verbatim when the operator picks a custom set, copying the array", () => {
+    expect(buildLaunchInput(form({ tools: ["Read", "Grep"] })).allowedTools).toEqual(["Read", "Grep"]);
+
+    const tools = ["Read"];
+    const input = buildLaunchInput(form({ tools }));
+    expect(input.allowedTools).not.toBe(tools);
+    // An agent-setup knob ⇒ sent on any tier.
+    expect(buildLaunchInput(form({ effort: "deep", tools: ["Bash"] })).allowedTools).toEqual(["Bash"]);
   });
 });
 

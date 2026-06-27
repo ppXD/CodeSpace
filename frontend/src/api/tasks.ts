@@ -69,6 +69,8 @@ export interface LaunchTaskInput {
   workingDirMode?: string;
   /** Per-run opt-in to the full (side-effecting) MCP tool fabric. Omitted (defer to the ambient flag) unless `true`. */
   enableMcp?: boolean;
+  /** Claude-only tool allow-list (canonical names). Omitted ⇒ the harness default (all tools). Additive against a persona's tools; not a write boundary. */
+  allowedTools?: string[];
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

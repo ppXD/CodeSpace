@@ -574,6 +574,62 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_single_agent_launch_bakes_the_operator_tool_allow_list_into_the_agent_config()
+    {
+        // The operator's Tools allow-list binds through the command → ResolvedAgentProfile.AllowedTools → the projected
+        // agent.code node's tools config (the Claude --allowed-tools source). Unset ⇒ omitted ⇒ the harness default
+        // (byte-identical — the other single-agent tests exercise that).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Touch the bound repo", RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick,
+            Overrides = new TaskExecutionOverrides { AllowedTools = new[] { "Read", "Grep" } },
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+        ReadAgentTools(run.DefinitionSnapshotJson!).ShouldBe(new[] { "Read", "Grep" },
+            "the operator's tool allow-list binds into the single-agent agent.code config, in authored order");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_bakes_the_operator_tool_allow_list_into_the_supervisor_snapshot()
+    {
+        // The same allow-list on a Deep launch must reach the supervisor's TOP-LEVEL allowedTools (NOT the nested
+        // agentProfile), where it threads into each spawned AgentTask.Tools — closing the gap where the supervisor lane
+        // silently dropped a launched allow-list. Unset ⇒ omitted ⇒ the harness default (byte-identical).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { AllowedTools = new[] { "Read", "Edit", "Bash" } },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorAllowedTools(run.DefinitionSnapshotJson!).ShouldBe(new[] { "Read", "Edit", "Bash" },
+                "the operator's tool allow-list binds into the supervisor's top-level allowedTools, in authored order");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1124,6 +1180,28 @@ public class TaskLaunchFlowTests
 
         return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("enableMcp", out var v)
             ? v.GetBoolean() : null;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>tools</c> allow-list out of the frozen snapshot, in authored order. Empty when the key is absent (the harness default — byte-identical).</summary>
+    private static IReadOnlyList<string> ReadAgentTools(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        if (!agent.GetProperty("config").TryGetProperty("tools", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's TOP-LEVEL <c>allowedTools</c> (the spawned-agent tool allow-list) out of the frozen snapshot, in authored order. Empty when absent.</summary>
+    private static IReadOnlyList<string> ReadSupervisorAllowedTools(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        if (!sup.GetProperty("config").TryGetProperty("allowedTools", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

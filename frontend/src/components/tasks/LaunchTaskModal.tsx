@@ -75,7 +75,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   const [acceptDraft, setAcceptDraft] = useState("");
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
-    branchMode: "auto", tools: "default", enableMcp: false, cwdMode: "auto",
+    branchMode: "auto", tools: [] as string[], enableMcp: false, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
@@ -85,7 +85,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
-    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: "default", enableMcp: false, cwdMode: "auto" }); }
+    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
     else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -176,7 +176,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
-      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp,
+      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, allowedTools: cfg.tools,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
@@ -228,6 +228,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     { value: "none", label: "Work in place" },
   ];
   const pickModel = (v: string) => { setModel(v); setModelCredentialId(credModels.data?.find(o => o.modelId === v)?.credentialId ?? ""); };
+
+  // The Tools allow-list (cfg.tools) is a CLAUDE-ONLY capability filter — empty = the harness default (all tools),
+  // a non-empty pick = exactly these (Custom). It is additive against a persona's tools and is NOT a write boundary
+  // (use the Permissions tab's autonomy tier for read-only). The canonical PascalCase names Claude's --allowed-tools
+  // matches; Codex ignores the list (it bounds the agent via its sandbox).
+  const CLAUDE_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "MultiEdit", "Bash", "WebFetch", "WebSearch", "NotebookEdit"];
+  const toolsLabel = cfg.tools.length ? `${cfg.tools.length} tool${cfg.tools.length > 1 ? "s" : ""}` : "Default · all tools";
+  const toggleTool = (name: string) => setC({ tools: cfg.tools.includes(name) ? cfg.tools.filter(t => t !== name) : [...cfg.tools, name] });
 
   return createPortal(
     <>
@@ -358,7 +366,20 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                   ? <div className="lt3-srow lt3-srow-ro"><span className="lt3-srow-l">Agent model</span><span className="lt3-combo-v">Auto · from model pool</span></div>
                   : <Combo label="Agent model" value={model} options={agentModelOpts} onChange={pickModel} searchable />}
                 <Combo label="Runner" value={runnerKind} options={runnerOpts} onChange={setRunnerKind} />
-                <Combo label="Tools" value={cfg.tools} options={[{ value: "default", label: "Default" }]} onChange={v => setC({ tools: v })} />
+                <RowPop label="Tools" value={toolsLabel}>
+                  <div className="lt3-poolhint">Restrict the agent to these tools. Leave empty for the harness default (all tools). Claude only — a capability filter, not a write boundary (use Permissions for read-only).</div>
+                  <div className="lt3-rlist">
+                    {CLAUDE_TOOLS.map(name => {
+                      const on = cfg.tools.includes(name);
+                      return (
+                        <button key={name} type="button" className="lt3-opt" data-on={on} onClick={() => toggleTool(name)}>
+                          <span className="lt3-check" data-on={on}>{on && <Ic.Check size={11} />}</span>
+                          <span className="lt3-opt-m"><span className="lt3-opt-t">{name}</span></span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </RowPop>
                 <Combo label="Branch" value={cfg.branchMode} options={branchOpts} onChange={v => setC({ branchMode: v })} />
                 <Combo label="Working dir" value={cfg.cwdMode} options={[{ value: "auto", label: "Auto" }, { value: "workspace", label: "Workspace root" }, { value: "primary", label: "Primary repo" }]} onChange={v => setC({ cwdMode: v })} />
                 <SToggleRow label="Force MCP fabric" on={cfg.enableMcp} onToggle={() => setC({ enableMcp: !cfg.enableMcp })} />
