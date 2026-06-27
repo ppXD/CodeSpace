@@ -181,9 +181,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
 
+  // Surface the model's intelligence in the picker: the EFFECTIVE capability tier (so the operator sees how auto ranks
+  // it) + an "offline" mark for a self-hosted gateway the availability probe found unreachable.
+  const modelDesc = (o: { provider: string; credentialName: string; tier?: string | null; available?: boolean | null }) =>
+    `${o.provider} · ${o.credentialName}${o.tier && o.tier !== "Unknown" ? ` · ${o.tier}` : ""}${o.available === false ? " · offline" : ""}`;
+
   const harnessOpts: Option[] = [{ value: "", label: "Auto" }, ...(harnesses.data ?? []).map(h => ({ value: h.kind, label: h.kind }))];
   const runnerOpts: Option[] = [{ value: "", label: "Local sandbox" }];
-  const modelOpts: Option[] = [{ value: "", label: "Auto" }, ...(credModels.data ?? []).map(o => ({ value: o.modelId, label: o.modelId, desc: `${o.provider} · ${o.credentialName}` }))];
+  const modelOpts: Option[] = [{ value: "", label: "Auto" }, ...(credModels.data ?? []).map(o => ({ value: o.modelId, label: o.modelId, desc: modelDesc(o) }))];
 
   // The Agent pool (cfg.agentPool) limits which agents the run may use — empty means any suitable agent.
   // The Agent-setup "Agent" then offers only those (plus Auto / inline).
@@ -202,7 +207,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   // the primary model is the supervisor brain (unconstrained) and agents draw from the pool, so it's Auto.
   const allModels = credModels.data ?? [];
   const poolModels = cfg.agentModels.length ? allModels.filter(o => cfg.agentModels.includes(o.rowId)) : allModels;
-  const agentModelOpts: Option[] = [{ value: "", label: "Auto" }, ...poolModels.map(o => ({ value: o.modelId, label: o.modelId, desc: `${o.provider} · ${o.credentialName}` }))];
+  const agentModelOpts: Option[] = [{ value: "", label: "Auto" }, ...poolModels.map(o => ({ value: o.modelId, label: o.modelId, desc: modelDesc(o) }))];
   const menuModels = effort === "deep" ? allModels : poolModels;
   const poolLabel = cfg.agentModels.length ? `${cfg.agentModels.length} model${cfg.agentModels.length > 1 ? "s" : ""}` : "All eligible models";
   // Toggle a model ROW in the pool (keyed by the row id so two credentials exposing the same model name stay

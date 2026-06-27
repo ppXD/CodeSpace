@@ -261,6 +261,9 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         DisplayName = m.DisplayName,
         Enabled = m.Enabled,
         IsDefault = m.IsDefault,
+        CapabilityTier = m.CapabilityTier,
+        ProbedCapabilityTier = m.ProbedCapabilityTier,
+        Available = m.Available,
     };
 
     private ModelCredentialSummary ToSummary(ModelCredential c)
