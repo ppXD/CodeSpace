@@ -463,6 +463,62 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_working_dir_mode_into_the_supervisor_snapshot()
+    {
+        // The operator's multi-repo working-dir choice (wire "workspace") must bind through the command → TaskBuildContext
+        // → the supervisor agentProfile's cwdMode (the enum NAME "WorkspaceRoot"), where each spawned agent's workspace
+        // resolves it. Unset ⇒ omitted ⇒ Auto ⇒ byte-identical (the other deep tests exercise that default path).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { CwdMode = "workspace" },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorCwdMode(run.DefinitionSnapshotJson!).ShouldBe("WorkspaceRoot",
+                "the operator's working-dir mode binds into the supervisor agentProfile config as the enum name");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_single_agent_launch_bakes_the_operator_working_dir_mode_into_the_agent_config()
+    {
+        // The same working-dir choice on a single-agent (Quick) launch binds into the projected agent.code node's cwdMode
+        // config (wire "primary" → enum name "PrimaryRepo"), which the node reads back via WorkspaceCwdModeWire. Frozen-def
+        // assertion (don't walk the run — a real clone of a seed-only repo would fail).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Touch the bound repo", RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick,
+            Overrides = new TaskExecutionOverrides { CwdMode = "primary" },
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+        ReadAgentCwdMode(run.DefinitionSnapshotJson!).ShouldBe("PrimaryRepo",
+            "the operator's working-dir mode binds into the single-agent agent.code config as the enum name");
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -975,6 +1031,25 @@ public class TaskLaunchFlowTests
 
         return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("integrateBranches", out var v)
             ? v.GetBoolean() : null;
+    }
+
+    /// <summary>Reads the supervisor node's agentProfile.cwdMode out of the frozen snapshot. Null when the key is absent (the Auto default).</summary>
+    private static string? ReadSupervisorCwdMode(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("cwdMode", out var v)
+            ? v.GetString() : null;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>cwdMode</c> config out of the frozen snapshot. Null when the key is absent (the Auto default — byte-identical).</summary>
+    private static string? ReadAgentCwdMode(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        return agent.GetProperty("config").TryGetProperty("cwdMode", out var v) ? v.GetString() : null;
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

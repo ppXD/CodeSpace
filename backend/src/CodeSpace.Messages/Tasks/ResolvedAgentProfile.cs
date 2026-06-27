@@ -49,6 +49,9 @@ public sealed record ResolvedAgentProfile
     /// <summary>The tool allow-list the agent is restricted to. Null → the harness default; non-empty → exactly these (UNIONed with a persona's tools by the dispatch-time resolver).</summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 
+    /// <summary>Where the harness's working directory points in a MULTI-repo workspace (<see cref="WorkspaceCwdMode.WorkspaceRoot"/> / <see cref="WorkspaceCwdMode.PrimaryRepo"/>). Null → <see cref="WorkspaceCwdMode.Auto"/> (omit → byte-identical). Inert on a single-repo run (the single-repo invariant forces cwd = repo root).</summary>
+    public WorkspaceCwdMode? CwdMode { get; init; }
+
     /// <summary>The agent run's wall-clock cap, in seconds. Null → the projection's bounded default (1h). 0 → NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). A positive value caps the run.</summary>
     public int? TimeoutSeconds { get; init; }
 }

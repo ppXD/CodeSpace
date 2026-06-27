@@ -27,6 +27,8 @@ export interface LaunchFormState {
   harness: string;
   agentDefinitionId: string;
   runnerKind: string;
+  /** "Working dir" — multi-repo cwd mode: `"auto"` (default) / `"workspace"` / `"primary"`. Sent (as `workingDirMode`) only when non-auto. Applies to all tiers (an agent-setup knob); inert on a single-repo run. */
+  cwdMode: string;
   /** Coordination "Limits" — supervisor fan-out bounds. Only meaningful on deep/auto (see effort gate). */
   maxParallel: string;
   maxRounds: string;
@@ -89,6 +91,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   const relatedRepositories = buildRelatedRepositories(state.workspace, primary);
   if (relatedRepositories) input.relatedRepositories = relatedRepositories;
+
+  // Working-dir mode is an agent-setup knob (all tiers), inert on a single-repo run. "auto" is the default ⇒ omitted ⇒
+  // byte-identical; "workspace"/"primary" are sent so a multi-repo run anchors the cwd where the operator asked.
+  if (state.cwdMode && state.cwdMode !== "auto") input.workingDirMode = state.cwdMode;
 
   // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
   // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit

@@ -36,4 +36,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>Deep/supervisor only: per-run opt-in to INTEGRATING the spawned agents' diffs into one reviewable branch at merge (SOTA #3). Null / false → defer to the ambient integrate flag (byte-identical). Inert on a single-agent run.</summary>
     public bool? IntegrateBranches { get; init; }
+
+    /// <summary>The working-directory mode in a MULTI-repo workspace, in wire vocabulary (<c>"workspace"</c> / <c>"primary"</c>; <c>"auto"</c> / null → the Auto default, omitted). Parsed by <c>WorkspaceCwdModeWire.FromWire</c> at profile build. Inert on a single-repo run.</summary>
+    public string? CwdMode { get; init; }
 }

@@ -56,6 +56,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "approvalConversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the run posts its tool-approval cards into. Leave empty for no approval surface." },
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
+                "cwdMode":        { "type": "string", "enum": ["Auto", "WorkspaceRoot", "PrimaryRepo"], "description": "MULTI-repo only: where the agent's working directory points. Auto (default): repo-root for one repo, workspace-root for many. WorkspaceRoot: always the shared root (every repo a sibling). PrimaryRepo: always the primary repo's root. Ignored for a single-repo run (which always runs at the repo root)." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
                 "autonomyLevel":  { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much the agent may do — one dial that sets write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest, admin/controlled runners. The network/readOnly fields below are advanced per-field overrides of this tier." },
                 "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
@@ -151,7 +152,9 @@ public sealed class AgentCodeNode : INodeRuntime
         // primary (the workspace has nowhere to anchor + nothing writable to default to).
         if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
 
-        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context));
+        var cwdMode = WorkspaceCwdModeWire.FromWire(ReadOptionalString(context.Config, "cwdMode")) ?? WorkspaceCwdMode.Auto;
+
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode);
 
         var task = new AgentTask
         {

@@ -112,11 +112,13 @@ public static class AgentWorkspaceAuthoring
     /// without a ref it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default
     /// branch). So: related repos ⇒ the multi-repo spec; else a pinned ref ⇒ <c>FromRepository(id, ref)</c>; else null.</para>
     /// </summary>
-    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false)
+    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto)
     {
         if (primaryRepositoryId is not { } primaryId) return null;
 
-        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback);
+        // cwdMode only bites a MULTI-repo workspace; a single-repo run always runs at the repo root (the single-repo
+        // invariant), so the pinned-ref single-repo branch below ignores it (byte-identical).
+        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback, cwdMode);
 
         return string.IsNullOrWhiteSpace(primaryRef) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback);
     }

@@ -292,6 +292,22 @@ public class AgentWorkspaceAuthoringTests
     }
 
     [Fact]
+    public void ResolveAuthoredWorkspace_threads_cwd_mode_into_a_multi_repo_spec_but_ignores_it_single_repo()
+    {
+        // The operator's multi-repo cwd choice rides through the shared authoring path onto the WorkspaceSpec. A
+        // single-repo run (no related repos, no pinned ref) stays null regardless of cwdMode — the single-repo
+        // invariant always runs at the repo root, so the knob is inert there (byte-identical).
+        var related = new[] { new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoB), Alias = "web", Access = WorkspaceAccess.Read } };
+
+        var multi = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), related, cwdMode: WorkspaceCwdMode.PrimaryRepo);
+        multi.ShouldNotBeNull();
+        multi!.CwdMode.ShouldBe(WorkspaceCwdMode.PrimaryRepo, "the multi-repo spec carries the operator's cwd choice");
+
+        AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), Array.Empty<WorkspaceRepositorySpec>(), cwdMode: WorkspaceCwdMode.PrimaryRepo)
+            .ShouldBeNull("a bare single-repo run stays null even with a cwd mode set — the knob is inert single-repo");
+    }
+
+    [Fact]
     public void ResolveAuthoredWorkspace_single_repo_with_a_pinned_ref_builds_a_one_repo_spec_at_that_ref()
     {
         // Session branch continuity (S4b): a single-repo CONTINUE pins the prior turn's produced branch. A bare

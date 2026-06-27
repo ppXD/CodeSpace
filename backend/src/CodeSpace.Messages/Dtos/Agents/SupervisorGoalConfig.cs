@@ -139,6 +139,9 @@ public sealed record SupervisorAgentProfile
 
     /// <summary>The autonomy tier each spawned agent runs at, parsed case-insensitively. Null / unrecognised → the safe <c>Standard</c> default (workspace write, no network) — byte-identical to pre-P2-3.</summary>
     public string? AutonomyLevel { get; init; }
+
+    /// <summary>Where each spawned agent's working directory points in a MULTI-repo workspace, in wire vocabulary (a <c>WorkspaceCwdMode</c> name, e.g. <c>"WorkspaceRoot"</c> / <c>"PrimaryRepo"</c>). Null / <c>"Auto"</c> → the Auto default (byte-identical). Parsed via <c>WorkspaceCwdModeWire.FromWire</c> at spawn. Inert on a single-repo spawn.</summary>
+    public string? CwdMode { get; init; }
 }
 
 /// <summary>

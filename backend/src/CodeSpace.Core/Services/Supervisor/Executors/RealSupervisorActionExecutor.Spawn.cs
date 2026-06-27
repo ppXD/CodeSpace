@@ -363,8 +363,9 @@ public sealed partial class RealSupervisorActionExecutor
             RunnerKind = NullIfBlank(profile?.RunnerKind),
             RepositoryId = repositoryId,
             // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.code node uses —
-            // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it).
-            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related),
+            // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it). The operator's
+            // multi-repo cwd mode rides the profile (null/Auto → byte-identical).
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             ApprovalConversationId = context.ConversationId,

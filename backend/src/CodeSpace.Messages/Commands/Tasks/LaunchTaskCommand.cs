@@ -109,6 +109,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
+    /// <summary>
+    /// The agent working-directory mode in a MULTI-repo workspace, in wire vocabulary: <c>"workspace"</c> (cwd = the
+    /// shared workspace root, every repo a sibling) or <c>"primary"</c> (cwd = the primary repo's root). <c>"auto"</c> /
+    /// null ⇒ the Auto default (repo-root for one repo, workspace-root for many), omitted ⇒ byte-identical. INERT on a
+    /// single-repo run (the single-repo invariant always runs at the repo root).
+    /// </summary>
+    public string? WorkingDirMode { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

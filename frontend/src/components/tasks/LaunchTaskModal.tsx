@@ -176,7 +176,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
-      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
+      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
