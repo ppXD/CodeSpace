@@ -131,6 +131,26 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Collapses_to_exactly_one_row_when_two_attempts_of_a_lineage_share_a_created_date()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // The same-lineage tie edge: a fork staged in the SAME instant as its original (batch / coarse clock). With only
+        // a created_date order the collapse could keep BOTH or NEITHER; the (created_date, id) total order must still
+        // pick exactly ONE — the higher id in Postgres uuid order — so the lineage is a single row, never zero or two.
+        var sameInstant = DateTimeOffset.UtcNow;
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: sameInstant, workflowId: null);
+        var fork = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: sameInstant, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Count.ShouldBe(1, "a created_date tie within one lineage still collapses to exactly one row — the id tiebreaker decides which");
+        var expectedSurvivor = new[] { original, fork }.OrderByDescending(id => id.ToString(), StringComparer.Ordinal).First();
+        result.Single().Id.ShouldBe(expectedSurvivor, "the survivor is the higher id in Postgres uuid order — the same total order keyset paging uses");
+        result.Single().AttemptCount.ShouldBe(2);
+    }
+
+    [Fact]
     public async Task A_status_filter_matches_the_collapsed_representative_so_a_resolved_failure_drops_from_Failed()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
