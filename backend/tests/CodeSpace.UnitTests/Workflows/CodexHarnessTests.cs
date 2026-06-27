@@ -31,6 +31,33 @@ public class CodexHarnessTests
     public void Kind_is_codex_cli() => Harness.Kind.ShouldBe("codex-cli");
 
     [Fact]
+    public void Projects_bound_skills_into_config_home_skill_files()
+    {
+        var task = Task() with { Skills = new[] { new AgentSkill { Slug = "tdd", Description = "Use when implementing.", Body = "Write the test first." } } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        spec.ConfigHomeFiles.Select(f => f.RelativePath).ShouldBe(new[] { "skills/tdd/SKILL.md" },
+            customMessage: "Codex scans CODEX_HOME/skills/<slug>/SKILL.md — the per-run config home the runner sets");
+        spec.ConfigHomeFiles.Single().Content.ShouldContain("Write the test first.");
+    }
+
+    [Fact]
+    public void No_skills_means_no_config_home_files()
+    {
+        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void SkillsRoot_is_pinned_to_the_codex_home_relative_skills_dir()
+    {
+        // Rule 8: pin the projection-root constant so an ACCIDENTAL edit is a deliberate, visible change. ($CODEX_HOME/skills
+        // is Codex's backward-compat path; this pins the CONSTANT, not Codex's runtime behavior — a version bump that
+        // dropped the path would surface only in a real-codex E2E, so re-verify on a Codex upgrade.)
+        CodexHarness.SkillsRoot.ShouldBe("skills");
+    }
+
+    [Fact]
     public void Renders_an_mcp_server_into_config_toml_with_the_run_socket_and_token()
     {
         // Codex reads MCP-server declarations from an [mcp_servers.<name>] table in its config home's config.toml. The

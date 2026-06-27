@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
@@ -48,6 +49,17 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     /// <c>config.toml</c> model-provider base-URL would otherwise override our injected gateway. Pinned by a test (Rule 8).
     /// </summary>
     public const string ConfigHomeEnvVar = "CODEX_HOME";
+
+    /// <summary>
+    /// The config-home-relative directory Codex's native loader scans for skills. <c>$CODEX_HOME/skills</c> is the
+    /// backward-compatible path (Codex 0.142.2 also scans the canonical <c>$HOME/.agents/skills</c>, but that follows
+    /// the OS home, which the sandbox only remaps when confined — <c>CODEX_HOME</c> is set on EVERY path, confined or
+    /// not, so it's the reliable per-run-isolated target). Pinned by a test (Rule 8) so an ACCIDENTAL edit of this
+    /// projection-root constant is a deliberate, visible change. (The pin guards the CONSTANT, not Codex's runtime
+    /// behavior — a Codex version bump that DROPPED the backward-compat root would surface only in a real-codex skill
+    /// E2E, not added in this slice, so re-verify this path on a Codex upgrade.)
+    /// </summary>
+    public const string SkillsRoot = "skills";
 
     /// <summary>The pinned Codex CLI version — MUST match <c>CODEX_CLI_VERSION</c> in <c>backend/Dockerfile.worker</c> (the single source of truth); a pin test fails if they drift.</summary>
     internal const string DefaultVersion = "0.142.2";
@@ -99,6 +111,10 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Codex's config home per run so it ignores the operator's personal ~/.codex.
             ConfigHomeEnvVars = new[] { ConfigHomeEnvVar },
+            // Project the persona's skills as SKILL.md files the runner writes under CODEX_HOME/skills/<slug>/;
+            // Codex's native loader discovers them there (the same Agent-Skills format + SkillProjection as Claude —
+            // only the root differs, which is why it's CODEX_HOME's, not CLAUDE_CONFIG_DIR's).
+            ConfigHomeFiles = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
