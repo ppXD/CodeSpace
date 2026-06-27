@@ -177,6 +177,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
       taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
+      integrateBranches: cfg.integrateBranches,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };

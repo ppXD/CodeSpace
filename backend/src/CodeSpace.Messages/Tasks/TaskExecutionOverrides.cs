@@ -33,4 +33,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>The agent run's wall-clock cap, in seconds. Null → the projection's bounded default (1h). 0 → NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). A positive value caps the run.</summary>
     public int? TimeoutSeconds { get; init; }
+
+    /// <summary>Deep/supervisor only: per-run opt-in to INTEGRATING the spawned agents' diffs into one reviewable branch at merge (SOTA #3). Null / false → defer to the ambient integrate flag (byte-identical). Inert on a single-agent run.</summary>
+    public bool? IntegrateBranches { get; init; }
 }

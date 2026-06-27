@@ -97,6 +97,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public string? AutonomyCeiling { get; init; }
 
+    /// <summary>Deep/supervisor only: per-run opt-in to INTEGRATING the spawned agents' diffs into one reviewable branch at merge (one PR over the combined work, instead of only the side-by-side fold). Null / false ⇒ defer to the ambient integrate flag (byte-identical). Inert on a single-agent / map projection.</summary>
+    public bool? IntegrateBranches { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

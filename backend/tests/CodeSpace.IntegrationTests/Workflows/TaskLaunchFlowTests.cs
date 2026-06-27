@@ -396,6 +396,39 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_integrate_branches_opt_in_into_the_supervisor_snapshot()
+    {
+        // The operator's "Integrate branches" opt-in must bind through the command path → TaskBuildContext → the
+        // supervisor agentProfile config's integrateBranches, where the merge turn reads it (ShouldIntegrate). Unset ⇒
+        // omitted ⇒ defers to the ambient flag (byte-identical — the other deep tests exercise that default path).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { IntegrateBranches = true },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorIntegrateBranches(run.DefinitionSnapshotJson!).ShouldBe(true,
+                "the operator's integrate-branches opt-in binds into the supervisor agentProfile config");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -887,6 +920,16 @@ public class TaskLaunchFlowTests
         if (!sup.GetProperty("config").TryGetProperty("allowedModelIds", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
 
         return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's agentProfile.integrateBranches out of the frozen snapshot. Null when the key is absent (the default — defers to the ambient flag).</summary>
+    private static bool? ReadSupervisorIntegrateBranches(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("integrateBranches", out var v)
+            ? v.GetBoolean() : null;
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

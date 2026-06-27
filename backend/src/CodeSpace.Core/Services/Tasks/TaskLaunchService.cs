@@ -243,6 +243,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             RunnerKind = request.Overrides.RunnerKind,
             AutonomyLevel = ClampAutonomy(request, route),
             TimeoutSeconds = request.Overrides.TimeoutSeconds,
+            IntegrateBranches = request.Overrides.IntegrateBranches,
         };
     }
 

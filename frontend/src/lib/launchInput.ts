@@ -37,6 +37,8 @@ export interface LaunchFormState {
   agentModels: string[];
   /** Coordination "Autonomy ceiling" — a tier name, or `""` (Inherit the preset). Tighten-only on the backend. */
   autonomyCeiling: string;
+  /** Coordination "Integrate branches" — Deep only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Default false ⇒ defer to the ambient flag. */
+  integrateBranches: boolean;
   /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
   timeLimit: string;
 }
@@ -97,6 +99,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   // The autonomy ceiling is a Coordination knob (deep/auto only); "" means Inherit the preset ⇒ omit the key.
   if (tierExposesCaps(state.effort) && state.autonomyCeiling) input.autonomyCeiling = state.autonomyCeiling;
+
+  // Integrate-branches is a Deep-only supervisor opt-in; send it only when ON (default off defers to the ambient flag,
+  // byte-identical) and only on the tiers that expose Coordination (inert on a single-agent run).
+  if (tierExposesCaps(state.effort) && state.integrateBranches) input.integrateBranches = true;
 
   return input;
 }
