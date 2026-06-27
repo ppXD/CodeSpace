@@ -526,6 +526,41 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void WriteConfigHomeFiles_writes_each_file_at_its_relative_path()
+    {
+        var configHome = TempDir();
+
+        LocalProcessRunner.WriteConfigHomeFiles(new[]
+        {
+            new ConfigHomeFile { RelativePath = "skills/tdd/SKILL.md", Content = "tdd body" },
+            new ConfigHomeFile { RelativePath = "skills/debug/SKILL.md", Content = "debug body" },
+        }, configHome);
+
+        File.ReadAllText(Path.Combine(configHome, "skills", "tdd", "SKILL.md")).ShouldBe("tdd body");
+        File.ReadAllText(Path.Combine(configHome, "skills", "debug", "SKILL.md")).ShouldBe("debug body");
+    }
+
+    [Fact]
+    public void WriteConfigHomeFiles_skips_a_path_that_escapes_the_config_home()
+    {
+        var configHome = TempDir();
+
+        LocalProcessRunner.WriteConfigHomeFiles(new[] { new ConfigHomeFile { RelativePath = "../escape/SKILL.md", Content = "x" } }, configHome);
+
+        File.Exists(Path.Combine(Path.GetDirectoryName(configHome)!, "escape", "SKILL.md"))
+            .ShouldBeFalse("a config-home-escaping relative path is skipped — the runner is the last gate before a write");
+    }
+
+    [Fact]
+    public void WriteConfigHomeFiles_is_a_no_op_without_files_or_config_home()
+    {
+        var configHome = TempDir();
+
+        Should.NotThrow(() => LocalProcessRunner.WriteConfigHomeFiles(Array.Empty<ConfigHomeFile>(), configHome));
+        Should.NotThrow(() => LocalProcessRunner.WriteConfigHomeFiles(new[] { new ConfigHomeFile { RelativePath = "skills/x/SKILL.md", Content = "y" } }, null));
+    }
+
+    [Fact]
     public void BuildDurableStartInfo_writes_the_mcp_declaration_into_the_config_home_when_wired()
     {
         var spool = Path.Combine(Path.GetTempPath(), "codespace-mcp-decl-" + Guid.NewGuid().ToString("N"));

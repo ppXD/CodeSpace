@@ -89,6 +89,25 @@ public sealed record SandboxSpec
     /// a per-run config-home (the durable local runner); a bare-process runner ignores it.
     /// </summary>
     public McpServerWiring? Mcp { get; init; }
+
+    /// <summary>
+    /// Files the runner materializes into the per-run config home (<see cref="ConfigHomeEnvVars"/>) BEFORE launch — e.g.
+    /// a projected skill's <c>skills/&lt;slug&gt;/SKILL.md</c>, which the harness's CLI then discovers natively. Unlike the
+    /// run-scoped <see cref="Mcp"/> declaration (injected by the executor because it carries a minted token), these are a
+    /// PURE function of the task, so the harness's <c>BuildInvocation</c> emits them. Not secrets — written with default
+    /// perms. Empty (default) → nothing written, byte-identical to a run without them. Honoured only by a runner that
+    /// writes a per-run config home; a bare-process runner with no config home ignores them.
+    /// </summary>
+    public IReadOnlyList<ConfigHomeFile> ConfigHomeFiles { get; init; } = Array.Empty<ConfigHomeFile>();
+}
+
+/// <summary>One file to write into the per-run config home, its <see cref="RelativePath"/> joined onto the config-home dir.</summary>
+public sealed record ConfigHomeFile
+{
+    /// <summary>Path relative to the config home (e.g. "skills/test-driven-development/SKILL.md"). Forward-slashed; the runner joins it onto the config-home dir and creates intermediate directories.</summary>
+    public required string RelativePath { get; init; }
+
+    public required string Content { get; init; }
 }
 
 /// <summary>

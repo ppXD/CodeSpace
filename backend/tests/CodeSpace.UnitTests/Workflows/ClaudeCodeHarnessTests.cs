@@ -1,5 +1,7 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Agents.Skills.Parsers.ClaudeCode;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -32,6 +34,54 @@ public class ClaudeCodeHarnessTests
 
     [Fact]
     public void Kind_is_claude_code() => Harness.Kind.ShouldBe("claude-code");
+
+    [Fact]
+    public void Projects_bound_skills_into_config_home_skill_files()
+    {
+        var task = Task() with { Skills = new[] { new AgentSkill { Slug = "tdd", Description = "Use when implementing.", Body = "Write the test first." } } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        spec.ConfigHomeFiles.Select(f => f.RelativePath).ShouldBe(new[] { "skills/tdd/SKILL.md" },
+            customMessage: "Claude Code scans CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md — the config-home the runner sets");
+        spec.ConfigHomeFiles.Single().Content.ShouldContain("Write the test first.");
+    }
+
+    [Fact]
+    public void No_skills_means_no_config_home_files()
+    {
+        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void A_bound_skill_round_trips_from_build_invocation_through_materialization_to_a_parseable_skill_md()
+    {
+        // The end-to-end production chain in-process (no CLI binary): a resolved task carrying skills →
+        // harness BuildInvocation → runner materialization → re-parse the file on disk. This is the test that
+        // proves the slice's whole point — a bound skill reaches the agent as a parseable SKILL.md — and would
+        // catch a skills-root drift or harness-emitted malformed frontmatter that the per-stage tests miss.
+        var task = Task() with { Skills = new[] { new AgentSkill { Slug = "tdd", Description = "Use when implementing any feature.", Body = "# TDD\n\nWrite the test first." } } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        var configHome = Path.Combine(Path.GetTempPath(), "cs-skills-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configHome);
+
+            var onDisk = File.ReadAllText(Path.Combine(configHome, "skills", "tdd", "SKILL.md"));
+            var parsed = new ClaudeCodeSkillParser().Parse(onDisk, "skills/tdd/SKILL.md");
+
+            parsed.Name.ShouldBe("tdd");
+            parsed.Description.ShouldBe("Use when implementing any feature.");
+            parsed.Body.ShouldBe("# TDD\n\nWrite the test first.");
+            parsed.Diagnostics.ShouldBeEmpty(customMessage: "the harness-emitted bytes, written to disk, must re-parse as valid SKILL.md");
+        }
+        finally
+        {
+            if (Directory.Exists(configHome)) Directory.Delete(configHome, recursive: true);
+        }
+    }
 
     [Fact]
     public void Renders_an_mcp_server_into_a_dot_mcp_json_with_the_run_socket_and_token()

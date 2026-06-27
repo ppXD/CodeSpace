@@ -471,6 +471,11 @@ public sealed partial class LocalProcessRunner
         // config-home (the declaration has nowhere harness-isolated to live).
         WriteMcpDeclaration(spec.Mcp, configHome);
 
+        // Materialize the harness's projected config-home files (e.g. skills/<slug>/SKILL.md) so the CLI discovers
+        // them on start. PURE (task-derived) + not secret, so — unlike the MCP declaration — the harness's
+        // BuildInvocation emits them and the runner just lays the bytes down. No-op without a config-home.
+        WriteConfigHomeFiles(spec.ConfigHomeFiles, configHome);
+
         // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
         // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback). A
         // filtered-egress netns prefix (B3.2b), when present, wraps the whole chain outermost.
@@ -626,6 +631,30 @@ public sealed partial class LocalProcessRunner
 
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
+    /// <summary>
+    /// Write the harness's projected config-home files (skill <c>SKILL.md</c> artifacts, …) into the per-run config-home,
+    /// each at its config-home-relative path with intermediate dirs created. No-op without a config-home (nowhere
+    /// isolated to put them). These are NOT secrets (default perms — the per-run dir is the boundary), unlike the 0600
+    /// MCP declaration. The harness owns the content; the runner lays the bytes down verbatim. A relative path that
+    /// would escape the config-home is skipped — the last gate before a write, though the slug is already sanitized upstream.
+    /// </summary>
+    internal static void WriteConfigHomeFiles(IReadOnlyList<ConfigHomeFile> files, string? configHome)
+    {
+        if (configHome is null || files.Count == 0) return;
+
+        var root = Path.GetFullPath(configHome) + Path.DirectorySeparatorChar;
+
+        foreach (var file in files)
+        {
+            var path = Path.GetFullPath(Path.Combine(configHome, file.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+            if (!path.StartsWith(root, StringComparison.Ordinal)) continue;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, file.Content);
+        }
     }
 
     /// <summary>

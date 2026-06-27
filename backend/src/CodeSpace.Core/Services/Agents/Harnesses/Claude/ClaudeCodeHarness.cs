@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
@@ -48,6 +49,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// whose <c>env.ANTHROPIC_BASE_URL</c> would otherwise override our injected gateway. Pinned by a test (Rule 8).
     /// </summary>
     public const string ConfigDirEnvVar = "CLAUDE_CONFIG_DIR";
+
+    /// <summary>The config-home-relative directory Claude Code's native loader scans for personal skills (<c>&lt;CLAUDE_CONFIG_DIR&gt;/skills/&lt;slug&gt;/SKILL.md</c>) — where the runner materializes the persona's projected skills.</summary>
+    public const string SkillsRoot = "skills";
 
     /// <summary>
     /// Claude Code's "disable non-essential network traffic" switch — set to <c>1</c> for an Allowlist (deny-by-default)
@@ -128,6 +132,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
+            // Project the persona's skills as SKILL.md files the runner writes under CLAUDE_CONFIG_DIR/skills/<slug>/;
+            // Claude Code's native loader discovers them there (personal scope) and does the progressive disclosure.
+            ConfigHomeFiles = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };

@@ -56,6 +56,15 @@ public sealed record AgentTask
     /// </summary>
     public IReadOnlyList<string>? Tools { get; init; }
 
+    /// <summary>
+    /// Skills the agent carries — resolved from the persona's bindings by the dispatch-time resolver and frozen here,
+    /// then projected by the harness into its native <c>SKILL.md</c> layout under the per-run config home (the CLI does
+    /// the progressive disclosure). <c>null</c> (default) → no skills, byte-identical to a pre-field task envelope;
+    /// <c>[JsonIgnore(WhenWritingNull)]</c> so an unset list adds nothing to the persisted task_json.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<AgentSkill>? Skills { get; init; }
+
     /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
     public string? RunnerKind { get; init; }
 
