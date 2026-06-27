@@ -24,11 +24,11 @@ import { RunOpenContext } from "./runOpenContext";
 const mapItem: RerunTarget = { kind: "mapItem", mapNodeId: "map", focusedIndex: 0, failedIndices: [0, 2], totalCount: 4 };
 const node: RerunTarget = { kind: "node", nodeId: "build" };
 
-function renderMenu(target: RerunTarget, opts: { isTerminal?: boolean; onOpenRun?: (id: string) => void } = {}) {
+function renderMenu(target: RerunTarget, opts: { isTerminal?: boolean; onOpenRun?: (id: string) => void; bare?: boolean } = {}) {
   return render(
     <RunActionsContext.Provider value={{ runId: "r1", isTerminal: opts.isTerminal ?? true }}>
       <RunOpenContext.Provider value={opts.onOpenRun ?? null}>
-        <RerunMenu target={target} />
+        <RerunMenu target={target} bare={opts.bare} />
       </RunOpenContext.Provider>
     </RunActionsContext.Provider>,
   );
@@ -102,5 +102,15 @@ describe("RerunMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: /^rerun item$/i }));
 
     await waitFor(() => expect(alertMock).toHaveBeenCalledWith(expect.objectContaining({ title: "Rerun already in progress" })));
+  });
+
+  it("bare: renders only the primary button — no caret, no dropdown — and still reruns the item", async () => {
+    renderMenu(mapItem, { bare: true });
+
+    expect(screen.queryByRole("button", { name: /more rerun options/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^rerun item$/i }));
+
+    await waitFor(() => expect(rerunOne.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ mapNodeId: "map", branchIndex: 0 })));
   });
 });

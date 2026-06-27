@@ -43,13 +43,13 @@ interface RerunOption {
  * Renders NOTHING unless the run is TERMINAL — a context-only gate, so the inner actions (which need the dialog +
  * query providers) mount only when a rerun is actually offered.
  */
-export function RerunMenu({ target, className, compact }: { target: RerunTarget; className?: string; compact?: boolean }) {
+export function RerunMenu({ target, className, compact, bare }: { target: RerunTarget; className?: string; compact?: boolean; bare?: boolean }) {
   const actions = useContext(RunActionsContext);
   if (!actions || !actions.isTerminal) return null;
-  return <RerunMenuInner target={target} runId={actions.runId} className={className} compact={compact} />;
+  return <RerunMenuInner target={target} runId={actions.runId} className={className} compact={compact} bare={bare} />;
 }
 
-function RerunMenuInner({ target, runId, className, compact }: { target: RerunTarget; runId: string; className?: string; compact?: boolean }) {
+function RerunMenuInner({ target, runId, className, compact, bare }: { target: RerunTarget; runId: string; className?: string; compact?: boolean; bare?: boolean }) {
   const onOpenRun = useContext(RunOpenContext);
   const confirm = useConfirm();
   const alert = useAlert();
@@ -134,17 +134,20 @@ function RerunMenuInner({ target, runId, className, compact }: { target: RerunTa
 
   const primary = options[0];
   const primaryText = primary.primaryLabel ?? primary.label;
+  const iconOnly = compact || bare;
   return (
-    <div className={`wf-rerun${compact ? " wf-rerun-compact" : ""}${className ? ` ${className}` : ""}`} ref={wrapRef}>
+    <div className={`wf-rerun${compact ? " wf-rerun-compact" : ""}${bare ? " wf-rerun-bare" : ""}${className ? ` ${className}` : ""}`} ref={wrapRef}>
       <div className="wf-rerun-split">
-        <button className="wf-rerun-primary" disabled={pending} title={compact ? primaryText : undefined} aria-label={compact ? primaryText : undefined} onClick={() => void dispatch(primary)}>
-          <Ic.Play size={11} aria-hidden="true" /> {compact ? null : (pending ? "Rerunning…" : primaryText)}
+        <button className="wf-rerun-primary" disabled={pending} title={iconOnly ? primaryText : undefined} aria-label={iconOnly ? primaryText : undefined} onClick={() => void dispatch(primary)}>
+          <Ic.Play size={11} aria-hidden="true" /> {iconOnly ? null : (pending ? "Rerunning…" : primaryText)}
         </button>
-        <button className="wf-rerun-caret" disabled={pending} aria-label="More rerun options" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>
-          <Ic.ChevronDown size={12} aria-hidden="true" />
-        </button>
+        {!bare && (
+          <button className="wf-rerun-caret" disabled={pending} aria-label="More rerun options" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>
+            <Ic.ChevronDown size={12} aria-hidden="true" />
+          </button>
+        )}
       </div>
-      {menuOpen && (
+      {!bare && menuOpen && (
         <div className="wf-rerun-menu" role="menu">
           {options.map((opt) => (
             <button key={opt.id} role="menuitem" className="wf-rerun-menu-item" disabled={pending} onClick={() => void dispatch(opt)}>

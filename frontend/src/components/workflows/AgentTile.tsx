@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef } from "@/api/workflows";
@@ -15,7 +15,7 @@ import { formatTokens, tileState, type TileState } from "./runActivity";
  * (when `onOpen` is given) opens its full terminal scrollback below the wave; `open` marks the one that's expanded.
  * Status is the agent run's LIVE status, falling back to the phase ref's.
  */
-export function AgentTile({ agent, selected, open, onOpen }: { agent: PhaseAgentRef; selected?: boolean; open?: boolean; onOpen?: () => void }) {
+export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: PhaseAgentRef; selected?: boolean; open?: boolean; onOpen?: () => void; rerun?: ReactNode }) {
   const tileRef = useRef<HTMLDivElement>(null);
 
   // When the outline selects this agent, bring its tile into view (within the Activity panel's own scroll).
@@ -57,6 +57,7 @@ export function AgentTile({ agent, selected, open, onOpen }: { agent: PhaseAgent
         <span className="agent-tile-flag" aria-hidden="true">{stateFlag(state)}</span>
       </div>
       <div className="agent-tile-body">{bodyLines(state, latest, summary, failReason)}</div>
+      {rerun && <div className="agent-tile-rerun" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} role="presentation">{rerun}</div>}
     </div>
   );
 }

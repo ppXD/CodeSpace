@@ -50,6 +50,11 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
     const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : phaseRerunTarget(wave);
     return t ? <RerunMenu target={t} className="run-tl-rerun-term" /> : null;
   };
+  // A per-tile compact rerun on each fanned-out item, so the small terminals carry their own "Rerun item" too.
+  const tileRerun = (agent: PhaseAgentRef) => {
+    const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : null;
+    return t ? <RerunMenu target={t} compact bare className="run-tl-rerun-tile" /> : null;
+  };
 
   return (
     <div className="run-tl-phase" ref={ref}>
@@ -74,7 +79,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
           <>
             <div className="run-tl-tiles">
               {wave.agents.map((a: PhaseAgentRef) => (
-                <AgentTile key={a.agentRunId} agent={a} selected={a.agentRunId === selectedAgentRunId} open={a.agentRunId === selectedAgentRunId} onOpen={() => toggleAgent(a.agentRunId)} />
+                <AgentTile key={a.agentRunId} agent={a} selected={a.agentRunId === selectedAgentRunId} open={a.agentRunId === selectedAgentRunId} onOpen={() => toggleAgent(a.agentRunId)} rerun={tileRerun(a)} />
               ))}
             </div>
 
