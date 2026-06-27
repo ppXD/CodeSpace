@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
 
 import { fanBranches, fanBreakdown } from "./mapBranches";
+import { RerunControl } from "./RerunControl";
 
 /** A node status → the fan-out tile's render state: running folds Suspended, done folds Skipped, queued is Pending. */
 function tileStateOf(status: NodeStatus): "running" | "done" | "failed" | "queued" {
@@ -67,6 +68,7 @@ export function MapFanout({ rows, renderBranch, inline }: { rows: WorkflowRunNod
           <div className="wf-rf-fanout-term-h">
             <span className="wf-rf-fanout-term-ix">{cur.badge}</span>
             <span className="wf-rf-fanout-term-st" data-status={cur.row.status.toLowerCase()}>{cur.row.status}</span>
+            <RerunControl branches={branches} focused={cur} />
           </div>
           {renderBranch(cur.row)}
         </div>

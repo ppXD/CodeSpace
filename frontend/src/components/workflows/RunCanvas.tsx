@@ -9,6 +9,7 @@ import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 import { definitionToRfNodes } from "./definitionToRfNodes";
 import { runEdgeFlow } from "./runCanvasFlow";
 import { collapsedMapNode, runFanoutCollapse } from "./runFanoutCollapse";
+import { RunActionsContext } from "./runActionsContext";
 import { RunOpenContext } from "./runOpenContext";
 import { summarizeRunProgress } from "./runProgress";
 import { CATCH_HANDLE } from "./workflowContainers";
@@ -23,6 +24,8 @@ interface RunCanvasProps {
   /** The run's overall status — once terminal, a node still reading Running/Suspended is stale, so edges stop flowing. */
   runStatus: WorkflowRunStatus;
   manifestByType: Map<string, NodeManifestDto>;
+  /** The run's id — threaded to nodes via RunActionsContext so the fan-out card's Rerun control can fork from it. */
+  runId?: string;
   /** Open another run full-view (a sub-workflow node's child run). Provided to nodes via RunOpenContext. */
   onOpenRun?: (runId: string) => void;
 }
@@ -35,12 +38,15 @@ interface RunCanvasProps {
  * The run→node mapping is intentionally a thin, separate layer (aggregateStatus / statusByNodeId) so it
  * can be lifted later for the generic task-run view, where any run resolves to the same node-status shape.
  */
-export function RunCanvas({ definition, runNodes, runStatus, manifestByType, onOpenRun }: RunCanvasProps) {
+export function RunCanvas({ definition, runNodes, runStatus, manifestByType, runId, onOpenRun }: RunCanvasProps) {
+  const actions = runId ? { runId, isTerminal: !isRunActive(runStatus) } : null;
   return (
     <ReactFlowProvider>
-      <RunOpenContext.Provider value={onOpenRun ?? null}>
-        <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
-      </RunOpenContext.Provider>
+      <RunActionsContext.Provider value={actions}>
+        <RunOpenContext.Provider value={onOpenRun ?? null}>
+          <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
+        </RunOpenContext.Provider>
+      </RunActionsContext.Provider>
     </ReactFlowProvider>
   );
 }

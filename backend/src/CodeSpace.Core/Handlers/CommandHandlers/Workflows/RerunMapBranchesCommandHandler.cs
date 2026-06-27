@@ -1,0 +1,23 @@
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Messages.Commands.Workflows;
+using MediatR;
+
+namespace CodeSpace.Core.Handlers.CommandHandlers.Workflows;
+
+public sealed class RerunMapBranchesCommandHandler : IRequestHandler<RerunMapBranchesCommand, Guid>
+{
+    private readonly IWorkflowService _service;
+    private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
+
+    public RerunMapBranchesCommandHandler(IWorkflowService service, ICurrentTeam currentTeam, ICurrentUser currentUser)
+    {
+        _service = service;
+        _currentTeam = currentTeam;
+        _currentUser = currentUser;
+    }
+
+    public async Task<Guid> Handle(RerunMapBranchesCommand request, CancellationToken cancellationToken) =>
+        await _service.RerunMapBranchesAsync(request.OriginalRunId, request.MapNodeId, request.BranchIndices.ToHashSet(), _currentTeam.Id!.Value, _currentUser.Id!.Value, request.OperationId, cancellationToken).ConfigureAwait(false);
+}

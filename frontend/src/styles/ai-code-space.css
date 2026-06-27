@@ -2927,6 +2927,21 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-term-st[data-status="failure"] { color: #9E3535; }
 .acs-root .wf-rf-fanout-term-st[data-status="success"] { color: #1F6B3F; }
 
+/* Rerun control on a fan-out card's focused item — a compact split button (primary + caret) right-aligned on the
+   #i status row, with an in-card dropdown for the secondary actions. Warm-accent, sized to the card's 10–11px scale. */
+.acs-root .wf-rf-rerun { position: relative; margin-left: auto; }
+.acs-root .wf-rf-rerun-split { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel); }
+.acs-root .wf-rf-rerun-primary,
+.acs-root .wf-rf-rerun-caret { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--accent); background: transparent; border: 0; cursor: pointer; padding: 3px 8px; line-height: 1.4; }
+.acs-root .wf-rf-rerun-caret { padding: 3px 5px; border-left: 1px solid var(--line); }
+.acs-root .wf-rf-rerun-primary:hover, .acs-root .wf-rf-rerun-caret:hover { background: var(--accent-soft); }
+.acs-root .wf-rf-rerun-primary[disabled], .acs-root .wf-rf-rerun-caret[disabled] { opacity: .55; cursor: default; }
+.acs-root .wf-rf-rerun-primary[disabled]:hover, .acs-root .wf-rf-rerun-caret[disabled]:hover { background: transparent; }
+.acs-root .wf-rf-rerun-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 6; min-width: 172px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: 0 4px 14px rgba(31,30,29,.10); overflow: hidden; }
+.acs-root .wf-rf-rerun-menu button { text-align: left; font-size: 11px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; padding: 7px 10px; white-space: nowrap; }
+.acs-root .wf-rf-rerun-menu button:hover { background: var(--accent-soft); color: var(--ink); }
+.acs-root .wf-rf-rerun-menu button + button { border-top: 1px solid var(--line); }
+
 /* A flow.map COLLAPSED to a single fan-out card node (run view): a ~340px auto-HEIGHT card (overrides the
    row-flex .wf-rf-node) whose body is the inline MapFanout (summary + dot strip + terminal). */
 .acs-root .wf-rf-fanout-node { flex-direction: column; align-items: stretch; gap: 0; min-width: 0; max-width: none; width: 340px; }

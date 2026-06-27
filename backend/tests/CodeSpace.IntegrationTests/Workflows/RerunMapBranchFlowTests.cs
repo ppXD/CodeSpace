@@ -148,6 +148,30 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public async Task Rerun_map_branches_command_reruns_the_set_in_one_fork()
+    {
+        // The "Rerun all failed items" wire: the set command (RerunMapBranchesCommand) dispatched through the full
+        // mediator pipeline forks ONE run reruning {0,2}; the other branches are reused. Proves the command + handler
+        // + controller-bound BranchIndices reach the already-tested RerunMapBranchesAsync.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-setcmd-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        var before = await RunCountAsync(teamId);
+
+        var rerunId = await RerunMapBranchesViaCommandAsync(originalRunId, "map", new[] { 0, 2 }, teamId, userId, Guid.NewGuid());
+        await RunEngineAsync(rerunId);
+
+        (await RunCountAsync(teamId)).ShouldBe(before + 1, "the set command forked exactly one run");
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "chosen branch 0 re-ran once");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "sibling 1 was reused");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(2, "chosen branch 2 re-ran once");
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(1, "sibling 3 was reused");
+    }
+
+    [Fact]
     public async Task Rerun_the_full_branch_set_reruns_every_branch()
     {
         // The whole set {0,1,2,3} → every branch re-runs (nothing reused); the map re-aggregates over all-fresh results.
@@ -1466,6 +1490,12 @@ public class RerunMapBranchFlowTests
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IMediator>().Send(new RerunMapBranchCommand { OriginalRunId = originalRunId, MapNodeId = mapNodeId, BranchIndex = branchIndex, OperationId = operationId });
+    }
+
+    private async Task<Guid> RerunMapBranchesViaCommandAsync(Guid originalRunId, string mapNodeId, IReadOnlyList<int> branchIndices, Guid teamId, Guid userId, Guid? operationId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new RerunMapBranchesCommand { OriginalRunId = originalRunId, MapNodeId = mapNodeId, BranchIndices = branchIndices, OperationId = operationId });
     }
 
     private async Task RunEngineAsync(Guid runId)
