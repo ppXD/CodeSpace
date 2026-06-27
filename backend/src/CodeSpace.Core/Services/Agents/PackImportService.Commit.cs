@@ -20,6 +20,10 @@ namespace CodeSpace.Core.Services.Agents;
 /// would abort the transaction). The only thing that can still throw at the save is a genuine concurrent-request
 /// race (another request committed the same source / handle in between): the transaction rolls the whole import
 /// back and the operator retries — nothing half-applies.</para>
+///
+/// <para>The Pack is created/touched ONLY when at least one artifact is imported or updated — an empty selection
+/// short-circuits before the clone, and an all-Skipped/all-Failed selection leaves no phantom library and no
+/// misleading sync timestamp.</para>
 /// </summary>
 public sealed partial class PackImportService
 {
@@ -35,14 +39,15 @@ public sealed partial class PackImportService
         var discovered = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
         var now = DateTimeOffset.UtcNow;
-        var pack = await ResolvePackAsync(url, reference, teamId, actorUserId, now, cancellationToken).ConfigureAwait(false);
+        var (pack, packIsNew) = await ResolvePackTargetAsync(url, reference, teamId, actorUserId, now, cancellationToken).ConfigureAwait(false);
 
         var agentsByPath = IndexByPath(discovered.Agents, a => a.SourcePath);
         var skillsByPath = IndexByPath(discovered.Skills, s => s.SourcePath);
 
         // This pack's already-imported rows (tracked, so an Update flushes), keyed by source-path = the sync identity.
-        var existingAgents = await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
-        var existingSkills = await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
+        // A brand-new pack has none yet, so skip the lookup.
+        var existingAgents = packIsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 
         // The team's active handles, loaded once and EXTENDED in memory as we claim new ones — so an intra-pack
         // duplicate handle is the 2nd..Nth Skipped here, never a transaction-aborting 23505 at the save.
@@ -61,24 +66,24 @@ public sealed partial class PackImportService
                 items.Add(new PackArtifactImportResult { SourcePath = path, Kind = null, Outcome = PackImportOutcome.Failed, Reason = "Not found in the pack at this ref — it may have been removed or renamed since the preview." });
         }
 
+        // Only create/touch the Pack when something actually landed — an all-Skipped/all-Failed selection leaves
+        // no phantom library and no misleading sync timestamp.
+        if (!items.Any(i => i.Outcome is PackImportOutcome.Imported or PackImportOutcome.Updated))
+            return new PackImportResult { PackId = packIsNew ? Guid.Empty : pack.Id, Items = items };
+
+        PersistPackSync(pack, packIsNew, reference, actorUserId, now);
+
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return new PackImportResult { PackId = pack.Id, Items = items };
     }
 
-    /// <summary>Find the team's active pack for this source (one per team+url+subpath, per the unique index) and refresh its ref/sync time, or stage a new one. Tracked, not saved — the single import save persists it. The URL flow has no subpath (the whole repo).</summary>
-    private async Task<Pack> ResolvePackAsync(string url, string? reference, Guid teamId, Guid actorUserId, DateTimeOffset now, CancellationToken cancellationToken)
+    /// <summary>Resolve the team's active pack for this source (one per team+url+subpath, per the unique index), or build a NEW unsaved one. Read-only: neither mutates nor adds — the actual write is deferred to <see cref="PersistPackSync"/> so a no-op commit never touches a pack. The URL flow has no subpath (the whole repo).</summary>
+    private async Task<(Pack Pack, bool IsNew)> ResolvePackTargetAsync(string url, string? reference, Guid teamId, Guid actorUserId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var existing = await _db.Pack.SingleOrDefaultAsync(p => p.TeamId == teamId && p.Url == url && p.Subpath == null && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
-        if (existing != null)
-        {
-            existing.Reference = reference;
-            existing.LastSyncedDate = now;
-            existing.LastModifiedDate = now;
-            existing.LastModifiedBy = actorUserId;
-            return existing;
-        }
+        if (existing != null) return (existing, false);
 
         var pack = new Pack
         {
@@ -95,8 +100,22 @@ public sealed partial class PackImportService
             LastModifiedBy = actorUserId,
         };
 
-        _db.Pack.Add(pack);
-        return pack;
+        return (pack, true);
+    }
+
+    /// <summary>Stage the pack write that accompanies a non-empty import: add the new pack, or refresh the existing pack's ref + sync timestamp. Flushed by the single import save alongside the artifact rows.</summary>
+    private void PersistPackSync(Pack pack, bool isNew, string? reference, Guid actorUserId, DateTimeOffset now)
+    {
+        if (isNew)
+        {
+            _db.Pack.Add(pack);
+            return;
+        }
+
+        pack.Reference = reference;
+        pack.LastSyncedDate = now;
+        pack.LastModifiedDate = now;
+        pack.LastModifiedBy = actorUserId;
     }
 
     private PackArtifactImportResult UpsertAgent(Pack pack, ParsedAgentDefinition parsed, IReadOnlyDictionary<string, AgentDefinition> existingByPath, HashSet<string> claimedSlugs, Guid teamId, Guid actorUserId, DateTimeOffset now)
@@ -218,6 +237,8 @@ public sealed partial class PackImportService
         foreach (var row in rows) map[path(row)] = row;   // one active row per (pack, source) — the unique index guarantees it
         return map;
     }
+
+    private static Dictionary<string, T> EmptyByPath<T>() => new(StringComparer.Ordinal);
 
     private static Dictionary<string, T> IndexByPath<T>(IEnumerable<T> items, Func<T, string> path)
     {

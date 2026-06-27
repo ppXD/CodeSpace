@@ -181,6 +181,36 @@ public class PackCommitFlowTests
         }
     }
 
+    [Fact]
+    public async Task An_intra_pack_duplicate_handle_skips_the_second_in_one_commit()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        try
+        {
+            // Two files in ONE commit derive the same handle. The fix decides this in memory (claimedSlugs), so one
+            // is Imported and the other Skipped — NOT two INSERTs that 23505 and abort the whole transaction.
+            var result = await CommitViaMediatorAsync(src, new[] { "agents/dup-a.md", "agents/dup-b.md" }, teamId, userId);
+
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(1);
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Skipped).ShouldBe(1);
+
+            // Atomic + correct: the committed transaction left exactly one active agent for the shared handle.
+            await AssertStateAsync(async db =>
+                (await db.AgentDefinition.CountAsync(a => a.TeamId == teamId && a.Slug == "duplicate-agent" && a.DeletedDate == null)).ShouldBe(1));
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static PackImportOutcome Outcome(PackImportResult result, string sourcePath) =>
         result.Items.Single(i => i.SourcePath == sourcePath).Outcome;
 
@@ -220,6 +250,8 @@ public class PackCommitFlowTests
         WriteFile(src, "agents/code-reviewer.md", "---\nname: code-reviewer\ndescription: Reviews PRs.\n---\nYou review.");
         WriteFile(src, "skills/tdd/SKILL.md", "---\nname: tdd\ndescription: Use when implementing.\n---\n# TDD\nWrite the failing test first.");
         WriteFile(src, "skills/systematic-debugging/SKILL.md", "---\nname: systematic-debugging\ndescription: Use when stuck.\n---\n# Debug");
+        WriteFile(src, "agents/dup-a.md", "---\nname: duplicate-agent\ndescription: First copy.\n---\nA.");   // dup-a + dup-b both derive
+        WriteFile(src, "agents/dup-b.md", "---\nname: Duplicate Agent\ndescription: Second copy.\n---\nB.");  // the slug "duplicate-agent"
         await CommitAllAsync(runners, src, "init");
         return src;
     }
