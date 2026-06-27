@@ -1224,22 +1224,34 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // run, and the ONLY team source for a snapshot run (which has no parent Workflow row).
         if (run.TeamId != teamId) return null;
 
-        var nodes = await _db.WorkflowRunNode.Where(n => n.RunId == runId).OrderBy(n => n.StartedAt).ToListAsync(cancellationToken).ConfigureAwait(false);
+        // LINEAGE-MERGED projection: a rerun fork only re-executes the chosen node/branch; the reused ones live on
+        // earlier attempts. So the detail merges across the WHOLE lineage — for each (node, iteration) it shows the
+        // LATEST attempt that ran it — and a map fan-out then shows EVERY branch (reused + freshly re-run), not just
+        // the one re-run. A single-attempt run is byte-identical (its lineage is itself, the dedup keeps its rows).
+        var rootKey = run.RootRunId ?? run.Id;
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
+            .Select(r => new { r.Id, r.CreatedDate })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var createdByRun = lineage.ToDictionary(x => x.Id, x => x.CreatedDate);
+        var lineageIds = createdByRun.Keys.ToList();
+
+        var allNodes = await _db.WorkflowRunNode.Where(n => lineageIds.Contains(n.RunId)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var nodes = LatestPerCell(allNodes, n => (n.NodeId, n.IterationKey), n => n.RunId, createdByRun).OrderBy(n => n.StartedAt).ToList();
         var normalizedPayload = SafeParseJson(run.RunRequest?.NormalizedPayloadJson);
         var outputs = SafeParseJson(run.OutputsJson);
 
-        // The outstanding wait (if any) — drives the run-detail's resume affordance. Latest
-        // pending wins (there is at most one per node; a run parks on one at a time today).
+        // The outstanding wait (if any) — drives the run-detail's resume affordance. Stays on the REQUESTED run (the
+        // lineage head); only the latest attempt can be parked. Latest pending wins (one per node at a time).
         var pending = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
             .OrderByDescending(w => w.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        // Per-node child-run links: each flow.subworkflow node owns one Subworkflow wait whose
-        // token is the child run id. The row survives resolution (status flips to Resolved), so
-        // the link is available whether the step is still suspended or already finished.
-        var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
-        var agentRunByNode = await LoadAgentRunLinksAsync(runId, cancellationToken).ConfigureAwait(false);
+        // Per-node child-run + agent-run links — merged over the lineage the same latest-wins way, so a reused
+        // branch links to its agent run on the earlier attempt and the re-run one to the latest.
+        var childRunByNode = await LoadSubworkflowChildLinksAsync(lineageIds, createdByRun, cancellationToken).ConfigureAwait(false);
+        var agentRunByNode = await LoadAgentRunLinksAsync(lineageIds, createdByRun, cancellationToken).ConfigureAwait(false);
 
         // Re-inflate any offloaded-value refs in each node's outputs so the run-detail surfaces the REAL values,
         // not the bare {"$artifact_ref":…} pointers the engine writes to the ledger for oversize outputs.
@@ -1361,30 +1373,41 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// child. The Subworkflow wait row is unique per (run, node, iteration) and persists after it
     /// resolves, so the link holds for both suspended and completed steps.
     /// </summary>
-    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadSubworkflowChildLinksAsync(Guid runId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadSubworkflowChildLinksAsync(IReadOnlyCollection<Guid> lineageIds, IReadOnlyDictionary<Guid, DateTimeOffset> createdByRun, CancellationToken cancellationToken)
     {
         var waits = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Subworkflow)
-            .Select(w => new { w.NodeId, w.IterationKey, w.Token })
+            .Where(w => lineageIds.Contains(w.RunId) && w.WaitKind == WorkflowWaitKinds.Subworkflow)
+            .Select(w => new { w.RunId, w.NodeId, w.IterationKey, w.Token })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return waits.ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
+        return LatestPerCell(waits, w => (w.NodeId, w.IterationKey), w => w.RunId, createdByRun).ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
     }
 
     /// <summary>
     /// Maps each <c>agent.code</c> node to the agent run it spawned, keyed by <c>(NodeId, IterationKey)</c> —
     /// from the AgentRun wait row (its token IS the agent-run id), which persists post-resolution so the link
     /// holds whether the step is still suspended or finished. Lets the UI stream that run's live timeline.
+    /// Merged over the lineage (latest attempt per cell wins), so a reused branch links to its earlier agent run.
     /// </summary>
-    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadAgentRunLinksAsync(Guid runId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadAgentRunLinksAsync(IReadOnlyCollection<Guid> lineageIds, IReadOnlyDictionary<Guid, DateTimeOffset> createdByRun, CancellationToken cancellationToken)
     {
         var waits = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun)
-            .Select(w => new { w.NodeId, w.IterationKey, w.Token })
+            .Where(w => lineageIds.Contains(w.RunId) && w.WaitKind == WorkflowWaitKinds.AgentRun)
+            .Select(w => new { w.RunId, w.NodeId, w.IterationKey, w.Token })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return waits.ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
+        return LatestPerCell(waits, w => (w.NodeId, w.IterationKey), w => w.RunId, createdByRun).ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
     }
+
+    /// <summary>
+    /// The lineage merge: per <c>(NodeId, IterationKey)</c> cell, keep the row from the LATEST attempt that ran it
+    /// by the lineage's canonical <c>(CreatedDate, Id)</c> order. The Id tiebreak compares the GUID's lowercase string
+    /// ORDINALLY — the .NET equivalent of Postgres uuid byte order — so a created-date tie resolves to the SAME
+    /// attempt the runs index + attempt ladder call latest (their Id tiebreak runs in uuid order; .NET Guid order
+    /// differs). For a single-attempt run this is a no-op (one row per cell).
+    /// </summary>
+    private static IEnumerable<T> LatestPerCell<T>(IEnumerable<T> rows, Func<T, (string, string)> cell, Func<T, Guid> runId, IReadOnlyDictionary<Guid, DateTimeOffset> createdByRun) =>
+        rows.GroupBy(cell).Select(g => g.OrderByDescending(x => createdByRun[runId(x)]).ThenByDescending(x => runId(x).ToString(), StringComparer.Ordinal).First());
 
     private static WorkflowRunNodeSummary MapRunNode(
         WorkflowRunNode n,
