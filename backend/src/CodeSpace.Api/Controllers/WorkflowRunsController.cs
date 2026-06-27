@@ -105,6 +105,14 @@ public class WorkflowRunsController : ControllerBase
         return Ok(new { runId = newRunId });
     }
 
+    /// <summary>Re-run a SET of a top-level flow.map's branches (the UI's "Rerun all failed items") in ONE fork. Returns <c>{ runId }</c>.</summary>
+    [HttpPost("{runId:guid}/rerun-map-branches")]
+    public async Task<IActionResult> RerunMapBranches([FromRoute] Guid runId, [FromBody] RerunMapBranchesCommand command, CancellationToken cancellationToken)
+    {
+        var newRunId = await _mediator.Send(command with { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { runId = newRunId });
+    }
+
     /// <summary>Resolve a pending approval on a Suspended run (approve / reject + optional comment) and resume it. Returns <c>{ resumed }</c>.</summary>
     [HttpPost("{runId:guid}/resume")]
     public async Task<IActionResult> Resume([FromRoute] Guid runId, [FromBody] ResumeRunCommand command, CancellationToken cancellationToken)

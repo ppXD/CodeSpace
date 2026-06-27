@@ -168,7 +168,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
 
       {!nested && view === "canvas" ? (
         r.definition
-          ? <RunCanvas definition={r.definition} runNodes={r.nodes} runStatus={r.status} manifestByType={manifestByType} onOpenRun={onOpenRun} />
+          ? <RunCanvas definition={r.definition} runNodes={r.nodes} runStatus={r.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} />
           : <div className="wf-run-canvas wf-run-canvas-loading">This run's graph snapshot isn't available.</div>
       ) : !nested && view === "changes" ? (
         <RunTabComingSoon title="Changes"

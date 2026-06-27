@@ -276,6 +276,36 @@ export function useReplayRun() {
 }
 
 /**
+ * Re-run ONE fanned-out item of a top-level flow.map — forks a fresh run that reuses the sibling items. Returns
+ * the new run id (the caller navigates to it). The `operationId` makes a double-submit idempotent; a concurrent
+ * rerun of the same item is refused 409 by the active-rerun lease.
+ */
+export function useRerunMapBranch(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { mapNodeId: string; branchIndex: number; operationId: string }) => workflowsApi.rerunMapBranch(runId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["team-runs"] });
+    },
+  });
+}
+
+/** Re-run a SET of a top-level flow.map's items ("Rerun all failed items") in ONE fork. Same contract as useRerunMapBranch. */
+export function useRerunMapBranches(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { mapNodeId: string; branchIndices: number[]; operationId: string }) => workflowsApi.rerunMapBranches(runId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["team-runs"] });
+    },
+  });
+}
+
+/**
  * Cancel (hard-stop) a still-live run — the operator action. Invalidates the run's views so the terminal
  * Cancelled state shows at once (the 2s status poll would also catch it). The backend POST /cancel is idempotent.
  */

@@ -600,6 +600,24 @@ export const workflowsApi = {
     method: "POST",
   }),
 
+  /**
+   * Re-run ONE branch (one fanned-out item) of a top-level flow.map. Forks a run that reuses the sibling items and
+   * re-runs this one + the map's downstream. `operationId` is a client-minted idempotency token (one per click →
+   * a double-submit / retry returns the SAME fork). Returns the new run id.
+   */
+  rerunMapBranch: (runId: string, body: { mapNodeId: string; branchIndex: number; operationId: string }) =>
+    fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/rerun-map-branch`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** Re-run a SET of a top-level flow.map's branches ("Rerun all failed items") in ONE fork. Same idempotency token contract. */
+  rerunMapBranches: (runId: string, body: { mapNodeId: string; branchIndices: number[]; operationId: string }) =>
+    fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/rerun-map-branches`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   /** Resolve a pending approval on a Suspended run + resume it. Returns whether it resumed. */
   resumeRun: (runId: string, body: { approved: boolean; comment?: string }) =>
     fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/resume`, {

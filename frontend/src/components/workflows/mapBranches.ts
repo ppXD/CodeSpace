@@ -22,7 +22,7 @@ import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
  */
 
 /** The container typeKey that owns a map fan-out (mirrors backend FlowMapNode.TypeKey). */
-const MAP_CONTAINER_KIND = "flow.map";
+export const MAP_CONTAINER_KIND = "flow.map";
 
 /** True for a row that belongs to a flow.map element-branch (vs a loop / try / top-level row). */
 function isMapBranchNode(node: WorkflowRunNodeSummary): boolean {
