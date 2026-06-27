@@ -93,6 +93,20 @@ export interface PackImportResult {
   items: PackArtifactImportResult[];
 }
 
+/**
+ * Result of re-pulling a pack from its saved source (mirrors backend PackSyncResult). Already-imported
+ * artifacts are refreshed in place — `upToDate` were unchanged, `updated` had their content re-applied;
+ * `newArtifacts` are the discovered-but-not-yet-imported artifacts, surfaced as a preview to select + add
+ * (never auto-imported).
+ */
+export interface PackSyncResult {
+  packId: string;
+  reference: string | null;
+  upToDate: number;
+  updated: number;
+  newArtifacts: PackPreview;
+}
+
 // ─── API client ─────────────────────────────────────────────────────────────────
 
 export const packsApi = {
@@ -109,4 +123,8 @@ export const packsApi = {
   /** Commit the selected source-paths from a previewed URL pack. */
   importFromUrl: (url: string, reference: string, sourcePaths: string[]) =>
     fetchJson<PackImportResult>("/api/agents/import-url", { method: "POST", body: JSON.stringify({ url, reference: reference.trim() || null, sourcePaths }) }),
+
+  /** Re-pull a pack from its saved source — refresh its imported artifacts, return what changed + the new ones. */
+  sync: (packId: string) =>
+    fetchJson<PackSyncResult>(`/api/packs/${packId}/sync`, { method: "POST" }),
 };

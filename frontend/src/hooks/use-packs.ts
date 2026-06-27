@@ -48,3 +48,20 @@ export function useImportPack() {
     },
   });
 }
+
+/**
+ * Re-pull one pack from its saved source. A sync refreshes the freshness (ref / sha / synced-at) and may
+ * have re-applied changed content, so invalidate the rail + every pack detail + the agents library; the
+ * caller shows the returned counts + new-artifact preview.
+ */
+export function useSyncPack() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (packId: string) => packsApi.sync(packId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["packs"] });
+      queryClient.invalidateQueries({ queryKey: ["pack"] });
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+  });
+}

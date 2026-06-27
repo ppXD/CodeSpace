@@ -1,12 +1,13 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { PackArtifactSummary, PackSummary } from "@/api/packs";
+import type { PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
-import { usePack, usePacks } from "@/hooks/use-packs";
+import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
 import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { SyncResultModal } from "./SyncResultModal";
 
 /**
  * Library / store — the team's imported packs as source categories. The left rail lists each pack (a github /
@@ -111,9 +112,11 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
   );
 }
 
-/** The detail pane — the selected pack's source + freshness header, then its agent + skill sections. */
+/** The detail pane — the selected pack's source + freshness header (with Sync), then its agent + skill sections. */
 function PackDetailPane({ packId }: { packId: string }) {
   const detail = usePack(packId);
+  const sync = useSyncPack();
+  const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult } | null>(null);
 
   if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
 
@@ -133,6 +136,14 @@ function PackDetailPane({ packId }: { packId: string }) {
   const { pack, artifacts } = detail.data;
   const { agents, skills } = splitArtifacts(artifacts);
 
+  // A Custom (locally-authored) pack has no remote source to re-pull, so it can't be synced.
+  const canSync = pack.kind !== "Custom";
+  const syncErr = sync.error ? sync.error.message : null;
+
+  function runSync() {
+    sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result }) });
+  }
+
   return (
     <div className="lib-detail">
       <div className="lib-dhead">
@@ -142,8 +153,22 @@ function PackDetailPane({ packId }: { packId: string }) {
             ? <a className="lib-dhead-src" href={pack.url} target="_blank" rel="noreferrer"><Ic.Link size={12} /> {sourceLabel(pack)}</a>
             : <span className="lib-dhead-src lib-dhead-src-mute">authored in this team</span>}
         </div>
-        <Freshness pack={pack} />
+        <div className="lib-dhead-actions">
+          <Freshness pack={pack} />
+          {canSync && (
+            <button type="button" className="btn" onClick={runSync} disabled={sync.isPending} title="Re-pull this pack from its source">
+              <Ic.Sync size={13} /> {sync.isPending ? "Syncing…" : "Sync"}
+            </button>
+          )}
+        </div>
       </div>
+
+      {syncErr && (
+        <div className="cn-banner cn-banner-err" style={{ marginTop: 12 }}>
+          <div className="cn-banner-h">Couldn't sync this pack</div>
+          <div className="cn-banner-p">{syncErr}</div>
+        </div>
+      )}
 
       {artifacts.length === 0 && (
         <div className="ct-empty"><div className="ct-empty-h">No active artifacts</div><div className="ct-empty-p">Every agent + skill from this pack has been removed.</div></div>
@@ -151,6 +176,8 @@ function PackDetailPane({ packId }: { packId: string }) {
 
       <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} />
       <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} />
+
+      {syncResult && <SyncResultModal pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
     </div>
   );
 }

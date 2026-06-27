@@ -453,6 +453,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .lib-dhead-src { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; color: var(--accent); text-decoration: none; }
 .acs-root .lib-dhead-src:hover { text-decoration: underline; }
 .acs-root .lib-dhead-src-mute { color: var(--muted); }
+.acs-root .lib-dhead-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .acs-root .lib-fresh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .acs-root .lib-fresh .wf-trigger-muted, .acs-root .lib-fresh .wf-trigger-chip { display: inline-flex; align-items: center; gap: 4px; }
 
