@@ -1,12 +1,15 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentBoundSkill } from "@/api/agents";
 import { ApiError } from "@/api/request";
+import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
 import { useAgentDefinitions } from "@/hooks/use-agents";
+
+type EditorState = { mode: "create" } | { mode: "edit"; id: string } | null;
 
 /**
  * Agents library — the team's reusable personas (AgentDefinition). The measurement strip (success / latency /
@@ -21,16 +24,15 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
 });
 
 function AgentsListPage() {
-  const { teamSlug } = Route.useParams();
-  const navigate = useNavigate();
   const agents = useAgentDefinitions();
   const rows = agents.data ?? [];
 
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState<OriginFilter>("all");
+  const [editor, setEditor] = useState<EditorState>(null);
 
-  const openNew = () => navigate({ to: "/teams/$teamSlug/agents/new", params: { teamSlug } });
-  const openAgent = (id: string) => navigate({ to: "/teams/$teamSlug/agents/$agentId", params: { teamSlug, agentId: id } });
+  const openNew = () => setEditor({ mode: "create" });
+  const openAgent = (id: string) => setEditor({ mode: "edit", id });
 
   const importedCount = rows.filter((a) => a.origin === "Imported").length;
   const authoredCount = rows.length - importedCount;
@@ -155,6 +157,14 @@ function AgentsListPage() {
           </>
         )}
       </div>
+
+      {editor && (
+        <AgentEditorModal
+          mode={editor.mode}
+          agentId={editor.mode === "edit" ? editor.id : undefined}
+          onClose={() => setEditor(null)}
+        />
+      )}
     </section>
   );
 }
