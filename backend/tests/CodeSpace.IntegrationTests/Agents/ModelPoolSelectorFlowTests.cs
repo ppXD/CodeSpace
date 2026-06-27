@@ -252,6 +252,57 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task An_unpinned_pick_prefers_the_higher_capability_tier_over_model_id_order()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelAsync(credId, "aaa-basic", tier: ModelCapabilityTier.Basic);          // sorts FIRST alphabetically
+        await AddModelAsync(credId, "zzz-frontier", tier: ModelCapabilityTier.Frontier);    // sorts LAST, but the strongest
+
+        // The precedence ladder is IsDefault > tier > alphabetical — so "auto = the strongest available", not the
+        // alphabetical-first model.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("zzz-frontier", "auto prefers the higher capability tier over model-id order");
+    }
+
+    [Fact]
+    public async Task An_untiered_pool_breaks_the_model_id_tie_by_ordinal_locale_independently()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelAsync(credId, "GPT-4o");        // both un-tiered (tier=null); ids differ only by case
+        await AddModelAsync(credId, "gpt-4o-mini");
+
+        // The in-memory tie-break is StringComparer.Ordinal, NOT the DB collation — so 'GPT-4o' ('G'=0x47) sorts before
+        // 'gpt-4o-mini' ('g'=0x67) deterministically, the SAME in CI and locally (the old DB-collation order could flip
+        // by locale). This pins the no-tier path explicitly.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("GPT-4o", "an un-tiered pool's tie-break is locale-independent Ordinal order");
+    }
+
+    [Fact]
+    public async Task An_operator_default_still_outranks_a_higher_tier()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelAsync(credId, "frontier-model", tier: ModelCapabilityTier.Frontier);
+        await AddModelAsync(credId, "starred-basic", tier: ModelCapabilityTier.Basic, isDefault: true);   // the operator's pick
+
+        // IsDefault wins FIRST — the operator's deliberate choice outranks the inferred tier (the human pin is the top of the ladder).
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("starred-basic", "the operator default outranks a higher tier — IsDefault is the top of the precedence ladder");
+    }
+
+    [Fact]
+    public async Task SelectBrainRowId_prefers_the_higher_tier_then_falls_back_to_model_id()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        await AddModelReturningIdAsync(cred, "aaa-basic", tier: ModelCapabilityTier.Basic);                  // sorts first
+        var frontierRow = await AddModelReturningIdAsync(cred, "zzz-frontier", tier: ModelCapabilityTier.Frontier);
+
+        // The auto brain is the strongest eligible model, not the alphabetical-first one.
+        (await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI")).ShouldBe(frontierRow, "the supervisor brain auto-pick prefers the higher capability tier");
+    }
+
+    [Fact]
     public async Task SelectBrainRowId_picks_a_Custom_provider_row_when_Custom_is_eligible()
     {
         // Custom endpoints to the supervisor: once "Custom" is a registered structured provider, a Custom-tagged pool
@@ -283,12 +334,12 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false)
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, IsDefault = isDefault });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, IsDefault = isDefault, CapabilityTier = tier });
         await db.SaveChangesAsync();
         return id;
     }
@@ -299,14 +350,14 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, allowed, pinned, CancellationToken.None);
     }
 
-    private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true, bool isDefault = false)
+    private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true, bool isDefault = false, ModelCapabilityTier? tier = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.ModelCredentialModel.Add(new ModelCredentialModel
         {
             Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual,
-            Enabled = enabled, IsDefault = isDefault,
+            Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier,
         });
         await db.SaveChangesAsync();
     }
