@@ -380,6 +380,34 @@ public class ModelPoolSelectorFlowTests
         (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(eligibleRow, "the anti-strand fallback stays within the eligible set — never bakes a provider-ineligible brain");
     }
 
+    // ─── Effective tier (probed ?? brain): the opaque-id probe lifts a capable opaque model off Unknown in the ordering ───
+
+    [Fact]
+    public async Task The_auto_pick_orders_by_the_effective_probed_tier_over_a_brain_unknown()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        // An opaque id the brain left Unknown but the probe lifted to Strong — sorts LATER alphabetically, so the tier is
+        // the deciding factor (effective Strong outranks effective Unknown).
+        var probedStrong = await AddModelReturningIdAsync(cred, "zzz-opaque", tier: ModelCapabilityTier.Unknown, probedTier: ModelCapabilityTier.Strong);
+        await AddModelReturningIdAsync(cred, "aaa-opaque", tier: ModelCapabilityTier.Unknown);   // effective Unknown (un-probed)
+
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("zzz-opaque", "the probed-Strong opaque model outranks an alphabetically-earlier effective-Unknown one");
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(probedStrong, "the brain auto-pick ranks by the effective tier too");
+    }
+
+    [Fact]
+    public async Task The_probed_tier_never_outranks_a_higher_brain_tier()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        var brainFrontier = await AddModelReturningIdAsync(cred, "zzz-known", tier: ModelCapabilityTier.Frontier);   // brain Frontier
+        await AddModelReturningIdAsync(cred, "aaa-opaque", tier: ModelCapabilityTier.Unknown, probedTier: ModelCapabilityTier.Strong);   // probed Strong
+
+        // Effective tier = probed ?? brain: a known Frontier (no probe) stays Frontier and outranks a probed Strong.
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(brainFrontier, "a brain Frontier still beats a probed Strong — the probe caps at Strong and never overwrites a higher brain verdict");
+    }
+
     [Fact]
     public async Task Never_probed_rows_are_preferred_so_an_unprobed_pool_is_byte_identical()
     {
@@ -482,12 +510,12 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().ResolvePinnedBrainRowIdAsync(teamId, rowId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true, bool? available = null)
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true, bool? available = null, ModelCapabilityTier? probedTier = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier, Available = available });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier, Available = available, ProbedCapabilityTier = probedTier });
         await db.SaveChangesAsync();
         return id;
     }
