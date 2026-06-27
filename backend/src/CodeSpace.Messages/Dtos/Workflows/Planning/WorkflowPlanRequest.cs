@@ -38,4 +38,11 @@ public sealed record WorkflowPlanRequest
 
     /// <summary>The round cap + per-round parallelism for the coordinated projection. Only consumed when <see cref="Coordinated"/> is <c>true</c>; defaults apply when absent.</summary>
     public CoordinationOptions? Coordination { get; init; }
+
+    /// <summary>
+    /// The operator-pinned BRAIN model a <c>IWorkflowPlanner</c> reasons on — a <c>ModelCredentialModel</c> ROW id. When
+    /// set, the planner resolves THIS exact model (failing clearly if it is not a structured-eligible team row); when
+    /// <c>null</c>, it auto-resolves the first structured-capable pool model (byte-identical to the prior behaviour).
+    /// </summary>
+    public Guid? BrainModelId { get; init; }
 }

@@ -33,13 +33,20 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
     {
-        // Resolve a structured client + a team pool model that MATCH — iterate the registered structured providers so a
-        // team whose pool is ALL one provider (e.g. all Custom-gateway models) plans on THAT provider's client, not a
-        // provider-blind first pick that would find no model.
-        if (await InProcessStructuredModel.ResolveAsync(_clientRegistry, _modelSelector, request.TeamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
-            throw new InvalidOperationException("No structured-output LLM provider has a credentialed, enabled model in the team's pool. Add a model whose provider a registered structured client serves (Anthropic / OpenAI / a Custom OpenAI-compatible gateway).");
+        // Resolve the brain: the operator's pinned model BY ROW ID when set (the same path the supervisor decider uses —
+        // selected = verbatim, fail clearly if it isn't a structured-eligible team row); else auto-resolve a structured
+        // client + a team pool model that MATCH — iterating the registered structured providers so a team whose pool is
+        // ALL one provider (e.g. all Custom-gateway models) plans on THAT provider's client, not a provider-blind pick.
+        var resolved = request.BrainModelId is { } brainModelId
+            ? await InProcessStructuredModel.ResolveByRowIdAsync(_clientRegistry, _modelSelector, request.TeamId, brainModelId, cancellationToken).ConfigureAwait(false)
+            : await InProcessStructuredModel.ResolveAsync(_clientRegistry, _modelSelector, request.TeamId, cancellationToken).ConfigureAwait(false);
 
-        var (structured, pick) = resolved;
+        if (resolved is not { } pickedBrain)
+            throw new InvalidOperationException(request.BrainModelId is null
+                ? "No structured-output LLM provider has a credentialed, enabled model in the team's pool. Add a model whose provider a registered structured client serves (Anthropic / OpenAI / a Custom OpenAI-compatible gateway)."
+                : "The pinned brain model is not an enabled, structured-eligible model in the team's pool (missing / disabled / revoked / cross-team, or no registered structured client serves its provider).");
+
+        var (structured, pick) = pickedBrain;
 
         // P2 — render the capability catalog (harnesses + drivable providers, the team's whole credentialed pool) so the
         // planner allocates a provider-compatible harness + model PER subtask informed, not blind. The run-time
