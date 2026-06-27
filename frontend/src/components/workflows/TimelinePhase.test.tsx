@@ -51,18 +51,20 @@ describe("TimelinePhase", () => {
     expect(screen.getByText("2 agents · 1 failed")).toBeInTheDocument();
   });
 
-  it("a failed single-agent / node phase carries a 'Rerun from here' on its own bottom row below the box", () => {
+  it("a failed single-agent / node phase carries a 'Rerun from here' INSIDE the box, on its own row below the dots", () => {
     const { container } = render(<TimelinePhase wave={wave({ kind: "node", agents: [a("a1", "Failed", 1000)] })} />);
 
-    const rerun = container.querySelector<HTMLElement>('.run-tl-phase > [data-testid="rerun"]');
-    expect(rerun).not.toBeNull();                            // the box's bottom-row rerun (sibling after the box button)
+    const rerun = container.querySelector<HTMLElement>('.run-tl-box .run-tl-rerun-row [data-testid="rerun"]');
+    expect(rerun).not.toBeNull();                            // the rerun row lives INSIDE the box, after the dots
     expect(rerun!.dataset.cls).toBe("run-tl-rerun");
     expect(rerun!.dataset.kind).toBe("node");                // "Rerun from here", same rule as a map fan-out's bulk row
+    // The box is a role=button div (so it can host the real rerun button) — clicking the box still toggles it.
+    expect(boxEl(container)!.getAttribute("role")).toBe("button");
   });
 
-  it("a clean (all-succeeded) phase shows no bottom-row rerun", () => {
+  it("a clean (all-succeeded) phase shows no in-box rerun", () => {
     const { container } = render(<TimelinePhase wave={wave({ kind: "node", agents: [a("a1", "Succeeded", 1000)] })} />);
-    expect(container.querySelector('.run-tl-phase > [data-testid="rerun"]')).toBeNull();
+    expect(container.querySelector('[data-testid="rerun"]')).toBeNull();
   });
 
   it("each fanned-out map tile gets its own per-item rerun affordance", () => {

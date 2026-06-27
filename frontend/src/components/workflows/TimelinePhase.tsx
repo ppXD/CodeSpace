@@ -59,7 +59,18 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
 
   return (
     <div className="run-tl-phase" ref={ref}>
-      <button type="button" className="run-tl-box" data-open={open || undefined} aria-expanded={open} onClick={() => setUserToggle(!open)}>
+      {/* The box is a role=button DIV (not a native <button>) so the rerun can live INSIDE it as a real child button
+          on its own row below the dots — a native button can't nest a button. Clicking the rerun stops propagation so
+          it never toggles the box. */}
+      <div
+        className="run-tl-box"
+        role="button"
+        tabIndex={0}
+        data-open={open || undefined}
+        aria-expanded={open}
+        onClick={() => setUserToggle(!open)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUserToggle(!open); } }}
+      >
         <span className="run-tl-box-head">
           <span className="run-tl-box-name" title={wave.label}>{wave.label}</span>
           <Ic.ChevronRight className="run-tl-box-caret" size={14} aria-hidden="true" />
@@ -68,9 +79,12 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
         <span className="run-tl-dots" aria-hidden="true">
           {wave.agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
         </span>
-      </button>
-
-      {headerTarget && <RerunMenu target={headerTarget} className="run-tl-rerun" />}
+        {headerTarget && (
+          <div className="run-tl-rerun-row" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} role="presentation">
+            <RerunMenu target={headerTarget} compact className="run-tl-rerun" />
+          </div>
+        )}
+      </div>
 
       {open && (single
         // Single agent → its full terminal directly (skip the tile layer); close collapses the box AND clears the
