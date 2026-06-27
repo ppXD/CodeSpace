@@ -15,10 +15,11 @@ namespace CodeSpace.Core.Services.Agents;
 ///   <item>prompt — persona system prompt PREPENDED to the node goal (the harness has one prompt conduit, the goal);</item>
 ///   <item>model — a non-blank node override wins, else the persona's model, else null (harness default);</item>
 ///   <item>tools — the persona's tools UNIONED with the node's (supplement-never-narrow; null = inherit the harness default);</item>
+///   <item>skills — the persona's bound skills (the <c>AgentSkillBinding</c> join → active skills) frozen onto the task; the harness projects them into its native SKILL.md layout;</item>
 ///   <item>everything else (harness, runner, repo, permissions, timeout) is node-authored and flows through.</item>
 /// </list>
-/// Skills / MCP / autonomy are NOT merged yet — the task envelope + harness don't carry them, so merging
-/// would silently drop them; that lands together with the harness projection in a follow-up.
+/// MCP / autonomy are NOT merged yet — the task envelope + harness don't carry them, so merging would silently
+/// drop them; those land with their own projection in a follow-up.
 /// </summary>
 public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedDependency
 {
@@ -52,7 +53,30 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         var modelCredentialId = ResolveModelCredentialId(task.ModelCredentialId, persona.ModelCredentialId);
 
-        return task with { Goal = goal, Model = model, Tools = tools, ModelCredentialId = modelCredentialId };
+        var skills = await LoadSkillsAsync(id, teamId, cancellationToken).ConfigureAwait(false);
+
+        return task with { Goal = goal, Model = model, Tools = tools, ModelCredentialId = modelCredentialId, Skills = skills };
+    }
+
+    /// <summary>
+    /// Load the persona's bound skills (the <c>AgentSkillBinding</c> join → ACTIVE skills) as the resolved payload
+    /// frozen onto the task, ordered by bind time then slug. The slug tiebreak makes the order DETERMINISTIC: skills
+    /// bound in one <c>SetForAgent</c> call share a timestamp, so without it the persisted task_json's <c>Skills</c>
+    /// order could differ across two dispatches of the same persona. A soft-deleted skill drops out (the join filters
+    /// on <c>DeletedDate == null</c>). Returns null when the persona has no skills, so the task_json stays
+    /// byte-identical to a pre-skills envelope (the field is <c>[JsonIgnore(WhenWritingNull)]</c>).
+    /// </summary>
+    private async Task<IReadOnlyList<AgentSkill>?> LoadSkillsAsync(Guid agentId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var skills = await _db.AgentSkillBinding.AsNoTracking()
+            .Where(b => b.AgentDefinitionId == agentId)
+            .Join(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null),
+                b => b.SkillDefinitionId, s => s.Id, (b, s) => new { b.CreatedDate, s })
+            .OrderBy(x => x.CreatedDate).ThenBy(x => x.s.Slug)
+            .Select(x => new AgentSkill { Slug = x.s.Slug, Description = x.s.Description, Body = x.s.Body })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return skills.Count == 0 ? null : skills;
     }
 
     /// <summary>

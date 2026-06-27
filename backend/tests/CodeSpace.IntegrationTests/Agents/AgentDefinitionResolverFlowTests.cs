@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -180,6 +181,63 @@ public class AgentDefinitionResolverFlowTests
         var task = InlineTask(goal: "Review.", model: null, agentDefinitionId: id) with { ModelCredentialId = nodeCred };
 
         (await ResolveAsync(task, teamId)).ModelCredentialId.ShouldBe(nodeCred, "a node-pinned credential overrides the persona's default");
+    }
+
+    [Fact]
+    public async Task Bound_skills_resolve_onto_the_task_and_drop_a_soft_deleted_one()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null);
+        var s1 = await SeedSkillAsync(teamId, "tdd", "Use when implementing.", "Write the test first.");
+        var s2 = await SeedSkillAsync(teamId, "debugging", "Use when stuck.", "Form a hypothesis.");
+        await BindSkillsAsync(teamId, id, new[] { s1, s2 });
+
+        var resolved = await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId);
+
+        resolved.Skills.ShouldNotBeNull();
+        // No re-sort in the assertion: pin the DETERMINISTIC emitted order. Both were bound in one Set call (same
+        // timestamp), so the slug tiebreak decides → alphabetical. A regression that dropped the tiebreak would flake here.
+        resolved.Skills!.Select(sk => sk.Slug).ShouldBe(new[] { "debugging", "tdd" }, customMessage: "stable order = bind time then slug");
+        resolved.Skills!.Single(sk => sk.Slug == "tdd").Body.ShouldBe("Write the test first.", "the body is carried so the harness can project the SKILL.md");
+
+        // Soft-delete one skill → the join reads active only, so it drops out of the next resolve.
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.SkillDefinition.SingleAsync(x => x.Id == s1)).DeletedDate = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var after = await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId);
+        after.Skills!.Select(sk => sk.Slug).ShouldBe(new[] { "debugging" });
+    }
+
+    [Fact]
+    public async Task A_persona_with_no_bound_skills_leaves_skills_null()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null);
+
+        (await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId)).Skills
+            .ShouldBeNull("no bindings → null skills, so the task_json stays byte-identical to a skill-less run");
+    }
+
+    private async Task<Guid> SeedSkillAsync(Guid teamId, string slug, string description, string body)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        db.SkillDefinition.Add(new SkillDefinition { Id = id, TeamId = teamId, Slug = slug, Name = slug, Description = description, Body = body, Origin = SkillDefinitionOrigin.Authored, CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task BindSkillsAsync(Guid teamId, Guid agentId, IReadOnlyList<Guid> skillIds)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentSkillBindingService>().SetForAgentAsync(teamId, agentId, skillIds, SystemUsers.SeederId, CancellationToken.None);
     }
 
     private static AgentTask InlineTask(string goal, string? model, Guid? agentDefinitionId = null) => new()
