@@ -22,6 +22,10 @@ export interface CredentialedModelOption {
   credentialId: string;
   credentialName: string;
   provider: string;
+  /** The EFFECTIVE capability tier (probed ?? brain), surfaced as a hint so the operator sees how auto ranks it. Null = un-tiered. */
+  tier?: "Unknown" | "Basic" | "Strong" | "Frontier" | null;
+  /** Endpoint reachability — false = a self-hosted gateway auto avoids; the picker shows it as offline. */
+  available?: boolean | null;
 }
 
 /**
@@ -35,7 +39,7 @@ export function useCredentialedModels() {
       const creds = await modelCredentialsApi.list();
       const lists = await Promise.all(creds.map(c =>
         modelCredentialsApi.listModels(c.id)
-          .then(models => models.filter(m => m.enabled).map(m => ({ rowId: m.id, modelId: m.modelId, credentialId: c.id, credentialName: c.displayName, provider: c.provider })))
+          .then(models => models.filter(m => m.enabled).map(m => ({ rowId: m.id, modelId: m.modelId, credentialId: c.id, credentialName: c.displayName, provider: c.provider, tier: m.probedCapabilityTier ?? m.capabilityTier, available: m.available })))
           .catch(() => [] as CredentialedModelOption[]),
       ));
       return lists.flat();

@@ -87,4 +87,10 @@ export interface CredentialedModelSummary {
   enabled: boolean;
   /** The operator-marked default for an "auto" run — at most one per credential, shown as a star. */
   isDefault: boolean;
+  /** Brain-inferred coding-capability tier (advisory ordering hint). "Unknown"/null = un-tiered / opaque id. */
+  capabilityTier?: "Unknown" | "Basic" | "Strong" | "Frontier" | null;
+  /** Objectively-probed tier for an opaque id; OVERRIDES capabilityTier for ordering (effective = probed ?? brain). */
+  probedCapabilityTier?: "Unknown" | "Basic" | "Strong" | "Frontier" | null;
+  /** Endpoint reachability: true = reachable, false = a self-hosted gateway that didn't respond (auto avoids it), null = not probed. */
+  available?: boolean | null;
 }

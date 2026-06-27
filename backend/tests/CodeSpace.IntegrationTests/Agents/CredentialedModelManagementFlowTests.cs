@@ -48,6 +48,31 @@ public class CredentialedModelManagementFlowTests
     }
 
     [Fact]
+    public async Task List_surfaces_the_capability_tier_probed_tier_and_availability()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var credId = await AddCredentialAsync(userId, teamId);
+        var rowId = await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "metis-coder-max" });
+
+        // The tiering / probe / availability producers write these advisory columns; the picker DTO must surface them so
+        // the operator can SEE how auto ranks a model (effective tier = probed ?? brain) + that a gateway is offline.
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var row = await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId);
+            row.CapabilityTier = ModelCapabilityTier.Unknown;        // the brain couldn't recognise the opaque id…
+            row.ProbedCapabilityTier = ModelCapabilityTier.Strong;   // …but the objective probe lifted it to Strong
+            row.Available = false;
+            await db.SaveChangesAsync();
+        }
+
+        var model = (await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId })).ShouldHaveSingleItem();
+        model.CapabilityTier.ShouldBe(ModelCapabilityTier.Unknown);
+        model.ProbedCapabilityTier.ShouldBe(ModelCapabilityTier.Strong, "the picker surfaces the probed tier so the effective (probed ?? brain) tier is visible");
+        model.Available.ShouldBe(false, "the picker surfaces availability so the operator sees an offline self-hosted gateway");
+    }
+
+    [Fact]
     public async Task A_duplicate_model_on_one_credential_is_rejected()
     {
         var (userId, teamId) = await SeedTeamAsync();
