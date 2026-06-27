@@ -125,6 +125,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public bool? EnableMcp { get; init; }
 
+    /// <summary>
+    /// The tool allow-list the run's agents are restricted to (canonical Claude tool names, e.g. <c>"Read"</c>,
+    /// <c>"Grep"</c>, <c>"Bash"</c>). Null / empty ⇒ omitted ⇒ the harness default (all tools) ⇒ byte-identical. A
+    /// CLAUDE-ONLY capability filter (Codex bounds the agent via its sandbox + autonomy, ignoring the list) and ADDITIVE
+    /// against a persona's tools — NOT a write boundary (use the autonomy tier for that). Flows to both the single-agent
+    /// <c>agent.code</c> node's <c>tools</c> and each supervisor-spawned agent's <c>allowedTools</c>.
+    /// </summary>
+    public IReadOnlyList<string>? AllowedTools { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

@@ -42,4 +42,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>Per-run opt-in to the FULL MCP tool-fabric (the side-effecting catalog) for the agent. Null / false → defer to the ambient deployment flag (an ordinary run keeps the read-only catalog unless the deployment forces full) — byte-identical. The gate is OR-only: this can force the full fabric ON, it cannot turn it OFF when the deployment enabled it.</summary>
     public bool? EnableMcp { get; init; }
+
+    /// <summary>The tool allow-list each agent is restricted to (canonical Claude tool names, e.g. Read / Grep / Bash). Null / empty → the harness default (all tools), omitted ⇒ byte-identical. A CLAUDE-ONLY capability filter (Codex restricts via its sandbox, ignoring the list) and ADDITIVE against a persona's tools — never a write boundary (use autonomy for that).</summary>
+    public IReadOnlyList<string>? AllowedTools { get; init; }
 }
