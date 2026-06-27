@@ -57,6 +57,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<AgentRun> AgentRun => Set<AgentRun>();
     public DbSet<AgentRunEvent> AgentRunEvent => Set<AgentRunEvent>();
     public DbSet<AgentDefinition> AgentDefinition => Set<AgentDefinition>();
+    public DbSet<SkillDefinition> SkillDefinition => Set<SkillDefinition>();
+    public DbSet<Pack> Pack => Set<Pack>();
     public DbSet<ModelCredential> ModelCredential => Set<ModelCredential>();
     public DbSet<ModelCredentialModel> ModelCredentialModel => Set<ModelCredentialModel>();
     public DbSet<ToolCallLedger> ToolCallLedger => Set<ToolCallLedger>();
