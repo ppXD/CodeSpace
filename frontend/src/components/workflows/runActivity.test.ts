@@ -105,7 +105,7 @@ describe("waveBreakdown", () => {
 });
 
 describe("mergeActivityStream", () => {
-  const wave = (id: string, startedAt: string | null, agents: string[] = ["a1"]): AgentWave => ({ id, label: id, startedAt, agents: agents.map(agent) });
+  const wave = (id: string, startedAt: string | null, agents: string[] = ["a1"]): AgentWave => ({ id, kind: "phase", label: id, startedAt, agents: agents.map(agent) });
 
   it("interleaves a wave between events by its startedAt, an event sorting before a wave on a tie", () => {
     const stream = mergeActivityStream([
