@@ -1,5 +1,5 @@
 using System.Text.Json;
-using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Tasks;
 
@@ -14,14 +14,12 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders;
 /// the SAME way an authored agent.code node does, regardless of which projection emitted it.
 ///
 /// <para>Optional fields are emitted only when present (an absent key inherits the node's own default), so a bare
-/// profile produces the same minimal config a bare authored node would. <see cref="DefaultHarness"/> matches the
-/// agent.code catalog default (the const owns the wire string, Rule 8, so a rename can't silently drift).</para>
+/// profile produces the same minimal config a bare authored node would. The harness, when the profile names none, is
+/// the shared <see cref="AgentHarnessDefaults.DefaultHarness"/> (Rule 8 — one source of truth across every projection +
+/// the supervisor spawn, operator-overridable, codex-cli floor).</para>
 /// </summary>
 internal static class AgentNodeMapping
 {
-    /// <summary>The harness used when the profile names none — the agent.code catalog default.</summary>
-    public const string DefaultHarness = CodexHarness.HarnessKind;
-
     /// <summary>
     /// The <c>agent.code</c> Config — maps the resolved profile onto the EXACT keys <c>AgentCodeNode</c> reads,
     /// with the supplied <paramref name="goal"/> (a literal for single-agent, a <c>{{item}}</c> binding for a map
@@ -105,9 +103,9 @@ internal static class AgentNodeMapping
     private static string? BaseRefFor(IReadOnlyDictionary<Guid, string>? baseRefs, Guid repositoryId) =>
         baseRefs is not null && baseRefs.TryGetValue(repositoryId, out var br) ? NullIfBlank(br) : null;
 
-    /// <summary>The profile's harness, else the codex-cli default (matches AgentCodeNode's catalog default; mirrors RealSupervisorActionExecutor.HarnessOf).</summary>
+    /// <summary>The profile's harness, else the shared platform default (<see cref="AgentHarnessDefaults.DefaultHarness"/> — operator-overridable, codex-cli floor; the same source the supervisor spawn + planner projector use).</summary>
     private static string Harness(ResolvedAgentProfile? profile) =>
-        !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : DefaultHarness;
+        !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : AgentHarnessDefaults.DefaultHarness;
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 

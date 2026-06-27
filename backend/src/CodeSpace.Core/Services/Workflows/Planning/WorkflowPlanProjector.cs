@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
@@ -36,7 +37,7 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
 
     public WorkflowPlanProjector(IAgentHarnessRegistry harnesses) => _harnesses = harnesses;
 
-    /// <summary>The registered harness kinds — the closed set the planner's authored per-subtask harness is clamped to (a hallucinated or empty kind falls to the codex-cli default), so every baked <c>{{item.harness}}</c> resolves to a kind the registry can resolve.</summary>
+    /// <summary>The registered harness kinds — the closed set the planner's authored per-subtask harness is clamped to (a hallucinated or empty kind falls to the platform default), so every baked <c>{{item.harness}}</c> resolves to a kind the registry can resolve.</summary>
     private IReadOnlyCollection<string> HarnessKinds() => _harnesses.All.Select(h => h.Kind).ToList();
 
     public WorkflowDefinition Project(PlannedWorkflow plan)
@@ -108,7 +109,7 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
     /// </summary>
     private static JsonElement AgentBodyConfig(bool perItemAllocation) => perItemAllocation
         ? JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = "{{item.harness}}", model = "{{item.model}}", autonomyLevel = "Confined", readOnly = true })
-        : JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = CodexHarness.HarnessKind, autonomyLevel = "Confined", readOnly = true });
+        : JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = AgentHarnessDefaults.DefaultHarness, autonomyLevel = "Confined", readOnly = true });
 
     private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
     {
@@ -140,19 +141,21 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
             s.Instruction,
             s.Rationale,
             // P2 — fill the harness so the body's {{item.harness}} ALWAYS resolves to a REGISTERED kind: the planner's
-            // per-subtask choice wins WHEN it names a real harness, else the codex-cli default (a hallucinated or empty
+            // per-subtask choice wins WHEN it names a real harness, else the platform default (a hallucinated or empty
             // kind can't reach the registry and throw). Model stays the planner's loose choice as an empty string when
             // unset, so {{item.model}} resolves to "" → the agent.code node falls to the harness default.
             harness = NormalizeHarness(s.Harness, harnessKinds),
             model = s.Model?.Trim() ?? "",
         }), CamelCase);
 
-    /// <summary>Clamp the planner's authored harness to a REGISTERED kind (case-insensitive, canonical casing) — an empty or hallucinated kind falls to the codex-cli default. This is the throw-safety floor: a kind the registry can't resolve never reaches run time.</summary>
+    /// <summary>Clamp the planner's authored harness to a REGISTERED kind (case-insensitive, canonical casing) — an empty or hallucinated kind falls to the platform default. This is the throw-safety floor: a kind the registry can't resolve never reaches run time, so the fallback is itself clamped (the operator-overridable default when registered, else the codex-cli floor).</summary>
     private static string NormalizeHarness(string? authored, IReadOnlyCollection<string> harnessKinds)
     {
-        if (string.IsNullOrWhiteSpace(authored)) return CodexHarness.HarnessKind;
+        var fallback = harnessKinds.FirstOrDefault(k => string.Equals(k, AgentHarnessDefaults.DefaultHarness, StringComparison.OrdinalIgnoreCase)) ?? CodexHarness.HarnessKind;
 
-        return harnessKinds.FirstOrDefault(k => string.Equals(k, authored.Trim(), StringComparison.OrdinalIgnoreCase)) ?? CodexHarness.HarnessKind;
+        if (string.IsNullOrWhiteSpace(authored)) return fallback;
+
+        return harnessKinds.FirstOrDefault(k => string.Equals(k, authored.Trim(), StringComparison.OrdinalIgnoreCase)) ?? fallback;
     }
 
     private static readonly JsonSerializerOptions CamelCase = new()

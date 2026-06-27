@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Harnesses;
 
 namespace CodeSpace.Core.Services.Agents;
 
@@ -23,6 +24,12 @@ public sealed class AgentHarnessRegistry : IAgentHarnessRegistry, ISingletonDepe
 
         _byKind = list.ToDictionary(h => h.Kind);
         All = list;
+
+        // Fail-fast on a misconfigured operator default-harness override (CODESPACE_DEFAULT_HARNESS): a deliberate global
+        // config typo surfaces at startup, not as a per-run "no harness registered" failure on the unclamped default
+        // paths. (A model-hallucinated per-subtask harness is clamped gracefully by the planner; the operator override is
+        // trusted config, so a bad value is loud.) Unset / registered → a no-op.
+        AgentHarnessDefaults.Validate(list.Select(h => h.Kind).ToList());
     }
 
     public IReadOnlyList<IAgentHarness> All { get; }

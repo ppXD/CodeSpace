@@ -21,6 +21,7 @@ namespace CodeSpace.UnitTests.Agents;
 /// </list>
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("DefaultHarnessEnvMutation")]   // a null-profile build reads the unset default harness — serialize with the env-mutating AgentHarnessDefaultsTests
 public class SupervisorBuildAgentTaskTests
 {
     private const string SubtaskId = "s1";
