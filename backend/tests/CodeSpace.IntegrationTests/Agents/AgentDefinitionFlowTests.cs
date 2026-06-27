@@ -237,7 +237,6 @@ public class AgentDefinitionFlowTests
         row.Slug.ShouldBe("imported-reviewer", "the @-handle is immutable post-create — a rename must not change it");
         row.PackId.ShouldBe(packId, "import provenance must survive a library edit so re-sync still works");
         row.SourcePath.ShouldBe("agents/imported-reviewer.md");
-        row.SkillsJson.ShouldContain("tdd", customMessage: "imported skills must survive an authored prompt edit");
         row.McpServersJson.ShouldContain("github", customMessage: "imported MCP servers must survive an authored edit");
         row.RawFrontmatterJson.ShouldContain("custom_future_key", customMessage: "the verbatim frontmatter blob must survive untouched — it's the lossless-forward-compat source");
     }
@@ -256,7 +255,6 @@ public class AgentDefinitionFlowTests
             Name = "Imported Reviewer",
             SystemPrompt = "imported prompt",
             Model = "claude-sonnet-4-6",
-            SkillsJson = "[{\"slug\":\"tdd\"}]",
             McpServersJson = "[{\"name\":\"github\"}]",
             RawFrontmatterJson = "{\"name\":\"imported-reviewer\",\"custom_future_key\":42}",
             Origin = AgentDefinitionOrigin.Imported,

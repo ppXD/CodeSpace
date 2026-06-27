@@ -4,8 +4,9 @@ namespace CodeSpace.Messages.Agents;
 /// The write contract for IMPORTING a persona — deliberately separate from <c>AgentDefinitionInput</c>
 /// (which is authored-only and must stay that way; three call sites depend on that boundary). Carries the
 /// authorable surface PLUS the import-owned fields a parsed artifact produces: the verbatim frontmatter,
-/// skill/MCP references, and provenance (SourcePath, optional PackId). The service stamps
-/// <c>Origin = Imported</c> — it's never on this input, so a public authoring path can't forge it.
+/// MCP references, and provenance (SourcePath, optional PackId). Skills are bound relationally via
+/// <c>AgentSkillBinding</c>, not carried here. The service stamps <c>Origin = Imported</c> — it's never on
+/// this input, so a public authoring path can't forge it.
 /// </summary>
 public sealed record ImportedAgentDefinitionInput
 {
@@ -17,9 +18,6 @@ public sealed record ImportedAgentDefinitionInput
 
     /// <summary>Tool allow-list — null = harness default, empty = no tools, non-empty = exactly these (same tri-state as the persona entity).</summary>
     public IReadOnlyList<string>? Tools { get; init; }
-
-    /// <summary>Skill references as JSON (default "[]"); jsonb on the entity.</summary>
-    public string SkillsJson { get; init; } = "[]";
 
     /// <summary>MCP server references as JSON (default "[]"); jsonb on the entity.</summary>
     public string McpServersJson { get; init; } = "[]";
