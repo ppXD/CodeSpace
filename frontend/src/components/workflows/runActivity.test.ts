@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
-import { buildWaves, composeActivity, formatDuration, formatUsd, mergeActivityStream, waveBreakdown, type AgentWave } from "./runActivity";
+import { buildWaves, composeActivity, formatDuration, formatUsd, itemRerunTarget, mergeActivityStream, phaseRerunTarget, waveBreakdown, type AgentWave } from "./runActivity";
 
 function agent(id: string): PhaseAgentRef {
   return { agentRunId: id, status: "Running" };
@@ -159,5 +159,34 @@ describe("composeActivity", () => {
   it("treats an absent level as a milestone (forward-tolerance) — never silently folds", () => {
     const items = composeActivity([event({ id: "a", occurredAt: "2026-06-23T10:00:00Z" }), event({ id: "b", occurredAt: "2026-06-23T10:00:01Z" })], []);
     expect(items.map((i) => i.kind)).toEqual(["event", "event"]);
+  });
+});
+
+describe("phaseRerunTarget / itemRerunTarget", () => {
+  const mapAgent = (i: number, status: string): PhaseAgentRef => ({ agentRunId: `a${i}`, status, iterationKey: `map#${i}` });
+  const mapWave = (statuses: string[]): AgentWave => ({ id: "map", kind: "map", label: "Fan out", startedAt: null, agents: statuses.map((s, i) => mapAgent(i, s)) });
+
+  it("a failed map fan-out → a bulk mapItem target (failed indices, no focus)", () => {
+    expect(phaseRerunTarget(mapWave(["Failed", "Succeeded", "TimedOut", "Succeeded"])))
+      .toEqual({ kind: "mapItem", mapNodeId: "map", failedIndices: [0, 2], totalCount: 4 });
+  });
+
+  it("a map fan-out with no failures → no phase target", () => {
+    expect(phaseRerunTarget(mapWave(["Succeeded", "Succeeded"]))).toBeNull();
+  });
+
+  it("a failed agent step → a from-node target", () => {
+    const w: AgentWave = { id: "build", kind: "agent", label: "build", startedAt: null, agents: [{ agentRunId: "a", status: "Failed" }] };
+    expect(phaseRerunTarget(w)).toEqual({ kind: "node", nodeId: "build" });
+  });
+
+  it("a supervisor / authored phase → no rerun target (model-owned)", () => {
+    const w: AgentWave = { id: "p", kind: "phase", label: "Implement", startedAt: null, agents: [{ agentRunId: "a", status: "Failed" }] };
+    expect(phaseRerunTarget(w)).toBeNull();
+  });
+
+  it("a focused map agent → a per-item mapItem target with its index", () => {
+    const w = mapWave(["Failed", "Succeeded", "Failed"]);
+    expect(itemRerunTarget(w.agents[2], w)).toEqual({ kind: "mapItem", mapNodeId: "map", focusedIndex: 2, failedIndices: [0, 2], totalCount: 3 });
   });
 });
