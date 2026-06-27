@@ -550,13 +550,17 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // duplicate submit reuses the same key → the starter raises 23505 → returns Guid.Empty (the dedup signal).
         var idempotencyKey = operationId?.ToString();
 
+        // The lineage ROOT the fork inherits — the original's own root, or the original itself if it IS the root (a
+        // first-time run). Every fork of a fork keeps the SAME root, so the whole chain collapses to one Runs-index entry.
+        var rootRunId = original.RootRunId ?? original.Id;
+
         Guid forkRunId;
         if (original.WorkflowId is null)
             forkRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
                 original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition to fork."),
                 original.DefinitionSnapshotHash ?? string.Empty,
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
-                parentRunId: original.Id, causationRequestId: original.RunRequestId,
+                parentRunId: original.Id, rootRunId: rootRunId, causationRequestId: original.RunRequestId,
                 original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
                 session: inheritedSession, idempotencyKey: idempotencyKey, cancellationToken).ConfigureAwait(false);
         else
@@ -572,6 +576,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 CreatedBy = actorUserId,
                 CausationRequestId = original.RunRequestId,
                 ParentRunId = original.Id,
+                RootRunId = rootRunId,
                 ReleaseHashAtRun = original.ReleaseHashAtRun,
                 Session = inheritedSession,
                 IdempotencyKey = idempotencyKey,
@@ -960,9 +965,26 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// ParentRunId filter: a replay / rerun fork also carries ParentRunId (its lineage to the original), yet is a
     /// top-level run the user launched and expects here. Agent runs are a separate entity, never WorkflowRun rows.
     /// TeamId is on the run directly, so snapshot / task runs (null WorkflowId) are included.
+    ///
+    /// LINEAGE COLLAPSE: a run + every replay/rerun fork of it share ONE lineage root (<c>RootRunId ?? Id</c>); the
+    /// index shows only the LATEST attempt of each lineage, so a rerun supersedes its predecessors in-place rather than
+    /// stacking a second row. Collapse runs over the UNFILTERED base (so "is this the newest attempt?" looks at the
+    /// whole lineage), THEN <see cref="ApplyFilter"/> narrows the surviving representatives — a resolved failure (latest
+    /// attempt succeeded) drops out of a Failed filter, matching the NeedsAttention "resolved by a successful child" rule.
     /// </summary>
     private IQueryable<WorkflowRun> TeamRunsQuery(Guid teamId, RunListFilter filter) =>
-        ApplyFilter(_db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow), filter);
+        ApplyFilter(CollapseToLatestPerLineage(teamId), filter);
+
+    /// <summary>
+    /// The team's top-level runs, one row per lineage — keep a run only when NO other run in the same team shares its
+    /// lineage root with a strictly-greater <c>(CreatedDate, Id)</c> ordinal (the same total order the index pages by).
+    /// A never-rerun run (root = its own Id, no newer sibling) always survives → byte-identical to the pre-collapse list.
+    /// </summary>
+    private IQueryable<WorkflowRun> CollapseToLatestPerLineage(Guid teamId) =>
+        _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow
+            && !_db.WorkflowRun.Any(o => o.TeamId == teamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow
+                && (o.RootRunId ?? o.Id) == (r.RootRunId ?? r.Id)
+                && (o.CreatedDate > r.CreatedDate || (o.CreatedDate == r.CreatedDate && o.Id.CompareTo(r.Id) > 0))));
 
     public async Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken)
     {
@@ -1135,8 +1157,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>
     /// In-SQL projection to the history-row shape — selects only the summary columns (no over-fetch) and LEFT JOINs
     /// the parent workflow for its display name (null for a snapshot / task run). Shared by both run-list queries.
+    /// Instance (not static) so the <c>AttemptCount</c> correlated count can reach <c>_db</c>; <c>RootRunId</c> is the
+    /// lineage key (<c>RootRunId ?? Id</c>) the index collapses on, and the count tallies every run sharing it.
     /// </summary>
-    private static readonly Expression<Func<WorkflowRun, WorkflowRunSummary>> ToSummaryExpr = r => new WorkflowRunSummary
+    private Expression<Func<WorkflowRun, WorkflowRunSummary>> ToSummaryExpr => r => new WorkflowRunSummary
     {
         Id = r.Id,
         WorkflowId = r.WorkflowId,
@@ -1148,6 +1172,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         StartedAt = r.StartedAt,
         CompletedAt = r.CompletedAt,
         CreatedDate = r.CreatedDate,
+        RootRunId = r.RootRunId ?? r.Id,
+        AttemptCount = _db.WorkflowRun.Count(o => o.TeamId == r.TeamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (o.RootRunId ?? o.Id) == (r.RootRunId ?? r.Id)),
     };
 
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)

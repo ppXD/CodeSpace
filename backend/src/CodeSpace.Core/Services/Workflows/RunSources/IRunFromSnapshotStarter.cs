@@ -47,5 +47,5 @@ public interface IRunFromSnapshotStarter
     /// submit reuses the key → the request insert raises 23505 → this returns <c>Guid.Empty</c> (the dedup signal);
     /// null (replay / first submit) carries a NULL key the partial unique index ignores.</para>
     /// </summary>
-    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, SessionAssignment? session, string? idempotencyKey, CancellationToken cancellationToken);
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid rootRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, SessionAssignment? session, string? idempotencyKey, CancellationToken cancellationToken);
 }

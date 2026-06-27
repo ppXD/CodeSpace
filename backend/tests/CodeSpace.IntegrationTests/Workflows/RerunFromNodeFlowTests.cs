@@ -325,6 +325,7 @@ public class RerunFromNodeFlowTests
         var request = await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.Id == rerun.RunRequestId);
 
         rerun.ParentRunId.ShouldBe(originalRunId, "rerun lineage: fork parents the original run");
+        rerun.RootRunId.ShouldBe(originalRunId, "the snapshot-path fork inherits the lineage root (the original, a first-time run) — so they collapse to one Runs-index entry");
         request.SourceType.ShouldBe(WorkflowRunSourceTypes.Rerun, "the fork request is tagged source=rerun");
         request.CausationId.ShouldBe(originalRequestId, "rerun lineage: the request links back to the original's request");
     }

@@ -165,6 +165,10 @@ export interface WorkflowRunSummary {
   startedAt: string | null;
   completedAt: string | null;
   createdDate: string;
+  /** Lineage key (`rootRunId ?? id`) the index collapses on — a row is always the LATEST attempt of its lineage. */
+  rootRunId: string;
+  /** How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip. */
+  attemptCount: number;
 }
 
 /**

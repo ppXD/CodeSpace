@@ -50,6 +50,10 @@ public sealed record RunSourceEnvelope
     // Replay-only optional fields.
     public Guid? CausationRequestId { get; init; }
     public Guid? ParentRunId { get; init; }
+
+    /// <summary>The lineage root for a fork (<c>parent.RootRunId ?? parent.Id</c>); NULL for a first-time run. Written verbatim to <c>WorkflowRun.RootRunId</c>.</summary>
+    public Guid? RootRunId { get; init; }
+
     public string? ReleaseHashAtRun { get; init; }
 
     /// <summary>

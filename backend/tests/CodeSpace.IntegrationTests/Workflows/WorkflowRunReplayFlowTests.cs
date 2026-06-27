@@ -196,6 +196,7 @@ public class WorkflowRunReplayFlowTests
         replay.WorkflowId.ShouldBe(workflowId, "an authored replay RE-PINS the original workflow (unlike a snapshot replay, which stays version-less)");
         replay.WorkflowVersion.ShouldNotBeNull("an authored replay re-pins the original version");
         replay.ParentRunId.ShouldBe(originalRunId, "replay lineage");
+        replay.RootRunId.ShouldBe(originalRunId, "the fork inherits the lineage root — the original itself, as it is a first-time run — so the two collapse to one Runs-index entry");
 
         var request = await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.Id == replay.RunRequestId);
         request.SourceType.ShouldBe(WorkflowRunSourceTypes.Replay);
