@@ -93,6 +93,15 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
             builder.AppendLine(catalog.TrimEnd());
         }
 
+        // IMPROVE: an independent reviewer critiqued a prior draft of this plan — revise to address it (set by the
+        // CriticPlannerDecorator on its one re-plan; absent on a first pass).
+        if (!string.IsNullOrWhiteSpace(request.ReviewerCritique))
+        {
+            builder.AppendLine();
+            builder.AppendLine("An independent reviewer critiqued a PRIOR draft of this plan. Produce an improved plan that addresses this critique:");
+            builder.AppendLine(request.ReviewerCritique);
+        }
+
         return builder.ToString();
     }
 

@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 
 /// <summary>
@@ -45,4 +47,13 @@ public sealed record WorkflowPlanRequest
     /// <c>null</c>, it auto-resolves the first structured-capable pool model (byte-identical to the prior behaviour).
     /// </summary>
     public Guid? BrainModelId { get; init; }
+
+    /// <summary>Whether an INDEPENDENT reviewer model gates / improves the plan (the <c>CriticPlannerDecorator</c>). Default <see cref="ReviewMode.None"/> ⇒ no review (byte-identical).</summary>
+    public ReviewMode Review { get; init; } = ReviewMode.None;
+
+    /// <summary>The operator-pinned REVIEWER model row id for <see cref="Review"/>. Null ⇒ the critic auto-picks the team's strongest structured-eligible model (independent of the producer when the team has &gt; 1 model).</summary>
+    public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>INTERNAL — the reviewer's critique folded back for the IMPROVE re-plan (set by the decorator, never from the wire). When present, the planner revises against it.</summary>
+    public string? ReviewerCritique { get; init; }
 }

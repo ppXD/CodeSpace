@@ -1,6 +1,7 @@
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -45,6 +46,12 @@ public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTask
     /// are both the run's reasoning brain, so they consume the SAME pinnable id.
     /// </summary>
     public Guid? BrainModelId { get; init; }
+
+    /// <summary>Whether an INDEPENDENT reviewer model gates / improves the plan. Default <see cref="ReviewMode.None"/> ⇒ no review (byte-identical).</summary>
+    public ReviewMode Review { get; init; } = ReviewMode.None;
+
+    /// <summary>The operator-pinned REVIEWER model row id for <see cref="Review"/>. Null ⇒ the critic auto-picks the team's strongest structured-eligible model.</summary>
+    public Guid? ReviewerModelId { get; init; }
 }
 
 /// <summary>
