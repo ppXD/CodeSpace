@@ -2436,10 +2436,11 @@ textarea:-webkit-autofill {
 @media (max-width: 560px) { .acs-root .run-tl-tiles { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .acs-root .run-tl-dots > i[data-state="running"] { animation: none; } }
 
-/* Activity placement of the RerunMenu: `run-tl-rerun` = the bulk "Rerun N failed" on a map fan-out's header (soft
-   accent, right-aligned, menu opens leftward); `run-tl-rerun-term` = the per-item / "Rerun from here" INSIDE an open
-   agent terminal's footer (menu opens UPWARD, since the footer sits at the terminal's bottom). */
-.acs-root .run-tl-rerun { width: 320px; max-width: 100%; align-self: flex-start; align-items: flex-start; margin-top: 6px; }
+/* Activity placement of the RerunMenu: `run-tl-rerun` = the phase rerun INSIDE the box, on its own row below the dots
+   (a small soft-accent button); `run-tl-rerun-term` = the per-item / "Rerun from here" INSIDE an open agent terminal's
+   footer (menu opens UPWARD, since the footer sits at the terminal's bottom). */
+.acs-root .run-tl-rerun-row { display: flex; }
+.acs-root .run-tl-rerun { align-items: flex-start; }
 .acs-root .run-tl-rerun .wf-rerun-menu { left: 0; right: auto; }
 .acs-root .run-tl-rerun .wf-rerun-primary, .acs-root .run-tl-rerun .wf-rerun-caret { background: var(--accent-soft); color: var(--accent); }
 .acs-root .run-tl-rerun .wf-rerun-primary:hover, .acs-root .run-tl-rerun .wf-rerun-caret:hover { background: #EBD9CC; }
