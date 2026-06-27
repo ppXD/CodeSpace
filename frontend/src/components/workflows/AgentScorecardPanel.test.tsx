@@ -1,14 +1,15 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { AgentRunScorecard } from "@/api/agents";
+import type { AgentRunScorecard, TeamCostRollup } from "@/api/agents";
 import { AgentScorecardView } from "./AgentScorecardPanel";
 
 /**
  * The scorecard view is the measurement-spine surface — it must render the team's REAL success rate + latency
  * percentiles + per-harness comparison faithfully (the API's job is to compute them; the view's job is to show
  * them without inventing anything). These pin: the headline stats, the per-harness rows, the duration
- * formatting, the deliberate ABSENCE of a cost figure (not aggregated yet), and the empty state.
+ * formatting, the estimated-spend stat — present as $X.XX when a cost rollup IS supplied, an em-dash when
+ * estimatedCostUsd is null, and ABSENT entirely when no rollup is passed (never fabricated) — and the empty state.
  */
 const card: AgentRunScorecard = {
   overall: { harness: "(all)", total: 4, succeeded: 3, successRate: 0.75, p50DurationSeconds: 20, p95DurationSeconds: 95 },
@@ -49,12 +50,29 @@ describe("AgentScorecardView", () => {
     expect(within(table).getByText("2/3")).toBeInTheDocument();
   });
 
-  it("does NOT surface a cost/token figure (the scorer doesn't aggregate it yet — no fabricated number)", () => {
+  it("does NOT surface a cost figure when no cost rollup is supplied (the view never fabricates one)", () => {
     render(<AgentScorecardView card={card} />);
 
     expect(screen.queryByText(/cost/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\$/)).not.toBeInTheDocument();
+  });
+
+  it("renders the estimated spend as a headline stat when a cost rollup IS supplied", () => {
+    const cost: TeamCostRollup = { totalInputTokens: 1000, totalOutputTokens: 500, estimatedCostUsd: 12.4, runCount: 4, unknownCostRuns: 0, windowRunCount: 4, truncated: false };
+
+    render(<AgentScorecardView card={card} cost={cost} />);
+
+    const head = screen.getByText("Est. cost").parentElement!;
+    expect(within(head).getByText("$12.40")).toBeInTheDocument();
+  });
+
+  it("renders an em-dash for cost when nothing in the window could be priced (null, not $0.00)", () => {
+    const cost: TeamCostRollup = { totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: null, runCount: 0, unknownCostRuns: 2, windowRunCount: 2, truncated: false };
+
+    render(<AgentScorecardView card={card} cost={cost} />);
+
+    const head = screen.getByText("Est. cost").parentElement!;
+    expect(within(head).getByText("—")).toBeInTheDocument();
   });
 
   it("shows the empty state when no runs have been scored yet", () => {

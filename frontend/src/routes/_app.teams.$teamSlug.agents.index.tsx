@@ -1,15 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
+import type { AgentBoundSkill } from "@/api/agents";
 import { ApiError } from "@/api/request";
+import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
 import { useAgentDefinitions } from "@/hooks/use-agents";
 
 /**
- * Agents library — the team's reusable personas (AgentDefinition). Same compact header rhythm
- * as the Workflows + Repositories lists. Read-only for now: a persona is a system prompt + model
- * + tools you @-mention from a workflow's agent.code node. Authoring + pack import land as the
- * "New" + "Import" actions in follow-ups; this slice proves the nav + data wiring.
+ * Agents library — the team's reusable personas (AgentDefinition). The measurement strip (success / latency /
+ * spend) sits above a searchable, origin-filtered table of personas; each row shows the persona's composition —
+ * model, the skills it carries (the AgentSkillBinding join), and its tool allow-list — plus whether it was
+ * authored locally or imported from a pack. A persona is harness-AGNOSTIC (it runs on any compatible harness),
+ * so there's deliberately no per-row harness column — the per-harness split lives in the scorecard above.
+ * Read-only: authoring + pack import land as the "New" / "Import" actions in the editor + import slices.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
@@ -19,10 +24,17 @@ function AgentsListPage() {
   const agents = useAgentDefinitions();
   const rows = agents.data ?? [];
 
+  const [query, setQuery] = useState("");
+  const [origin, setOrigin] = useState<OriginFilter>("all");
+
+  const importedCount = rows.filter((a) => a.origin === "Imported").length;
+  const authoredCount = rows.length - importedCount;
+  const visible = filterAgents(rows, query, origin);
+
+  const hasAgents = !agents.isLoading && !agents.error && rows.length > 0;
+
   return (
     <section className="ct">
-      {/* paddingBottom matches the Workflows list — without a tabs strip the title row would
-          otherwise sit flush against the table border below. */}
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
           <span className="cur">Agents</span>
@@ -30,11 +42,17 @@ function AgentsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Agents</h1>
         </div>
+        {hasAgents && (
+          <div className="ct-sub">
+            {rows.length} {rows.length === 1 ? "persona" : "personas"}
+            {importedCount > 0 && ` · ${importedCount} from packs`}
+          </div>
+        )}
       </div>
 
       <div className="ct-body">
-        {/* The measurement spine — the team's agent success rate + latency over its run history, above the
-            persona library. Self-contained (own fetch, team-scoped at the source); renders nothing while
+        {/* The measurement spine — the team's agent success rate + latency + estimated spend over its run history,
+            above the persona library. Self-contained (own fetch, team-scoped at the source); renders nothing while
             loading so the list below isn't pushed around. */}
         <AgentScorecardPanel />
 
@@ -52,49 +70,114 @@ function AgentsListPage() {
         {!agents.isLoading && !agents.error && rows.length === 0 && (
           <div className="ct-empty">
             <div className="ct-empty-h">No agents yet</div>
-            <div className="ct-empty-p">Reusable personas — a system prompt, model, and tools you can <strong>@-mention</strong> from a workflow — will appear here.</div>
+            <div className="ct-empty-p">Reusable personas — a system prompt, model, skills, and tools you can <strong>@-mention</strong> from a workflow — will appear here.</div>
           </div>
         )}
 
-        {!agents.isLoading && !agents.error && rows.length > 0 && (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width: "42%" }}>Agent</th>
-                <th>Model</th>
-                <th>Tools</th>
-                <th>Origin</th>
-                <th>Added</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((a) => (
-                <tr key={a.id}>
-                  <td>
-                    <div className="repo-cell">
-                      <div className="repo-mark" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
-                        <Ic.Bot size={14} />
-                      </div>
-                      <div className="repo-info">
-                        <div className="repo-name">
-                          {a.name}
-                          <span className="wf-trigger-muted" style={{ marginLeft: 8 }}>@{a.slug}</span>
+        {hasAgents && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, margin: "16px 0 6px", flexWrap: "wrap" }}>
+              <div className="ct-search">
+                <Ic.Search size={14} />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search agents…"
+                  aria-label="Search agents"
+                />
+              </div>
+              <div className="ct-tabs">
+                <OriginTab value="all" current={origin} count={rows.length} onSelect={setOrigin}>All</OriginTab>
+                <OriginTab value="Authored" current={origin} count={authoredCount} onSelect={setOrigin}>Authored</OriginTab>
+                <OriginTab value="Imported" current={origin} count={importedCount} onSelect={setOrigin}>Imported</OriginTab>
+              </div>
+            </div>
+
+            {visible.length === 0 ? (
+              <div className="ct-empty">
+                <div className="ct-empty-h">No matching agents</div>
+                <div className="ct-empty-p">No persona matches the current search and filter.</div>
+              </div>
+            ) : (
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th style={{ width: "38%" }}>Agent</th>
+                    <th>Model</th>
+                    <th>Skills</th>
+                    <th>Tools</th>
+                    <th>Origin</th>
+                    <th>Added</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((a) => (
+                    <tr key={a.id}>
+                      <td>
+                        <div className="repo-cell">
+                          <div className="repo-mark" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                            <Ic.Bot size={14} />
+                          </div>
+                          <div className="repo-info">
+                            <div className="repo-name">
+                              {a.name}
+                              <span className="wf-trigger-muted" style={{ marginLeft: 8 }}>@{a.slug}</span>
+                            </div>
+                            {a.description && <div className="repo-path"><span className="repo-path-desc" title={a.description}>{a.description}</span></div>}
+                          </div>
                         </div>
-                        {a.description && <div className="repo-path"><span className="repo-path-desc" title={a.description}>{a.description}</span></div>}
-                      </div>
-                    </div>
-                  </td>
-                  <td>{a.model ? <span className="wf-version">{a.model}</span> : <span className="wf-trigger-muted">default</span>}</td>
-                  <td><ToolsCell tools={a.tools} /></td>
-                  <td><span className="wf-trigger-muted">{a.origin === "Imported" ? "imported" : "authored"}</span></td>
-                  <td>{formatRelative(a.createdDate)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                      </td>
+                      <td>{a.model ? <span className="wf-version">{a.model}</span> : <span className="wf-trigger-muted">default</span>}</td>
+                      <td><SkillsCell skills={a.boundSkills} /></td>
+                      <td><ToolsCell tools={a.tools} /></td>
+                      <td><span className="wf-trigger-muted">{a.origin === "Imported" ? "imported" : "authored"}</span></td>
+                      <td>{formatRelative(a.createdDate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
         )}
       </div>
     </section>
+  );
+}
+
+/** One origin filter toggle — the warm underline-tab look, but a keyboard-operable toggle (role=button + Enter/Space), matching the accessible tab pattern in AgentDetailTabs / SettingsLayout. */
+function OriginTab({ value, current, count, onSelect, children }: { value: OriginFilter; current: OriginFilter; count: number; onSelect: (v: OriginFilter) => void; children: React.ReactNode }) {
+  const active = current === value;
+
+  return (
+    <span
+      className="ct-tab"
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      data-active={active ? "true" : undefined}
+      onClick={() => onSelect(value)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(value); } }}
+    >
+      {children}<span className="ct-tab-c">{count}</span>
+    </span>
+  );
+}
+
+/**
+ * The skills a persona carries (the AgentSkillBinding join), as accent chips by handle. Caps the visible chips
+ * so a heavily-bound persona doesn't blow out the row; the rest fold into a muted "+N". Empty = a muted "none".
+ */
+function SkillsCell({ skills }: { skills: AgentBoundSkill[] }) {
+  if (!skills || skills.length === 0) return <span className="wf-trigger-muted">none</span>;
+
+  const shown = skills.slice(0, 3);
+  const extra = skills.length - shown.length;
+
+  return (
+    <div className="wf-triggers">
+      {shown.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}
+      {extra > 0 && <span className="wf-trigger-muted">+{extra}</span>}
+    </div>
   );
 }
 
@@ -108,7 +191,7 @@ function ToolsCell({ tools }: { tools: string[] | null }) {
 
   return (
     <div className="wf-triggers">
-      {tools.map((t) => <span key={t} className="wf-trigger-chip">{t}</span>)}
+      {tools.map((t) => <span key={t} className="wf-trigger-chip wf-trigger-chip-soft">{t}</span>)}
     </div>
   );
 }

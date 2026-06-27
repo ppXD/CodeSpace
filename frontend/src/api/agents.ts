@@ -5,9 +5,20 @@ import { fetchJson } from "./request";
 export type AgentDefinitionOrigin = "Authored" | "Imported";
 
 /**
+ * Mirrors backend `AgentBoundSkill` — a skill bound to a persona (the Level-1 handle the UI renders as a chip),
+ * read from the AgentSkillBinding join. The relational replacement for the dropped `skills_jsonb` blob.
+ */
+export interface AgentBoundSkill {
+  skillDefinitionId: string;
+  slug: string;
+  name: string;
+}
+
+/**
  * Mirrors backend `AgentDefinitionSummary` — a reusable Agent persona (the canonical "Agent" noun).
  * The @-mention `slug` is the stable handle an `agent.code` node references; `tools` is null when the
- * persona inherits the harness's default toolset (distinct from an empty list = no tools).
+ * persona inherits the harness's default toolset (distinct from an empty list = no tools). `boundSkills`
+ * are the skills the persona carries (the binding join, ordered by handle).
  */
 export interface AgentDefinitionSummary {
   id: string;
@@ -20,6 +31,7 @@ export interface AgentDefinitionSummary {
   defaultAutonomy: string | null;
   tools: string[] | null;
   origin: AgentDefinitionOrigin;
+  boundSkills: AgentBoundSkill[];
   createdDate: string;
 }
 
@@ -118,6 +130,22 @@ export interface ScorecardFilters {
   harness?: string;
 }
 
+/**
+ * Mirrors backend `TeamCostRollup` — the team's token + estimated-USD spend over its agent runs. `estimatedCostUsd`
+ * is null when nothing in the window could be priced (distinct from 0 = priced but free); `unknownCostRuns` is the
+ * fail-open honesty qualifier (runs with no captured usage or an unpriceable model). The summed totals cover the
+ * full window. (The per-run breakdown is omitted here — the library strip needs only the totals.)
+ */
+export interface TeamCostRollup {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  estimatedCostUsd: number | null;
+  runCount: number;
+  unknownCostRuns: number;
+  windowRunCount: number;
+  truncated: boolean;
+}
+
 /** A run is still in flight (worth polling) while Queued or Running; terminal states stop the poll. */
 export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
   status === "Queued" || status === "Running";
@@ -164,4 +192,5 @@ export const agentsApi = {
     const qs = params.toString();
     return fetchJson<AgentRunScorecard>(`/api/agents/scorecard${qs ? `?${qs}` : ""}`);
   },
+  getCost: () => fetchJson<TeamCostRollup>("/api/agents/cost"),
 };
