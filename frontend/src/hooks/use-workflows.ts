@@ -202,6 +202,15 @@ export function useRunAttempts(runId: string | null) {
   });
 }
 
+/** One cell's attempt history (every attempt that ran a node/branch) — drives the terminal's per-cell rerun switcher. */
+export function useCellAttempts(runId: string | null, nodeId: string | null | undefined, iterationKey: string | null | undefined) {
+  return useQuery({
+    queryKey: ["cell-attempts", runId, nodeId, iterationKey ?? ""],
+    queryFn: () => workflowsApi.getCellAttempts(runId!, nodeId!, iterationKey ?? ""),
+    enabled: runId != null && nodeId != null,
+  });
+}
+
 /**
  * The run's outline — the merged phase tree (the run-neutral projection). Separate query from the run detail
  * (a different endpoint with its own shape), polled on the same 2s cadence while the run is non-terminal so the

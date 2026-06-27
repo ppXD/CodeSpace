@@ -73,6 +73,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>One cell's attempt history — every lineage attempt that ran this (nodeId, iterationKey) cell, with its agent run + outcome. Lets a re-run node show each earlier run. Foreign / absent → 404.</summary>
+    [HttpGet("{runId:guid}/cells/attempts")]
+    public async Task<IActionResult> GetCellAttempts([FromRoute] Guid runId, [FromQuery] string nodeId, [FromQuery] string? iterationKey, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetCellAttemptsQuery { RunId = runId, NodeId = nodeId, IterationKey = iterationKey ?? string.Empty }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The run's narrative timeline — the merged, chronologically-sorted events across every source (run/node lifecycle, …). Foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/timeline")]
     public async Task<IActionResult> GetTimeline([FromRoute] Guid runId, CancellationToken cancellationToken)

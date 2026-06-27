@@ -75,6 +75,27 @@ public class RunDetailLineageMergeFlowTests
     }
 
     [Fact]
+    public async Task Cell_attempt_history_returns_every_attempt_that_ran_the_cell_oldest_first_latest_flagged()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        // Branch 0 FAILED on attempt 1, then a rerun SUCCEEDED it on attempt 2 — the cell history must surface both.
+        var a1 = await SeedRunAsync(teamId, parent: null, root: null, created: t.AddMinutes(-5));
+        await SeedCellAsync(a1, "map", "map#0", WorkflowRunRecordTypes.NodeFailed);
+        var a2 = await SeedRunAsync(teamId, parent: a1, root: a1, created: t);
+        await SeedCellAsync(a2, "map", "map#0", WorkflowRunRecordTypes.NodeCompleted);
+
+        using var scope = _fixture.BeginScope();
+        var hist = await scope.Resolve<IWorkflowService>().ListCellAttemptsAsync(a2, "map", "map#0", teamId, CancellationToken.None);
+
+        hist.ShouldNotBeNull();
+        hist!.Attempts.Select(x => (x.AttemptNumber, x.Status, x.IsLatest)).ShouldBe(new[] { (1, NodeStatus.Failure, false), (2, NodeStatus.Success, true) });
+        hist.Attempts[0].AgentRunId.ShouldBe(AgentTokenFor(a1, 0), "the earlier (failed) attempt links to its own agent run");
+        hist.Attempts[1].AgentRunId.ShouldBe(AgentTokenFor(a2, 0));
+    }
+
+    [Fact]
     public async Task A_never_rerun_run_is_unchanged_by_the_merge()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -142,6 +163,25 @@ public class RunDetailLineageMergeFlowTests
         Id = Guid.NewGuid(), RunId = runId, Sequence = sequence, RecordType = WorkflowRunRecordTypes.NodeCompleted,
         NodeId = nodeId, IterationKey = iterationKey, CorrelationId = null, PayloadJson = "{}", OccurredAt = at,
     };
+
+    /// <summary>Seed ONE cell with a given outcome (node.* record) + its agent run wait — for the per-cell history tests.</summary>
+    private async Task SeedCellAsync(Guid runId, string nodeId, string iterationKey, string recordType)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, Sequence = 1, RecordType = recordType,
+            NodeId = nodeId, IterationKey = iterationKey, CorrelationId = null, PayloadJson = "{}", OccurredAt = now,
+        });
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = iterationKey, WaitKind = WorkflowWaitKinds.AgentRun,
+            Token = AgentTokenFor(runId, 0), WakeAt = now.AddMinutes(5), Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now, ResolvedAt = now,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
 
     private async Task<Messages.Dtos.Workflows.WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId)
     {

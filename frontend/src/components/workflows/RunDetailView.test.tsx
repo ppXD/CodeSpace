@@ -26,6 +26,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useRunPhases: () => useRunPhasesMock(),
   useRunTimeline: () => ({ data: undefined }),   // the narrative band stays empty in these node-trace tests
   useRunRecords: () => ({ data: undefined, isLoading: false }),   // the Trace tab isn't the active view here
+  useCellAttempts: () => ({ data: { attempts: [] } }),   // a terminal's per-cell history — empty (no rerun) here
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the

@@ -100,6 +100,13 @@ public interface IWorkflowService
     Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The per-CELL attempt history — every lineage attempt that ran the <paramref name="nodeId"/>/<paramref name="iterationKey"/>
+    /// cell (a node, or one map branch), oldest first with its agent run + outcome. Lets a re-run node show each earlier
+    /// run, not only the merged latest. Team-scoped; a foreign / absent run returns null.
+    /// </summary>
+    Task<CellAttemptsResponse?> ListCellAttemptsAsync(Guid runId, string nodeId, string iterationKey, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Resolve a pending <c>Approval</c> wait on a Suspended run with a human decision
     /// (approved + optional comment) and resume it. Tenancy: the run's workflow must belong to
     /// the caller's team (<see cref="KeyNotFoundException"/> conflated with not-yours). Returns

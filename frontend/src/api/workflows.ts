@@ -193,6 +193,25 @@ export interface RunAttempt {
   isLatest: boolean;
 }
 
+/** Mirrors backend `CellAttemptsResponse` — one cell's attempt history (every attempt that ran this node/branch). */
+export interface CellAttemptsResponse {
+  attempts: CellAttempt[];
+}
+
+/** Mirrors backend `CellAttempt` — one attempt's run of a cell. */
+export interface CellAttempt {
+  /** 1-based ordinal of the owning run within the lineage. */
+  attemptNumber: number;
+  runId: string;
+  /** The agent run this attempt spawned for the cell (null if not an agent node on that attempt). */
+  agentRunId: string | null;
+  /** This attempt's cell outcome (the node status). */
+  status: NodeStatus;
+  createdDate: string;
+  /** The newest attempt that ran the cell — the merged detail's default. */
+  isLatest: boolean;
+}
+
 /**
  * One page of the runs index, in either mode. Keyset (the live feed): `nextCursor` is null on the last page; echo it
  * back as `?cursor=`. Offset (numbered pages, e.g. History): `totalCount` is the total rows matching the filter, so
@@ -603,6 +622,10 @@ export const workflowsApi = {
 
   /** The lineage's attempt ladder (original + every rerun fork) — drives the run-detail attempt switcher. */
   getRunAttempts: (runId: string) => fetchJson<RunAttemptsResponse>(`/api/workflows/runs/${runId}/attempts`),
+
+  /** One cell's attempt history (every attempt that ran this node/branch) — drives the per-cell rerun history in the terminal. */
+  getCellAttempts: (runId: string, nodeId: string, iterationKey: string) =>
+    fetchJson<CellAttemptsResponse>(`/api/workflows/runs/${runId}/cells/attempts?nodeId=${encodeURIComponent(nodeId)}&iterationKey=${encodeURIComponent(iterationKey)}`),
 
   /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
   getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),

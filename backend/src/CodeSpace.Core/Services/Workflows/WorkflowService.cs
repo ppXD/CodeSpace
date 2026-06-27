@@ -1211,6 +1211,49 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return new RunAttemptsResponse { RootRunId = rootKey, Attempts = attempts };
     }
 
+    public async Task<CellAttemptsResponse?> ListCellAttemptsAsync(Guid runId, string nodeId, string iterationKey, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.RootRunId })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (run == null) return null;
+
+        var rootKey = run.RootRunId ?? run.Id;
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
+            .OrderBy(r => r.CreatedDate).ThenBy(r => r.Id)
+            .Select(r => new { r.Id, r.CreatedDate })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var lineageIds = lineage.Select(x => x.Id).ToList();
+
+        // The cell's node row (the VIEW gives its per-attempt outcome) + the agent run wait, across the lineage.
+        var statusByRun = (await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => lineageIds.Contains(n.RunId) && n.NodeId == nodeId && n.IterationKey == iterationKey)
+            .Select(n => new { n.RunId, n.Status }).ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToDictionary(n => n.RunId, n => n.Status);
+        var agentByRun = (await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => lineageIds.Contains(w.RunId) && w.WaitKind == WorkflowWaitKinds.AgentRun && w.NodeId == nodeId && w.IterationKey == iterationKey)
+            .Select(w => new { w.RunId, w.Token }).ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToDictionary(w => w.RunId, w => w.Token);
+
+        // Only the attempts that actually RAN the cell (have a node row); attempt number is the run's lineage position.
+        var ran = lineage.Select((r, i) => (r.Id, r.CreatedDate, AttemptNumber: i + 1)).Where(x => statusByRun.ContainsKey(x.Id)).ToList();
+
+        var attempts = ran.Select((x, idx) => new CellAttempt
+        {
+            AttemptNumber = x.AttemptNumber,
+            RunId = x.Id,
+            AgentRunId = agentByRun.GetValueOrDefault(x.Id),
+            Status = statusByRun[x.Id],
+            CreatedDate = x.CreatedDate,
+            IsLatest = idx == ran.Count - 1,
+        }).ToList();
+
+        return new CellAttemptsResponse { Attempts = attempts };
+    }
+
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         var run = await _db.WorkflowRun

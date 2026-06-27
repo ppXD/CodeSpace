@@ -3,13 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseAgentRef } from "@/api/workflows";
 
-const { useAgentRunMock, useAgentRunEventsMock } = vi.hoisted(() => ({
+const { useAgentRunMock, useAgentRunEventsMock, useCellAttemptsMock } = vi.hoisted(() => ({
   useAgentRunMock: vi.fn(),
   useAgentRunEventsMock: vi.fn(),
+  useCellAttemptsMock: vi.fn(),
 }));
 vi.mock("@/hooks/use-agents", () => ({
-  useAgentRun: () => useAgentRunMock(),
-  useAgentRunEvents: () => useAgentRunEventsMock(),
+  useAgentRun: (id: string) => useAgentRunMock(id),
+  useAgentRunEvents: (id: string) => useAgentRunEventsMock(id),
+}));
+vi.mock("@/hooks/use-workflows", () => ({
+  useCellAttempts: () => useCellAttemptsMock(),
 }));
 // Stub the tool-calls panel — its own tests cover it; here we just assert the tab swaps to it.
 vi.mock("./AgentToolCalls", () => ({
@@ -26,9 +30,32 @@ const evt = (sequence: number, kind: string, text: string) => ({ sequence, kind,
 beforeEach(() => {
   useAgentRunMock.mockReturnValue({ data: { status: "Running" } });
   useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false });
+  useCellAttemptsMock.mockReturnValue({ data: { attempts: [] } });   // single-cell default → no switcher
 });
 
 describe("AgentTerminal", () => {
+  it("offers a per-cell rerun switcher and swaps the viewed agent run to the picked attempt", () => {
+    useCellAttemptsMock.mockReturnValue({ data: { attempts: [
+      { attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Failure", createdDate: "2026-06-23T00:00:00Z", isLatest: false },
+      { attemptNumber: 2, runId: "r2", agentRunId: "ag2", status: "Success", createdDate: "2026-06-23T01:00:00Z", isLatest: true },
+    ] } });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "ag2", nodeId: "map", iterationKey: "map#0" })} />);
+
+    const pills = screen.getAllByRole("tab");
+    expect(pills.map((p) => p.textContent?.trim())).toEqual(["Attempt 1", "Attempt 2latest"]);
+    expect(pills[1].getAttribute("aria-selected")).toBe("true");   // the latest (the ref's agent run) is selected by default
+
+    fireEvent.click(screen.getByRole("tab", { name: /attempt 1/i }));
+    expect(useAgentRunEventsMock).toHaveBeenCalledWith("ag1");      // the earlier (failed) attempt's record is now streamed
+  });
+
+  it("shows no switcher when the cell ran only once", () => {
+    useCellAttemptsMock.mockReturnValue({ data: { attempts: [{ attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Success", createdDate: "2026-06-23T00:00:00Z", isLatest: true }] } });
+    render(<AgentTerminal agent={termAgent({ agentRunId: "ag1", nodeId: "n", iterationKey: "" })} />);
+    expect(screen.queryByRole("tab")).toBeNull();
+  });
+
   it("renders the event stream as terminal scrollback, prompting commands + toning errors", () => {
     useAgentRunEventsMock.mockReturnValue({ data: [
       evt(1, "CommandExecuted", "pnpm test --filter auth"),
