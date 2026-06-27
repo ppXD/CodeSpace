@@ -70,7 +70,7 @@ export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | 
   const existing = useAgentDefinition(mode === "edit" ? agentId : undefined);
 
   if (mode === "edit" && existing.isLoading) {
-    return <ModalFrame title="Edit agent" onClose={onClose}><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></ModalFrame>;
+    return <ModalFrame title="Edit agent" onClose={onClose}><div className="wf-form-empty">Loading…</div></ModalFrame>;
   }
   if (mode === "edit" && (existing.error || !existing.data)) {
     return (
@@ -96,12 +96,14 @@ export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | 
 }
 
 /** The warm `.mdl` portal shell (mask + dialog + head + body + optional foot), reused for loading / error / form. */
-function ModalFrame({ title, sub, onClose, foot, children }: { title: string; sub?: string; onClose: () => void; foot?: React.ReactNode; children: React.ReactNode }) {
+function ModalFrame({ title, sub, onClose, foot, escapeDisabled, children }: { title: string; sub?: string; onClose: () => void; foot?: React.ReactNode; escapeDisabled?: boolean; children: React.ReactNode }) {
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    // Suspend Escape while a layered dialog (the delete-confirm) is open, so one Escape cancels only that
+    // dialog rather than also tearing down the editor underneath it.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !escapeDisabled) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, escapeDisabled]);
 
   return createPortal(
     <>
@@ -137,6 +139,7 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   const [toolsMode, setToolsMode] = useState<"inherit" | "custom">(initial.toolsMode);
   const [toolsText, setToolsText] = useState(initial.toolsText);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   const handle = deriveSlug(name);
   const saving = createAgent.isPending || updateAgent.isPending;
@@ -174,12 +177,14 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 
   async function handleDelete() {
     if (!agentId) return;
+    setConfirming(true);
     const ok = await confirm({
       title: "Delete agent?",
       message: (<><strong>{name}</strong> will be removed. Its run history is kept; workflows referencing <code>@{immutableSlug}</code> will no longer resolve it.</>),
       confirmLabel: "Delete",
       destructive: true,
     });
+    setConfirming(false);
     if (!ok) return;
 
     try {
@@ -205,7 +210,7 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   );
 
   return (
-    <ModalFrame title={mode === "create" ? "New agent" : "Edit agent"} sub={mode === "create" ? "A reusable persona you can @-mention from a workflow." : `@${immutableSlug}`} onClose={onClose} foot={foot}>
+    <ModalFrame title={mode === "create" ? "New agent" : "Edit agent"} sub={mode === "create" ? "A reusable persona you can @-mention from a workflow." : `@${immutableSlug}`} onClose={onClose} escapeDisabled={confirming} foot={foot}>
       {error && (
         <div className="cn-banner cn-banner-err" style={{ marginBottom: 14 }}>
           <div className="cn-banner-h">Couldn't save</div>

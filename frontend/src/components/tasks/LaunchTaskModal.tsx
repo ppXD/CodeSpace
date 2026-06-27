@@ -456,8 +456,6 @@ function SendGlyph() {
   );
 }
 
-/** Shared popover machinery — portal'd to <body>, fixed-positioned from the trigger rect, dismissed on
- *  outside click or on scroll of the content behind it (not the popover's own list). */
 /** A settings row whose value opens a custom popover (Limits, Acceptance). */
 function RowPop({ label, value, children }: { label: string; value: string; children: ReactNode }) {
   const { open, setOpen, btnRef, popRef, pos } = usePopover();

@@ -29,7 +29,7 @@ export function Combo({ label, value, options, onChange, placeholder, searchable
   const isRow = label !== undefined;
   return (
     <>
-      <button ref={btnRef} type="button" className={buttonClassName ?? (isRow ? "lt3-srow" : "lt3-combo-btn")} data-open={open} onClick={() => setOpen(v => !v)}>
+      <button ref={btnRef} type="button" className={buttonClassName ?? (isRow ? "lt3-srow" : "lt3-combo-btn")} data-open={open} onClick={() => { setQ(""); setOpen(v => !v); }}>
         {isRow && <span className="lt3-srow-l">{label}</span>}
         <span className="lt3-combo-v">{sel?.label ?? placeholder ?? "Select"}</span>
         {isRow ? <Ic.ChevronRight size={15} /> : <Ic.ChevronDown size={14} />}
