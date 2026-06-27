@@ -43,6 +43,30 @@ public class ClaudeCodeAgentParserTests
     }
 
     [Fact]
+    public void Tolerates_non_strict_yaml_frontmatter_and_recovers_the_agent()
+    {
+        // The exact real-world shape from contains-studio/agents (caught by the real-GitHub E2E): the description is
+        // a single unquoted line embedding <example> blocks with `Context:` / `user: "…"` — colon-space sequences that
+        // make strict YAML throw ("found invalid mapping"). Without tolerant parsing the whole agent is lost (no name
+        // → excluded from discovery). The lenient fallback must recover the top-level scalars.
+        const string md =
+            "---\n" +
+            "name: backend-architect\n" +
+            "description: Use this agent when designing APIs. Examples:\\n\\n<example>\\nContext: Designing a new API\\nuser: \"We need an API\"\\nassistant: \"I'll design it.\"\\n</example>\n" +
+            "color: purple\n" +
+            "tools: Write, Read, Bash\n" +
+            "---\n" +
+            "You are a backend architect.\n";
+
+        var p = Parser.Parse(md, "engineering/backend-architect.md");
+
+        p.Name.ShouldBe("backend-architect", customMessage: "the agent must NOT be dropped just because its description isn't strict YAML");
+        p.Tools.ShouldBe(new[] { "Write", "Read", "Bash" });
+        p.SystemPrompt.ShouldBe("You are a backend architect.");
+        p.Diagnostics.ShouldContain(d => d.Contains("not strict YAML"), customMessage: "the lenient fallback is surfaced as a diagnostic, but the agent is still importable");
+    }
+
+    [Fact]
     public void Preserves_unknown_and_nested_frontmatter_keys_verbatim_in_raw_json()
     {
         // The forward-compat contract: keys we DON'T index (incl. nested maps + lists + typed scalars) must
@@ -114,12 +138,24 @@ public class ClaudeCodeAgentParserTests
     }
 
     [Fact]
-    public void Invalid_yaml_frontmatter_is_tolerated_with_a_diagnostic()
+    public void Invalid_yaml_frontmatter_recovers_the_name_leniently_with_a_diagnostic()
     {
-        // A blatantly malformed YAML block must not throw — it parses to a diagnostic-bearing item.
+        // Malformed YAML must neither throw NOR silently drop a NAMED artifact: the lenient fallback recovers the
+        // top-level name (so an agent stays importable) + flags a diagnostic. This is the discovery-admission contract.
         var p = Parser.Parse("---\nname: [unclosed\n  bad: : :\n---\nbody\n", "x.md");
 
+        p.Name.ShouldBe("[unclosed", customMessage: "the lenient fallback recovers the top-level name from non-strict YAML");
+        p.Diagnostics.ShouldContain(d => d.Contains("not strict YAML"));
+    }
+
+    [Fact]
+    public void Malformed_yaml_with_no_name_stays_un_importable()
+    {
+        // The negative of the recovery contract: the fallback must NOT fabricate a name. A malformed block with no
+        // parseable name line yields Name="" so the artifact is excluded from discovery (not admitted as a junk agent).
+        var p = Parser.Parse("---\ndescription: \"unterminated\n---\nbody\n", "x.md");
+
+        p.Name.ShouldBe("");
         p.Diagnostics.ShouldNotBeEmpty();
-        Should.NotThrow(() => p.SystemPrompt.ShouldNotBeNull());
     }
 }
