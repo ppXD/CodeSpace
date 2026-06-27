@@ -1,5 +1,42 @@
 import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
+import { parseIterationKey } from "./mapBranches";
+import type { RerunTarget } from "./RerunMenu";
+
+/** Agent-run statuses (and the node-status "Failure" fallback for a missing row) that count as a genuine failure to rerun — NOT the catch-all `tileState==="failed"`, which folds the Pending/Skipped missing-row fallbacks in too. */
+const FAILED_STATUSES = new Set(["Failed", "Cancelled", "TimedOut", "NeedsReview", "Failure"]);
+
+/** The failed top-level map-branch indices of a <c>kind: "map"</c> wave (each agent keyed <c>"&lt;wave.id&gt;#&lt;i&gt;"</c>). */
+export function failedMapIndices(wave: AgentWave): number[] {
+  if (wave.kind !== "map") return [];
+  return wave.agents
+    .filter((a) => FAILED_STATUSES.has(a.status))
+    .map((a) => parseIterationKey(a.iterationKey ?? ""))
+    .filter((s) => s.length === 1 && s[0].containerId === wave.id)
+    .map((s) => s[0].index)
+    .sort((x, y) => x - y);
+}
+
+/** A wave's PHASE-LEVEL rerun target: a map fan-out → bulk "Rerun N failed items"; a failed agent step → "Rerun from here"; otherwise none (supervisor / authored / plain phases are model-owned or non-rerunnable here). */
+export function phaseRerunTarget(wave: AgentWave): RerunTarget | null {
+  if (wave.kind === "map") {
+    const failed = failedMapIndices(wave);
+    return failed.length > 0 ? { kind: "mapItem", mapNodeId: wave.id, failedIndices: failed, totalCount: wave.agents.length } : null;
+  }
+  if ((wave.kind === "agent" || wave.kind === "node") && wave.agents.some((a) => FAILED_STATUSES.has(a.status))) {
+    return { kind: "node", nodeId: wave.id };
+  }
+  return null;
+}
+
+/** The per-item rerun target for one FOCUSED agent of a map wave (its terminal open) — "Rerun item #i". Null if the agent isn't a top-level map branch of this wave. */
+export function itemRerunTarget(agent: PhaseAgentRef, wave: AgentWave): RerunTarget | null {
+  if (wave.kind !== "map") return null;
+  const segs = parseIterationKey(agent.iterationKey ?? "");
+  if (segs.length !== 1 || segs[0].containerId !== wave.id) return null;
+  return { kind: "mapItem", mapNodeId: wave.id, focusedIndex: segs[0].index, failedIndices: failedMapIndices(wave), totalCount: wave.agents.length };
+}
+
 /**
  * The run's pure phase/agent model — groups the phase tree into agent WAVES (each phase's claimed agents) and the
  * shared agent-status helpers the outline + the Activity tiles both read. Source-agnostic: it never switches on a

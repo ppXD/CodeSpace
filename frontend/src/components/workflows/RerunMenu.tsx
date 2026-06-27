@@ -14,7 +14,9 @@ import { RunOpenContext } from "./runOpenContext";
  * the whole run can be replayed. The control turns this into the split button + dropdown.
  */
 export type RerunTarget =
-  | { kind: "mapItem"; mapNodeId: string; focusedIndex: number; failedIndices: readonly number[]; totalCount: number }
+  // A flow.map fan-out. With `focusedIndex` the primary is "Rerun item" (that item); without it (the phase-level
+  // bulk surface) the primary is "Rerun N failed items".
+  | { kind: "mapItem"; mapNodeId: string; focusedIndex?: number; failedIndices: readonly number[]; totalCount: number }
   | { kind: "node"; nodeId: string; label?: string };
 
 interface RerunOption {
@@ -80,25 +82,33 @@ function RerunMenuInner({ target, runId, className }: { target: RerunTarget; run
   if (target.kind === "mapItem") {
     const { mapNodeId, focusedIndex, failedIndices, totalCount } = target;
     const failed = [...failedIndices].sort((a, b) => a - b);
-    const reusedForItem = totalCount - 1;
-    const stillBlocking = failed.filter((i) => i !== focusedIndex).length;
-    const itemOption: RerunOption = {
-      id: "item", label: `Rerun item #${focusedIndex}`, primaryLabel: "Rerun item", current: true,
-      icon: <Ic.Branch size={13} aria-hidden="true" />,
-      confirmTitle: `Rerun item #${focusedIndex}?`,
-      confirmMessage: `Item #${focusedIndex} will rerun. ${reusedForItem} ${items(reusedForItem)} will be reused.`
-        + (stillBlocking > 0 ? ` ${stillBlocking} other failed ${items(stillBlocking)} will still block the map.` : ""),
-      mutate: () => rerunOne.mutateAsync({ mapNodeId, branchIndex: focusedIndex, operationId: crypto.randomUUID() }),
-    };
-    options = [itemOption, replayOption];
-    if (failed.length >= 2) {
-      const reusedForAll = totalCount - failed.length;
-      options.push({
-        id: "allFailed", label: "Rerun all failed items", suggested: true, icon: <Ic.Branch size={13} aria-hidden="true" />,
-        confirmTitle: `Rerun ${failed.length} failed items?`,
-        confirmMessage: `Rerun ${failed.length} failed items (#${failed.join(", #")}). ${reusedForAll} ${items(reusedForAll)} will be reused.`,
+    const allFailedOption = (current: boolean): RerunOption => {
+      const reused = totalCount - failed.length;
+      return {
+        id: "allFailed", label: "Rerun all failed items", primaryLabel: `Rerun ${failed.length} failed ${items(failed.length)}`,
+        suggested: !current, current, icon: <Ic.Branch size={13} aria-hidden="true" />,
+        confirmTitle: `Rerun ${failed.length} failed ${items(failed.length)}?`,
+        confirmMessage: `Rerun ${failed.length} failed ${items(failed.length)} (#${failed.join(", #")}). ${reused} ${items(reused)} will be reused.`,
         mutate: () => rerunSet.mutateAsync({ mapNodeId, branchIndices: failed, operationId: crypto.randomUUID() }),
-      });
+      };
+    };
+    if (focusedIndex === undefined) {
+      // Phase-level bulk surface — no single item is focused, so the bulk rerun is the primary action.
+      if (failed.length === 0) return null;
+      options = [allFailedOption(true), replayOption];
+    } else {
+      const reusedForItem = totalCount - 1;
+      const stillBlocking = failed.filter((i) => i !== focusedIndex).length;
+      const itemOption: RerunOption = {
+        id: "item", label: `Rerun item #${focusedIndex}`, primaryLabel: "Rerun item", current: true,
+        icon: <Ic.Branch size={13} aria-hidden="true" />,
+        confirmTitle: `Rerun item #${focusedIndex}?`,
+        confirmMessage: `Item #${focusedIndex} will rerun. ${reusedForItem} ${items(reusedForItem)} will be reused.`
+          + (stillBlocking > 0 ? ` ${stillBlocking} other failed ${items(stillBlocking)} will still block the map.` : ""),
+        mutate: () => rerunOne.mutateAsync({ mapNodeId, branchIndex: focusedIndex, operationId: crypto.randomUUID() }),
+      };
+      options = [itemOption, replayOption];
+      if (failed.length >= 2) options.push(allFailedOption(false));
     }
   } else {
     options = [{

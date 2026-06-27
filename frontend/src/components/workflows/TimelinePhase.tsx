@@ -5,8 +5,8 @@ import type { PhaseAgentRef } from "@/api/workflows";
 
 import { AgentTerminal } from "./AgentTerminal";
 import { AgentTile } from "./AgentTile";
-import { formatDuration, tileState, waveBreakdown, type AgentWave, type WaveBreakdown } from "./runActivity";
-import { WaveRerunControl } from "./WaveRerunControl";
+import { formatDuration, itemRerunTarget, phaseRerunTarget, tileState, waveBreakdown, type AgentWave, type WaveBreakdown } from "./runActivity";
+import { RerunMenu } from "./RerunMenu";
 
 /**
  * One phase on the Activity timeline as a Claude-style CONVERSATION BOX — a 3-level drill-down. Collapsed it's a
@@ -43,6 +43,9 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
   const openAgent = wave.agents.find((a) => a.agentRunId === selectedAgentRunId) ?? null;
   const toggleAgent = (id: string) => onSelectAgent?.(id === selectedAgentRunId ? null : id);
 
+  const phaseTarget = phaseRerunTarget(wave);
+  const openTarget = openAgent ? itemRerunTarget(openAgent, wave) : null;
+
   return (
     <div className="run-tl-phase" ref={ref}>
       <button type="button" className="run-tl-box" data-open={open || undefined} aria-expanded={open} onClick={() => setUserToggle(!open)}>
@@ -56,7 +59,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
         </span>
       </button>
 
-      <WaveRerunControl wave={wave} />
+      {phaseTarget && <RerunMenu target={phaseTarget} className="run-tl-rerun" />}
 
       {open && (single
         // Single agent → its full terminal directly (skip the tile layer); close collapses the box AND clears the
@@ -71,6 +74,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
             </div>
 
             {openAgent && <AgentTerminal agent={openAgent} onClose={() => onSelectAgent?.(null)} />}
+            {openTarget && <RerunMenu target={openTarget} className="run-tl-rerun run-tl-rerun-item" />}
           </>
         ))}
     </div>

@@ -2436,19 +2436,11 @@ textarea:-webkit-autofill {
 @media (max-width: 560px) { .acs-root .run-tl-tiles { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .acs-root .run-tl-dots > i[data-state="running"] { animation: none; } }
 
-/* Activity-view rerun bar — a thin right-aligned action under a failed flow.map "Fan out" phase. Warm accent, matched
-   to the fan-out card's split-button scale; aligns to the phase box's right edge (same 320px column). */
-.acs-root .run-tl-rerun { position: relative; width: 320px; max-width: 100%; align-self: flex-start; display: flex; justify-content: flex-end; margin-top: -2px; }
-.acs-root .run-tl-rerun-split { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel); }
-.acs-root .run-tl-rerun-primary,
-.acs-root .run-tl-rerun-caret { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--accent); background: transparent; border: 0; cursor: pointer; padding: 4px 9px; line-height: 1.4; }
-.acs-root .run-tl-rerun-caret { padding: 4px 6px; border-left: 1px solid var(--line); }
-.acs-root .run-tl-rerun-primary:hover, .acs-root .run-tl-rerun-caret:hover { background: var(--accent-soft); }
-.acs-root .run-tl-rerun-primary[disabled], .acs-root .run-tl-rerun-caret[disabled] { opacity: .55; cursor: default; }
-.acs-root .run-tl-rerun-primary[disabled]:hover, .acs-root .run-tl-rerun-caret[disabled]:hover { background: transparent; }
-.acs-root .run-tl-rerun-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 6; min-width: 150px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: 0 4px 14px rgba(31,30,29,.10); overflow: hidden; }
-.acs-root .run-tl-rerun-menu button { text-align: left; font-size: 11.5px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; padding: 7px 11px; white-space: nowrap; }
-.acs-root .run-tl-rerun-menu button:hover { background: var(--accent-soft); color: var(--ink); }
+/* Activity-view placement of the unified RerunMenu — `run-tl-rerun` right-aligns the phase-header control under the
+   phase box (its menu opens leftward); `run-tl-rerun-item` is the per-focused-agent control below an open terminal. */
+.acs-root .run-tl-rerun { width: 320px; max-width: 100%; align-self: flex-start; align-items: flex-end; margin-top: -2px; }
+.acs-root .run-tl-rerun .wf-rerun-menu { left: auto; right: 0; }
+.acs-root .run-tl-rerun-item { width: auto; align-self: flex-start; align-items: flex-start; margin-top: 10px; }
 
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
