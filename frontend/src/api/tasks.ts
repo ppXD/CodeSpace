@@ -71,6 +71,8 @@ export interface LaunchTaskInput {
   enableMcp?: boolean;
   /** Claude-only tool allow-list (canonical names). Omitted ⇒ the harness default (all tools). Additive against a persona's tools; not a write boundary. */
   allowedTools?: string[];
+  /** Per-run opt-in to publishing the agent's diff as a branch. Omitted (defer to the ambient flag) unless `true`. */
+  pushBranch?: boolean;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the
