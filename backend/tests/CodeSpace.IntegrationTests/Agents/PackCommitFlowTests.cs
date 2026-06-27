@@ -211,6 +211,90 @@ public class PackCommitFlowTests
         }
     }
 
+    [Fact]
+    public async Task An_imported_agent_binds_its_declared_skills_resolving_handles_in_the_same_commit()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        try
+        {
+            // The agent declares skills: [tdd, systematic-debugging, ghost-skill]. tdd + systematic-debugging are
+            // imported in THIS commit (resolvable same-batch); ghost-skill matches no team skill → not bound.
+            var result = await CommitViaMediatorAsync(src, new[] { "agents/skilled.md", "skills/tdd/SKILL.md", "skills/systematic-debugging/SKILL.md" }, teamId, userId);
+
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(3);
+            var agentId = result.Items.Single(i => i.SourcePath == "agents/skilled.md").DefinitionId!.Value;
+
+            await AssertStateAsync(async db =>
+            {
+                var boundSlugs = await (from b in db.AgentSkillBinding
+                                        join s in db.SkillDefinition on b.SkillDefinitionId equals s.Id
+                                        where b.AgentDefinitionId == agentId
+                                        select s.Slug).ToListAsync();
+
+                // resolvable declared handles are bound; ghost-skill matches no team skill and is skipped
+                boundSlugs.OrderBy(x => x, StringComparer.Ordinal).ShouldBe(new[] { "systematic-debugging", "tdd" });
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task A_resync_does_not_reseed_declared_skill_bindings()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+        var paths = new[] { "agents/skilled.md", "skills/tdd/SKILL.md", "skills/systematic-debugging/SKILL.md" };
+
+        try
+        {
+            var first = await CommitViaMediatorAsync(src, paths, teamId, userId);
+            var agentId = first.Items.Single(i => i.SourcePath == "agents/skilled.md").DefinitionId!.Value;
+
+            // Simulate the operator curating bindings via the editor: unbind tdd.
+            await AssertStateAsync(async db =>
+            {
+                var tdd = await db.AgentSkillBinding.SingleAsync(b => b.AgentDefinitionId == agentId && db.SkillDefinition.Any(s => s.Id == b.SkillDefinitionId && s.Slug == "tdd"));
+                db.AgentSkillBinding.Remove(tdd);
+                await db.SaveChangesAsync();
+            });
+
+            // Re-sync the agent — it comes back Updated, and the declared-skills seeding must NOT re-add the
+            // curated-away tdd binding (re-sync only refreshes content; bindings are the editor's to own).
+            var second = await CommitViaMediatorAsync(src, new[] { "agents/skilled.md" }, teamId, userId);
+            second.Items.Single().Outcome.ShouldBe(PackImportOutcome.Updated);
+
+            await AssertStateAsync(async db =>
+            {
+                var boundSlugs = await (from b in db.AgentSkillBinding
+                                        join s in db.SkillDefinition on b.SkillDefinitionId equals s.Id
+                                        where b.AgentDefinitionId == agentId
+                                        select s.Slug).ToListAsync();
+
+                // a re-sync leaves curated bindings alone — tdd is not re-seeded
+                boundSlugs.ShouldBe(new[] { "systematic-debugging" });
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static PackImportOutcome Outcome(PackImportResult result, string sourcePath) =>
         result.Items.Single(i => i.SourcePath == sourcePath).Outcome;
 
@@ -252,6 +336,7 @@ public class PackCommitFlowTests
         WriteFile(src, "skills/systematic-debugging/SKILL.md", "---\nname: systematic-debugging\ndescription: Use when stuck.\n---\n# Debug");
         WriteFile(src, "agents/dup-a.md", "---\nname: duplicate-agent\ndescription: First copy.\n---\nA.");   // dup-a + dup-b both derive
         WriteFile(src, "agents/dup-b.md", "---\nname: Duplicate Agent\ndescription: Second copy.\n---\nB.");  // the slug "duplicate-agent"
+        WriteFile(src, "agents/skilled.md", "---\nname: skilled\ndescription: Carries skills.\nskills:\n  - tdd\n  - systematic-debugging\n  - ghost-skill\n---\nYou are skilled.");
         await CommitAllAsync(runners, src, "init");
         return src;
     }

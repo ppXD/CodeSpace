@@ -39,7 +39,35 @@ public class ClaudeCodeAgentParserTests
         p.Model.ShouldBe("claude-opus-4-8");
         p.Tools.ShouldBe(new[] { "Read", "Grep", "Bash" }, customMessage: "Claude-Code writes tools as a comma-separated scalar — split into a list");
         p.SystemPrompt.ShouldBe("You are a senior backend architect.\n\nThink before coding.", customMessage: "the body is everything after the closing fence, trimmed");
+        p.Skills.ShouldBeEmpty("no skills: key → empty (resolved to no bindings at import)");
         p.Diagnostics.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Parses_declared_skills_from_a_yaml_list()
+    {
+        const string md =
+            "---\n" +
+            "name: reviewer\n" +
+            "description: Reviews PRs.\n" +
+            "skills:\n  - test-driven-development\n  - systematic-debugging\n" +
+            "---\n" +
+            "You review.\n";
+
+        Parser.Parse(md, "agents/reviewer.md").Skills.ShouldBe(new[] { "test-driven-development", "systematic-debugging" });
+    }
+
+    [Fact]
+    public void Parses_declared_skills_from_a_comma_scalar()
+    {
+        const string md =
+            "---\n" +
+            "name: reviewer\n" +
+            "skills: test-driven-development, systematic-debugging\n" +
+            "---\n" +
+            "You review.\n";
+
+        Parser.Parse(md, "agents/reviewer.md").Skills.ShouldBe(new[] { "test-driven-development", "systematic-debugging" });
     }
 
     [Fact]

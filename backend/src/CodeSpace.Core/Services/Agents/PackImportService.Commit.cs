@@ -50,18 +50,28 @@ public sealed partial class PackImportService
         var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 
         // The team's active handles, loaded once and EXTENDED in memory as we claim new ones — so an intra-pack
-        // duplicate handle is the 2nd..Nth Skipped here, never a transaction-aborting 23505 at the save.
+        // duplicate handle is the 2nd..Nth Skipped here, never a transaction-aborting 23505 at the save. Skills
+        // carry their id too: an imported agent's declared skills resolve against this map (existing + same-batch).
         var agentSlugs = new HashSet<string>(await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false), StringComparer.Ordinal);
-        var skillSlugs = new HashSet<string>(await ActiveSlugsAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null).Select(s => s.Slug), cancellationToken).ConfigureAwait(false), StringComparer.Ordinal);
+        var skillSlugToId = await ActiveSkillSlugToIdAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         var items = new List<PackArtifactImportResult>();
+        var newAgentSkills = new List<(Guid AgentId, IReadOnlyList<string> Declared)>();
 
         foreach (var path in selected)
         {
             if (agentsByPath.TryGetValue(path, out var agent))
-                items.Add(UpsertAgent(pack, agent, existingAgents, agentSlugs, teamId, actorUserId, now));
+            {
+                var result = UpsertAgent(pack, agent, existingAgents, agentSlugs, teamId, actorUserId, now);
+                items.Add(result);
+
+                // Seed bindings from the declared skills only on a FRESH import — a re-sync leaves the (possibly
+                // editor-curated) bindings of an existing agent untouched.
+                if (result.Outcome == PackImportOutcome.Imported && agent.Skills.Count > 0)
+                    newAgentSkills.Add((result.DefinitionId!.Value, agent.Skills));
+            }
             else if (skillsByPath.TryGetValue(path, out var skill))
-                items.Add(UpsertSkill(pack, skill, existingSkills, skillSlugs, teamId, actorUserId, now));
+                items.Add(UpsertSkill(pack, skill, existingSkills, skillSlugToId, teamId, actorUserId, now));
             else
                 items.Add(new PackArtifactImportResult { SourcePath = path, Kind = null, Outcome = PackImportOutcome.Failed, Reason = "Not found in the pack at this ref — it may have been removed or renamed since the preview." });
         }
@@ -72,6 +82,8 @@ public sealed partial class PackImportService
             return new PackImportResult { PackId = packIsNew ? Guid.Empty : pack.Id, Items = items };
 
         PersistPackSync(pack, packIsNew, reference, actorUserId, now);
+
+        BindDeclaredSkills(newAgentSkills, skillSlugToId, actorUserId, now);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
@@ -155,7 +167,7 @@ public sealed partial class PackImportService
         return AgentResult(parsed.SourcePath, PackImportOutcome.Imported, agent.Id);
     }
 
-    private PackArtifactImportResult UpsertSkill(Pack pack, ParsedSkillDefinition parsed, IReadOnlyDictionary<string, SkillDefinition> existingByPath, HashSet<string> claimedSlugs, Guid teamId, Guid actorUserId, DateTimeOffset now)
+    private PackArtifactImportResult UpsertSkill(Pack pack, ParsedSkillDefinition parsed, IReadOnlyDictionary<string, SkillDefinition> existingByPath, Dictionary<string, Guid> claimedSlugToId, Guid teamId, Guid actorUserId, DateTimeOffset now)
     {
         if (existingByPath.TryGetValue(parsed.SourcePath, out var existing))
         {
@@ -170,7 +182,7 @@ public sealed partial class PackImportService
 
         var slug = AgentDefinitionService.DeriveSlug(parsed.Name);
 
-        if (!claimedSlugs.Add(slug))
+        if (claimedSlugToId.ContainsKey(slug))
             return SkillResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"A skill with handle '{slug}' already exists in this team — left untouched.");
 
         var skill = new SkillDefinition
@@ -189,7 +201,30 @@ public sealed partial class PackImportService
         ApplySkillContent(skill, parsed);
 
         _db.SkillDefinition.Add(skill);
+        claimedSlugToId[slug] = skill.Id;   // claim the handle AND make it resolvable for an agent's declared skills this batch
         return SkillResult(parsed.SourcePath, PackImportOutcome.Imported, skill.Id);
+    }
+
+    /// <summary>The team's active skills as a handle→id map — the dedup set for skill imports AND the resolver for an imported agent's declared <c>skills:</c>, extended in memory as new skills are claimed this batch.</summary>
+    private async Task<Dictionary<string, Guid>> ActiveSkillSlugToIdAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.SkillDefinition.AsNoTracking()
+            .Where(s => s.TeamId == teamId && s.DeletedDate == null)
+            .Select(s => new { s.Slug, s.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var map = new Dictionary<string, Guid>(StringComparer.Ordinal);
+        foreach (var row in rows) map[row.Slug] = row.Id;   // slug is unique per active team, so no clobber
+        return map;
+    }
+
+    /// <summary>Bind each freshly-imported agent to the team skills its frontmatter declared (resolving each handle via DeriveSlug against the same-batch handle→id map); a declared handle that matches no team skill is skipped, a duplicate is bound once.</summary>
+    private void BindDeclaredSkills(IReadOnlyList<(Guid AgentId, IReadOnlyList<string> Declared)> newAgentSkills, IReadOnlyDictionary<string, Guid> skillSlugToId, Guid actorUserId, DateTimeOffset now)
+    {
+        foreach (var (agentId, declared) in newAgentSkills)
+            foreach (var slug in declared.Select(AgentDefinitionService.DeriveSlug).Where(s => s.Length > 0).Distinct(StringComparer.Ordinal))
+                if (skillSlugToId.TryGetValue(slug, out var skillId))
+                    _db.AgentSkillBinding.Add(new AgentSkillBinding { Id = Guid.NewGuid(), AgentDefinitionId = agentId, SkillDefinitionId = skillId, CreatedDate = now, CreatedBy = actorUserId });
     }
 
     /// <summary>Sets the content columns from the parsed artifact. Never touches slug / origin / pack / source-path (identity) — a re-sync refreshes the body, not the handle.</summary>

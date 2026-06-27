@@ -44,10 +44,25 @@ public sealed class ClaudeCodeAgentParser : IAgentArtifactParser, ISingletonDepe
             Description = Frontmatter.ReadScalar(fm.Map, "description"),
             Model = NullIfBlank(Frontmatter.ReadScalar(fm.Map, "model")),
             Tools = ReadTools(fm.Map),
+            Skills = ReadSkills(fm.Map),
             SystemPrompt = body.Trim(),
             RawFrontmatterJson = fm.RawJson,
             Diagnostics = diagnostics,
         };
+    }
+
+    /// <summary>The skill handles the agent declares (frontmatter <c>skills</c>) — a comma scalar or a YAML list of trimmed, non-blank entries; empty when the key is absent. Unlike tools there's no null/empty tri-state (a skill is bound or not).</summary>
+    private static IReadOnlyList<string> ReadSkills(IReadOnlyDictionary<string, object?> map)
+    {
+        if (!map.TryGetValue("skills", out var value) || value is null) return Array.Empty<string>();
+
+        if (value is string scalar)
+            return scalar.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+
+        if (value is IEnumerable list)
+            return list.Cast<object?>().Select(s => s?.ToString()?.Trim()).Where(s => !string.IsNullOrEmpty(s)).Cast<string>().ToList();
+
+        return Array.Empty<string>();
     }
 
     /// <summary>
