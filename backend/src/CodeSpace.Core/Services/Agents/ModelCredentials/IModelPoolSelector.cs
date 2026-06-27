@@ -8,9 +8,9 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// <c>ModelCredentialModel</c> rows S1–S3 build) — the one mechanism every in-process caller shares: the supervisor
 /// decider, the workflow planner, the <c>llm.complete</c> node, the supervisor synthesis. A qualifying row is an
 /// ENABLED model under an ACTIVE credential of the requested provider, bounded by the operator's allowed-models pool
-/// (null/empty = all the team's models), pinned to one model when the caller has one, else the operator's per-credential
-/// default (<c>IsDefault</c>, #746) first, then a deterministic total order (model id, then row id). The pool is
-/// provider+credential GENERIC — it never gates on a model "capability" flag: structured
+/// (null/empty = all the team's models), pinned to one model when the caller has one, else by the precedence ladder
+/// (operator <c>IsDefault</c> #746 → cached capability tier #762 → model id → row id). The pool is
+/// provider+credential GENERIC — the tier is an advisory ORDERING hint, never a selection gate: structured
 /// output is the client's job (<c>IStructuredLLMClient</c> degrades a model that doesn't honour forced tool-use to its
 /// prompt-only JSON floor), so any credentialed model is selectable and a genuinely-incapable one fails at call time,
 /// never as a pre-filter. The chosen row's backing credential is decrypted just-in-time. <c>null</c> = nothing
@@ -58,10 +58,10 @@ public interface IModelPoolSelector
     /// Auto-pick ONE enabled credentialed-model ROW id to run the supervisor's BRAIN on, when the operator pinned none
     /// (the Deep/Auto lane). Bounded to <paramref name="eligibleProviders"/> — the providers a structured-LLM client
     /// actually serves — so a self-resolved brain never trades <c>NoBrainModelStop</c> for <c>NoModelStop</c>. Returns
-    /// the row id (the decider resolves the brain BY row id) of the FIRST match in precedence order — the operator's
-    /// per-credential default (<c>IsDefault</c>) first, then model id / row id — so a starred eligible model becomes the
-    /// auto brain and a replay re-derives the SAME brain. Null when no enabled row under an active credential has an
-    /// eligible provider (the honest fail-closed floor — nothing to run the brain on).
+    /// the row id (the decider resolves the brain BY row id) of the FIRST match in precedence order — operator
+    /// <c>IsDefault</c> → cached capability tier (strongest first) → model id / row id — so a starred eligible model wins,
+    /// else the strongest, and a replay re-derives the SAME brain. Null when no enabled row under an active credential has
+    /// an eligible provider (the honest fail-closed floor — nothing to run the brain on).
     /// </summary>
     Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 }

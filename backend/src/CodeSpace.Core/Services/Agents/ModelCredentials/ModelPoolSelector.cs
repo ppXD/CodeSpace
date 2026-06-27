@@ -49,16 +49,24 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             query = query.Where(m => allowed.Contains(m.ModelId.ToLower()));
 
         // Precedence ladder for an UNPINNED auto pick: the operator's per-credential default (IsDefault, #746) wins
-        // first, then a deterministic total order (model id, then row id) so the pick is stable even when two credentials
-        // of the same provider carry the same model id. Mirrors the agent plane (ModelCredentialResolver) so a starred
-        // model drives EVERY auto pick — the brain (planner / synthesis / llm.complete) included, not just agents. The
-        // supervisor brain is picked by row id (ResolveByRowIdAsync); this name/provider path decides the ambient picks.
-        var row = await query
+        // first; then the cached capability TIER (frontier > strong > basic > unknown — "auto = the strongest available
+        // brain"); then a deterministic total order (model id, then row id) for stability across two credentials of the
+        // same model id. Mirrors the agent plane (ModelCredentialResolver) so a starred model drives every auto pick.
+        // The supervisor brain is picked by row id (ResolveByRowIdAsync); this name/provider path decides the ambient
+        // picks. Ordered IN-MEMORY because capability_tier is stored as TEXT — a DB ORDER BY would sort it alphabetically,
+        // not by rank — over the (small per-team) candidate pool. The model-id tie-break uses StringComparer.Ordinal ON
+        // PURPOSE: it is locale-INDEPENDENT, so the pick is identical in CI and locally (the prior DB-collation tie-break
+        // could differ across environments — see LlmCompleteUsageFlowTests). Advisory ordering only — never a filter.
+        var candidates = await query
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var row = candidates
             .OrderByDescending(m => m.IsDefault)
-            .ThenBy(m => m.ModelId)
+            .ThenByDescending(m => (int)(m.CapabilityTier ?? ModelCapabilityTier.Unknown))
+            .ThenBy(m => m.ModelId, StringComparer.Ordinal)
             .ThenBy(m => m.Id)
-            .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            .FirstOrDefault();
 
         if (row == null) return null;
 
@@ -140,14 +148,22 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
-            .Select(m => new { m.Id, Provider = m.Credential.Provider })
+            .Select(m => new { m.Id, m.ModelId, m.IsDefault, m.CapabilityTier, Provider = m.Credential.Provider })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // First STRUCTURED-eligible row in precedence order — the operator's default (IsDefault, #746) first, then model
-        // id / row id — so a starred brain model wins the auto pick (a non-eligible default is skipped to the next). A
-        // replay re-derives the SAME brain (the order is a stable total order over a frozen pool snapshot).
-        return rows.FirstOrDefault(r => eligible.Contains(r.Provider.ToLower()))?.Id;
+        // The highest-precedence STRUCTURED-eligible row — the operator's default (IsDefault, #746) first, then the cached
+        // capability TIER (frontier > strong > basic > unknown — "auto = the strongest available brain"), then model id /
+        // row id — so a starred brain wins, else the strongest, else alphabetical (a non-eligible row is excluded). A
+        // replay re-derives the SAME brain (a stable total order over a frozen pool snapshot). Ordered IN-MEMORY because
+        // capability_tier is stored as TEXT (a DB ORDER BY would sort it alphabetically, not by rank).
+        return rows
+            .Where(r => eligible.Contains(r.Provider.ToLower()))
+            .OrderByDescending(r => r.IsDefault)
+            .ThenByDescending(r => (int)(r.CapabilityTier ?? ModelCapabilityTier.Unknown))
+            .ThenBy(r => r.ModelId, StringComparer.Ordinal)
+            .ThenBy(r => r.Id)
+            .Select(r => (Guid?)r.Id)
+            .FirstOrDefault();
     }
 
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
