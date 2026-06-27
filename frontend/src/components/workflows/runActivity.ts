@@ -9,8 +9,10 @@ import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows"
 
 /** An agent wave — the agents one phase claimed (deduped so an agent never appears in two waves). */
 export interface AgentWave {
-  /** The owning phase id (the React key + the outline / tiles filter key). */
+  /** The owning phase id (the React key + the outline / tiles filter key). For a <c>kind: "map"</c> wave this is the flow.map node id the Rerun control forks from. */
   id: string;
+  /** The owning phase kind — "map" marks a flow.map fan-out (rerunnable per item); "phase"/"agent"/"node"/"decision" otherwise. */
+  kind: string;
   /** The phase label ("Implement", "Spawn 3 agents", "code"). */
   label: string;
   /** When the phase began (null until it has started). */
@@ -45,6 +47,7 @@ export function buildWaves(phases: readonly RunPhase[]): AgentWave[] {
   return phases
     .map((p): AgentWave => ({
       id: p.id,
+      kind: p.kind,
       label: p.label,
       startedAt: p.startedAt ?? null,
       // The agents this phase claimed, also collapsed by id so a (defensively) duplicated ref in one phase's list

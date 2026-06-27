@@ -6,6 +6,7 @@ import type { PhaseAgentRef } from "@/api/workflows";
 import { AgentTerminal } from "./AgentTerminal";
 import { AgentTile } from "./AgentTile";
 import { formatDuration, tileState, waveBreakdown, type AgentWave, type WaveBreakdown } from "./runActivity";
+import { WaveRerunControl } from "./WaveRerunControl";
 
 /**
  * One phase on the Activity timeline as a Claude-style CONVERSATION BOX — a 3-level drill-down. Collapsed it's a
@@ -54,6 +55,8 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
           {wave.agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
         </span>
       </button>
+
+      <WaveRerunControl wave={wave} />
 
       {open && (single
         // Single agent → its full terminal directly (skip the tile layer); close collapses the box AND clears the

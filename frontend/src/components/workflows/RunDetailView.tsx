@@ -5,11 +5,12 @@ import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
 import type { WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
-import { useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
+import { isRunActive, useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { RunActionsContext } from "./runActionsContext";
 import { RunActivityTimeline } from "./RunActivityTimeline";
 import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
@@ -179,7 +180,11 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <>
           {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
               as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
-          {!nested && <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />}
+          {!nested && (
+            <RunActionsContext.Provider value={{ runId, isTerminal: !isRunActive(r.status) }}>
+              <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
+            </RunActionsContext.Provider>
+          )}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.

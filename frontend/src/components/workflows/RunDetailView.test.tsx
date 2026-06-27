@@ -19,6 +19,7 @@ const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock } = vi.hoisted(() 
 
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  isRunActive: (s: string) => !["Success", "Failure", "Cancelled"].includes(s),
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),

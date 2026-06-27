@@ -15,7 +15,7 @@ import { TimelinePhase } from "./TimelinePhase";
 import type { AgentWave } from "./runActivity";
 
 const a = (id: string, status = "Running", durationMs?: number): PhaseAgentRef => ({ agentRunId: id, status, durationMs });
-const wave = (o: Partial<AgentWave>): AgentWave => ({ id: "w", label: "Implement", startedAt: null, agents: [], ...o });
+const wave = (o: Partial<AgentWave>): AgentWave => ({ id: "w", kind: "phase", label: "Implement", startedAt: null, agents: [], ...o });
 const dots = (c: HTMLElement) => Array.from(c.querySelectorAll<HTMLElement>(".run-tl-dots > i"));
 const boxEl = (c: HTMLElement) => c.querySelector<HTMLElement>(".run-tl-box");
 
