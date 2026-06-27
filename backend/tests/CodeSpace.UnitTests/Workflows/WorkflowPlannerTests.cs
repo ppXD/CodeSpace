@@ -26,6 +26,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// and the recommended-kind switch picks the right body node type.
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("DefaultHarnessEnvMutation")]   // reads the unset default harness — serialize with the env-mutating AgentHarnessDefaultsTests
 public class WorkflowPlannerTests
 {
     // ── Flag env-const pin (Rule 8) ───────────────────────────────────────────

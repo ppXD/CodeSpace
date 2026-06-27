@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -372,9 +373,9 @@ public sealed partial class RealSupervisorActionExecutor
         };
     }
 
-    /// <summary>The profile's harness, else the supervisor's <c>codex-cli</c> default (matches agent.code's catalog default). Null/blank profile → byte-identical to pre-P2-3.</summary>
+    /// <summary>The profile's harness, else the shared platform default (<see cref="AgentHarnessDefaults.DefaultHarness"/> — the same operator-overridable, codex-cli-floor source the agent.code projection uses). Null/blank profile → byte-identical to pre-P2-3.</summary>
     private static string HarnessOf(SupervisorAgentProfile? profile) =>
-        !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : DefaultHarness;
+        !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : AgentHarnessDefaults.DefaultHarness;
 
     /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.code's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
     private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
@@ -386,7 +387,4 @@ public sealed partial class RealSupervisorActionExecutor
 
     /// <summary>A blank string degrades to null (the harness-default sentinel), mirroring agent.code's ReadOptionalString.</summary>
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
-
-    /// <summary>The default harness for a supervisor-spawned agent run (matches the agent.code node's catalog default).</summary>
-    private const string DefaultHarness = "codex-cli";
 }
