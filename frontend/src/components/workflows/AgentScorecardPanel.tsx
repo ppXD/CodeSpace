@@ -1,20 +1,21 @@
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { AgentRunScorecard, HarnessScore } from "@/api/agents";
-import { useAgentScorecard } from "@/hooks/use-agents";
+import type { AgentRunScorecard, HarnessScore, TeamCostRollup } from "@/api/agents";
+import { useAgentScorecard, useTeamCost } from "@/hooks/use-agents";
 
 /**
  * The team's agent-run scorecard — the measurement spine that turns "is the agent working" into an auditable
- * NUMBER. A headline strip (overall success rate, P50/P95 latency, runs scored) over a per-harness comparison
- * table, surfaced at the top of the Agents library. Read-only + team-scoped at the source.
+ * NUMBER. A headline strip (overall success rate, P50/P95 latency, runs scored, est. spend) over a per-harness
+ * comparison table, surfaced at the top of the Agents library. Read-only + team-scoped at the source.
  *
- * <p>Cost/token is deliberately ABSENT: the backend scorer aggregates only success + latency today (token usage
- * lives in the per-run result envelope but isn't rolled up), so a cost figure would be fabricated. When the
- * persistence prereq lands, it slots in as another headline stat + table column — additively.</p>
+ * <p>Success + latency come from the scorecard; the estimated USD spend comes from the SEPARATE cost rollup
+ * (<c>/api/agents/cost</c>) — a real figure, qualified by an unknown-cost count, not fabricated. The cost stat
+ * renders only when a rollup is supplied, so the pure view stays cost-free when given only a scorecard.</p>
  *
  * This is the wired surface; {@link AgentScorecardView} is the pure renderer (data in, markup out) the tests drive.
  */
 export function AgentScorecardPanel() {
   const scorecard = useAgentScorecard();
+  const cost = useTeamCost();
 
   if (scorecard.isLoading) return null;
 
@@ -27,11 +28,11 @@ export function AgentScorecardPanel() {
     );
   }
 
-  return <AgentScorecardView card={scorecard.data} />;
+  return <AgentScorecardView card={scorecard.data} cost={cost.data} />;
 }
 
 /** Pure renderer — markup for a scorecard (or the empty state when no runs have been scored yet). */
-export function AgentScorecardView({ card }: { card: AgentRunScorecard | undefined }) {
+export function AgentScorecardView({ card, cost }: { card: AgentRunScorecard | undefined; cost?: TeamCostRollup }) {
   const overall = card?.overall;
 
   if (!overall || overall.total === 0) {
@@ -52,6 +53,7 @@ export function AgentScorecardView({ card }: { card: AgentRunScorecard | undefin
         <Stat label="P50 latency" value={formatDuration(overall.p50DurationSeconds)} />
         <Stat label="P95 latency" value={formatDuration(overall.p95DurationSeconds)} />
         <Stat label="Runs scored" value={`${overall.succeeded}/${overall.total}`} />
+        {cost && <Stat label="Est. cost" value={formatUsd(cost.estimatedCostUsd)} />}
       </div>
 
       <table className="tbl sc-table">
@@ -102,6 +104,12 @@ function HarnessRow({ score }: { score: HarnessScore }) {
 /** 0..1 → a whole-number percentage (no decimals — the success rate reads as a clean "75%"). */
 function formatRate(rate: number): string {
   return `${Math.round(rate * 100)}%`;
+}
+
+/** Estimated spend → "$12.40"; an em-dash when nothing in the window could be priced (null, distinct from $0.00). */
+function formatUsd(usd: number | null): string {
+  if (usd === null) return "—";
+  return `$${usd.toFixed(2)}`;
 }
 
 /** Seconds → a compact human duration ("8s", "1m 30s", "2h 5m"); an em-dash when there's no latency to show. */

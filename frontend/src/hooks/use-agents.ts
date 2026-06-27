@@ -84,3 +84,15 @@ export function useAgentScorecard(filters: ScorecardFilters = {}) {
     staleTime: 30 * 1000,
   });
 }
+
+/**
+ * The team's token + estimated-USD spend roll-up — the cost half of the library measurement strip (success +
+ * latency come from {@link useAgentScorecard}). Team-scoped at the source; short staleTime like the scorecard.
+ */
+export function useTeamCost() {
+  return useQuery({
+    queryKey: ["agent-cost"],
+    queryFn: () => agentsApi.getCost(),
+    staleTime: 30 * 1000,
+  });
+}
