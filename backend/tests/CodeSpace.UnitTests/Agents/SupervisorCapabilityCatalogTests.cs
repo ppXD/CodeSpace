@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -34,6 +35,36 @@ public class SupervisorCapabilityCatalogTests
         catalog.ShouldContain("metis-coder-max — Anthropic");
         catalog.ShouldContain("gpt-4o — OpenAI");
         catalog.ShouldContain("harness whose providers include that model's provider", Case.Insensitive, "the catalog states the compatibility constraint");
+    }
+
+    [Fact]
+    public void Catalog_appends_the_capability_tier_when_known_and_guides_allocation()
+    {
+        var pool = new[]
+        {
+            new PoolModelInfo("claude-opus-4-8", "Anthropic", ModelCapabilityTier.Frontier),
+            new PoolModelInfo("metis-coder-max", "Anthropic", ModelCapabilityTier.Unknown),   // opaque/un-tiered → no suffix
+        };
+
+        var catalog = LlmSupervisorDecider.RenderCatalog(Harnesses, pool);
+
+        catalog.ShouldContain("claude-opus-4-8 — Anthropic — tier: frontier", Case.Sensitive, "a known tier is surfaced so the brain allocates capability-aware");
+        catalog.ShouldContain("metis-coder-max — Anthropic\n", Case.Sensitive, "an Unknown tier renders no suffix");
+        catalog.ShouldNotContain("metis-coder-max — Anthropic — tier", Case.Insensitive);
+        catalog.ShouldContain("higher-tier model", Case.Insensitive, "the allocation guidance line appears when any tier is known");
+    }
+
+    [Fact]
+    public void Catalog_with_an_all_untiered_pool_is_byte_identical_to_the_pre_tier_render()
+    {
+        var untiered = new[] { new PoolModelInfo("metis-coder-max", "Anthropic"), new PoolModelInfo("gpt-4o", "OpenAI") };
+        var explicitUnknown = new[] { new PoolModelInfo("metis-coder-max", "Anthropic", ModelCapabilityTier.Unknown), new PoolModelInfo("gpt-4o", "OpenAI", ModelCapabilityTier.Unknown) };
+
+        var render = LlmSupervisorDecider.RenderCatalog(Harnesses, untiered);
+
+        render.ShouldBe(LlmSupervisorDecider.RenderCatalog(Harnesses, explicitUnknown));
+        render.ShouldNotContain("tier:", Case.Insensitive, "no tier suffix");
+        render.ShouldNotContain("higher-tier", Case.Insensitive, "and no allocation-guidance line — an un-tiered pool renders exactly as before this signal existed");
     }
 
     [Fact]

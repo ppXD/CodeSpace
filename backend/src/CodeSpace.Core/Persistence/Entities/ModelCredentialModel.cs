@@ -35,5 +35,11 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>The operator's preferred model for an "auto" run (no pinned model) — the resolver orders default-marked rows first in the pool pick. At most one per credential (the service clears the others when one is set). Defaults false.</summary>
     public bool IsDefault { get; set; }
 
+    /// <summary>Cached, advisory coding-capability tier inferred by the brain from <see cref="ModelId"/> (an ALLOCATION HINT surfaced in the capability catalog, never a selection gate). Null / <see cref="ModelCapabilityTier.Unknown"/> = not yet tiered, or an opaque id the brain couldn't recognise (the later-probe hook).</summary>
+    public ModelCapabilityTier? CapabilityTier { get; set; }
+
+    /// <summary>When <see cref="CapabilityTier"/> was last written — the staleness gate so re-tiering is a cached fact, never a per-launch call. Null = never tiered.</summary>
+    public DateTimeOffset? LastTieredAt { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }
