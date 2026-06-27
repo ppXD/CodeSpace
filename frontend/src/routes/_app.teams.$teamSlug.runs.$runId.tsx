@@ -40,9 +40,14 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   // "N attempts" summary. `rootId` is the lineage identity the page titles on.
   const attempts = useRunAttempts(runId);
   const rootId = attempts.data?.rootRunId ?? runId;
-  const latestRunId = attempts.data?.attempts.find((a) => a.isLatest)?.runId;
+  const ladder = attempts.data?.attempts;
+  const latestRunId = ladder?.find((a) => a.isLatest)?.runId;
   const effectiveRunId = latestRunId ?? runId;
-  const provenance = useMemo(() => ({ attempts: attempts.data?.attempts ?? [], rerunsByNode: rerunsByNode(attempts.data?.attempts ?? []) }), [attempts.data]);
+  // Memo on the ladder's CONTENT — useRunAttempts returns a fresh array on every 3s poll while a rerun is live, so a
+  // `[attempts.data]` dep would rebuild the context (and re-render every node badge) each poll for no change.
+  const provKey = (ladder ?? []).map((a) => `${a.runId}:${a.status}:${a.rerunFromNodeId ?? ""}`).join("|");
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- provKey is the content digest of `ladder`
+  const provenance = useMemo(() => ({ attempts: ladder ?? [], rerunsByNode: rerunsByNode(ladder ?? []) }), [provKey]);
 
   // Shared with RunDetailView via the same query key (React Query dedups) — used here for the Re-run target,
   // the run-state header, and the "Back to workflow" link when the run came from an authored workflow.
