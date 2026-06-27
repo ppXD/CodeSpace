@@ -432,6 +432,37 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ct-empty { padding: 64px 24px; text-align: center; color: var(--muted); }
 .acs-root .ct-empty-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 
+/* Library / store — packs-as-categories rail (left) + the selected pack's artifacts (right). */
+.acs-root .lib { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding-top: 16px; align-items: start; }
+.acs-root .lib-rail { display: flex; flex-direction: column; gap: 4px; }
+.acs-root .lib-rail-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 11px; border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; transition: background .12s ease, border-color .12s ease; }
+.acs-root .lib-rail-item:hover { background: rgba(31,30,29,.04); }
+.acs-root .lib-rail-item[data-active="true"] { background: var(--panel); border-color: var(--line); box-shadow: var(--shadow-1); }
+.acs-root .lib-rail-item:focus-visible { outline: none; border-color: var(--accent); }
+.acs-root .lib-rail-ic { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line); flex-shrink: 0; }
+.acs-root .lib-rail-item[data-active="true"] .lib-rail-ic { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.acs-root .lib-rail-body { min-width: 0; flex: 1; }
+.acs-root .lib-rail-top { display: flex; align-items: center; gap: 7px; }
+.acs-root .lib-rail-name { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acs-root .lib-rail-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+.acs-root .lib-detail { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 4px 18px 8px; min-width: 0; }
+.acs-root .lib-dhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 16px 0 14px; border-bottom: 1px solid var(--line); }
+.acs-root .lib-dhead-main { min-width: 0; }
+.acs-root .lib-dhead-name { font-size: 16px; font-weight: 650; color: var(--ink); letter-spacing: -0.01em; }
+.acs-root .lib-dhead-src { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; color: var(--accent); text-decoration: none; }
+.acs-root .lib-dhead-src:hover { text-decoration: underline; }
+.acs-root .lib-dhead-src-mute { color: var(--muted); }
+.acs-root .lib-fresh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acs-root .lib-fresh .wf-trigger-muted, .acs-root .lib-fresh .wf-trigger-chip { display: inline-flex; align-items: center; gap: 4px; }
+
+.acs-root .lib-sec { padding: 14px 0 4px; }
+.acs-root .lib-sec-h { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; }
+.acs-root .lib-sec-h svg { color: var(--ink-2); }
+.acs-root .lib-sec-c { color: var(--muted-2); font-weight: 500; }
+.acs-root .lib-art { padding: 9px 0; border-top: 1px solid var(--line); }
+.acs-root .lib-sec-h + .lib-art { border-top: none; }
+
 /* Model-credential cards (Settings → Model credentials) — provider logo + masked key, never the secret. */
 .acs-root .mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 14px; padding: 16px; }
 .acs-root .mc-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; transition: border-color .12s ease, box-shadow .12s ease; }
