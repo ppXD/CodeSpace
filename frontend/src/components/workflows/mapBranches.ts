@@ -77,6 +77,67 @@ export function branchBadge(node: WorkflowRunNodeSummary): string {
   return segments.map((s) => `#${s.index}`).join("/");
 }
 
+/**
+ * A supervisor-style TURN segment parsed from `<nodeId>#turn{N}` (optionally with a sub-state suffix like
+ * `#park` / `#ask`, e.g. `sup#turn2#park`). The supervisor is a durable node that suspends/resumes ONCE PER
+ * decision turn, keyed this way — the SAME `<id>#<seg>` family as a map branch, but the segment is `turn{N}`,
+ * not a bare integer, so {@link parseIterationKey} skips it and the row would otherwise read as an unlabeled
+ * "branch". Returns the turn number + optional sub-state, or null for a non-turn key.
+ */
+export interface TurnSegment {
+  turn: number;
+  /** A within-turn sub-state, e.g. "park" (waiting on spawned agents) / "ask" (awaiting a human). Absent on a bare turn. */
+  sub?: string;
+}
+
+export function parseTurnKey(iterationKey: string): TurnSegment | null {
+  const m = /#turn(\d+)(?:#([a-z]+))?$/i.exec(iterationKey);
+  return m ? { turn: Number(m[1]), sub: m[2] } : null;
+}
+
+/**
+ * A human label for ONE iterated node-trace row, so repeated rows under one node id read distinctly instead of
+ * as N identical lines: a flow.map branch → `#i` (or `#i/#j` nested), a supervisor turn → `turn 2` (or
+ * `turn 2 · parked`), everything else (top-level, loop pass, try body) → `""` (unchanged). Generic — driven by
+ * the key shape, never by a specific node id.
+ */
+export function nodeIterationLabel(node: WorkflowRunNodeSummary): string {
+  const badge = branchBadge(node);
+  if (badge) return badge;
+
+  const turn = parseTurnKey(node.iterationKey);
+  if (turn) return turn.sub ? `turn ${turn.turn} · ${turnSubLabel(turn.sub)}` : `turn ${turn.turn}`;
+
+  return "";
+}
+
+function turnSubLabel(sub: string): string {
+  if (sub === "park") return "parked";
+  if (sub === "ask") return "awaiting input";
+  return sub;
+}
+
+/**
+ * The fan-out summary for a node's run-result footer: how many distinct iterations the node ran AND the right
+ * NOUN for them — `branches` for a flow.map, `turns` for a supervisor (distinct turn numbers, ignoring the
+ * `#park`/`#ask` sub-states), `runs` as a neutral fallback for any other multi-row node (e.g. a loop). Returns
+ * count 1 (singular, no fan-out) when the node ran once. Drives a correct "Running · N turns" instead of the
+ * old blanket "N branches".
+ */
+export function fanoutSummary(rows: readonly WorkflowRunNodeSummary[]): { count: number; noun: string } {
+  const branches = fanBranches(rows);
+  if (branches.length >= 2) return { count: branches.length, noun: "branches" };
+
+  const turns = new Set<number>();
+  for (const r of rows) {
+    const t = parseTurnKey(r.iterationKey);
+    if (t) turns.add(t.turn);
+  }
+  if (turns.size >= 2) return { count: turns.size, noun: "turns" };
+
+  return { count: rows.length, noun: rows.length === 1 ? "run" : "runs" };
+}
+
 /** Per-map rollup over its branch rows: distinct branches seen, and how each settled. */
 export interface MapRollup {
   /** The map node id this group fans out from (the FINAL segment's containerId — the innermost map for a nested branch). */

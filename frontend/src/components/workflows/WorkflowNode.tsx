@@ -13,7 +13,7 @@ import { JsonView } from "./JsonView";
 import { NodeRerunBadge } from "./NodeRerunBadge";
 import { RerunMenu } from "./RerunMenu";
 import { loopMinSize } from "./loopResize";
-import { branchBadge, fanBranches } from "./mapBranches";
+import { fanBranches, fanoutSummary, nodeIterationLabel } from "./mapBranches";
 import { MapFanout } from "./MapFanout";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
 import { RunOpenContext } from "./runOpenContext";
@@ -128,7 +128,7 @@ function RunResultBar({ status, rows, title }: { status: NodeStatus; rows: Workf
         onClick={(e) => { e.stopPropagation(); if (expandable) setOpen((v) => !v); }}
       >
         <span className="wf-rf-result-glyph" aria-hidden="true">{resultGlyph(status)}</span>
-        <span className="wf-rf-result-label">{resultLabel(status, rows.length)}</span>
+        <span className="wf-rf-result-label">{resultLabel(status, rows)}</span>
         {durationMs != null && <span className="wf-rf-result-dur">{formatDuration(durationMs)}</span>}
         {expandable && <span className="wf-rf-result-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>}
       </button>
@@ -137,10 +137,10 @@ function RunResultBar({ status, rows, title }: { status: NodeStatus; rows: Workf
           {rows.length === 1
             ? <RunRowDetail row={rows[0]} />
             : rows.map((r, i) => {
-                // The REAL map element index, parsed from the row's iterationKey (#i, or #i/#j nested) — NOT
-                // the array position, which is StartedAt order and wrong for out-of-order map completion. ""
-                // for a loop/try row, which stays unbadged, exactly as the timeline view does.
-                const badge = branchBadge(r);
+                // The REAL iteration label, parsed from the row's iterationKey: a map element index (#i, or #i/#j
+                // nested) OR a supervisor turn (turn 2 · parked) — NOT the array position, which is StartedAt
+                // order. "" for a loop/try row, which stays unlabeled, exactly as the timeline view does.
+                const badge = nodeIterationLabel(r);
                 return (
                   <div key={`${r.nodeId}:${r.iterationKey}:${i}`} className="wf-rf-result-branch">
                     <div className="wf-rf-result-branch-h">
@@ -226,9 +226,10 @@ function resultGlyph(status: NodeStatus) {
   return <span className="wf-rf-status-spin" />;            // Running
 }
 
-/** "Success" / "Failure" / … — appends "· N branches" when a map/loop node fanned out to many rows. */
-function resultLabel(status: NodeStatus, count: number): string {
-  return count > 1 ? `${status} · ${count} branches` : status;
+/** "Success" / "Failure" / … — appends "· N {branches|turns|runs}" when a node ran multiple iterations (the noun matches what it ran: map branches, supervisor turns, or a neutral fallback). */
+function resultLabel(status: NodeStatus, rows: WorkflowRunNodeSummary[]): string {
+  const { count, noun } = fanoutSummary(rows);
+  return count > 1 ? `${status} · ${count} ${noun}` : status;
 }
 
 /**
