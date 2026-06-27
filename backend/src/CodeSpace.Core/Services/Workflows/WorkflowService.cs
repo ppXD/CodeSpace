@@ -1401,10 +1401,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary>
     /// The lineage merge: per <c>(NodeId, IterationKey)</c> cell, keep the row from the LATEST attempt that ran it
-    /// (by the lineage's <c>(CreatedDate, Id)</c> order). For a single-attempt run this is a no-op (one row per cell).
+    /// by the lineage's canonical <c>(CreatedDate, Id)</c> order. The Id tiebreak compares the GUID's lowercase string
+    /// ORDINALLY — the .NET equivalent of Postgres uuid byte order — so a created-date tie resolves to the SAME
+    /// attempt the runs index + attempt ladder call latest (their Id tiebreak runs in uuid order; .NET Guid order
+    /// differs). For a single-attempt run this is a no-op (one row per cell).
     /// </summary>
     private static IEnumerable<T> LatestPerCell<T>(IEnumerable<T> rows, Func<T, (string, string)> cell, Func<T, Guid> runId, IReadOnlyDictionary<Guid, DateTimeOffset> createdByRun) =>
-        rows.GroupBy(cell).Select(g => g.OrderByDescending(x => createdByRun[runId(x)]).ThenByDescending(x => runId(x)).First());
+        rows.GroupBy(cell).Select(g => g.OrderByDescending(x => createdByRun[runId(x)]).ThenByDescending(x => runId(x).ToString(), StringComparer.Ordinal).First());
 
     private static WorkflowRunNodeSummary MapRunNode(
         WorkflowRunNode n,

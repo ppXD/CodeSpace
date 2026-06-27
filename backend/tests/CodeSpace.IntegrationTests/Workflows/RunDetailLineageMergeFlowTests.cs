@@ -53,6 +53,28 @@ public class RunDetailLineageMergeFlowTests
     }
 
     [Fact]
+    public async Task When_the_fork_re_emits_every_branch_the_latest_attempts_copy_wins_each_cell()
+    {
+        // Production fidelity: a real rerun RE-EMITS the reused siblings onto the fork (SeedSiblingBranchCells), so BOTH
+        // attempts carry all 3 branches. The merge must then pick the LATEST attempt's copy for every contested cell.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var replay = await SeedRunAsync(teamId, parent: null, root: null, created: t.AddMinutes(-5));
+        await SeedMapAsync(replay, branches: 3, rerunBranchesOnly: null);
+
+        var rerun = await SeedRunAsync(teamId, parent: replay, root: replay, created: t);
+        await SeedMapAsync(rerun, branches: 3, rerunBranchesOnly: null);   // the fork carries ALL branches too
+
+        var detail = await GetRunAsync(rerun, teamId);
+
+        var byKey = detail!.Nodes.Where(n => n.IterationKey.StartsWith("map#")).ToDictionary(n => n.IterationKey);
+        byKey.Count.ShouldBe(3, "still exactly 3 branches — no duplicate cells across attempts");
+        for (var i = 0; i < 3; i++)
+            byKey[$"map#{i}"].AgentRunId.ShouldBe(AgentTokenFor(rerun, i), $"branch {i} resolves to the LATEST attempt's copy, not the older one");
+    }
+
+    [Fact]
     public async Task A_never_rerun_run_is_unchanged_by_the_merge()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
