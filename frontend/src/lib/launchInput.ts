@@ -29,6 +29,8 @@ export interface LaunchFormState {
   runnerKind: string;
   /** "Working dir" — multi-repo cwd mode: `"auto"` (default) / `"workspace"` / `"primary"`. Sent (as `workingDirMode`) only when non-auto. Applies to all tiers (an agent-setup knob); inert on a single-repo run. */
   cwdMode: string;
+  /** "Force MCP fabric" — per-run opt-in to the FULL (side-effecting) MCP tool catalog. Default false ⇒ omitted ⇒ defer to the ambient flag (byte-identical). Sent (as `enableMcp:true`) only when on. Applies to all tiers (an agent-setup knob). */
+  enableMcp: boolean;
   /** Coordination "Limits" — supervisor fan-out bounds. Only meaningful on deep/auto (see effort gate). */
   maxParallel: string;
   maxRounds: string;
@@ -95,6 +97,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // Working-dir mode is an agent-setup knob (all tiers), inert on a single-repo run. "auto" is the default ⇒ omitted ⇒
   // byte-identical; "workspace"/"primary" are sent so a multi-repo run anchors the cwd where the operator asked.
   if (state.cwdMode && state.cwdMode !== "auto") input.workingDirMode = state.cwdMode;
+
+  // Force-MCP is a default-OFF per-run opt-in (the OR-gate can force the full fabric ON, never OFF). Send true only when
+  // on (default off ⇒ omitted ⇒ defer to the ambient flag, byte-identical). An agent-setup knob ⇒ all tiers.
+  if (state.enableMcp) input.enableMcp = true;
 
   // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
   // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit

@@ -39,4 +39,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>The working-directory mode in a MULTI-repo workspace, in wire vocabulary (<c>"workspace"</c> / <c>"primary"</c>; <c>"auto"</c> / null → the Auto default, omitted). Parsed by <c>WorkspaceCwdModeWire.FromWire</c> at profile build. Inert on a single-repo run.</summary>
     public string? CwdMode { get; init; }
+
+    /// <summary>Per-run opt-in to the FULL MCP tool-fabric (the side-effecting catalog) for the agent. Null / false → defer to the ambient deployment flag (an ordinary run keeps the read-only catalog unless the deployment forces full) — byte-identical. The gate is OR-only: this can force the full fabric ON, it cannot turn it OFF when the deployment enabled it.</summary>
+    public bool? EnableMcp { get; init; }
 }

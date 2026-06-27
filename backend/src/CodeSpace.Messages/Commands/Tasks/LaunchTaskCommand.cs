@@ -117,6 +117,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public string? WorkingDirMode { get; init; }
 
+    /// <summary>
+    /// Per-run opt-in to the FULL MCP tool-fabric (the side-effecting catalog) for the run's agents. Null / false ⇒
+    /// omitted ⇒ defer to the ambient deployment flag (the read-only catalog unless the deployment forces full) ⇒
+    /// byte-identical. The gate is OR-only: this FORCES the full fabric ON for the run; it cannot turn it OFF when the
+    /// deployment enabled it. Flows to both the single-agent <c>agent.code</c> node and each supervisor-spawned agent.
+    /// </summary>
+    public bool? EnableMcp { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 
