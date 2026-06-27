@@ -1,4 +1,5 @@
 using CodeSpace.Core.Authorization;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Workflows;
@@ -188,6 +189,14 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
             case RerunUpstreamNotReusableException:
                 _logger.LogInformation("Rerun upstream not reusable at {Path}: {Message}", path, context.Exception.Message);
                 context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_upstream_not_reusable", context.Exception.Message);
+                break;
+
+            case PackImportException packImport:
+                // 400 — a pack source the operator pasted is bad input: a non-allowlisted/non-https host (egress
+                // guard) or a clone that failed. The message is operator-actionable (it names CODESPACE_PACK_ALLOWED_HOSTS
+                // for the host case), so surface it verbatim rather than letting it fall to the masked 500 default arm.
+                _logger.LogWarning("Pack import rejected at {Path}: {Message}", path, packImport.Message);
+                context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "pack_import_failed", packImport.Message);
                 break;
 
             case ArgumentException argument:
