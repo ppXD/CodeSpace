@@ -3,7 +3,10 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Agents;
+using MediatR;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -64,8 +67,11 @@ public class PackReadApiTests
         var (teamId, userId) = await SeedTeamAsync();
         var pack = await SeedPackAsync(teamId, userId, "obra/superpowers", PackKind.Github, "https://github.com/obra/superpowers", "v6.0.3", null, null);
 
-        await SeedAgentAsync(teamId, userId, "backend-architect", pack, deleted: false);
-        await SeedSkillAsync(teamId, userId, "tdd", pack, deleted: false);
+        // Interleaving slugs across kinds prove the ordering: agents BEFORE skills, ordinal slug tiebreak within a kind.
+        await SeedAgentAsync(teamId, userId, "zebra", pack, deleted: false);
+        await SeedAgentAsync(teamId, userId, "alpha", pack, deleted: false);
+        await SeedSkillAsync(teamId, userId, "yak", pack, deleted: false);
+        await SeedSkillAsync(teamId, userId, "beta", pack, deleted: false);
         await SeedSkillAsync(teamId, userId, "gone", pack, deleted: true);
 
         using var scope = _fixture.BeginScope();
@@ -73,12 +79,18 @@ public class PackReadApiTests
 
         var detail = await service.GetAsync(teamId, pack, CancellationToken.None);
         detail.ShouldNotBeNull();
-        detail!.Pack.AgentCount.ShouldBe(1);
-        detail.Pack.SkillCount.ShouldBe(1);
+        detail!.Pack.AgentCount.ShouldBe(2);
+        detail.Pack.SkillCount.ShouldBe(2, "the soft-deleted skill is excluded");
 
-        // Agents before skills, soft-deleted excluded; the artifact carries its source path.
-        detail.Artifacts.Select(a => (a.Kind, a.Slug)).ShouldBe(new[] { (PackArtifactKindFor("agent"), "backend-architect"), (PackArtifactKindFor("skill"), "tdd") });
-        detail.Artifacts.Single(a => a.Slug == "backend-architect").SourcePath.ShouldBe("agents/backend-architect.md");
+        // Agents before skills, ordinal slug tiebreak within each kind; soft-deleted excluded.
+        detail.Artifacts.Select(a => (a.Kind, a.Slug)).ShouldBe(new[]
+        {
+            (PackArtifactKind.Agent, "alpha"),
+            (PackArtifactKind.Agent, "zebra"),
+            (PackArtifactKind.Skill, "beta"),
+            (PackArtifactKind.Skill, "yak"),
+        });
+        detail.Artifacts.Single(a => a.Slug == "alpha").SourcePath.ShouldBe("agents/alpha.md");
 
         (await service.GetAsync(teamId, Guid.NewGuid(), CancellationToken.None)).ShouldBeNull("an unknown pack is null");
 
@@ -86,7 +98,30 @@ public class PackReadApiTests
         (await service.GetAsync(otherTeam, pack, CancellationToken.None)).ShouldBeNull("a pack in another team is null (tenancy)");
     }
 
-    private static PackArtifactKind PackArtifactKindFor(string kind) => kind == "agent" ? PackArtifactKind.Agent : PackArtifactKind.Skill;
+    [Fact]
+    public async Task Mediator_threads_the_current_team_so_packs_are_invisible_to_another_team()
+    {
+        var (teamA, userA) = await SeedTeamAsync();
+        var (teamB, userB) = await SeedTeamAsync();
+
+        var packInA = await SeedPackAsync(teamA, userA, "obra/superpowers", PackKind.Github, "https://github.com/obra/superpowers", "v6.0.3", null, null);
+        await SeedSkillAsync(teamA, userA, "tdd", packInA, deleted: false);
+
+        // Owner of A: the handler threads ICurrentTeam → the pack lists + resolves.
+        using (var owner = _fixture.BeginScopeAs(userA, teamA, Roles.Admin))
+        {
+            var mediator = owner.Resolve<IMediator>();
+            (await mediator.Send(new ListPacksQuery())).Select(p => p.Id).ShouldContain(packInA);
+            (await mediator.Send(new GetPackQuery { PackId = packInA }))!.Pack.Name.ShouldBe("obra/superpowers");
+        }
+
+        // A member of team B presenting A's pack id: the handler uses B's ICurrentTeam (never the payload), so
+        // A's pack is invisible — Get is null and List omits it. This is the cross-tenant guarantee.
+        using var attacker = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var b = attacker.Resolve<IMediator>();
+        (await b.Send(new GetPackQuery { PackId = packInA })).ShouldBeNull("a foreign team's pack MUST resolve null, never confirm existence");
+        (await b.Send(new ListPacksQuery())).Select(p => p.Id).ShouldNotContain(packInA);
+    }
 
     private async Task<Guid> SeedPackAsync(Guid teamId, Guid userId, string name, PackKind kind, string? url, string? reference, string? sha, DateTimeOffset? synced)
     {
