@@ -429,6 +429,40 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_acceptance_criteria_into_the_supervisor_snapshot()
+    {
+        // The operator's free-text Acceptance criteria (the definition of done) must bind through the command path →
+        // TaskBuildContext → the supervisor node's acceptanceCriteria config, where the decider renders them into its
+        // prompt. They are NEVER executed (distinct from the executable acceptanceChecks argv). Unset ⇒ omitted ⇒ the
+        // supervisor prompt is byte-identical (the other deep tests exercise that default path).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                AcceptanceCriteria = new[] { "tests pass", "docs updated", "no perf regression" },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorAcceptanceCriteria(run.DefinitionSnapshotJson!).ShouldBe(new[] { "tests pass", "docs updated", "no perf regression" },
+                customMessage: "the operator's acceptance criteria bind through the command path into the supervisor's acceptanceCriteria config, in authored order");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -918,6 +952,17 @@ public class TaskLaunchFlowTests
         var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
 
         if (!sup.GetProperty("config").TryGetProperty("allowedModelIds", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's <c>acceptanceCriteria</c> array (the operator's free-text definition of done) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
+    private static IReadOnlyList<string> ReadSupervisorAcceptanceCriteria(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        if (!sup.GetProperty("config").TryGetProperty("acceptanceCriteria", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
 
         return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
     }

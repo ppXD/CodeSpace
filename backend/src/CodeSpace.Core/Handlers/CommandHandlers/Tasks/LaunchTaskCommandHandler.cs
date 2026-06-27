@@ -44,6 +44,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             Overrides = BuildOverrides(request),
             CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),
             AllowedModelIds = request.AllowedModelIds,
+            AcceptanceCriteria = request.AcceptanceCriteria,
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
 

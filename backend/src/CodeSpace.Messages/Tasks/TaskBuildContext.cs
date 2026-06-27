@@ -36,4 +36,7 @@ public sealed record TaskBuildContext
 
     /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches, validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedModelIds</c>, where a dispatched model out of the pool fails closed. Null / empty ⇒ the pool is all the team's models (the builder omits the key — byte-identical). Inert on a non-supervisor projection (its builder never reads this).</summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
+
+    /// <summary>The operator's free-text ACCEPTANCE CRITERIA — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c>, rendered into the decider prompt (NOT executed). Null / empty ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 }

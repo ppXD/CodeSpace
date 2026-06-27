@@ -39,9 +39,15 @@ export interface LaunchFormState {
   autonomyCeiling: string;
   /** Coordination "Integrate branches" — Deep only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Default false ⇒ defer to the ambient flag. */
   integrateBranches: boolean;
+  /** Coordination "Acceptance" — Deep only: free-text criteria the supervisor targets (rendered into its prompt). Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
+  acceptanceCriteria: string[];
   /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
   timeLimit: string;
 }
+
+/** The canonical default acceptance chips — shared by the modal seed/reset and the omit-check, so an UNMODIFIED set is
+ *  recognised and omitted (byte-identical). The operator activates criteria by changing this set (deleting / editing). */
+export const DEFAULT_ACCEPTANCE = ["tests pass", "PR opened"];
 
 const primaryOf = (workspace: LaunchWorkspaceRepo[]) => workspace.find(r => r.isPrimary) ?? workspace[0];
 
@@ -103,6 +109,14 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // Integrate-branches is a Deep-only supervisor opt-in; send it only when ON (default off defers to the ambient flag,
   // byte-identical) and only on the tiers that expose Coordination (inert on a single-agent run).
   if (tierExposesCaps(state.effort) && state.integrateBranches) input.integrateBranches = true;
+
+  // Acceptance criteria are a Deep-only supervisor concern. Send only when the operator CHANGED them from the canonical
+  // default AND the set is non-empty — an unmodified default (or a cleared set) is omitted, keeping the supervisor
+  // prompt byte-identical. (The modal default is non-empty, so omit-when-empty alone would always send it.)
+  if (tierExposesCaps(state.effort) && state.acceptanceCriteria.length
+      && JSON.stringify(state.acceptanceCriteria) !== JSON.stringify(DEFAULT_ACCEPTANCE)) {
+    input.acceptanceCriteria = [...state.acceptanceCriteria];
+  }
 
   return input;
 }

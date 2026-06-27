@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { createPortal } from "react-dom";
 
 import type { TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput } from "@/lib/launchInput";
+import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
@@ -71,20 +71,21 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   const [effortOpen, setEffortOpen] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
   const [customizeTab, setCustomizeTab] = useState<"execution" | "supervisor" | "safety">("execution");
+  const [acceptDraft, setAcceptDraft] = useState("");
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
     branchMode: "auto", tools: "default", enableMcp: true, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
-    acceptance: ["tests pass", "PR opened"] as string[],
+    acceptance: [...DEFAULT_ACCEPTANCE],
     askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true,
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: "default", enableMcp: true, cwdMode: "auto" }); }
-    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: ["tests pass", "PR opened"] });
+    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
     else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
 
@@ -177,7 +178,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
       taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
-      integrateBranches: cfg.integrateBranches,
+      integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
@@ -407,7 +408,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                 <RowPop label="Acceptance" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>
                   <div className="lt3-chips2">
                     {cfg.acceptance.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptance: cfg.acceptance.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
-                    <span className="lt3-chip2-add">+ add</span>
+                    <input className="lt3-chip2-add" placeholder="+ add" value={acceptDraft} onChange={e => setAcceptDraft(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        const v = acceptDraft.trim();
+                        if (v && !cfg.acceptance.includes(v)) setC({ acceptance: [...cfg.acceptance, v] });
+                        setAcceptDraft("");
+                      }} />
                   </div>
                 </RowPop>
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />

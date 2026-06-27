@@ -63,6 +63,8 @@ export interface LaunchTaskInput {
   autonomyCeiling?: string;
   /** Deep-only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Omitted ⇒ defer to the ambient flag. */
   integrateBranches?: boolean;
+  /** Deep-only: free-text acceptance criteria the supervisor targets (rendered into its prompt, never executed). Omitted when unchanged from the default. */
+  acceptanceCriteria?: string[];
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

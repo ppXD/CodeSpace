@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildLaunchInput, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
+import { buildLaunchInput, DEFAULT_ACCEPTANCE, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
 
 const repo = (over: Partial<LaunchWorkspaceRepo> = {}): LaunchWorkspaceRepo => ({
   repositoryId: "r1", branch: "", access: "write", alias: "repo", isPrimary: false, ...over,
@@ -27,6 +27,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   agentModels: [],
   autonomyCeiling: "",
   integrateBranches: false,
+  acceptanceCriteria: [...DEFAULT_ACCEPTANCE],
   timeLimit: "3600",
   ...over,
 });
@@ -103,6 +104,34 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ effort: "deep", integrateBranches: true })).integrateBranches).toBe(true);
     expect(buildLaunchInput(form({ effort: "deep", integrateBranches: false }))).not.toHaveProperty("integrateBranches");
     expect(buildLaunchInput(form({ effort: "quick", integrateBranches: true }))).not.toHaveProperty("integrateBranches", "inert on a single-agent tier");
+  });
+
+  it("omits acceptanceCriteria when left at the canonical default (byte-identical supervisor prompt)", () => {
+    expect(buildLaunchInput(form({ effort: "deep" }))).not.toHaveProperty("acceptanceCriteria");
+    // Same elements in a different order are still the unmodified default ⇒ still omitted is NOT required here, but a
+    // verbatim default must omit. (Operator activates criteria by changing the set.)
+    expect(buildLaunchInput(form({ effort: "deep", acceptanceCriteria: [...DEFAULT_ACCEPTANCE] }))).not.toHaveProperty("acceptanceCriteria");
+  });
+
+  it("sends acceptanceCriteria when the operator changed the set, on a Deep tier", () => {
+    const input = buildLaunchInput(form({ effort: "deep", acceptanceCriteria: ["tests pass", "PR opened", "docs updated"] }));
+    expect(input.acceptanceCriteria).toEqual(["tests pass", "PR opened", "docs updated"]);
+
+    // A reduced subset (operator deleted a default chip) is a change ⇒ sent.
+    expect(buildLaunchInput(form({ effort: "deep", acceptanceCriteria: ["tests pass"] })).acceptanceCriteria).toEqual(["tests pass"]);
+  });
+
+  it("omits acceptanceCriteria when cleared to empty, and copies the array (no aliasing)", () => {
+    expect(buildLaunchInput(form({ effort: "deep", acceptanceCriteria: [] }))).not.toHaveProperty("acceptanceCriteria");
+
+    const acceptanceCriteria = ["custom"];
+    const input = buildLaunchInput(form({ effort: "deep", acceptanceCriteria }));
+    expect(input.acceptanceCriteria).not.toBe(acceptanceCriteria);
+  });
+
+  it("never sends acceptanceCriteria on a single-agent tier (inert)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
+    expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
   });
 });
 
