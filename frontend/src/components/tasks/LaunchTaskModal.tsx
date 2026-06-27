@@ -75,7 +75,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   const [acceptDraft, setAcceptDraft] = useState("");
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
-    branchMode: "auto", tools: "default", enableMcp: true, cwdMode: "auto",
+    branchMode: "auto", tools: "default", enableMcp: false, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
@@ -85,7 +85,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
-    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: "default", enableMcp: true, cwdMode: "auto" }); }
+    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: "default", enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
     else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -176,7 +176,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
-      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode,
+      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
@@ -361,7 +361,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                 <Combo label="Tools" value={cfg.tools} options={[{ value: "default", label: "Default" }]} onChange={v => setC({ tools: v })} />
                 <Combo label="Branch" value={cfg.branchMode} options={branchOpts} onChange={v => setC({ branchMode: v })} />
                 <Combo label="Working dir" value={cfg.cwdMode} options={[{ value: "auto", label: "Auto" }, { value: "workspace", label: "Workspace root" }, { value: "primary", label: "Primary repo" }]} onChange={v => setC({ cwdMode: v })} />
-                <SToggleRow label="MCP tools" on={cfg.enableMcp} onToggle={() => setC({ enableMcp: !cfg.enableMcp })} />
+                <SToggleRow label="Force MCP fabric" on={cfg.enableMcp} onToggle={() => setC({ enableMcp: !cfg.enableMcp })} />
               </>}
 
               {customizeTab === "supervisor" && <>

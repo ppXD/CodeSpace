@@ -245,6 +245,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             TimeoutSeconds = request.Overrides.TimeoutSeconds,
             IntegrateBranches = request.Overrides.IntegrateBranches,
             CwdMode = WorkspaceCwdModeWire.FromWire(request.Overrides.CwdMode),
+            EnableMcp = request.Overrides.EnableMcp,
         };
     }
 

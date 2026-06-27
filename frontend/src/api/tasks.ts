@@ -67,6 +67,8 @@ export interface LaunchTaskInput {
   acceptanceCriteria?: string[];
   /** Multi-repo working-directory mode (`"workspace"` / `"primary"`). Omitted for `"auto"` (the default). Inert on a single-repo run. */
   workingDirMode?: string;
+  /** Per-run opt-in to the full (side-effecting) MCP tool fabric. Omitted (defer to the ambient flag) unless `true`. */
+  enableMcp?: boolean;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

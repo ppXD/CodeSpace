@@ -21,6 +21,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   agentDefinitionId: "",
   runnerKind: "",
   cwdMode: "auto",
+  enableMcp: false,
   maxParallel: "5",
   maxRounds: "6",
   maxAgents: "20",
@@ -145,6 +146,17 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ cwdMode: "primary" })).workingDirMode).toBe("primary");
     expect(buildLaunchInput(form({ effort: "quick", cwdMode: "primary" })).workingDirMode).toBe("primary");
     expect(buildLaunchInput(form({ effort: "deep", cwdMode: "workspace" })).workingDirMode).toBe("workspace");
+  });
+
+  it("omits enableMcp when off (the default ⇒ defer to the ambient flag, byte-identical)", () => {
+    expect(buildLaunchInput(form({ enableMcp: false }))).not.toHaveProperty("enableMcp");
+    expect(buildLaunchInput(form())).not.toHaveProperty("enableMcp");
+  });
+
+  it("sends enableMcp:true when the operator forces the fabric on, on ANY tier", () => {
+    expect(buildLaunchInput(form({ enableMcp: true })).enableMcp).toBe(true);
+    expect(buildLaunchInput(form({ effort: "quick", enableMcp: true })).enableMcp).toBe(true);
+    expect(buildLaunchInput(form({ effort: "deep", enableMcp: true })).enableMcp).toBe(true);
   });
 });
 

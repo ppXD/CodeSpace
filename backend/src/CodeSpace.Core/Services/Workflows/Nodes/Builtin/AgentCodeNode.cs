@@ -62,6 +62,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
                 "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." },
                 "pushBranch":     { "type": "boolean", "description": "Per-run opt-in: publish the agent's diff as its own branch (codespace/agent/<runId>) even when the deployment-wide push flag is off — the knob a one-agent-one-branch fan-out sets so each agent's work lands on its own branch. Leave unset to defer to the deployment flag." },
+                "enableMcp":      { "type": "boolean", "description": "Per-run opt-in: open the FULL MCP tool-fabric (the side-effecting catalog) for this agent, even when the deployment-wide flag is off. Leave unset to defer to the deployment flag (the read-only catalog). Cannot turn the fabric OFF when the deployment forces it on." },
                 "mode":           { "type": "string", "enum": ["research", "code"], "description": "The model-authored intent of this run — the BASE the planner picks per fan-out subtask. research: analysis-only (read-only, no network, no produced branch); code: edits the codebase (workspace write, publishes its own branch). The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling clamp always bounds it. Leave unset for today's tier-derived behaviour." }
               },
               "required": ["harness"]
@@ -176,6 +177,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
             PushProducedBranch = ResolvePushBranch(context.Config, mode),
+            EnableMcpEndpoint = ReadOptionalBool(context.Config, "enableMcp"),
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken

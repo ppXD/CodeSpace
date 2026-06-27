@@ -519,6 +519,61 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_single_agent_launch_bakes_the_operator_force_mcp_opt_in_into_the_agent_config()
+    {
+        // The operator's "Force MCP fabric" opt-in must bind through the command → ResolvedAgentProfile.EnableMcp → the
+        // projected agent.code node's enableMcp config, where ShouldOpenMcpEndpoint reads it to open the full catalog.
+        // Unset ⇒ omitted ⇒ defer to the ambient flag (byte-identical — the other single-agent tests exercise that).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Touch the bound repo", RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick,
+            Overrides = new TaskExecutionOverrides { EnableMcp = true },
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+        ReadAgentEnableMcp(run.DefinitionSnapshotJson!).ShouldBe(true,
+            "the operator's force-MCP opt-in binds into the single-agent agent.code config");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_bakes_the_operator_force_mcp_opt_in_into_the_supervisor_snapshot()
+    {
+        // The same opt-in on a Deep launch binds into the supervisor agentProfile's enableMcp, where each spawned agent
+        // reads it (Spawn → EnableMcpEndpoint). Unset ⇒ omitted ⇒ defer to the ambient flag (byte-identical).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { EnableMcp = true },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorEnableMcp(run.DefinitionSnapshotJson!).ShouldBe(true,
+                "the operator's force-MCP opt-in binds into the supervisor agentProfile config");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1050,6 +1105,25 @@ public class TaskLaunchFlowTests
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
 
         return agent.GetProperty("config").TryGetProperty("cwdMode", out var v) ? v.GetString() : null;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>enableMcp</c> config out of the frozen snapshot. Null when the key is absent (defers to the ambient flag — byte-identical).</summary>
+    private static bool? ReadAgentEnableMcp(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        return agent.GetProperty("config").TryGetProperty("enableMcp", out var v) ? v.GetBoolean() : null;
+    }
+
+    /// <summary>Reads the supervisor node's agentProfile.enableMcp out of the frozen snapshot. Null when the key is absent (defers to the ambient flag).</summary>
+    private static bool? ReadSupervisorEnableMcp(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("enableMcp", out var v)
+            ? v.GetBoolean() : null;
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
