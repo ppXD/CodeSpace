@@ -15,4 +15,7 @@ public interface IPackImportService
 
     /// <summary>Re-clone <paramref name="url"/>, re-walk it, resolve (or create) its <c>Pack</c>, and persist exactly the chosen <paramref name="sourcePaths"/> — agents and skills — for <paramref name="teamId"/>. Idempotent: a re-run upserts on (pack, source-path) rather than duplicating. Returns a per-path outcome.</summary>
     Task<PackImportResult> ImportFromUrlAsync(string url, string? reference, IReadOnlyList<string> sourcePaths, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>Re-pull the pack <paramref name="packId"/> from its saved source: refresh every already-imported artifact in place (kept handles) and return what changed plus the discovered-but-not-imported artifacts as a preview to add.</summary>
+    Task<PackSyncResult> SyncAsync(Guid teamId, Guid packId, Guid actorUserId, CancellationToken cancellationToken);
 }

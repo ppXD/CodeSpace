@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -30,5 +31,13 @@ public class PacksController : ControllerBase
     {
         var result = await _mediator.Send(new GetPackQuery { PackId = packId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Re-pull a pack from its saved source — refresh its already-imported artifacts and return what changed (up-to-date / updated) plus the discovered-but-not-imported artifacts to add.</summary>
+    [HttpPost("{packId:guid}/sync")]
+    public async Task<IActionResult> Sync([FromRoute] Guid packId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new SyncPackCommand { PackId = packId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
     }
 }
