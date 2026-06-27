@@ -34,6 +34,7 @@ export function Sidebar() {
     || pathname.startsWith("/repositories")
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isAgentsActive = /^\/teams\/[^/]+\/agents/.test(pathname);
+  const isLibraryActive = /^\/teams\/[^/]+\/library/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
   const isRunsActive = /^\/teams\/[^/]+\/runs/.test(pathname);
   const isSettingsActive = /^\/teams\/[^/]+\/settings/.test(pathname);
@@ -301,6 +302,21 @@ export function Sidebar() {
           <span className="sb-nav-lbl">Agents</span>
           {/* No badge: MeTeam carries projectCount + workflowCount but no persona count yet.
               Adding agentDefinitionCount to /me is a separate backend change. */}
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isLibraryActive}
+          onClick={() => {
+            // The Library/store — imported packs (agent + skill source libraries). Team-scoped; same
+            // first-paint guard as the other rows (no-op until the active team resolves).
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/library", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Library"
+        >
+          <span className="sb-nav-ic"><Ic.Book size={15} /></span>
+          <span className="sb-nav-lbl">Library</span>
         </div>
         <div
           className="sb-nav-item"

@@ -43,6 +43,41 @@ export interface PackPreview {
 export type PackImportOutcome = "Imported" | "Updated" | "Skipped" | "Failed";
 export type PackArtifactKind = "Agent" | "Skill";
 
+/** Where a pack is sourced from (mirrors backend PackKind). `Custom` is the synthetic per-team locally-authored pack. */
+export type PackKind = "Github" | "GitUrl" | "Custom";
+
+/**
+ * One row in the Library's source rail — an imported pack (a github/git-url library) as a category, with its
+ * source + freshness + the active-artifact counts (mirrors backend PackSummary).
+ */
+export interface PackSummary {
+  id: string;
+  kind: PackKind;
+  name: string;
+  url: string | null;
+  reference: string | null;
+  lastSyncedSha: string | null;
+  lastSyncedDate: string | null;
+  agentCount: number;
+  skillCount: number;
+}
+
+/** One artifact inside a pack — an agent persona or a skill — as the Library detail lists them uniformly (mirrors backend PackArtifactSummary). */
+export interface PackArtifactSummary {
+  kind: PackArtifactKind;
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  sourcePath: string | null;
+}
+
+/** A pack with every active agent + skill it contributed — the Library detail pane (mirrors backend PackDetail). */
+export interface PackDetail {
+  pack: PackSummary;
+  artifacts: PackArtifactSummary[];
+}
+
 /** Per-selected-path outcome of a commit (mirrors backend PackArtifactImportResult). */
 export interface PackArtifactImportResult {
   sourcePath: string;
@@ -61,6 +96,12 @@ export interface PackImportResult {
 // ─── API client ─────────────────────────────────────────────────────────────────
 
 export const packsApi = {
+  /** The team's imported packs (the Library's source rail) with freshness + artifact counts. */
+  list: () => fetchJson<PackSummary[]>("/api/packs"),
+
+  /** One pack with its agents + skills (the Library detail pane). */
+  get: (packId: string) => fetchJson<PackDetail>(`/api/packs/${packId}`),
+
   /** Clone + discover a pack at a URL (host-allowlist-guarded, persists nothing). */
   previewFromUrl: (url: string, reference: string) =>
     fetchJson<PackPreview>("/api/agents/import-preview-url", { method: "POST", body: JSON.stringify({ url, reference: reference.trim() || null }) }),
