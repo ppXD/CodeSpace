@@ -9,8 +9,8 @@ import { ApiError } from "@/api/request";
 const rerunOne = { mutateAsync: vi.fn(), isPending: false };
 const rerunSet = { mutateAsync: vi.fn(), isPending: false };
 const replay = { mutateAsync: vi.fn(), isPending: false };
-const confirmMock = vi.fn<() => Promise<boolean>>();
-const alertMock = vi.fn<() => Promise<void>>();
+const confirmMock = vi.fn<(o: { title: string; message?: string }) => Promise<boolean>>();
+const alertMock = vi.fn<(o: { title: string; message?: string }) => Promise<void>>();
 vi.mock("@/hooks/use-workflows", () => ({
   useRerunMapBranch: () => rerunOne,
   useRerunMapBranches: () => rerunSet,
@@ -109,6 +109,28 @@ describe("RerunControl", () => {
     fireEvent.click(screen.getByRole("button", { name: /rerun item/i }));
 
     await waitFor(() => expect(alertMock).toHaveBeenCalledWith(expect.objectContaining({ title: "Rerun already in progress" })));
+  });
+
+  it("surfaces a non-409 failure as an alert instead of swallowing it", async () => {
+    confirmMock.mockResolvedValue(true);
+    rerunOne.mutateAsync = vi.fn().mockRejectedValue(new ApiError(500, "internal_error", "boom"));
+    const branches = [branch(0, "Failure"), branch(1, "Success")];
+    renderControl(branches, branches[0]);
+
+    fireEvent.click(screen.getByRole("button", { name: /rerun item/i }));
+
+    await waitFor(() => expect(alertMock).toHaveBeenCalledWith(expect.objectContaining({ title: "Couldn’t start the rerun" })));
+  });
+
+  it("does not warn about residual blockers when the focused item is the only failure", async () => {
+    confirmMock.mockResolvedValue(true);
+    const branches = [branch(0, "Failure"), branch(1, "Skipped"), branch(2, "Skipped")];
+    renderControl(branches, branches[0]);
+
+    fireEvent.click(screen.getByRole("button", { name: /rerun item/i }));
+
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    expect(confirmMock.mock.calls[0][0].message).not.toContain("still block");
   });
 
   it("opens the dropdown with 'Rerun entire run'", async () => {

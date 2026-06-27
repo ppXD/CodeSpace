@@ -50,8 +50,6 @@ function RerunActions({ branches, focused, runId, mapNodeId }: { branches: reado
   }, [menuOpen]);
 
   const failed = branches.filter((b) => b.row.status === "Failure").map((b) => b.index).sort((a, b) => a - b);
-  const succeeded = branches.filter((b) => b.row.status === "Success").length;
-  const reused = branches.length - 1;
   const multiFailed = failed.length >= 2;
   const items = (n: number) => (n === 1 ? "item" : "items");
 
@@ -59,21 +57,26 @@ function RerunActions({ branches, focused, runId, mapNodeId }: { branches: reado
     setMenuOpen(false);
     onOpenRun?.(newRunId);
   };
+  // Surface EVERY failure — a 409 means a concurrent rerun holds the lease; anything else (500 / network) still
+  // owes the user feedback rather than a silently-swallowed click.
   const onError = async (e: unknown) => {
-    if (e instanceof ApiError && e.status === 409) await alert({ title: "Rerun already in progress", message: e.message });
-    else throw e;
+    const conflict = e instanceof ApiError && e.status === 409;
+    const message = e instanceof ApiError ? e.message : "Something went wrong starting the rerun. Please try again.";
+    await alert({ title: conflict ? "Rerun already in progress" : "Couldn’t start the rerun", message });
   };
 
   const rerunItem = async (index: number) => {
-    const message = succeeded > 0
-      ? `Only item #${index} will rerun. ${reused} ${items(reused)} will be reused.`
-      : `Item #${index} will rerun, but ${failed.length - 1} failed ${items(failed.length - 1)} will still block the map.`;
+    const reused = branches.length - 1;
+    const stillBlocking = failed.filter((i) => i !== index).length;
+    const message = `Item #${index} will rerun. ${reused} ${items(reused)} will be reused.`
+      + (stillBlocking > 0 ? ` ${stillBlocking} other failed ${items(stillBlocking)} will still block the map.` : "");
     if (!(await confirm({ title: `Rerun item #${index}?`, message, confirmLabel: "Rerun item" }))) return;
     try { navigate((await rerunOne.mutateAsync({ mapNodeId, branchIndex: index, operationId: crypto.randomUUID() })).runId); }
     catch (e) { await onError(e); }
   };
   const rerunFailed = async () => {
-    const message = `Rerun ${failed.length} failed items (#${failed.join(", #")}). ${succeeded} successful ${items(succeeded)} will be reused.`;
+    const reused = branches.length - failed.length;
+    const message = `Rerun ${failed.length} failed items (#${failed.join(", #")}). ${reused} ${items(reused)} will be reused.`;
     if (!(await confirm({ title: `Rerun ${failed.length} failed items?`, message, confirmLabel: "Rerun failed" }))) return;
     try { navigate((await rerunSet.mutateAsync({ mapNodeId, branchIndices: failed, operationId: crypto.randomUUID() })).runId); }
     catch (e) { await onError(e); }
