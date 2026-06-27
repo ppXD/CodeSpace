@@ -283,7 +283,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var replayRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Replay, teamId, actorUserId, operationId: null, cancellationToken).ConfigureAwait(false);
+        var replayRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Replay, teamId, actorUserId, operationId: null, rerunFromNodeId: null, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await DispatchAfterCommitAsync(replayRunId, cancellationToken).ConfigureAwait(false);
@@ -313,7 +313,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId: null, cancellationToken).ConfigureAwait(false);
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId: null, rerunFromNodeId: fromNodeId, cancellationToken).ConfigureAwait(false);
 
         // Pre-seed the kept (reused) upstream cells onto the fork; the engine's RehydrateFromLedger then settles
         // them and the frontier resumes at fromNode. The sentinel (empty original snapshot) forces the replay
@@ -370,7 +370,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId, cancellationToken).ConfigureAwait(false);
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId, rerunFromNodeId: mapNodeId, cancellationToken).ConfigureAwait(false);
 
         // Idempotency dedup hit: a fork carrying this operationId already committed (a double-submit / HTTP retry).
         // The staging returned Guid.Empty WITHOUT touching the ledger — return the PRIOR fork's id, never a second
@@ -536,7 +536,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// passes because the hash travels with it). The cloned snapshot makes the engine take the REPLAY scope path
     /// (frozen plains + re-resolved secrets). Lineage (ParentRunId + causation) is stamped for both.
     /// </summary>
-    private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken)
+    private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, Guid? operationId, string? rerunFromNodeId, CancellationToken cancellationToken)
     {
         // A fork RIDES the parent's session — the SAME thread, consuming NO new turn (Correction 1): inherit the
         // parent's SessionId with a NULL TurnIndex, so a replay/rerun attaches to the timeline via ParentRunId and
@@ -560,7 +560,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition to fork."),
                 original.DefinitionSnapshotHash ?? string.Empty,
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
-                parentRunId: original.Id, rootRunId: rootRunId, causationRequestId: original.RunRequestId,
+                parentRunId: original.Id, rootRunId: rootRunId, rerunFromNodeId: rerunFromNodeId, causationRequestId: original.RunRequestId,
                 original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
                 session: inheritedSession, idempotencyKey: idempotencyKey, cancellationToken).ConfigureAwait(false);
         else
@@ -577,6 +577,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 CausationRequestId = original.RunRequestId,
                 ParentRunId = original.Id,
                 RootRunId = rootRunId,
+                RerunFromNodeId = rerunFromNodeId,
                 ReleaseHashAtRun = original.ReleaseHashAtRun,
                 Session = inheritedSession,
                 IdempotencyKey = idempotencyKey,
@@ -1193,7 +1194,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var lineage = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
             .OrderBy(r => r.CreatedDate).ThenBy(r => r.Id)
-            .Select(r => new { r.Id, r.Status, r.SourceType, r.CreatedDate })
+            .Select(r => new { r.Id, r.Status, r.SourceType, r.CreatedDate, r.RerunFromNodeId })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var attempts = lineage.Select((r, i) => new RunAttemptSummary
@@ -1202,6 +1203,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             AttemptNumber = i + 1,
             Status = r.Status,
             SourceType = r.SourceType,
+            RerunFromNodeId = r.RerunFromNodeId,
             CreatedDate = r.CreatedDate,
             IsLatest = i == lineage.Count - 1,
         }).ToList();

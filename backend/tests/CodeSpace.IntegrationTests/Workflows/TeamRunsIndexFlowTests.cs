@@ -142,8 +142,8 @@ public class TeamRunsIndexFlowTests
 
         var t = DateTimeOffset.UtcNow;
         var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null, status: WorkflowRunStatus.Failure);
-        var r1 = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Failure);
-        var r2 = await InsertRunAsync(teamA, parentRunId: r1, rootRunId: original, createdDate: t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);
+        var r1 = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Failure, rerunFromNodeId: "agent");
+        var r2 = await InsertRunAsync(teamA, parentRunId: r1, rootRunId: original, createdDate: t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success, rerunFromNodeId: "agent");
         await InsertRunAsync(teamA, parentRunId: original, createdDate: t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.ChildWorkflow);   // a child — never in the ladder
         await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);   // a different lineage — must not bleed in
 
@@ -155,6 +155,7 @@ public class TeamRunsIndexFlowTests
             ladder!.RootRunId.ShouldBe(original);
             ladder.Attempts.Select(a => a.RunId).ShouldBe(new[] { original, r1, r2 }, $"oldest-first, child + other lineage excluded (opened from {member})");
             ladder.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2, 3 });
+            ladder.Attempts.Select(a => a.RerunFromNodeId).ShouldBe(new[] { null, "agent", "agent" }, "the original re-ran nothing; both forks re-ran the 'agent' node — drives its per-node history");
             ladder.Attempts.Single(a => a.IsLatest).RunId.ShouldBe(r2, "the newest attempt is the one the runs list shows");
             ladder.Attempts.Count(a => a.IsLatest).ShouldBe(1, "exactly one latest");
         }
@@ -909,7 +910,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -943,6 +944,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
             SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
             RootRunId = rootRunId,   // a production fork carries its lineage root; null = its own root (group key = own Id)
+            RerunFromNodeId = rerunFromNodeId,   // the node a rerun fork re-ran from; null for the original / a replay
             Status = status,
             StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
             ScopeRepositoryIds = repositoryIds ?? [],

@@ -150,6 +150,13 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public Guid? RootRunId { get; set; }
 
     /// <summary>
+    /// For a rerun-from-node / map-branch rerun fork, the node id this attempt re-ran from (the map node for a branch
+    /// rerun). NULL for a first run or a whole-run replay. Drives the per-node rerun history in the run detail — a node
+    /// knows which attempts re-ran it without diffing snapshots.
+    /// </summary>
+    public string? RerunFromNodeId { get; set; }
+
+    /// <summary>
     /// FK-free pointer (same stance as <see cref="ParentRunId"/> — a bare lineage column, no enforced FK / nav)
     /// to the owning <c>WorkSession</c> — the long-term work-context thread this run is ONE turn of. NULL for a
     /// session-less run, which is every run until the session layer starts binding them (so the default is

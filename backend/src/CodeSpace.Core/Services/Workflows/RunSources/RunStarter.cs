@@ -83,6 +83,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ReleaseHashAtRun = envelope.ReleaseHashAtRun ?? string.Empty,
             ParentRunId = envelope.ParentRunId,
             RootRunId = envelope.RootRunId,
+            RerunFromNodeId = envelope.RerunFromNodeId,
             SessionId = envelope.Session?.SessionId,
             SessionTurnIndex = envelope.Session?.TurnIndex,
             Status = WorkflowRunStatus.Pending,
