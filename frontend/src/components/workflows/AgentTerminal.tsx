@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentRunEventDto } from "@/api/agents";
-import type { PhaseAgentRef } from "@/api/workflows";
+import type { CellAttempt, NodeStatus, PhaseAgentRef } from "@/api/workflows";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
+import { useCellAttempts } from "@/hooks/use-workflows";
 
 import { AgentToolCalls } from "./AgentToolCalls";
+import { RunActionsContext } from "./runActionsContext";
 import { isAgentBusy } from "./runPhases";
 import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivity";
 
@@ -21,10 +23,20 @@ import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivit
 export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode }) {
   const [tab, setTab] = useState<"output" | "tools">("output");
 
-  const run = useAgentRun(agent.agentRunId);
-  const status = run.data?.status ?? agent.status;
+  // Per-cell rerun history: every attempt that ran THIS (node, branch) cell. Picking an earlier one shows that
+  // attempt's own record (the agent that ran then), so you can look back at e.g. the run that failed before a rerun.
+  // The ref's agentRunId is the merged latest; null selection = that.
+  const actions = useContext(RunActionsContext);
+  const cellAttempts = useCellAttempts(actions?.runId ?? null, agent.nodeId, agent.iterationKey);
+  const attemptRuns = (cellAttempts.data?.attempts ?? []).filter((a): a is CellAttempt & { agentRunId: string } => !!a.agentRunId);
+  const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
+  const activeAgentRunId = selectedAgentRunId ?? agent.agentRunId;
+  const viewingLatest = activeAgentRunId === agent.agentRunId;   // the ref's metrics (tokens/cost/files) only describe the latest
+
+  const run = useAgentRun(activeAgentRunId);
+  const status = run.data?.status ?? (viewingLatest ? agent.status : "Running");
   const active = isAgentBusy(status);
-  const events = useAgentRunEvents(agent.agentRunId, active);
+  const events = useAgentRunEvents(activeAgentRunId, active);
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const evts = events.data ?? [];
@@ -54,16 +66,36 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         </div>
       )}
 
+      {attemptRuns.length > 1 && (
+        <div className="agent-terminal-attempts" role="tablist" aria-label="This node's rerun history">
+          <span className="agent-terminal-attempts-label">Ran</span>
+          {attemptRuns.map((a) => (
+            <button
+              key={a.runId}
+              type="button"
+              role="tab"
+              aria-selected={a.agentRunId === activeAgentRunId}
+              className="agent-terminal-attempt"
+              data-selected={a.agentRunId === activeAgentRunId || undefined}
+              title={`Attempt ${a.attemptNumber} · ${a.status}`}
+              onClick={() => setSelectedAgentRunId(a.agentRunId)}
+            >
+              <AttemptGlyph status={a.status} /> Attempt {a.attemptNumber}{a.isLatest && <span className="agent-terminal-attempt-latest">latest</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="agent-terminal-body">
-        {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} /> : <AgentToolCalls agentRunId={agent.agentRunId} />}
+        {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} /> : <AgentToolCalls agentRunId={activeAgentRunId} />}
       </div>
 
       <div className="agent-terminal-footer">
         <span className="agent-terminal-stat" data-state={tileState(status)}><span className="agent-terminal-statdot" aria-hidden="true"></span>{humanize(status)}</span>
         {rerun}
-        {tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
-        {cost > 0 && <span className="agent-terminal-fact">{formatUsd(cost)}</span>}
-        {files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
+        {viewingLatest && tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
+        {viewingLatest && cost > 0 && <span className="agent-terminal-fact">{formatUsd(cost)}</span>}
+        {viewingLatest && files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>
           <button type="button" data-active={tab === "tools" || undefined} onClick={() => setTab("tools")}>Tool calls</button>
@@ -90,6 +122,13 @@ function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; lo
       ))}
     </ol>
   );
+}
+
+/** A cell-attempt's outcome glyph — tick when it succeeded, cross when it failed, clock while live/pending. */
+function AttemptGlyph({ status }: { status: NodeStatus }) {
+  if (status === "Success") return <span className="agent-terminal-attempt-glyph" data-tone="success"><Ic.Check size={11} aria-hidden="true" /></span>;
+  if (status === "Failure") return <span className="agent-terminal-attempt-glyph" data-tone="failed"><Ic.X size={11} aria-hidden="true" /></span>;
+  return <span className="agent-terminal-attempt-glyph" data-tone="live"><Ic.Clock size={11} aria-hidden="true" /></span>;
 }
 
 /** "TimedOut" → "timed out", "FinalSummary" → "final summary" — split camelCase + lowercase for a micro-label. */
