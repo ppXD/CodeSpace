@@ -18,7 +18,7 @@ type EditorState = { mode: "create" } | { mode: "edit"; id: string } | null;
  * model, the skills it carries (the AgentSkillBinding join), and its tool allow-list — plus whether it was
  * authored locally or imported from a pack. A persona is harness-AGNOSTIC (it runs on any compatible harness),
  * so there's deliberately no per-row harness column — the per-harness split lives in the scorecard above.
- * "New agent" + a row click open the editor; pack import lands as the "Import" action in a later slice.
+ * "New agent" + a row click open the editor modal; "Import" opens the import-from-URL pack modal.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,

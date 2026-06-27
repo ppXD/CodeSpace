@@ -28,6 +28,7 @@ import {
   Code2,
   Command,
   Copy,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -154,6 +155,7 @@ export const Ic = {
   // value to clipboard, Maximize/Minimize toggles between compact and expanded editor.
   At: wrap(AtSign),
   Copy: wrap(Copy),
+  Download: wrap(Download),
   Expand: wrap(Maximize2),
   Collapse: wrap(Minimize2),
 };
