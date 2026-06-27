@@ -249,6 +249,44 @@ public class PackCommitFlowTests
     }
 
     [Fact]
+    public async Task An_imported_agent_binds_a_skill_that_already_exists_in_the_team()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        try
+        {
+            // Prior commit imports tdd ALONE — it becomes a persisted team skill.
+            await CommitViaMediatorAsync(src, new[] { "skills/tdd/SKILL.md" }, teamId, userId);
+
+            // Later commit imports skilled.md ALONE (declares tdd + systematic-debugging + ghost-skill). Only tdd
+            // already exists in the team, so it resolves via the DB-loaded arm of the map; the rest are unresolved.
+            var second = await CommitViaMediatorAsync(src, new[] { "agents/skilled.md" }, teamId, userId);
+            var agentId = second.Items.Single(i => i.SourcePath == "agents/skilled.md").DefinitionId!.Value;
+
+            await AssertStateAsync(async db =>
+            {
+                var boundSlugs = await (from b in db.AgentSkillBinding
+                                        join s in db.SkillDefinition on b.SkillDefinitionId equals s.Id
+                                        where b.AgentDefinitionId == agentId
+                                        select s.Slug).ToListAsync();
+
+                // resolves against a PRE-EXISTING team skill, not a same-batch one
+                boundSlugs.ShouldBe(new[] { "tdd" });
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
     public async Task A_resync_does_not_reseed_declared_skill_bindings()
     {
         if (OperatingSystem.IsWindows()) return;

@@ -70,6 +70,30 @@ public class ClaudeCodeAgentParserTests
         Parser.Parse(md, "agents/reviewer.md").Skills.ShouldBe(new[] { "test-driven-development", "systematic-debugging" });
     }
 
+    [Theory]
+    [InlineData("skills:")]          // present-but-null
+    [InlineData("skills: []")]       // empty YAML list
+    [InlineData("skills: \"\"")]    // present-but-blank scalar
+    public void Declared_skills_present_but_empty_yields_empty(string skillsLine)
+    {
+        var md = "---\nname: reviewer\n" + skillsLine + "\n---\nYou review.\n";
+
+        Parser.Parse(md, "agents/reviewer.md").Skills.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Declared_skills_drops_blank_list_entries()
+    {
+        const string md =
+            "---\n" +
+            "name: reviewer\n" +
+            "skills:\n  - tdd\n  - \"\"\n  - \"   \"\n" +
+            "---\n" +
+            "You review.\n";
+
+        Parser.Parse(md, "agents/reviewer.md").Skills.ShouldBe(new[] { "tdd" });
+    }
+
     [Fact]
     public void Tolerates_non_strict_yaml_frontmatter_and_recovers_the_agent()
     {
