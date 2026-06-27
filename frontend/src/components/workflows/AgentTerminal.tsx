@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentRunEventDto } from "@/api/agents";
@@ -18,7 +18,7 @@ import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivit
  * STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The full raw
  * ledger lives in the Trace tab.
  */
-export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClose?: () => void }) {
+export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode }) {
   const [tab, setTab] = useState<"output" | "tools">("output");
 
   const run = useAgentRun(agent.agentRunId);
@@ -60,6 +60,7 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
 
       <div className="agent-terminal-footer">
         <span className="agent-terminal-stat" data-state={tileState(status)}><span className="agent-terminal-statdot" aria-hidden="true"></span>{humanize(status)}</span>
+        {rerun}
         {tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
         {cost > 0 && <span className="agent-terminal-fact">{formatUsd(cost)}</span>}
         {files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
