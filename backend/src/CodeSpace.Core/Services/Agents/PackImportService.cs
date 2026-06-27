@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// <see cref="AgentDefinitionService.DeriveSlug"/> (the same handle rule authoring/import already use), and
 /// importability mirrors the agent-only preview: parseable + named + no active-slug conflict.
 /// </summary>
-public sealed class PackImportService : IPackImportService, IScopedDependency
+public sealed partial class PackImportService : IPackImportService, IScopedDependency
 {
     private readonly IPackSourceFetcher _fetcher;
     private readonly IPackSourceWalker _walker;
