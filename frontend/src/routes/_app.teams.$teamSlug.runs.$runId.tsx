@@ -22,8 +22,15 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runId")({
   component: RunDetailPage,
 });
 
+// Remount per URL run id so the selected-attempt + outline state resets cleanly on navigation (changing a path param
+// does NOT remount by default). Without this, replaying / navigating to a different run would carry a stale
+// `selectedAttempt` into the next lineage — pinning the page to an attempt that isn't even in the new ladder.
 function RunDetailPage() {
   const { teamSlug, runId } = Route.useParams();
+  return <RunDetailRoom key={runId} teamSlug={teamSlug} runId={runId} />;
+}
+
+function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string }) {
   const navigate = useNavigate();
 
   // The lineage's attempt ladder — the URL run id is any member; the detail shows ONE attempt at a time, defaulting to
