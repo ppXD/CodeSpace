@@ -27,30 +27,42 @@ public class AgentBoundSkillsTests
     {
         var (teamId, userId) = await SeedTeamAsync();
 
-        var withSkills = await SeedAgentAsync(teamId, userId, "reviewer");
-        var noSkills = await SeedAgentAsync(teamId, userId, "architect");
+        var reviewer = await SeedAgentAsync(teamId, userId, "reviewer");
+        var architect = await SeedAgentAsync(teamId, userId, "architect");   // a SECOND skill-bearing agent
+        var writer = await SeedAgentAsync(teamId, userId, "writer");         // no bindings
 
         var tdd = await SeedSkillAsync(teamId, userId, "tdd", deleted: false);
         var debugging = await SeedSkillAsync(teamId, userId, "systematic-debugging", deleted: false);
+        var apiDesign = await SeedSkillAsync(teamId, userId, "api-design", deleted: false);
         var gone = await SeedSkillAsync(teamId, userId, "deprecated-skill", deleted: true);
 
-        await BindAsync(withSkills, tdd, userId);
-        await BindAsync(withSkills, debugging, userId);
-        await BindAsync(withSkills, gone, userId);   // bound, but the skill is soft-deleted → must not surface
+        await BindAsync(reviewer, tdd, userId);
+        await BindAsync(reviewer, debugging, userId);
+        await BindAsync(reviewer, gone, userId);        // bound, but the skill is soft-deleted → must not surface
+        await BindAsync(architect, apiDesign, userId);
+
+        // Cross-team bait: a skill in ANOTHER team, bound to this team's agent out-of-band (bypassing the
+        // same-team-enforcing service). The read must scope the skill side to teamId and exclude it.
+        var (otherTeamId, otherUserId) = await SeedTeamAsync();
+        var foreign = await SeedSkillAsync(otherTeamId, otherUserId, "foreign-skill", deleted: false);
+        await BindAsync(reviewer, foreign, userId);
 
         using var scope = _fixture.BeginScope();
         var service = scope.Resolve<IAgentDefinitionService>();
 
         var list = await service.ListAsync(teamId, CancellationToken.None);
 
-        var reviewer = list.Single(a => a.Slug == "reviewer");
-        reviewer.BoundSkills.Select(s => s.Slug).ShouldBe(new[] { "systematic-debugging", "tdd" }, "ordered by handle, the soft-deleted skill excluded");
-        reviewer.BoundSkills.Single(s => s.Slug == "tdd").SkillDefinitionId.ShouldBe(tdd);
+        // Each agent gets exactly its OWN skills (the batched GroupBy partition), ordered by handle, active +
+        // same-team only — the soft-deleted and the cross-team skills are both excluded.
+        var reviewerRow = list.Single(a => a.Slug == "reviewer");
+        reviewerRow.BoundSkills.Select(s => s.Slug).ShouldBe(new[] { "systematic-debugging", "tdd" });
+        reviewerRow.BoundSkills.Single(s => s.Slug == "tdd").SkillDefinitionId.ShouldBe(tdd);
 
-        list.Single(a => a.Slug == "architect").BoundSkills.ShouldBeEmpty("an agent with no bindings carries an empty list");
+        list.Single(a => a.Slug == "architect").BoundSkills.Select(s => s.Slug).ShouldBe(new[] { "api-design" }, "the partition gives each agent its own skills, not the other's");
+        list.Single(a => a.Slug == "writer").BoundSkills.ShouldBeEmpty("an agent with no bindings carries an empty list");
 
         // Get projects the same bound skills as the list.
-        var fetched = await service.GetAsync(teamId, withSkills, CancellationToken.None);
+        var fetched = await service.GetAsync(teamId, reviewer, CancellationToken.None);
         fetched!.BoundSkills.Select(s => s.Slug).ShouldBe(new[] { "systematic-debugging", "tdd" });
     }
 
