@@ -10,7 +10,12 @@ public class AgentSkillBindingConfiguration : IEntityTypeConfiguration<AgentSkil
     {
         builder.HasKey(b => b.Id);
 
-        // Column names + FKs + indexes are declared in DbUp 0080; nothing non-conventional to map here
-        // (no enum-as-string, no jsonb, no xmin concurrency token — bindings are insert/delete only).
+        // Column names + FKs + indexes live in DbUp 0080. Declare the two relationships (no navigation
+        // properties — the entities stay thin) so EF knows the binding DEPENDS on its agent + skill and
+        // orders a same-SaveChanges insert AFTER them; without this, importing an agent + its skills + the
+        // binding in one transaction can flush the binding first and trip the FK. Restrict (never cascade):
+        // both definitions soft-delete, so a binding is never orphaned by a hard delete.
+        builder.HasOne<AgentDefinition>().WithMany().HasForeignKey(b => b.AgentDefinitionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne<SkillDefinition>().WithMany().HasForeignKey(b => b.SkillDefinitionId).OnDelete(DeleteBehavior.Restrict);
     }
 }

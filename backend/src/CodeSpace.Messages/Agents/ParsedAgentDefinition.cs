@@ -27,6 +27,9 @@ public sealed record ParsedAgentDefinition
     /// <summary>Tool allow-list (frontmatter <c>tools</c>). Null = key absent = harness default; empty = present-but-empty = no tools; non-empty = exactly these.</summary>
     public IReadOnlyList<string>? Tools { get; init; }
 
+    /// <summary>Skill handles the agent declares it carries (frontmatter <c>skills</c>); empty when the key is absent. Resolved to AgentSkillBinding rows at import — a handle that matches no team skill is skipped.</summary>
+    public IReadOnlyList<string> Skills { get; init; } = Array.Empty<string>();
+
     /// <summary>The ENTIRE parsed frontmatter, re-serialized to JSON verbatim — the lossless source unknown/future keys survive in.</summary>
     public string RawFrontmatterJson { get; init; } = "{}";
 
