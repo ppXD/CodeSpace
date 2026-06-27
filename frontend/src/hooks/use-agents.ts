@@ -1,6 +1,6 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
+import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentDefinitionInput, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
 
 /**
  * Agent-persona data hooks. The library list backs the editor's persona picker + (later) the Agents
@@ -12,6 +12,45 @@ export function useAgentDefinitions() {
   return useQuery({
     queryKey: ["agents"],
     queryFn: () => agentsApi.listAgentDefinitions(),
+  });
+}
+
+/** One persona's full record — the editor's edit-mode load. Keyed by id; only enabled when an id is supplied. */
+export function useAgentDefinition(agentDefinitionId: string | undefined) {
+  return useQuery({
+    queryKey: ["agent", agentDefinitionId],
+    queryFn: () => agentsApi.getAgentDefinition(agentDefinitionId!),
+    enabled: !!agentDefinitionId,
+  });
+}
+
+/** Create a persona; invalidates the library list so it reappears on return. Returns the new id. */
+export function useCreateAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: AgentDefinitionInput) => agentsApi.createAgentDefinition(input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agents"] }),
+  });
+}
+
+/** Replace a persona's editable surface (PUT); invalidates the list + that persona's detail. */
+export function useUpdateAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: AgentDefinitionInput }) => agentsApi.updateAgentDefinition(id, input),
+    onSuccess: (_data, { id }) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: ["agent", id] });
+    },
+  });
+}
+
+/** Soft-delete a persona; invalidates the library list. */
+export function useDeleteAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => agentsApi.deleteAgentDefinition(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agents"] }),
   });
 }
 

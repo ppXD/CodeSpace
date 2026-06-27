@@ -15,6 +15,21 @@ export interface AgentBoundSkill {
 }
 
 /**
+ * The authorable surface of a persona (mirrors backend `AgentDefinitionInput`) — the create/update wire shape.
+ * The @-mention handle is DERIVED from `name` server-side (never sent). Skills / MCP / provenance are
+ * import-owned and intentionally absent — authoring never touches them. `model` null = the harness's default;
+ * `tools` null = the harness default toolset, [] = no tools, non-empty = exactly these.
+ */
+export interface AgentDefinitionInput {
+  name: string;
+  description?: string | null;
+  systemPrompt?: string | null;
+  model?: string | null;
+  defaultAutonomy?: string | null;
+  tools?: string[] | null;
+}
+
+/**
  * Mirrors backend `AgentDefinitionSummary` — a reusable Agent persona (the canonical "Agent" noun).
  * The @-mention `slug` is the stable handle an `agent.code` node references; `tools` is null when the
  * persona inherits the harness's default toolset (distinct from an empty list = no tools). `boundSkills`
@@ -179,6 +194,15 @@ export function lastEventSequence(events: AgentRunEventDto[]): number {
 
 export const agentsApi = {
   listAgentDefinitions: () => fetchJson<AgentDefinitionSummary[]>("/api/agents"),
+  getAgentDefinition: (id: string) => fetchJson<AgentDefinitionSummary>(`/api/agents/${id}`),
+  createAgentDefinition: (input: AgentDefinitionInput) =>
+    fetchJson<{ id: string }>("/api/agents", { method: "POST", body: JSON.stringify(input) }),
+  // agentDefinitionId is duplicated in the URL + body: the body must carry it so the command's `required
+  // AgentDefinitionId` deserialization succeeds, and the controller then overrides it with the URL value via
+  // `command with { AgentDefinitionId = id }` (the URL is authoritative). Same pattern as the variables PUTs.
+  updateAgentDefinition: (id: string, input: AgentDefinitionInput) =>
+    fetchJson<void>(`/api/agents/${id}`, { method: "PUT", body: JSON.stringify({ ...input, agentDefinitionId: id }) }),
+  deleteAgentDefinition: (id: string) => fetchJson<void>(`/api/agents/${id}`, { method: "DELETE" }),
   listHarnesses: () => fetchJson<HarnessSummary[]>("/api/agents/harnesses"),
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
   listRunEvents: (agentRunId: string, after = 0) =>

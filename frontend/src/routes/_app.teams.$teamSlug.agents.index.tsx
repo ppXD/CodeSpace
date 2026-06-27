@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -14,18 +14,23 @@ import { useAgentDefinitions } from "@/hooks/use-agents";
  * model, the skills it carries (the AgentSkillBinding join), and its tool allow-list — plus whether it was
  * authored locally or imported from a pack. A persona is harness-AGNOSTIC (it runs on any compatible harness),
  * so there's deliberately no per-row harness column — the per-harness split lives in the scorecard above.
- * Read-only: authoring + pack import land as the "New" / "Import" actions in the editor + import slices.
+ * "New agent" + a row click open the editor; pack import lands as the "Import" action in a later slice.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
 });
 
 function AgentsListPage() {
+  const { teamSlug } = Route.useParams();
+  const navigate = useNavigate();
   const agents = useAgentDefinitions();
   const rows = agents.data ?? [];
 
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState<OriginFilter>("all");
+
+  const openNew = () => navigate({ to: "/teams/$teamSlug/agents/new", params: { teamSlug } });
+  const openAgent = (id: string) => navigate({ to: "/teams/$teamSlug/agents/$agentId", params: { teamSlug, agentId: id } });
 
   const importedCount = rows.filter((a) => a.origin === "Imported").length;
   const authoredCount = rows.length - importedCount;
@@ -41,6 +46,9 @@ function AgentsListPage() {
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">Agents</h1>
+          <div className="ct-actions">
+            <button type="button" className="btn btn-primary" onClick={openNew}><Ic.Plus size={14} /> New agent</button>
+          </div>
         </div>
         {hasAgents && (
           <div className="ct-sub">
@@ -71,6 +79,7 @@ function AgentsListPage() {
           <div className="ct-empty">
             <div className="ct-empty-h">No agents yet</div>
             <div className="ct-empty-p">Reusable personas — a system prompt, model, skills, and tools you can <strong>@-mention</strong> from a workflow — will appear here.</div>
+            <button type="button" className="btn btn-primary" style={{ marginTop: 14 }} onClick={openNew}><Ic.Plus size={14} /> New agent</button>
           </div>
         )}
 
@@ -112,7 +121,13 @@ function AgentsListPage() {
                 </thead>
                 <tbody>
                   {visible.map((a) => (
-                    <tr key={a.id}>
+                    <tr
+                      key={a.id}
+                      tabIndex={0}
+                      aria-label={`Edit ${a.name}`}
+                      onClick={() => openAgent(a.id)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openAgent(a.id); } }}
+                    >
                       <td>
                         <div className="repo-cell">
                           <div className="repo-mark" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
