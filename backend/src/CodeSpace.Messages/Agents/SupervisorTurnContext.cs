@@ -103,6 +103,9 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
+    /// <summary>The operator's free-text ACCEPTANCE CRITERIA (blank entries dropped) — the definition of done rendered into the decider prompt so the model targets it. NOT executed (distinct from <see cref="AcceptanceChecks"/>). Null/empty (none / all-blank) ⇒ no prompt block (byte-identical). The intended yardstick for a future supervisor critic-gate.</summary>
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
+
     /// <summary>
     /// The tool allow-list each spawned agent is restricted to (P2-3) — the supervisor config's REUSED
     /// <c>AllowedTools</c> threaded into <c>AgentTask.Tools</c>. Tri-state, matching the task envelope: <c>null</c>

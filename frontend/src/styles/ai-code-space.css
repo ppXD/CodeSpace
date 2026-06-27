@@ -5083,6 +5083,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 .lt3-chip2 > button { appearance: none; background: transparent; border: 0; color: var(--muted-2); cursor: pointer; display: grid; place-items: center; padding: 0; }
 .lt3-chip2 > button:hover { color: var(--ink-2); }
 .lt3-chip2-add { font-size: 11.5px; color: var(--accent); border: 1px dashed var(--line-2); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+input.lt3-chip2-add { appearance: none; background: transparent; outline: none; width: 84px; cursor: text; }
+input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .lt3-expand { display: flex; flex-direction: column; gap: 18px; padding: 14px 6px 2px; }
 .lt3-sec-t { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 9px; display: flex; align-items: center; gap: 7px; }
 .lt3-err { font-size: 12px; color: var(--accent); padding: 9px 6px 0; }

@@ -101,6 +101,7 @@ public sealed partial class SupervisorTurnService
             AcceptanceChecks = acceptanceCommand,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
+            AcceptanceCriteria = NormalizeTools(goalConfig?.AcceptanceCriteria),
             SupervisorModelId = goalConfig?.SupervisorModelId,
             PendingChildDecisions = pendingChildDecisions,
         };

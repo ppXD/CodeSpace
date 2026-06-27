@@ -46,6 +46,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional acceptance checks the operator wants verified before the supervisor declares success — the OPERATOR FLOOR (L4 P1), an argv (e.g. <c>["sh","check.sh"]</c>). ENFORCED at the terminal <c>stop</c>: the run's reviewable head is cloned and graded against this command (mandatory when set), and a non-zero exit fails the stop (status <c>AcceptanceFailed</c>) + WITHHOLDS the reviewable branch — so the supervisor can't declare success on an unverified head. Null / empty = no floor.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
+    /// <summary>The operator's free-text ACCEPTANCE CRITERIA (e.g. "tests pass") — the definition of done RENDERED into the supervisor decider prompt so the model targets them. NOT the executable floor (that is <see cref="AcceptanceChecks"/>): these are never executed. Null / empty ⇒ no prompt block (byte-identical). Also the forward seam for a future supervisor critic-gate yardstick.</summary>
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
+
     /// <summary>
     /// Which decisions require a human in the loop before their side effect fires (PR-E E5 governance). Parsed
     /// leniently into <see cref="SupervisorApprovalPolicy"/>: <c>"none"</c> (autonomous), <c>"spawns"</c> /

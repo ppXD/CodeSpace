@@ -145,6 +145,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"Turn: {context.TurnNumber}");
         builder.AppendLine();
 
+        // The operator's acceptance criteria — the definition of done the supervisor must target (a yardstick, NOT an
+        // executable check). Null / empty ⇒ no block ⇒ byte-identical prompt.
+        if (context.AcceptanceCriteria is { Count: > 0 } criteria)
+        {
+            builder.AppendLine("Acceptance criteria (the operator's definition of done — drive the work to meet these before declaring success):");
+            foreach (var c in criteria) builder.AppendLine($"- {c}");
+            builder.AppendLine();
+        }
+
         if (!string.IsNullOrWhiteSpace(catalog))
         {
             builder.AppendLine(catalog.TrimEnd());

@@ -100,6 +100,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>Deep/supervisor only: per-run opt-in to INTEGRATING the spawned agents' diffs into one reviewable branch at merge (one PR over the combined work, instead of only the side-by-side fold). Null / false ⇒ defer to the ambient integrate flag (byte-identical). Inert on a single-agent / map projection.</summary>
     public bool? IntegrateBranches { get; init; }
 
+    /// <summary>
+    /// Deep/supervisor only: the operator's free-text ACCEPTANCE CRITERIA (e.g. "tests pass", "PR opened") — the
+    /// definition of done the supervisor TARGETS. RENDERED into the supervisor decider prompt (a yardstick the model
+    /// aims at); it is NOT executed and is DISTINCT from the executable <c>acceptanceChecks</c> argv floor. Null / empty
+    /// ⇒ omitted ⇒ byte-identical. Inert on a non-supervisor projection. (The structured list is also the forward seam
+    /// for a future supervisor critic-gate, which would judge against the same criteria.)
+    /// </summary>
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

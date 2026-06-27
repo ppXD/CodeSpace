@@ -95,6 +95,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // baked as a string-uuid array onto the node's allowedModelIds, where a dispatched model out of the pool fails
         // closed. Omitted (null) when empty, so a bare supervisor draws from all the team's models — byte-identical.
         AddIfPresent(config, "allowedModelIds", context.AllowedModelIds is { Count: > 0 } pool ? pool.Select(id => id.ToString()).ToList() : null);
+        // The operator's free-text acceptance CRITERIA — rendered into the decider prompt as the definition of done (the
+        // model targets them; NOT executed, distinct from the acceptanceChecks argv floor). Omitted when empty (byte-identical).
+        AddIfPresent(config, "acceptanceCriteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);
