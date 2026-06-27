@@ -43,8 +43,13 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
   const openAgent = wave.agents.find((a) => a.agentRunId === selectedAgentRunId) ?? null;
   const toggleAgent = (id: string) => onSelectAgent?.(id === selectedAgentRunId ? null : id);
 
-  const phaseTarget = phaseRerunTarget(wave);
-  const openTarget = openAgent ? itemRerunTarget(openAgent, wave) : null;
+  // The bulk "Rerun N failed items" sits on a map fan-out's HEADER; the per-item / "Rerun from here" goes INSIDE the
+  // focused agent's terminal footer (where the failure reads), matching the design.
+  const headerTarget = wave.kind === "map" ? phaseRerunTarget(wave) : null;
+  const terminalRerun = (agent: PhaseAgentRef) => {
+    const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : phaseRerunTarget(wave);
+    return t ? <RerunMenu target={t} className="run-tl-rerun-term" /> : null;
+  };
 
   return (
     <div className="run-tl-phase" ref={ref}>
@@ -59,12 +64,12 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
         </span>
       </button>
 
-      {phaseTarget && <RerunMenu target={phaseTarget} className="run-tl-rerun" />}
+      {headerTarget && <RerunMenu target={headerTarget} className="run-tl-rerun" />}
 
       {open && (single
         // Single agent → its full terminal directly (skip the tile layer); close collapses the box AND clears the
         // shared selection (else the outline row stays highlighted, and a selection-driven open would re-open it).
-        ? <AgentTerminal agent={wave.agents[0]} onClose={() => { setUserToggle(false); onSelectAgent?.(null); }} />
+        ? <AgentTerminal agent={wave.agents[0]} onClose={() => { setUserToggle(false); onSelectAgent?.(null); }} rerun={terminalRerun(wave.agents[0])} />
         : (
           <>
             <div className="run-tl-tiles">
@@ -73,8 +78,7 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
               ))}
             </div>
 
-            {openAgent && <AgentTerminal agent={openAgent} onClose={() => onSelectAgent?.(null)} />}
-            {openTarget && <RerunMenu target={openTarget} className="run-tl-rerun run-tl-rerun-item" />}
+            {openAgent && <AgentTerminal agent={openAgent} onClose={() => onSelectAgent?.(null)} rerun={terminalRerun(openAgent)} />}
           </>
         ))}
     </div>
