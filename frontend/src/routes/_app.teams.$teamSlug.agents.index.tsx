@@ -144,10 +144,20 @@ function AgentsListPage() {
   );
 }
 
-/** One origin filter tab — the warm underline-tab pattern with a muted count suffix. */
+/** One origin filter toggle — the warm underline-tab look, but a keyboard-operable toggle (role=button + Enter/Space), matching the accessible tab pattern in AgentDetailTabs / SettingsLayout. */
 function OriginTab({ value, current, count, onSelect, children }: { value: OriginFilter; current: OriginFilter; count: number; onSelect: (v: OriginFilter) => void; children: React.ReactNode }) {
+  const active = current === value;
+
   return (
-    <span className="ct-tab" data-active={current === value ? "true" : undefined} onClick={() => onSelect(value)}>
+    <span
+      className="ct-tab"
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      data-active={active ? "true" : undefined}
+      onClick={() => onSelect(value)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(value); } }}
+    >
       {children}<span className="ct-tab-c">{count}</span>
     </span>
   );

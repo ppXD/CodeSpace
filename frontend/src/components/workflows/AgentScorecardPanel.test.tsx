@@ -8,7 +8,8 @@ import { AgentScorecardView } from "./AgentScorecardPanel";
  * The scorecard view is the measurement-spine surface — it must render the team's REAL success rate + latency
  * percentiles + per-harness comparison faithfully (the API's job is to compute them; the view's job is to show
  * them without inventing anything). These pin: the headline stats, the per-harness rows, the duration
- * formatting, the deliberate ABSENCE of a cost figure (not aggregated yet), and the empty state.
+ * formatting, the estimated-spend stat — present as $X.XX when a cost rollup IS supplied, an em-dash when
+ * estimatedCostUsd is null, and ABSENT entirely when no rollup is passed (never fabricated) — and the empty state.
  */
 const card: AgentRunScorecard = {
   overall: { harness: "(all)", total: 4, succeeded: 3, successRate: 0.75, p50DurationSeconds: 20, p95DurationSeconds: 95 },
