@@ -40,16 +40,21 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const evts = events.data ?? [];
-  const files = agent.filesChanged ?? 0;   // git-truth count off the ref (not a live FileChanged-event tally, which can double-count)
-  const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
-  const cost = agent.costUsd ?? 0;
 
-  // The agent's identity strip — harness (the live run row) + model + tools + time (the phase rollup). Each part drops when absent.
+  // The metrics shown describe the ACTIVE attempt: the ref carries the merged-latest figures, while an earlier
+  // attempt carries its OWN (from its agent run) — so switching to a failed/older attempt shows that attempt's
+  // spend + timing + model, not the latest's (and a failed attempt's tokens, no longer hidden behind viewingLatest).
+  const sel = attemptRuns.find((a) => a.agentRunId === activeAgentRunId);
+  const m = viewingLatest
+    ? { tokens: (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0), cost: agent.costUsd ?? 0, files: agent.filesChanged ?? 0, model: agent.model, toolCount: agent.toolCount, durationMs: agent.durationMs }
+    : { tokens: (sel?.inputTokens ?? 0) + (sel?.outputTokens ?? 0), cost: sel?.costUsd ?? 0, files: sel?.filesChanged ?? 0, model: sel?.model ?? null, toolCount: sel?.toolCount ?? null, durationMs: sel?.durationMs ?? null };
+
+  // The agent's identity strip — harness (the live run row) + model + tools + time (the active attempt's rollup). Each part drops when absent.
   const identity = [
     run.data?.harness,
-    agent.model,
-    agent.toolCount != null && `${agent.toolCount} ${agent.toolCount === 1 ? "tool" : "tools"}`,
-    agent.durationMs != null && formatDuration(agent.durationMs),
+    m.model,
+    m.toolCount != null && `${m.toolCount} ${m.toolCount === 1 ? "tool" : "tools"}`,
+    m.durationMs != null && formatDuration(m.durationMs),
   ].filter(Boolean) as string[];
 
   return (
@@ -93,9 +98,9 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
       <div className="agent-terminal-footer">
         <span className="agent-terminal-stat" data-state={tileState(status)}><span className="agent-terminal-statdot" aria-hidden="true"></span>{humanize(status)}</span>
         {rerun}
-        {viewingLatest && tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
-        {viewingLatest && cost > 0 && <span className="agent-terminal-fact">{formatUsd(cost)}</span>}
-        {viewingLatest && files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
+        {m.tokens > 0 && <span className="agent-terminal-fact">{formatTokens(m.tokens)} tokens</span>}
+        {m.cost > 0 && <span className="agent-terminal-fact">{formatUsd(m.cost)}</span>}
+        {m.files > 0 && <span className="agent-terminal-fact">{m.files} {m.files === 1 ? "file" : "files"}</span>}
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>
           <button type="button" data-active={tab === "tools" || undefined} onClick={() => setTab("tools")}>Tool calls</button>

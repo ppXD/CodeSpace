@@ -1,10 +1,13 @@
+using System.Text.Json;
 using Autofac;
 using Microsoft.EntityFrameworkCore;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -96,6 +99,39 @@ public class RunDetailLineageMergeFlowTests
     }
 
     [Fact]
+    public async Task Each_cell_attempt_carries_its_OWN_metrics_so_looking_back_shows_that_attempts_spend_not_the_latest()
+    {
+        // The reported bug: a failed/earlier attempt showed NO tokens and the LATEST attempt's time. Each CellAttempt now
+        // carries its own agent run's metrics, so the per-cell history must surface DIFFERENT figures per attempt.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var a1 = await SeedRunAsync(teamId, parent: null, root: null, created: t.AddMinutes(-5));
+        await SeedCellWithAgentAsync(a1, teamId, "map", "map#0", AgentRunStatus.Failed, WorkflowRunRecordTypes.NodeFailed, input: 2500, output: 500, model: "claude-sonnet", durationMs: 45_000, files: 1);
+
+        var a2 = await SeedRunAsync(teamId, parent: a1, root: a1, created: t);
+        await SeedCellWithAgentAsync(a2, teamId, "map", "map#0", AgentRunStatus.Succeeded, WorkflowRunRecordTypes.NodeCompleted, input: 12000, output: 2200, model: "claude-opus-4-8", durationMs: 137_000, files: 3);
+
+        using var scope = _fixture.BeginScope();
+        var hist = await scope.Resolve<IWorkflowService>().ListCellAttemptsAsync(a2, "map", "map#0", teamId, CancellationToken.None);
+
+        var first = hist!.Attempts[0];
+        first.InputTokens.ShouldBe(2500);
+        first.OutputTokens.ShouldBe(500);
+        first.Model.ShouldBe("claude-sonnet");
+        first.DurationMs.ShouldBe(45_000);
+        first.FilesChanged.ShouldBe(1);
+
+        var latest = hist.Attempts[1];
+        latest.InputTokens.ShouldBe(12000, "the latest attempt's metrics are its own, distinct from the earlier attempt's");
+        latest.OutputTokens.ShouldBe(2200);
+        latest.Model.ShouldBe("claude-opus-4-8");
+        latest.DurationMs.ShouldBe(137_000);
+        latest.FilesChanged.ShouldBe(3);
+        latest.CostUsd.ShouldNotBeNull("a priced model yields a per-attempt cost");
+    }
+
+    [Fact]
     public async Task A_never_rerun_run_is_unchanged_by_the_merge()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -179,6 +215,41 @@ public class RunDetailLineageMergeFlowTests
         {
             Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = iterationKey, WaitKind = WorkflowWaitKinds.AgentRun,
             Token = AgentTokenFor(runId, 0), WakeAt = now.AddMinutes(5), Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now, ResolvedAt = now,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Seed a cell whose agent run is a REAL <c>agent_run</c> row (Guid token) carrying token usage + model + timing, so <c>ListCellAttemptsAsync</c> can fold its OWN metrics. The wait token is the agent run's Guid (what the metric join parses).</summary>
+    private async Task SeedCellWithAgentAsync(Guid runId, Guid teamId, string nodeId, string iterationKey, AgentRunStatus agentStatus, string recordStatus, int input, int output, string model, long durationMs, int files)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, Sequence = 1, RecordType = recordStatus,
+            NodeId = nodeId, IterationKey = iterationKey, CorrelationId = null, PayloadJson = "{}", OccurredAt = now,
+        });
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = iterationKey, WaitKind = WorkflowWaitKinds.AgentRun,
+            Token = agentRunId.ToString(), WakeAt = now.AddMinutes(5), Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now, ResolvedAt = now,
+        });
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = iterationKey,
+            Harness = "claude-code", Status = agentStatus,
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "do the thing", Harness = "claude-code", Model = model }, AgentJson.Options),
+            ResultJson = JsonSerializer.Serialize(new AgentRunResult
+            {
+                Status = agentStatus, ExitReason = "completed",
+                TokenUsage = new AgentTokenUsage { InputTokens = input, OutputTokens = output },
+                ChangedFiles = Enumerable.Range(0, files).Select(i => $"file{i}.cs").ToList(),
+            }, AgentJson.Options),
+            StartedAt = now.AddMilliseconds(-durationMs), CompletedAt = now,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync().ConfigureAwait(false);
     }

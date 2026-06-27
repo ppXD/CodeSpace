@@ -50,6 +50,33 @@ describe("AgentTerminal", () => {
     expect(useAgentRunEventsMock).toHaveBeenCalledWith("ag1");      // the earlier (failed) attempt's record is now streamed
   });
 
+  it("shows the SELECTED attempt's own metrics (tokens · time · model) when looking back at an earlier attempt", () => {
+    // The reported bug: viewing a failed/earlier attempt showed NO tokens and the LATEST attempt's time, because the
+    // footer/identity read the ref (merged-latest) regardless of which attempt was picked. Each CellAttempt now carries
+    // its own metrics, so switching must surface THAT attempt's figures.
+    useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
+    useCellAttemptsMock.mockReturnValue({ data: { attempts: [
+      { attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Failure", createdDate: "2026-06-23T00:00:00Z", isLatest: false, durationMs: 45_000, inputTokens: 2500, outputTokens: 500, costUsd: 0.0009, filesChanged: 1, toolCount: 4, model: "claude-sonnet" },
+      { attemptNumber: 2, runId: "r2", agentRunId: "ag2", status: "Success", createdDate: "2026-06-23T01:00:00Z", isLatest: true, durationMs: 137_000, inputTokens: 12000, outputTokens: 2200, costUsd: 0.0045, filesChanged: 3, toolCount: 16, model: "claude-opus" },
+    ] } });
+
+    // The ref carries the merged-LATEST figures (attempt 2).
+    render(<AgentTerminal agent={termAgent({ agentRunId: "ag2", nodeId: "map", iterationKey: "map#0", model: "claude-opus", toolCount: 16, durationMs: 137_000, inputTokens: 12000, outputTokens: 2200, costUsd: 0.0045, filesChanged: 3 })} />);
+
+    expect(screen.getByText("14.2k tokens")).toBeInTheDocument();   // default = latest
+    expect(screen.getByText("2m 17s")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /attempt 1/i }));
+
+    expect(screen.getByText("3.0k tokens")).toBeInTheDocument();    // the failed attempt's OWN spend, no longer hidden
+    expect(screen.getByText("45s")).toBeInTheDocument();            // its OWN time, not the latest's 2m 17s
+    expect(screen.getByText("claude-sonnet")).toBeInTheDocument();  // its OWN model
+    expect(screen.getByText("$0.0009")).toBeInTheDocument();
+    expect(screen.getByText("1 file")).toBeInTheDocument();
+    expect(screen.queryByText("14.2k tokens")).toBeNull();         // the latest's figures are gone
+    expect(screen.queryByText("2m 17s")).toBeNull();
+  });
+
   it("shows no switcher when the cell ran only once", () => {
     useCellAttemptsMock.mockReturnValue({ data: { attempts: [{ attemptNumber: 1, runId: "r1", agentRunId: "ag1", status: "Success", createdDate: "2026-06-23T00:00:00Z", isLatest: true }] } });
     render(<AgentTerminal agent={termAgent({ agentRunId: "ag1", nodeId: "n", iterationKey: "" })} />);
