@@ -1,8 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
+import { Combo, type Option } from "@/components/common/Combo";
+import { usePopover } from "@/components/common/usePopover";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
@@ -30,7 +32,6 @@ export interface LaunchTaskModalProps {
 }
 
 interface WorkspaceRepo { repositoryId: string; branch: string; access: "write" | "read"; alias: string; isPrimary: boolean }
-interface Option { value: string; label: string; desc?: string }
 
 const EFFORT_OPTS: { v: string; l: string; d: string; tip?: string }[] = [
   { v: "auto", l: "Auto", d: "CodeSpace picks the depth" },
@@ -457,71 +458,6 @@ function SendGlyph() {
 
 /** Shared popover machinery — portal'd to <body>, fixed-positioned from the trigger rect, dismissed on
  *  outside click or on scroll of the content behind it (not the popover's own list). */
-function usePopover() {
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
-  useLayoutEffect(() => {
-    if (open && btnRef.current) {
-      const r = btnRef.current.getBoundingClientRect();
-      setPos({ left: r.left, top: r.bottom + 5, width: Math.max(r.width, 200) });
-    }
-  }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    const inside = (n: EventTarget | null) => btnRef.current?.contains(n as Node) || popRef.current?.contains(n as Node);
-    const onDown = (e: MouseEvent) => { if (!inside(e.target)) setOpen(false); };
-    const onScroll = (e: Event) => { if (!popRef.current?.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("mousedown", onDown);
-    window.addEventListener("scroll", onScroll, true);
-    return () => { document.removeEventListener("mousedown", onDown); window.removeEventListener("scroll", onScroll, true); };
-  }, [open]);
-  return { open, setOpen, btnRef, popRef, pos };
-}
-
-/** In-house warm dropdown. With `label`, renders as a compact settings ROW (label · value · ›); without,
- *  a boxed select / pill. Optional top search for long lists. */
-function Combo({ label, value, options, onChange, placeholder, searchable, buttonClassName }: {
-  label?: string;
-  value: string;
-  options: Option[];
-  onChange: (v: string) => void;
-  placeholder?: string;
-  searchable?: boolean;
-  buttonClassName?: string;
-}) {
-  const { open, setOpen, btnRef, popRef, pos } = usePopover();
-  const [q, setQ] = useState("");
-  const sel = options.find(o => o.value === value);
-  const filtered = searchable && q.trim() ? options.filter(o => o.label.toLowerCase().includes(q.trim().toLowerCase())) : options;
-  const isRow = label !== undefined;
-  return (
-    <>
-      <button ref={btnRef} type="button" className={buttonClassName ?? (isRow ? "lt3-srow" : "lt3-combo-btn")} data-open={open} onClick={() => setOpen(v => !v)}>
-        {isRow && <span className="lt3-srow-l">{label}</span>}
-        <span className="lt3-combo-v">{sel?.label ?? placeholder ?? "Select"}</span>
-        {isRow ? <Ic.ChevronRight size={15} /> : <Ic.ChevronDown size={14} />}
-      </button>
-      {open && pos && createPortal(
-        <div ref={popRef} className="lt3-pop lt3-combo-pop" style={{ position: "fixed", left: pos.left, top: pos.top, minWidth: pos.width }}>
-          {searchable && <input className="lt3-search" placeholder="Search" value={q} onChange={e => setQ(e.target.value)} autoFocus />}
-          <div className="lt3-combo-list">
-            {filtered.map(o => (
-              <button key={o.value} type="button" className="lt3-opt" data-on={o.value === value} onClick={() => { onChange(o.value); setOpen(false); setQ(""); }}>
-                <span className="lt3-opt-m"><span className="lt3-opt-t">{o.label}</span>{o.desc && <span className="lt3-opt-d">{o.desc}</span>}</span>
-                {o.value === value && <Ic.Check size={14} />}
-              </button>
-            ))}
-            {filtered.length === 0 && <div className="lt3-rempty">No matches</div>}
-          </div>
-        </div>,
-        document.body,
-      )}
-    </>
-  );
-}
-
 /** A settings row whose value opens a custom popover (Limits, Acceptance). */
 function RowPop({ label, value, children }: { label: string; value: string; children: ReactNode }) {
   const { open, setOpen, btnRef, popRef, pos } = usePopover();

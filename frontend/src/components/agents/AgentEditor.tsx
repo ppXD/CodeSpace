@@ -1,30 +1,34 @@
-import { useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentBoundSkill, AgentDefinitionInput, AgentDefinitionSummary } from "@/api/agents";
 import { ApiError } from "@/api/request";
+import { Combo, type Option } from "@/components/common/Combo";
 import { useConfirm } from "@/components/dialog";
-import { useAgentDefinition, useCreateAgent, useDeleteAgent, useHarnesses, useUpdateAgent } from "@/hooks/use-agents";
+import { useAgentDefinition, useCreateAgent, useDeleteAgent, useUpdateAgent } from "@/hooks/use-agents";
+import { useCredentialedModels } from "@/hooks/use-model-credentials";
 
 import { deriveSlug } from "./deriveSlug";
 
 /** The autonomy tiers the run path recognizes (AgentAutonomyLevel, parsed case-insensitively). Stored by name. */
-const AUTONOMY: { value: string; desc: string }[] = [
-  { value: "Confined", desc: "Analysis only — no writes, no network. The most restricted tier." },
-  { value: "Standard", desc: "Writes inside its workspace, no network. The safe default." },
-  { value: "Trusted", desc: "Workspace write + network — for runs that fetch dependencies." },
-  { value: "Unleashed", desc: "Highest capability — admin / controlled runners only." },
+const AUTONOMY: Option[] = [
+  { value: "Confined", label: "Confined", desc: "Analysis only — no writes, no network." },
+  { value: "Standard", label: "Standard", desc: "Writes inside its workspace, no network. The safe default." },
+  { value: "Trusted", label: "Trusted", desc: "Workspace write + network — for runs that fetch dependencies." },
+  { value: "Unleashed", label: "Unleashed", desc: "Highest capability — admin / controlled runners only." },
 ];
 const DEFAULT_AUTONOMY = "Standard";
+const TOOLS_MODES: Option[] = [
+  { value: "inherit", label: "Inherit the harness default" },
+  { value: "custom", label: "Custom allow-list" },
+];
 
-/** Map a stored autonomy string (any case, possibly a legacy value) to a canonical tier, falling back to the safe default. */
 function normalizeAutonomy(stored: string | null | undefined): string {
   const match = AUTONOMY.find((t) => t.value.toLowerCase() === (stored ?? "").toLowerCase());
   return match ? match.value : DEFAULT_AUTONOMY;
 }
 
-/** Comma-separated tools → a trimmed, non-empty list (empty input ⇒ [], meaning "no tools"). */
 function parseTools(text: string): string[] {
   return text.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
 }
@@ -54,40 +58,73 @@ function formFromPersona(a: AgentDefinitionSummary): FormState {
 }
 
 /**
- * Create / edit an Agent persona — the authorable surface (name → derived @handle, description, system prompt,
- * model, default autonomy, tools). A persona is harness-AGNOSTIC, so there's no harness field; skills are bound
- * via import (shown read-only here) — in-app binding is a follow-up.
+ * Create / edit an Agent persona — a warm-theme MODAL over the authorable surface (name → derived @handle,
+ * description, system prompt, model, default autonomy, tools). All dropdowns are the in-house warm {@link Combo}
+ * (no native selects); the model picker loads the team's REAL credentialed models. A persona is
+ * harness-AGNOSTIC (no harness field); skills are bound via import (shown read-only) — in-app binding is a follow-up.
  *
- * <p>The async edit-load is lifted here so the form mounts ONLY once data is ready — its state initialises from
- * props, avoiding a populate-from-query effect (no cascading-render setState).</p>
+ * <p>The async edit-load is lifted here so the form mounts (and inits its state from props) only once data is
+ * ready — no populate-from-query effect.</p>
  */
-export function AgentEditor({ mode, teamSlug, agentId }: { mode: "create" | "edit"; teamSlug: string; agentId?: string }) {
+export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | "edit"; agentId?: string; onClose: () => void }) {
   const existing = useAgentDefinition(mode === "edit" ? agentId : undefined);
 
-  if (mode === "edit") {
-    if (existing.isLoading) {
-      return <section className="ct"><div className="ct-body"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div></section>;
-    }
-    if (existing.error || !existing.data) {
-      return (
-        <section className="ct"><div className="ct-body">
-          <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Couldn't load this agent</div>
-            <div className="cn-banner-p">{existing.error instanceof ApiError ? existing.error.message : "The agent may not exist in this team."}</div>
-          </div>
-        </div></section>
-      );
-    }
-    return <AgentEditorForm mode="edit" teamSlug={teamSlug} agentId={agentId} initial={formFromPersona(existing.data)} boundSkills={existing.data.boundSkills} immutableSlug={existing.data.slug} />;
+  if (mode === "edit" && existing.isLoading) {
+    return <ModalFrame title="Edit agent" onClose={onClose}><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></ModalFrame>;
+  }
+  if (mode === "edit" && (existing.error || !existing.data)) {
+    return (
+      <ModalFrame title="Edit agent" onClose={onClose}>
+        <div className="cn-banner cn-banner-err">
+          <div className="cn-banner-h">Couldn't load this agent</div>
+          <div className="cn-banner-p">{existing.error instanceof ApiError ? existing.error.message : "The agent may not exist in this team."}</div>
+        </div>
+      </ModalFrame>
+    );
   }
 
-  return <AgentEditorForm mode="create" teamSlug={teamSlug} initial={EMPTY_FORM} />;
+  return (
+    <AgentEditorForm
+      mode={mode}
+      agentId={agentId}
+      initial={mode === "edit" ? formFromPersona(existing.data!) : EMPTY_FORM}
+      boundSkills={existing.data?.boundSkills}
+      immutableSlug={existing.data?.slug}
+      onClose={onClose}
+    />
+  );
 }
 
-function AgentEditorForm({ mode, teamSlug, agentId, initial, boundSkills, immutableSlug }: { mode: "create" | "edit"; teamSlug: string; agentId?: string; initial: FormState; boundSkills?: AgentBoundSkill[]; immutableSlug?: string }) {
-  const navigate = useNavigate();
+/** The warm `.mdl` portal shell (mask + dialog + head + body + optional foot), reused for loading / error / form. */
+function ModalFrame({ title, sub, onClose, foot, children }: { title: string; sub?: string; onClose: () => void; foot?: React.ReactNode; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <>
+      <div className="mdl-mask" onClick={onClose} />
+      <div className="mdl" role="dialog" aria-modal="true" style={{ width: 560, maxWidth: "94vw" }}>
+        <div className="mdl-head">
+          <div className="mdl-title-wrap">
+            <div className="mdl-title">{title}</div>
+            {sub && <div className="mdl-sub">{sub}</div>}
+          </div>
+          <button type="button" className="mdl-x" onClick={onClose} title="Close" aria-label="Close"><Ic.X size={14} /></button>
+        </div>
+        <div className="mdl-body">{children}</div>
+        {foot}
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, onClose }: { mode: "create" | "edit"; agentId?: string; initial: FormState; boundSkills?: AgentBoundSkill[]; immutableSlug?: string; onClose: () => void }) {
   const confirm = useConfirm();
-  const harnesses = useHarnesses();
+  const credModels = useCredentialedModels();
   const createAgent = useCreateAgent();
   const updateAgent = useUpdateAgent();
   const deleteAgent = useDeleteAgent();
@@ -105,9 +142,15 @@ function AgentEditorForm({ mode, teamSlug, agentId, initial, boundSkills, immuta
   const saving = createAgent.isPending || updateAgent.isPending;
   const canSave = name.trim().length > 0 && handle.length > 0 && !saving;
 
-  const modelSuggestions = [...new Set((harnesses.data ?? []).flatMap((h) => h.models))].sort();
-
-  const toList = () => navigate({ to: "/teams/$teamSlug/agents", params: { teamSlug } });
+  // Real credentialed models, deduped by model id (the persona stores a model id, not a credential).
+  const modelOpts: Option[] = [{ value: "", label: "Auto (harness default)" }];
+  const seen = new Set<string>();
+  for (const o of credModels.data ?? []) {
+    if (seen.has(o.modelId)) continue;
+    seen.add(o.modelId);
+    modelOpts.push({ value: o.modelId, label: o.modelId, desc: `${o.provider}${o.tier && o.tier !== "Unknown" ? ` · ${o.tier}` : ""}${o.available === false ? " · offline" : ""}` });
+  }
+  if (model && !seen.has(model)) modelOpts.push({ value: model, label: model, desc: "not in your model list" });
 
   async function handleSave() {
     setError(null);
@@ -123,7 +166,7 @@ function AgentEditorForm({ mode, teamSlug, agentId, initial, boundSkills, immuta
     try {
       if (mode === "create") await createAgent.mutateAsync(input);
       else await updateAgent.mutateAsync({ id: agentId!, input });
-      toList();
+      onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't save the agent.");
     }
@@ -141,112 +184,91 @@ function AgentEditorForm({ mode, teamSlug, agentId, initial, boundSkills, immuta
 
     try {
       await deleteAgent.mutateAsync(agentId);
-      toList();
+      onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't delete the agent.");
     }
   }
 
-  return (
-    <section className="ct">
-      <div className="ct-head" style={{ paddingBottom: 18 }}>
-        <div className="ct-crumbs">
-          <Link to="/teams/$teamSlug/agents" params={{ teamSlug }}>Agents</Link>
-          <span className="sep">/</span>
-          <span className="cur">{mode === "create" ? "New agent" : name || "Edit"}</span>
-        </div>
-        <div className="ct-title-row">
-          <h1 className="ct-title">{mode === "create" ? "New agent" : "Edit agent"}</h1>
-          <div className="ct-actions">
-            {mode === "edit" && (
-              <button type="button" className="btn btn-danger" onClick={handleDelete} disabled={deleteAgent.isPending}>
-                <Ic.Trash size={14} /> Delete
-              </button>
-            )}
-            <button type="button" className="btn" onClick={toList}><Ic.X size={14} /> Cancel</button>
-            <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!canSave}>
-              <Ic.Check size={14} /> {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-        </div>
+  const foot = (
+    <div className="mdl-foot">
+      <div>
+        {mode === "edit" && (
+          <button type="button" className="btn btn-danger" onClick={handleDelete} disabled={deleteAgent.isPending}><Ic.Trash size={14} /> Delete</button>
+        )}
       </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!canSave}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+    </div>
+  );
 
-      <div className="ct-body">
-        {error && (
-          <div className="cn-banner cn-banner-err" style={{ marginBottom: 16 }}>
-            <div className="cn-banner-h">Couldn't save</div>
-            <div className="cn-banner-p">{error}</div>
+  return (
+    <ModalFrame title={mode === "create" ? "New agent" : "Edit agent"} sub={mode === "create" ? "A reusable persona you can @-mention from a workflow." : `@${immutableSlug}`} onClose={onClose} foot={foot}>
+      {error && (
+        <div className="cn-banner cn-banner-err" style={{ marginBottom: 14 }}>
+          <div className="cn-banner-h">Couldn't save</div>
+          <div className="cn-banner-p">{error}</div>
+        </div>
+      )}
+
+      <div className="wf-form">
+        <div className="wf-form-row">
+          <label className="wf-form-label" htmlFor="ag-name">Name<span className="wf-form-required">*</span></label>
+          <input id="ag-name" className="wf-form-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Backend Architect" autoFocus={mode === "create"} />
+          <span className="wf-form-help">
+            {mode === "edit"
+              ? <>Handle <code>@{immutableSlug}</code> is fixed (the @-mention other workflows reference).</>
+              : handle.length > 0
+                ? <>Handle will be <code>@{handle}</code> — derived from the name, fixed after creation.</>
+                : "Use a name with at least one letter or digit so a handle can be derived."}
+          </span>
+        </div>
+
+        <div className="wf-form-row">
+          <label className="wf-form-label" htmlFor="ag-desc">Description</label>
+          <input id="ag-desc" className="wf-form-input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Use PROACTIVELY for system design and API boundaries." />
+        </div>
+
+        <div className="wf-form-row">
+          <label className="wf-form-label" htmlFor="ag-prompt">System prompt</label>
+          <textarea id="ag-prompt" className="wf-form-textarea" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={7} placeholder="You are a senior backend architect. Before writing code, lay out the data model and the API surface…" />
+        </div>
+
+        <div className="wf-form-row">
+          <span className="wf-form-label">Model</span>
+          <Combo value={model} options={modelOpts} onChange={setModel} placeholder="Auto (harness default)" searchable />
+          <span className="wf-form-help">Auto = let the chosen harness pick its default. The list is your team's credentialed models.</span>
+        </div>
+
+        <div className="wf-form-row">
+          <span className="wf-form-label">Default autonomy</span>
+          <Combo value={autonomy} options={AUTONOMY} onChange={setAutonomy} />
+          <span className="wf-form-help">{AUTONOMY.find((t) => t.value === autonomy)?.desc}</span>
+        </div>
+
+        <div className="wf-form-row">
+          <span className="wf-form-label">Tools</span>
+          <Combo value={toolsMode} options={TOOLS_MODES} onChange={(v) => setToolsMode(v as "inherit" | "custom")} />
+          {toolsMode === "custom" && (
+            <>
+              <input className="wf-form-input" style={{ marginTop: 6 }} value={toolsText} onChange={(e) => setToolsText(e.target.value)} placeholder="read, edit, run_command" />
+              <span className="wf-form-help">Comma-separated. Empty = no tools.</span>
+            </>
+          )}
+        </div>
+
+        {mode === "edit" && (
+          <div className="wf-form-row">
+            <span className="wf-form-label">Bound skills</span>
+            {boundSkills && boundSkills.length > 0
+              ? <div className="wf-triggers">{boundSkills.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}</div>
+              : <span className="wf-trigger-muted">none</span>}
+            <span className="wf-form-help">Skills are bound when importing a pack; in-app binding is coming soon.</span>
           </div>
         )}
-
-        <div style={{ display: "flex", gap: 24, alignItems: "flex-start", flexWrap: "wrap", paddingTop: 4 }}>
-          {/* Main: the authored content */}
-          <div className="wf-form" style={{ flex: "1 1 360px", minWidth: 0 }}>
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="ag-name">Name<span className="wf-form-required">*</span></label>
-              <input id="ag-name" className="wf-form-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Backend Architect" autoFocus={mode === "create"} />
-              <span className="wf-form-help">
-                {mode === "edit"
-                  ? <>Handle <code>@{immutableSlug}</code> is fixed (the @-mention other workflows reference).</>
-                  : handle.length > 0
-                    ? <>Handle will be <code>@{handle}</code> — derived from the name, fixed after creation.</>
-                    : "Use a name with at least one letter or digit so a handle can be derived."}
-              </span>
-            </div>
-
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="ag-desc">Description</label>
-              <input id="ag-desc" className="wf-form-input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Use PROACTIVELY for system design and API boundaries." />
-              <span className="wf-form-help">Drives auto-invocation + the library row. Optional.</span>
-            </div>
-
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="ag-prompt">System prompt</label>
-              <textarea id="ag-prompt" className="wf-form-textarea" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={12} placeholder="You are a senior backend architect. Before writing code, lay out the data model and the API surface…" />
-            </div>
-
-            {mode === "edit" && (
-              <div className="wf-form-row">
-                <span className="wf-form-label">Bound skills</span>
-                {boundSkills && boundSkills.length > 0
-                  ? <div className="wf-triggers">{boundSkills.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}</div>
-                  : <span className="wf-trigger-muted">none</span>}
-                <span className="wf-form-help">Skills are bound when importing a pack; in-app binding is coming soon.</span>
-              </div>
-            )}
-          </div>
-
-          {/* Rail: the composition */}
-          <div className="wf-form" style={{ flex: "0 1 280px" }}>
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="ag-model">Model</label>
-              <input id="ag-model" className="wf-form-input" value={model} onChange={(e) => setModel(e.target.value)} placeholder="default" list="ag-model-suggestions" />
-              <datalist id="ag-model-suggestions">{modelSuggestions.map((m) => <option key={m} value={m} />)}</datalist>
-              <span className="wf-form-help">Blank = let the chosen harness pick its default.</span>
-            </div>
-
-            <div className="wf-form-row">
-              <label className="wf-form-label" htmlFor="ag-autonomy">Default autonomy</label>
-              <select id="ag-autonomy" className="wf-form-input" value={autonomy} onChange={(e) => setAutonomy(e.target.value)}>
-                {AUTONOMY.map((t) => <option key={t.value} value={t.value}>{t.value}</option>)}
-              </select>
-              <span className="wf-form-help">{AUTONOMY.find((t) => t.value === autonomy)?.desc}</span>
-            </div>
-
-            <div className="wf-form-row">
-              <span className="wf-form-label">Tools</span>
-              <label className="wf-form-check"><input type="radio" name="ag-tools" checked={toolsMode === "inherit"} onChange={() => setToolsMode("inherit")} /> Inherit the harness default</label>
-              <label className="wf-form-check"><input type="radio" name="ag-tools" checked={toolsMode === "custom"} onChange={() => setToolsMode("custom")} /> Custom allow-list</label>
-              {toolsMode === "custom" && (
-                <>
-                  <input className="wf-form-input" value={toolsText} onChange={(e) => setToolsText(e.target.value)} placeholder="read, edit, run_command" />
-                  <span className="wf-form-help">Comma-separated. Empty = no tools.</span>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
       </div>
-    </section>
+    </ModalFrame>
   );
 }
