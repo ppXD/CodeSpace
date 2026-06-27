@@ -54,6 +54,17 @@ describe("WaveRerunControl", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("does not count a missing-agent-row Pending/Skipped fallback as failed", async () => {
+    // The backend falls a missing AgentRun's status back to the NODE status name; "Skipped"/"Pending" are NOT failures.
+    confirmMock.mockResolvedValue(true);
+    renderControl(mapWave(["Failed", "Skipped", "Pending", "Succeeded"]));
+
+    fireEvent.click(screen.getByRole("button", { name: /rerun 1 failed item/i }));
+
+    await waitFor(() => expect(rerunSet.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(rerunSet.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ branchIndices: [0] }));
+  });
+
   it("reruns the failed items (incl. timed-out) and navigates to the fork", async () => {
     confirmMock.mockResolvedValue(true);
     const onOpenRun = vi.fn();

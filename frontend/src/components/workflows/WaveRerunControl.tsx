@@ -8,7 +8,15 @@ import { useRerunMapBranches, useReplayRun } from "@/hooks/use-workflows";
 import { parseIterationKey } from "./mapBranches";
 import { RunActionsContext } from "./runActionsContext";
 import { RunOpenContext } from "./runOpenContext";
-import { tileState, type AgentWave } from "./runActivity";
+import { type AgentWave } from "./runActivity";
+
+/**
+ * A branch counts as failed for rerun ONLY on a genuine terminal-failure status — the agent-run failure modes (which
+ * an agent.code body all settle to a Failure node) plus the node-status "Failure" fallback the backend emits when an
+ * agent row is missing. Deliberately NOT the catch-all `tileState === "failed"`: that also folds the missing-row
+ * "Pending" / "Skipped" fallbacks (which aren't failures) into the rerun set.
+ */
+const FAILED_STATUSES = new Set(["Failed", "Cancelled", "TimedOut", "NeedsReview", "Failure"]);
 
 /**
  * The Activity-view rerun control for a flow.map "Fan out" phase — a thin action bar under the phase header offering
@@ -25,7 +33,7 @@ export function WaveRerunControl({ wave }: { wave: AgentWave }) {
   if (wave.kind !== "map" || !actions || !actions.isTerminal) return null;
 
   const failedIndices = wave.agents
-    .filter((a) => tileState(a.status) === "failed")
+    .filter((a) => FAILED_STATUSES.has(a.status))
     .map((a) => parseIterationKey(a.iterationKey ?? ""))
     .filter((segs) => segs.length === 1 && segs[0].containerId === wave.id)
     .map((segs) => segs[0].index)
