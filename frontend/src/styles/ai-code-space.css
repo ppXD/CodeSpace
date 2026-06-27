@@ -2439,8 +2439,8 @@ textarea:-webkit-autofill {
 /* Activity placement of the RerunMenu: `run-tl-rerun` = the bulk "Rerun N failed" on a map fan-out's header (soft
    accent, right-aligned, menu opens leftward); `run-tl-rerun-term` = the per-item / "Rerun from here" INSIDE an open
    agent terminal's footer (menu opens UPWARD, since the footer sits at the terminal's bottom). */
-.acs-root .run-tl-rerun { width: 320px; max-width: 100%; align-self: flex-start; align-items: flex-end; margin-top: -2px; }
-.acs-root .run-tl-rerun .wf-rerun-menu { left: auto; right: 0; }
+.acs-root .run-tl-rerun { width: 320px; max-width: 100%; align-self: flex-start; align-items: flex-start; margin-top: 6px; }
+.acs-root .run-tl-rerun .wf-rerun-menu { left: 0; right: auto; }
 .acs-root .run-tl-rerun .wf-rerun-primary, .acs-root .run-tl-rerun .wf-rerun-caret { background: var(--accent-soft); color: var(--accent); }
 .acs-root .run-tl-rerun .wf-rerun-primary:hover, .acs-root .run-tl-rerun .wf-rerun-caret:hover { background: #EBD9CC; }
 .acs-root .run-tl-rerun .wf-rerun-caret { border-left-color: rgba(217,119,87,.30); }
@@ -2450,12 +2450,11 @@ textarea:-webkit-autofill {
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
 .acs-root .agent-tile { position: relative; appearance: none; width: 100%; display: block; text-align: left; font: inherit; color: inherit; padding: 0; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease, border-color .15s ease; }
-/* Per-tile rerun: clean at rest, revealed on hover, always shown on the selected tile (so it never hides the focused item's action). */
-.acs-root .agent-tile-rerun { position: absolute; bottom: 7px; right: 7px; z-index: 2; opacity: 0; transition: opacity .12s ease; }
-.acs-root .agent-tile:hover .agent-tile-rerun,
-.acs-root .agent-tile:focus-within .agent-tile-rerun,
-.acs-root .agent-tile[data-selected] .agent-tile-rerun { opacity: 1; }
-.acs-root .run-tl-rerun-tile .wf-rerun-primary { background: var(--accent-soft); color: var(--accent); padding: 3px 7px; box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
+/* Per-tile rerun: a dedicated bottom ROW below the tile body (same rule as every other surface), NOT a floating corner
+   icon. Persistent (no hover-reveal). The tile's overflow:hidden clips a dropdown, so the tile rerun is `bare` (label,
+   no menu) — the full dropdown lives on the expanded terminal. */
+.acs-root .agent-tile-rerun { display: flex; justify-content: flex-start; padding: 6px 8px; border-top: 1px solid var(--line); }
+.acs-root .run-tl-rerun-tile .wf-rerun-primary { background: var(--accent-soft); color: var(--accent); padding: 3px 8px; font-size: 10.5px; }
 .acs-root .run-tl-rerun-tile .wf-rerun-primary:hover { background: #EBD9CC; }
 .acs-root .agent-tile:hover { border-color: var(--line-2); }
 .acs-root .agent-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

@@ -134,12 +134,14 @@ function RerunMenuInner({ target, runId, className, compact, bare }: { target: R
 
   const primary = options[0];
   const primaryText = primary.primaryLabel ?? primary.label;
-  const iconOnly = compact || bare;
+  // `bare` = the primary button ALONE (no caret, no dropdown) — for a surface that clips an escaping menu (the
+  // overflow:hidden agent tile). It still shows the Play + label, same pattern as everywhere else. `compact` is a
+  // pure SIZE hint (smaller padding), not icon-only — every surface keeps its label so the rule reads consistently.
   return (
     <div className={`wf-rerun${compact ? " wf-rerun-compact" : ""}${bare ? " wf-rerun-bare" : ""}${className ? ` ${className}` : ""}`} ref={wrapRef}>
       <div className="wf-rerun-split">
-        <button className="wf-rerun-primary" disabled={pending} title={iconOnly ? primaryText : undefined} aria-label={iconOnly ? primaryText : undefined} onClick={() => void dispatch(primary)}>
-          <Ic.Play size={11} aria-hidden="true" /> {iconOnly ? null : (pending ? "Rerunning…" : primaryText)}
+        <button className="wf-rerun-primary" disabled={pending} onClick={() => void dispatch(primary)}>
+          <Ic.Play size={11} aria-hidden="true" /> {pending ? "Rerunning…" : primaryText}
         </button>
         {!bare && (
           <button className="wf-rerun-caret" disabled={pending} aria-label="More rerun options" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>

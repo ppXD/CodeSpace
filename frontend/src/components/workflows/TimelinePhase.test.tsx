@@ -8,7 +8,10 @@ vi.mock("./AgentTerminal", () => ({
     <div data-testid="terminal" data-closable={!!onClose} onClick={onClose}>term:{agent.agentRunId}</div>,
 }));
 vi.mock("./AgentTile", () => ({
-  AgentTile: ({ agent, onOpen }: { agent: PhaseAgentRef; onOpen?: () => void }) => <button data-testid="tile" onClick={onOpen}>{agent.agentRunId}</button>,
+  AgentTile: ({ agent, onOpen, rerun }: { agent: PhaseAgentRef; onOpen?: () => void; rerun?: unknown }) => <button data-testid="tile" data-hasrerun={!!rerun} onClick={onOpen}>{agent.agentRunId}</button>,
+}));
+vi.mock("./RerunMenu", () => ({
+  RerunMenu: ({ target, className }: { target: { kind: string }; className?: string }) => <div data-testid="rerun" data-kind={target.kind} data-cls={className} />,
 }));
 
 import { TimelinePhase } from "./TimelinePhase";
@@ -46,6 +49,32 @@ describe("TimelinePhase", () => {
   it("summarizes a settled phase with failures as 'N failed'", () => {
     render(<TimelinePhase wave={wave({ agents: [a("a1", "Succeeded", 1000), a("a2", "Failed", 2000)] })} />);
     expect(screen.getByText("2 agents · 1 failed")).toBeInTheDocument();
+  });
+
+  it("a failed single-agent / node phase carries a 'Rerun from here' on its own bottom row below the box", () => {
+    const { container } = render(<TimelinePhase wave={wave({ kind: "node", agents: [a("a1", "Failed", 1000)] })} />);
+
+    const rerun = container.querySelector<HTMLElement>('.run-tl-phase > [data-testid="rerun"]');
+    expect(rerun).not.toBeNull();                            // the box's bottom-row rerun (sibling after the box button)
+    expect(rerun!.dataset.cls).toBe("run-tl-rerun");
+    expect(rerun!.dataset.kind).toBe("node");                // "Rerun from here", same rule as a map fan-out's bulk row
+  });
+
+  it("a clean (all-succeeded) phase shows no bottom-row rerun", () => {
+    const { container } = render(<TimelinePhase wave={wave({ kind: "node", agents: [a("a1", "Succeeded", 1000)] })} />);
+    expect(container.querySelector('.run-tl-phase > [data-testid="rerun"]')).toBeNull();
+  });
+
+  it("each fanned-out map tile gets its own per-item rerun affordance", () => {
+    // A running map wave auto-opens to its tiles; each top-level branch tile carries a per-item rerun.
+    render(<TimelinePhase wave={wave({ kind: "map", agents: [
+      { agentRunId: "a0", status: "Failed", iterationKey: "w#0" },
+      { agentRunId: "a1", status: "Running", iterationKey: "w#1" },
+    ] })} />);
+
+    const tiles = screen.getAllByTestId("tile");
+    expect(tiles.length).toBe(2);
+    expect(tiles.every((t) => t.dataset.hasrerun === "true")).toBe(true);
   });
 
   it("a single-agent phase opens straight to its terminal — skips the tile layer", () => {
