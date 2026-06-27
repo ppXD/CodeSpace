@@ -75,6 +75,16 @@ public interface IModelPoolSelector
     /// <c>NoBrainModelStop</c> on (a working brain beats a turn-1 stop). Pure read; never decrypts.
     /// </summary>
     Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The PROVIDER tag of the model an UN-pinned agent would auto-run — the team's top ENABLED pool row in the credential
+    /// resolver's precedence order (<c>IsDefault</c> &gt; model id &gt; row id) but provider-AGNOSTIC (no harness filter), so
+    /// a no-pin task can DERIVE its harness from the model it will actually get instead of defaulting blind. Only the
+    /// provider tag (no decrypt). <c>null</c> when the team has no enabled pool model under an active credential (the
+    /// caller keeps its harness floor). Agrees with <c>ModelCredentialResolver</c>'s pick: the derived harness drives this
+    /// provider, so the harness-filtered resolve picks the SAME row.
+    /// </summary>
+    Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken);
 }
 
 /// <summary>One pooled model the brain may dispatch — its canonical id, the provider tag whose harness can drive it, and its cached advisory capability <see cref="ModelCapabilityTier"/> (default <see cref="ModelCapabilityTier.Unknown"/> when un-tiered). Catalog-only (no credential, no secret).</summary>

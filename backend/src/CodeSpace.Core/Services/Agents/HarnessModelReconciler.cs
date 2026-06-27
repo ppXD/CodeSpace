@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -61,7 +62,7 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
         // caller's registry resolves it; a genuinely-unregistered kind surfaces there, unchanged).
         if (provider is null) return new HarnessReconciliation(task.Harness, false, null);
 
-        return Reconcile(task.Harness, provider, _harnesses.All);
+        return Reconcile(task.Harness, provider, _harnesses.All, AgentHarnessDefaults.DefaultHarness);
     }
 
     /// <summary>
@@ -79,11 +80,17 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
                 .SingleOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(task.Model)) return null;
+        if (!string.IsNullOrWhiteSpace(task.Model))
+        {
+            var dispatch = await _modelSelector.ResolveDispatchAsync(teamId, task.Model, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
 
-        var dispatch = await _modelSelector.ResolveDispatchAsync(teamId, task.Model, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
+            return dispatch?.Provider;
+        }
 
-        return dispatch?.Provider;
+        // No pin AND no model name (the AUTO case) — derive the provider the un-pinned run will actually get (the team's
+        // top default pool row), so the harness follows the model instead of the codex floor. This is the "always-codex"
+        // fix: an Anthropic-only auto team now reconciles to claude-code. Null (no enabled pool model) keeps the floor.
+        return await _modelSelector.ResolveTeamDefaultProviderAsync(teamId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -92,16 +99,20 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
     /// else the authored kind (nothing drives it → the resolver throws the truly-unrunnable error, the honest floor).
     /// Internal + static so it is unit-pinned across the harness × provider matrix without a DB.
     /// </summary>
-    internal static HarnessReconciliation Reconcile(string authoredKind, string provider, IReadOnlyList<IAgentHarness> pool)
+    internal static HarnessReconciliation Reconcile(string authoredKind, string provider, IReadOnlyList<IAgentHarness> pool, string defaultHarnessKind)
     {
         var authored = pool.FirstOrDefault(h => string.Equals(h.Kind, authoredKind, StringComparison.OrdinalIgnoreCase));
 
         if (authored is not null && Drives(authored, provider)) return new HarnessReconciliation(authoredKind, false, null);
 
-        // Order by Kind so the fallback is DETERMINISTIC regardless of DI/registration order — two runs of the same
-        // mismatch always repair to the same harness (today codex-cli + claude-code overlap only on "Custom", which the
-        // authored harness already drives, so this never branches; it future-proofs a third overlapping harness).
-        var compatible = pool.Where(h => Drives(h, provider)).OrderBy(h => h.Kind, StringComparer.Ordinal).FirstOrDefault();
+        // The DEFAULT harness wins among the drivers, else Kind order — DETERMINISTIC regardless of DI/registration order.
+        // The default-first tie-break decides the genuinely-ambiguous case: "Custom" is OpenAI-wire and BOTH codex-cli and
+        // claude-code drive it, so a Custom auto model derives the default (codex-cli, the OpenAI harness), not the
+        // alphabetically-first claude-code. (`defaultHarnessKind` is passed in so this stays a pure function.)
+        var compatible = pool.Where(h => Drives(h, provider))
+            .OrderByDescending(h => string.Equals(h.Kind, defaultHarnessKind, StringComparison.OrdinalIgnoreCase))
+            .ThenBy(h => h.Kind, StringComparer.Ordinal)
+            .FirstOrDefault();
 
         if (compatible is null) return new HarnessReconciliation(authoredKind, false, null);
 
