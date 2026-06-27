@@ -27,8 +27,8 @@ public sealed class PackService : IPackService, IScopedDependency
         if (packs.Count == 0) return Array.Empty<PackSummary>();
 
         var ids = packs.Select(p => p.Id).ToList();
-        var agentCounts = await CountByPackAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.PackId != null && ids.Contains(a.PackId.Value) && a.DeletedDate == null).Select(a => a.PackId!.Value), cancellationToken).ConfigureAwait(false);
-        var skillCounts = await CountByPackAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.PackId != null && ids.Contains(s.PackId.Value) && s.DeletedDate == null).Select(s => s.PackId!.Value), cancellationToken).ConfigureAwait(false);
+        var agentCounts = await CountByPackAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.PackId != null && ids.Contains(a.PackId.Value) && a.DeletedDate == null).Select(a => a.PackId!.Value), cancellationToken).ConfigureAwait(false);
+        var skillCounts = await CountByPackAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.PackId != null && ids.Contains(s.PackId.Value) && s.DeletedDate == null).Select(s => s.PackId!.Value), cancellationToken).ConfigureAwait(false);
 
         return packs.Select(p => ToSummary(p, agentCounts.GetValueOrDefault(p.Id), skillCounts.GetValueOrDefault(p.Id))).ToList();
     }
@@ -41,12 +41,12 @@ public sealed class PackService : IPackService, IScopedDependency
         if (pack == null) return null;
 
         var agents = await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.PackId == packId && a.DeletedDate == null)
+            .Where(a => a.PackId == packId && a.TeamId == teamId && a.DeletedDate == null)
             .Select(a => new PackArtifactSummary { Kind = PackArtifactKind.Agent, Id = a.Id, Slug = a.Slug, Name = a.Name, Description = a.Description, SourcePath = a.SourcePath })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var skills = await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.PackId == packId && s.DeletedDate == null)
+            .Where(s => s.PackId == packId && s.TeamId == teamId && s.DeletedDate == null)
             .Select(s => new PackArtifactSummary { Kind = PackArtifactKind.Skill, Id = s.Id, Slug = s.Slug, Name = s.Name, Description = s.Description, SourcePath = s.SourcePath })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
