@@ -19,6 +19,9 @@ public class ModelCredentialModelConfiguration : IEntityTypeConfiguration<ModelC
         // Stored as its string name (matches every other enum in the schema, incl. CredentialStatus).
         builder.Property(m => m.Source).HasConversion<string>();
 
+        // The cached capability tier is likewise stored as its string name (null = not yet tiered).
+        builder.Property(m => m.CapabilityTier).HasConversion<string>();
+
         builder.HasOne(m => m.Credential)
             .WithMany(c => c.Models)
             .HasForeignKey(m => m.ModelCredentialId)

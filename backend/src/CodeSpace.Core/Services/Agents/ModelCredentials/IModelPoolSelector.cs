@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 
@@ -65,8 +66,8 @@ public interface IModelPoolSelector
     Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 }
 
-/// <summary>One pooled model the brain may dispatch — its canonical id and the provider tag whose harness can drive it. Catalog-only (no credential, no secret).</summary>
-public sealed record PoolModelInfo(string ModelId, string Provider);
+/// <summary>One pooled model the brain may dispatch — its canonical id, the provider tag whose harness can drive it, and its cached advisory capability <see cref="ModelCapabilityTier"/> (default <see cref="ModelCapabilityTier.Unknown"/> when un-tiered). Catalog-only (no credential, no secret).</summary>
+public sealed record PoolModelInfo(string ModelId, string Provider, ModelCapabilityTier Tier = ModelCapabilityTier.Unknown);
 
 /// <summary>The agent-dispatch resolution: the canonical model id + the BACKING credential's id. Distinct from <see cref="ModelPoolPick"/> (the in-process plane, which carries the decrypted key) — the agent plane wants the credential REFERENCE (a Guid it resolves to env at execution), never the secret in-process.</summary>
 public sealed record ModelDispatchRef

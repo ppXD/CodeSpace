@@ -1,5 +1,6 @@
 using System.Text;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Agents;
 
@@ -31,7 +32,17 @@ public static class CapabilityCatalog
         if (pool.Count > 0)
         {
             builder.AppendLine("Models in this run's credentialed pool (model — provider):");
-            foreach (var model in pool) builder.AppendLine($"  - {model.ModelId} — {model.Provider}");
+            foreach (var model in pool)
+            {
+                // Cached capability tier (frontier / strong / basic) when known — omitted for an un-tiered / opaque model
+                // so an all-Unknown pool renders byte-identically to before this signal existed.
+                var tier = model.Tier == ModelCapabilityTier.Unknown ? "" : $" — tier: {model.Tier.ToString().ToLowerInvariant()}";
+                builder.AppendLine($"  - {model.ModelId} — {model.Provider}{tier}");
+            }
+
+            if (pool.Any(m => m.Tier != ModelCapabilityTier.Unknown))
+                builder.AppendLine("Prefer a higher-tier model (frontier > strong > basic) for a harder subtask, and a cheaper lower-tier one for a trivial subtask.");
+
             builder.AppendLine("Per agent, pick a model from THIS pool and a harness whose providers include that model's provider. The server corrects an incompatible pair, but a compatible choice is preferred.");
         }
         else

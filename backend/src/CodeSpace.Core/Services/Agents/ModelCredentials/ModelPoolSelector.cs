@@ -110,21 +110,22 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         if (allowedRowIds is { Count: > 0 }) query = query.Where(m => allowedRowIds.Contains(m.Id));
 
-        // Project the two columns on the DB side; dedupe + total-order + map in memory (a team's pool is small, and EF
-        // can't translate Distinct→OrderBy over a constructed record). A model name can exist under two providers (both
-        // harnesses list Custom), so the (id, provider) pair is the dedup key + the stable render order. The catalog
-        // render order intentionally stays ALPHABETICAL and does NOT surface IsDefault — the operator default orders the
-        // PICK (SelectAsync / SelectBrainRowIdAsync), not this displayed menu; capability-aware ordering of this catalog
-        // is the follow-up (when the brain authors against a tier/score signal, not just id+provider).
+        // Project (id, provider, tier) on the DB side; dedupe + total-order + map in memory (a team's pool is small, and
+        // EF can't translate GroupBy→OrderBy over a constructed record). A model name can exist under two providers (both
+        // harnesses list Custom) AND under two credentials (each tiered separately), so the (id, provider) pair is the
+        // dedup key and the BEST (highest) tier across its rows is carried (a model's capability is its own, not the
+        // credential's). The render order intentionally stays ALPHABETICAL and does NOT surface IsDefault or the tier —
+        // the operator default orders the PICK (SelectAsync / SelectBrainRowIdAsync), not this displayed menu, and
+        // tier-aware ORDERING of this catalog is a later slice; this slice only surfaces the tier as a render hint.
         var rows = await query
-            .Select(m => new { m.ModelId, m.Credential.Provider })
+            .Select(m => new { m.ModelId, m.Credential.Provider, m.CapabilityTier })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
         return rows
-            .Distinct()
-            .OrderBy(r => r.ModelId, StringComparer.Ordinal).ThenBy(r => r.Provider, StringComparer.Ordinal)
-            .Select(r => new PoolModelInfo(r.ModelId, r.Provider))
+            .GroupBy(r => new { r.ModelId, r.Provider })
+            .Select(g => new PoolModelInfo(g.Key.ModelId, g.Key.Provider, g.Max(r => r.CapabilityTier ?? ModelCapabilityTier.Unknown)))
+            .OrderBy(p => p.ModelId, StringComparer.Ordinal).ThenBy(p => p.Provider, StringComparer.Ordinal)
             .ToList();
     }
 
