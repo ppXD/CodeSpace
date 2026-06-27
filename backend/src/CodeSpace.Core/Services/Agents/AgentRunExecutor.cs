@@ -399,8 +399,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, IReadOnlyList<AgentEvent> events) => sandbox.Status switch
     {
-        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." },
-        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over." },
+        // A timed-out / stalled agent still BURNED tokens before we killed it — capture the usage from its events
+        // (the harness's own fold does this for a clean/non-zero exit; these forced-terminal paths must too) so the
+        // spend shows on the run regardless of outcome.
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
         _ => harness.BuildResult(events, sandbox.ExitCode),
     };
 

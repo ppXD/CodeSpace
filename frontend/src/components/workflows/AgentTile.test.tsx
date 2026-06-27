@@ -67,6 +67,14 @@ describe("AgentTile", () => {
     expect(tile(container)?.dataset.state).toBe("failed");
   });
 
+  it("still shows the token / file spend on a FAILED tile (a failure consumed budget too)", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Failed" } });
+
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", inputTokens: 300000, outputTokens: 73100 })} />);
+
+    expect(container.querySelector(".agent-tile-fail")?.textContent).toBe("failed · 373.1k tokens");
+  });
+
   it("shows the run's failure reason on a failed tile that emitted no event (instead of bare 'stopped')", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "no drivable credential for codex-cli" } });
     useAgentRunEventsMock.mockReturnValue({ data: [] });

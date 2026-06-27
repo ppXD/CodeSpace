@@ -86,7 +86,8 @@ function bodyLines(state: TileState, latest: string | undefined, summary: string
     return (
       <>
         <div className="agent-tile-line agent-tile-cmd">{latest ?? failReason ?? "stopped"}</div>
-        <div className="agent-tile-line agent-tile-fail">failed</div>
+        {/* Still surface the token/file spend on a failure — a failed agent consumed budget too. */}
+        <div className="agent-tile-line agent-tile-fail">{summary ? `failed · ${summary}` : "failed"}</div>
       </>
     );
   }
