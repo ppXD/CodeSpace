@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { AttemptSwitcher } from "@/components/workflows/AttemptSwitcher";
 import { DecisionInbox } from "@/components/workflows/DecisionInbox";
 import { RunDetailView } from "@/components/workflows/RunDetailView";
 import { RunFacts } from "@/components/workflows/RunFacts";
@@ -9,7 +10,7 @@ import { RunOutline } from "@/components/workflows/RunOutline";
 import { RunStateHeader } from "@/components/workflows/RunStateHeader";
 import { StopRunButton } from "@/components/workflows/StopRunButton";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
-import { isRunActive, usePendingDecisions, useReplayRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
+import { isRunActive, usePendingDecisions, useReplayRun, useRunAttempts, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
 
 /**
  * The canonical run-detail page — the Run Room. A run is run-neutral (manual, scheduled, webhook, replay, task,
@@ -21,20 +22,37 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runId")({
   component: RunDetailPage,
 });
 
+// Remount per URL run id so the selected-attempt + outline state resets cleanly on navigation (changing a path param
+// does NOT remount by default). Without this, replaying / navigating to a different run would carry a stale
+// `selectedAttempt` into the next lineage — pinning the page to an attempt that isn't even in the new ladder.
 function RunDetailPage() {
   const { teamSlug, runId } = Route.useParams();
+  return <RunDetailRoom key={runId} teamSlug={teamSlug} runId={runId} />;
+}
+
+function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string }) {
   const navigate = useNavigate();
+
+  // The lineage's attempt ladder — the URL run id is any member; the detail shows ONE attempt at a time, defaulting to
+  // the latest (so opening the original from the runs list lands on the newest attempt, with the older ones one pill
+  // away). `rootId` is the lineage identity the page titles on.
+  const attempts = useRunAttempts(runId);
+  const rootId = attempts.data?.rootRunId ?? runId;
+  const latestRunId = attempts.data?.attempts.find((a) => a.isLatest)?.runId;
+  const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null);
+  const effectiveRunId = selectedAttempt ?? latestRunId ?? runId;
+
   // Shared with RunDetailView via the same query key (React Query dedups) — used here for the Re-run target,
   // the run-state header, and the "Back to workflow" link when the run came from an authored workflow.
-  const run = useWorkflowRun(runId);
+  const run = useWorkflowRun(effectiveRunId);
   // The run-neutral outline (the phase projection) — a separate endpoint, polled on the same cadence.
-  const phases = useRunPhases(runId);
+  const phases = useRunPhases(effectiveRunId);
   // The cross-grain decision queue, narrowed to this run — polled while the run can still park one. Agent-grain
   // decisions key off the agent run id, so we pass the run's fanned-out agent ids (from the phase projection).
   const pendingPoll = run.data ? isRunActive(run.data.status) : true;
   const decisions = usePendingDecisions(pendingPoll);
   const runAgentIds = new Set((phases.data?.phases ?? []).flatMap((p) => p.agents).map((a) => a.agentRunId));
-  const runDecisions = decisions.data ? decisionsForRun(decisions.data, runId, runAgentIds) : [];
+  const runDecisions = decisions.data ? decisionsForRun(decisions.data, effectiveRunId, runAgentIds) : [];
   const workflowId = run.data?.workflowId ?? null;
   const replay = useReplayRun();
   // The outline drives the center: a selected PHASE filters the Activity tiles to it; a selected AGENT opens its terminal.
@@ -44,8 +62,11 @@ function RunDetailPage() {
   // from it. (Selecting an AGENT sets its phase then itself, in that order, so the agent still wins.)
   const selectPhase = (phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); };
 
+  // Switching attempts is a fresh focus — the outline selections belong to the old attempt's run, so clear them.
+  const selectAttempt = (attemptRunId: string) => { setSelectedAttempt(attemptRunId); setSelectedPhaseId(null); setSelectedAgentRunId(null); };
+
   const onReplay = async () => {
-    const result = await replay.mutateAsync(runId);
+    const result = await replay.mutateAsync(effectiveRunId);
     await navigate({
       to: "/teams/$teamSlug/runs/$runId",
       params: { teamSlug, runId: result.runId },
@@ -58,28 +79,21 @@ function RunDetailPage() {
         <div className="ct-crumbs">
           <a onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Runs</a>
           <span className="sep">/</span>
-          <span className="cur">Run {runId.slice(0, 8)}</span>
+          <span className="cur">Run {rootId.slice(0, 8)}</span>
         </div>
         <div className="ct-title-row">
           <div>
-            <h1 className="ct-title">Run {runId.slice(0, 8)}</h1>
+            <h1 className="ct-title">Run {rootId.slice(0, 8)}</h1>
             {run.data && phases.data && (
               <RunStateHeader runStatus={run.data.status} phases={phases.data.phases}
                 pendingDecisions={decisions.data ? runDecisions.length : undefined} />
             )}
-            {run.data?.parentRunId && (
-              <button
-                className="run-lineage-link"
-                onClick={() => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.data!.parentRunId! } })}
-                title="Open the run this one was forked from"
-              >
-                <Ic.Branch size={12} aria-hidden="true" />
-                {run.data.sourceType === "replay" ? "Replay of" : "Rerun of"} run {run.data.parentRunId.slice(0, 8)}
-              </button>
+            {attempts.data && (
+              <AttemptSwitcher attempts={attempts.data.attempts} selectedRunId={effectiveRunId} onSelect={selectAttempt} />
             )}
           </div>
           <div className="ct-actions">
-            {run.data && <StopRunButton runId={runId} status={run.data.status} />}
+            {run.data && <StopRunButton runId={effectiveRunId} status={run.data.status} />}
             <button
               className="btn btn-primary"
               onClick={() => void onReplay()}
@@ -114,7 +128,7 @@ function RunDetailPage() {
               and the Activity·Canvas·Changes·Trace tabs read as that panel's header. */}
           <div className="run-panel">
             <RunDetailView
-              runId={runId}
+              runId={effectiveRunId}
               selectedPhaseId={selectedPhaseId}
               selectedAgentRunId={selectedAgentRunId}
               onSelectAgent={setSelectedAgentRunId}

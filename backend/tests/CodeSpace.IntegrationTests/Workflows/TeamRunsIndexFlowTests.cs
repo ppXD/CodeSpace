@@ -113,6 +113,76 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task The_representative_carries_the_roots_identity_source_so_a_rerun_titles_as_the_original_not_replay()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // The original is a Snapshot/task run; the rerun fork's OWN source is "replay". The row (the latest attempt) must
+        // expose the ROOT's source via RootSourceType so the list titles the lineage as the original task, never "Replay".
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-5), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot);
+        var rerun = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+
+        var row = (await ListAsync(teamA, 50)).Single();
+
+        row.Id.ShouldBe(rerun, "the representative is the latest attempt (the fork)");
+        row.RootRunId.ShouldBe(original, "but its lineage identity points at the original — the list opens THAT");
+        row.SourceType.ShouldBe(WorkflowRunSourceTypes.Replay, "the representative's own source is the fork's");
+        row.RootSourceType.ShouldBe(WorkflowRunSourceTypes.Snapshot, "RootSourceType is the ORIGINAL's source, so the title reads as the task, not 'Replay'");
+
+        var (teamB, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var lone = await InsertRunAsync(teamB, parentRunId: null, createdDate: t, workflowId: null, sourceType: WorkflowRunSourceTypes.Manual);
+        (await ListAsync(teamB, 50)).Single(r => r.Id == lone).RootSourceType.ShouldBe(WorkflowRunSourceTypes.Manual, "a never-rerun run's RootSourceType is just its own source");
+    }
+
+    [Fact]
+    public async Task ListRunAttempts_returns_the_whole_lineage_oldest_first_numbered_with_one_latest_resolved_from_any_member()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null, status: WorkflowRunStatus.Failure);
+        var r1 = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Failure);
+        var r2 = await InsertRunAsync(teamA, parentRunId: r1, rootRunId: original, createdDate: t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);
+        await InsertRunAsync(teamA, parentRunId: original, createdDate: t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.ChildWorkflow);   // a child — never in the ladder
+        await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);   // a different lineage — must not bleed in
+
+        // Opening ANY member (the root OR a fork) resolves the SAME ladder.
+        foreach (var member in new[] { original, r1, r2 })
+        {
+            var ladder = await AttemptsAsync(teamA, member);
+            ladder.ShouldNotBeNull();
+            ladder!.RootRunId.ShouldBe(original);
+            ladder.Attempts.Select(a => a.RunId).ShouldBe(new[] { original, r1, r2 }, $"oldest-first, child + other lineage excluded (opened from {member})");
+            ladder.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2, 3 });
+            ladder.Attempts.Single(a => a.IsLatest).RunId.ShouldBe(r2, "the newest attempt is the one the runs list shows");
+            ladder.Attempts.Count(a => a.IsLatest).ShouldBe(1, "exactly one latest");
+        }
+    }
+
+    [Fact]
+    public async Task ListRunAttempts_for_a_never_rerun_run_is_a_single_self_attempt()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var lone = await InsertRunAsync(teamA, parentRunId: null, createdDate: DateTimeOffset.UtcNow, workflowId: null);
+
+        var ladder = await AttemptsAsync(teamA, lone);
+
+        ladder!.RootRunId.ShouldBe(lone);
+        ladder.Attempts.Select(a => (a.RunId, a.AttemptNumber, a.IsLatest)).ShouldBe(new[] { (lone, 1, true) });
+    }
+
+    [Fact]
+    public async Task ListRunAttempts_is_team_scoped_returning_null_for_a_foreign_run()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var aRun = await InsertRunAsync(teamA, parentRunId: null, createdDate: DateTimeOffset.UtcNow, workflowId: null);
+
+        (await AttemptsAsync(teamB, aRun)).ShouldBeNull("a run another team owns must 404-conflate, no existence leak");
+    }
+
+    [Fact]
     public async Task Collapses_a_branched_lineage_to_the_single_newest_attempt()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -787,6 +857,12 @@ FROM (
     WHERE NOT EXISTS (SELECT 1 FROM workflow_run p WHERE p.id = c.ancestor AND p.parent_run_id IS NOT NULL)
 ) roots
 WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
+    }
+
+    private async Task<RunAttemptsResponse?> AttemptsAsync(Guid teamId, Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().ListRunAttemptsAsync(runId, teamId, CancellationToken.None);
     }
 
     private async Task<RunSummary> SummaryAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart)

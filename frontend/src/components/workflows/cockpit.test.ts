@@ -12,7 +12,7 @@ function decision(o: Partial<PendingDecision>): PendingDecision {
 }
 
 function run(id: string, status: WorkflowRunStatus, createdDate = "2026-06-22T00:00:00Z"): WorkflowRunSummary {
-  return { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1 };
+  return { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1, rootSourceType: "manual" };
 }
 
 describe("formatDuration", () => {

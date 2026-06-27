@@ -1174,7 +1174,40 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         CreatedDate = r.CreatedDate,
         RootRunId = r.RootRunId ?? r.Id,
         AttemptCount = _db.WorkflowRun.Count(o => o.TeamId == r.TeamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (o.RootRunId ?? o.Id) == (r.RootRunId ?? r.Id)),
+        RootSourceType = _db.WorkflowRun.Where(o => o.Id == (r.RootRunId ?? r.Id)).Select(o => o.SourceType).FirstOrDefault() ?? r.SourceType,
     };
+
+    public async Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.RootRunId })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (run == null) return null;
+
+        var rootKey = run.RootRunId ?? run.Id;
+
+        // Every run in the lineage, oldest first under the SAME (CreatedDate, Id) order the index ranks by — so the last
+        // one is exactly the representative the runs list shows. AsNoTracking read of summary columns only.
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
+            .OrderBy(r => r.CreatedDate).ThenBy(r => r.Id)
+            .Select(r => new { r.Id, r.Status, r.SourceType, r.CreatedDate })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var attempts = lineage.Select((r, i) => new RunAttemptSummary
+        {
+            RunId = r.Id,
+            AttemptNumber = i + 1,
+            Status = r.Status,
+            SourceType = r.SourceType,
+            CreatedDate = r.CreatedDate,
+            IsLatest = i == lineage.Count - 1,
+        }).ToList();
+
+        return new RunAttemptsResponse { RootRunId = rootKey, Attempts = attempts };
+    }
 
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
