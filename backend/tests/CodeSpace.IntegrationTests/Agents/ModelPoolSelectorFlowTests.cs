@@ -54,6 +54,19 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task An_unpinned_pick_prefers_the_operator_default_over_model_id_order()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelAsync(credId, "claude-opus-4-8");                      // sorts FIRST alphabetically
+        await AddModelAsync(credId, "claude-sonnet-4-6", isDefault: true);   // the operator's starred default — must win
+
+        // A1: #746 made the AGENT plane honor IsDefault; this brings the in-process BRAIN plane (planner / synthesis /
+        // llm.complete) to parity. The starred model wins the unpinned auto pick even though 'opus' sorts before 'sonnet'.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-sonnet-4-6", "the operator's per-credential default outranks alphabetical order");
+    }
+
+    [Fact]
     public async Task Any_enabled_credentialed_model_is_selectable_the_pool_is_capability_generic()
     {
         var teamId = await SeedTeamAsync();
@@ -181,6 +194,51 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task SelectBrainRowId_prefers_the_operator_default_over_model_id_order()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        await AddModelReturningIdAsync(cred, "claude-opus-4-8");                            // sorts first
+        var sonnetRow = await AddModelReturningIdAsync(cred, "claude-sonnet-4-6", isDefault: true);   // starred — must become the brain
+
+        // A1: the supervisor brain auto-pick now honors the operator's default model, at parity with the agent plane.
+        (await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI")).ShouldBe(sonnetRow, "a starred eligible model becomes the auto brain, outranking model-id order");
+    }
+
+    [Fact]
+    public async Task Two_credentials_each_with_a_default_break_the_tie_deterministically_and_replay_stable()
+    {
+        var teamId = await SeedTeamAsync();
+        var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
+        var opusRow = await AddModelReturningIdAsync(credA, "claude-opus-4-8", isDefault: true);   // both starred — IsDefault is PER-credential
+        await AddModelReturningIdAsync(credB, "claude-sonnet-4-6", isDefault: true);
+
+        // Two defaults can coexist (one per credential). The total order is IsDefault desc, THEN model id, THEN row id —
+        // so the tie is broken deterministically (alphabetical 'opus' wins) and the pick is REPLAY-STABLE across calls.
+        // Matches the agent plane's documented multi-default contract (ModelCredentialResolver).
+        (await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI")).ShouldBe(opusRow);
+        (await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI")).ShouldBe(opusRow, "repeated calls re-derive the SAME brain — a stable total order over the frozen pool snapshot");
+
+        // The ambient (SelectAsync) plane breaks the same multi-default tie identically.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public async Task SelectBrainRowId_does_not_let_a_default_override_provider_eligibility()
+    {
+        var teamId = await SeedTeamAsync();
+        var ollamaCred = await SeedCredentialAsync(teamId, "Ollama", key: "sk-o");
+        await AddModelReturningIdAsync(ollamaCred, "llama3", isDefault: true);   // STARRED, but Ollama has no structured client
+        var anthropicCred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var opusRow = await AddModelReturningIdAsync(anthropicCred, "zzz-opus");
+
+        // The default orders WITHIN the eligible set; it never bypasses the fail-closed provider-eligibility floor. A
+        // starred model whose provider can't run the brain is still skipped to the next eligible row.
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(opusRow, "the operator default is a tie-break inside the eligible set, not a bypass of provider eligibility");
+    }
+
+    [Fact]
     public async Task SelectBrainRowId_skips_a_row_whose_provider_has_no_structured_client()
     {
         var teamId = await SeedTeamAsync();
@@ -225,12 +283,12 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId)
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, IsDefault = isDefault });
         await db.SaveChangesAsync();
         return id;
     }
@@ -241,14 +299,14 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, allowed, pinned, CancellationToken.None);
     }
 
-    private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true)
+    private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true, bool isDefault = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.ModelCredentialModel.Add(new ModelCredentialModel
         {
             Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual,
-            Enabled = enabled,
+            Enabled = enabled, IsDefault = isDefault,
         });
         await db.SaveChangesAsync();
     }
