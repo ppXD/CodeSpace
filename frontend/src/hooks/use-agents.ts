@@ -74,12 +74,17 @@ export function useAgentRun(agentRunId: string | undefined) {
 }
 
 /**
- * One agent run's live event log, streamed INCREMENTALLY: each ~1s poll (while `active`) fetches only the
+ * One agent run's live event log, streamed INCREMENTALLY: each poll (while `active`) fetches only the
  * events past the highest sequence already held (the `after` cursor) and merges them in, so a long run
  * streams deltas instead of re-pulling the whole log every tick. Polling stops once terminal. The log is
  * append-only + immutable, so the merge is a safe dedup-by-sequence (see {@link mergeRunEvents}).
+ *
+ * `intervalMs` is the live cadence: the expanded terminal streams at 1s, but a wave's collapsed PREVIEW tiles pass a
+ * slower cadence (a many-agent wave of M tiles each polling 1s is the steady-state jank driver, and a preview line
+ * doesn't need second-by-second freshness). Tiles + terminal share one query per agent, so React Query polls the
+ * agent at the fastest cadence among its mounted observers — opening a terminal speeds that one agent back to 1s.
  */
-export function useAgentRunEvents(agentRunId: string | undefined, active: boolean) {
+export function useAgentRunEvents(agentRunId: string | undefined, active: boolean, intervalMs = 1000) {
   const queryClient = useQueryClient();
   const queryKey = ["agent-run-events", agentRunId];
 
@@ -91,7 +96,7 @@ export function useAgentRunEvents(agentRunId: string | undefined, active: boolea
       return mergeRunEvents(prev, fresh);
     },
     enabled: !!agentRunId,
-    refetchInterval: active ? 1000 : false,
+    refetchInterval: active ? intervalMs : false,
   });
 }
 

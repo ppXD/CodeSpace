@@ -9,7 +9,7 @@ const { useAgentRunMock, useAgentRunEventsMock } = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => useAgentRunMock(),
-  useAgentRunEvents: () => useAgentRunEventsMock(),
+  useAgentRunEvents: (id: string | undefined, active: boolean, intervalMs?: number) => useAgentRunEventsMock(id, active, intervalMs),
 }));
 
 import { AgentTile } from "./AgentTile";
@@ -27,6 +27,13 @@ beforeEach(() => {
 });
 
 describe("AgentTile", () => {
+  it("streams its preview at the slower 2s cadence (the expanded terminal keeps 1s)", () => {
+    // A wave of many tiles each polling 1s is the steady-state jank; a preview line tolerates 2s. The tiles + the open
+    // terminal share one query per agent, so opening one speeds that agent back to 1s — the tile just asks for less.
+    render(<AgentTile agent={tileAgent({ agentRunId: "a1" })} />);
+    expect(useAgentRunEventsMock).toHaveBeenCalledWith("a1", true, 2000);
+  });
+
   it("shows a running tile with its latest line as the live command + a cursor", () => {
     useAgentRunEventsMock.mockReturnValue({ data: [evt("FileChanged", "editing auth/session.ts")] });
 

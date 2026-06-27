@@ -26,7 +26,10 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
   const run = useAgentRun(agent.agentRunId);
   const status = run.data?.status ?? agent.status;
   const active = isAgentBusy(status);
-  const events = useAgentRunEvents(agent.agentRunId, active);
+  // 2s preview cadence (the expanded terminal streams at 1s) — a wave of M tiles each polling 1s is the steady-state
+  // jank; the preview's latest-line + file count don't need second-by-second freshness. Opening this agent's terminal
+  // adds a 1s observer on the shared query, so the open one speeds back up.
+  const events = useAgentRunEvents(agent.agentRunId, active, 2000);
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const state = tileState(status);

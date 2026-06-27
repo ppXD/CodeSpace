@@ -51,6 +51,11 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   // The Live-work center is driven by the phase projection (shared ['run-phases', id] cache). Only the framed
   // route needs it — the embedded (nested) dialog keeps the plain node narrative, so it skips the fetch.
   const phases = useRunPhases(nested ? null : runId);
+  // Stable context value for the canvas fan-out rerun + the open terminal (non-nested only — the nested dialog never
+  // provides it) — without the memo a fresh object every 2s run poll re-renders every consumer (each open AgentTerminal)
+  // for no change. Keyed on status, not run.data: run.data identity churns every poll, which would defeat the memo.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- status is the only field read; run.data churns each poll
+  const runActions = useMemo(() => (!nested && run.data ? { runId, isTerminal: !isRunActive(run.data.status) } : null), [nested, runId, run.data?.status]);
 
   if (run.isLoading) {
     return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
@@ -77,6 +82,12 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   // (the Activity timeline is the heart), a structural workflow with no agents keeps the node trace primary.
   const phaseList = phases.data?.phases ?? [];
   const agents = dedupRunAgents(phaseList);
+  // While the phases query is genuinely loading its FIRST result, optimistically fold the raw input/node trace. An
+  // agent run otherwise renders the node trace EXPANDED (phases not yet known → "no agents") and then collapses it into
+  // a fold the instant agents arrive — that collapse, while the timeline simultaneously fans out above, is the entry
+  // "expand/zoom" reflow. Folding from the start keeps the layout stable through the load. Once loaded, a genuinely
+  // agent-less (structural) run still gets the primary node trace; nested (editor dialog) is unaffected.
+  const phasesLoading = !nested && phases.isLoading;
 
   const payloadBlock = (
     <>
@@ -182,14 +193,14 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
           {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
               as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
           {!nested && (
-            <RunActionsContext.Provider value={{ runId, isTerminal: !isRunActive(r.status) }}>
+            <RunActionsContext.Provider value={runActions}>
               <RunOpenContext.Provider value={onOpenRun ?? null}>
                 <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
               </RunOpenContext.Provider>
             </RunActionsContext.Provider>
           )}
 
-          {nested || agents.length === 0 ? (
+          {nested || (!phasesLoading && agents.length === 0) ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
             <>
               {payloadBlock}
