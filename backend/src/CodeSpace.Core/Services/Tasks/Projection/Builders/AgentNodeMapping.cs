@@ -48,6 +48,9 @@ internal static class AgentNodeMapping
         // Per-run opt-in to the full MCP fabric; null ⇒ omitted ⇒ defer to the ambient flag ⇒ byte-identical. The same
         // key the supervisor agentProfile writes, so single-agent + spawned agents honour the operator's choice identically.
         AddIfPresent(config, "enableMcp", profile?.EnableMcp);
+        // Per-run opt-in to publishing the diff as a branch; null ⇒ omitted ⇒ the node's mode-derived default / ambient
+        // flag (ResolvePushBranch) ⇒ byte-identical. OR-gate: forces publish ON, never OFF.
+        AddIfPresent(config, "pushBranch", profile?.PushBranch);
         // Multi-repo working-dir mode — the enum NAME ("WorkspaceRoot"/"PrimaryRepo"); null (Auto) ⇒ omitted ⇒ the
         // node's Auto default ⇒ byte-identical. AgentCodeNode reads it back via WorkspaceCwdModeWire.FromWire.
         AddIfPresent(config, "cwdMode", profile?.CwdMode?.ToString());

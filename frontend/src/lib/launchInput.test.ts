@@ -23,6 +23,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   cwdMode: "auto",
   enableMcp: false,
   tools: [],
+  pushBranch: false,
   maxParallel: "5",
   maxRounds: "6",
   maxAgents: "20",
@@ -173,6 +174,17 @@ describe("buildLaunchInput — base fields", () => {
     expect(input.allowedTools).not.toBe(tools);
     // An agent-setup knob ⇒ sent on any tier.
     expect(buildLaunchInput(form({ effort: "deep", tools: ["Bash"] })).allowedTools).toEqual(["Bash"]);
+  });
+
+  it("omits pushBranch when off (the default ⇒ defer to the ambient flag, byte-identical)", () => {
+    expect(buildLaunchInput(form({ pushBranch: false }))).not.toHaveProperty("pushBranch");
+    expect(buildLaunchInput(form())).not.toHaveProperty("pushBranch");
+  });
+
+  it("sends pushBranch:true when the operator opts to publish, on ANY tier", () => {
+    expect(buildLaunchInput(form({ pushBranch: true })).pushBranch).toBe(true);
+    expect(buildLaunchInput(form({ effort: "quick", pushBranch: true })).pushBranch).toBe(true);
+    expect(buildLaunchInput(form({ effort: "deep", pushBranch: true })).pushBranch).toBe(true);
   });
 });
 

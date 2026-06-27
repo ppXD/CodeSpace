@@ -45,4 +45,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>The tool allow-list each agent is restricted to (canonical Claude tool names, e.g. Read / Grep / Bash). Null / empty → the harness default (all tools), omitted ⇒ byte-identical. A CLAUDE-ONLY capability filter (Codex restricts via its sandbox, ignoring the list) and ADDITIVE against a persona's tools — never a write boundary (use autonomy for that).</summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
+
+    /// <summary>Per-run opt-in to PUBLISHING the agent's diff as its own branch even when the deployment push flag is off. Null / false → defer to the ambient flag (byte-identical). OR-gate: forces publish ON, cannot force OFF.</summary>
+    public bool? PushBranch { get; init; }
 }

@@ -43,6 +43,9 @@ public sealed record ResolvedAgentProfile
     /// <summary>Per-run opt-in to the MCP tool-fabric endpoint. Null → defer to the ambient deployment flag (an ordinary run is unchanged).</summary>
     public bool? EnableMcp { get; init; }
 
+    /// <summary>Per-run opt-in to PUBLISHING the agent's diff as its own branch (<c>codespace/agent/&lt;runId&gt;</c>) even when the deployment-wide push flag is off. Null → defer to the ambient flag (byte-identical). OR-gate: this forces publish ON, it cannot force it OFF; the diff is captured for review either way.</summary>
+    public bool? PushBranch { get; init; }
+
     /// <summary>Deep/supervisor only: per-run opt-in to integrating the spawned agents' diffs into one reviewable branch at merge. Null → defer to the ambient flag. Inert on a single-agent run.</summary>
     public bool? IntegrateBranches { get; init; }
 

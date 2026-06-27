@@ -126,6 +126,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         AddIfPresent(map, "modelCredentialId", profile.ModelCredentialId?.ToString());
         AddIfPresent(map, "runnerKind", NullIfBlank(profile.RunnerKind));
         AddIfPresent(map, "enableMcp", profile.EnableMcp);
+        AddIfPresent(map, "pushBranch", profile.PushBranch);
         AddIfPresent(map, "integrateBranches", profile.IntegrateBranches);
         AddIfPresent(map, "autonomyLevel", NullIfBlank(profile.AutonomyLevel));
         AddIfPresent(map, "cwdMode", profile.CwdMode?.ToString());

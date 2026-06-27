@@ -134,6 +134,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 
+    /// <summary>
+    /// Per-run opt-in to PUBLISHING the run's agent diff(s) as a branch (<c>codespace/agent/&lt;runId&gt;</c>) even when
+    /// the deployment-wide push flag is off. Null / false ⇒ omitted ⇒ defer to the ambient flag ⇒ byte-identical. An
+    /// OR-gate: this FORCES publish ON for the run; it cannot force it OFF (the diff is captured for review regardless).
+    /// Flows to both the single-agent <c>agent.code</c> node and each supervisor-spawned agent.
+    /// </summary>
+    public bool? PushBranch { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

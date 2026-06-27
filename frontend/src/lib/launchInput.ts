@@ -33,6 +33,8 @@ export interface LaunchFormState {
   enableMcp: boolean;
   /** "Tools" — a Claude-only tool allow-list (canonical names). Empty ⇒ omitted ⇒ harness default (all tools), byte-identical. Non-empty ⇒ sent as `allowedTools`. Additive against a persona's tools; not a write boundary. */
   tools: string[];
+  /** "Publish branch" — per-run opt-in to publishing the agent's diff as a branch even when the ambient push flag is off. Default false ⇒ omitted ⇒ defer to the ambient flag (byte-identical). Sent (as `pushBranch:true`) only when on. All tiers. */
+  pushBranch: boolean;
   /** Coordination "Limits" — supervisor fan-out bounds. Only meaningful on deep/auto (see effort gate). */
   maxParallel: string;
   maxRounds: string;
@@ -107,6 +109,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // The tool allow-list (a Claude-only capability filter). Empty ⇒ omitted ⇒ the harness default (all tools) ⇒
   // byte-identical; a non-empty pick is sent verbatim. An agent-setup knob ⇒ all tiers.
   if (state.tools.length) input.allowedTools = [...state.tools];
+
+  // Publish-branch is a default-OFF per-run opt-in (the OR-gate forces publish ON, never OFF). Send true only when on
+  // (default off ⇒ omitted ⇒ defer to the ambient flag, byte-identical). An agent-setup knob ⇒ all tiers.
+  if (state.pushBranch) input.pushBranch = true;
 
   // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
   // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit

@@ -247,6 +247,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             CwdMode = WorkspaceCwdModeWire.FromWire(request.Overrides.CwdMode),
             EnableMcp = request.Overrides.EnableMcp,
             AllowedTools = request.Overrides.AllowedTools is { Count: > 0 } tools ? tools : null,
+            PushBranch = request.Overrides.PushBranch,
         };
     }
 

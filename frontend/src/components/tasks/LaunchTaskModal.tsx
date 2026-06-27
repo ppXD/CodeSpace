@@ -75,7 +75,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   const [acceptDraft, setAcceptDraft] = useState("");
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
-    branchMode: "auto", tools: [] as string[], enableMcp: false, cwdMode: "auto",
+    pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
@@ -85,7 +85,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
-    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: [], enableMcp: false, cwdMode: "auto" }); }
+    if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
     else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -176,7 +176,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
-      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools,
+      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
@@ -222,11 +222,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     const selectedRowId = allModels.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId;
     if (effort !== "deep" && selectedRowId && next.length && !next.includes(selectedRowId)) { setModel(""); setModelCredentialId(""); }
   };
-  const branchOpts: Option[] = [
-    { value: "auto", label: "Create branch when changes exist" },
-    { value: "always", label: "Always create a branch" },
-    { value: "none", label: "Work in place" },
-  ];
   const pickModel = (v: string) => { setModel(v); setModelCredentialId(credModels.data?.find(o => o.modelId === v)?.credentialId ?? ""); };
 
   // The Tools allow-list (cfg.tools) is a CLAUDE-ONLY capability filter — empty = the harness default (all tools),
@@ -380,7 +375,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                     })}
                   </div>
                 </RowPop>
-                <Combo label="Branch" value={cfg.branchMode} options={branchOpts} onChange={v => setC({ branchMode: v })} />
+                <SToggleRow label="Publish branch" on={cfg.pushBranch} onToggle={() => setC({ pushBranch: !cfg.pushBranch })} />
                 <Combo label="Working dir" value={cfg.cwdMode} options={[{ value: "auto", label: "Auto" }, { value: "workspace", label: "Workspace root" }, { value: "primary", label: "Primary repo" }]} onChange={v => setC({ cwdMode: v })} />
                 <SToggleRow label="Force MCP fabric" on={cfg.enableMcp} onToggle={() => setC({ enableMcp: !cfg.enableMcp })} />
               </>}
