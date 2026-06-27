@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PackArtifactSummary, PackSummary } from "@/api/packs";
 
-import { countLabel, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 
 const pack = (over: Partial<PackSummary>): PackSummary => ({
   id: "p1", kind: "Github", name: "agents", url: null, reference: null,
@@ -41,6 +41,27 @@ describe("splitArtifacts", () => {
 
   it("handles an empty pack", () => {
     expect(splitArtifacts([])).toEqual({ agents: [], skills: [] });
+  });
+});
+
+describe("resolveSelectedPackId", () => {
+  const packs = [pack({ id: "a" }), pack({ id: "b" }), pack({ id: "c" })];
+
+  it("keeps an explicit pick that still exists", () => {
+    expect(resolveSelectedPackId("b", packs)).toBe("b");
+  });
+
+  it("defaults to the first pack when nothing is picked", () => {
+    expect(resolveSelectedPackId(null, packs)).toBe("a");
+  });
+
+  it("falls back to the first pack when the pick no longer exists", () => {
+    expect(resolveSelectedPackId("gone", packs)).toBe("a");
+  });
+
+  it("returns null when there are no packs", () => {
+    expect(resolveSelectedPackId("a", [])).toBeNull();
+    expect(resolveSelectedPackId(null, [])).toBeNull();
   });
 });
 

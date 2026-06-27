@@ -2,27 +2,26 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PackArtifactSummary, PackSummary } from "@/api/packs";
-import { ApiError } from "@/api/request";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { usePack, usePacks } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
-import { countLabel, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 
 /**
  * Library / store — the team's imported packs as source categories. The left rail lists each pack (a github /
  * git-url library) with its freshness + artifact counts; selecting one shows its agents + skills in the detail
- * pane. This is the only surface where skills are visible, and the home of the per-pack Sync action (re-pull a
- * pack to refresh its artifacts). "Import" opens the import-from-URL modal — the same path that creates packs.
+ * pane. This is the only surface where skills are visible. "Import" opens the import-from-URL modal — the same
+ * path that creates packs.
  */
 export function LibraryPage() {
   const packs = usePacks();
   const rows = packs.data ?? [];
 
-  // Derived selection (no effect): an explicit pick wins, else the first pack. Avoids the setState-in-effect
-  // that the agent editor's load had to be refactored away from.
+  // Derived selection (no effect): an explicit pick wins while it still exists, else the first pack — see
+  // resolveSelectedPackId. Avoids the setState-in-effect the agent editor's load had to be refactored away from.
   const [picked, setPicked] = useState<string | null>(null);
-  const selectedId = picked ?? rows[0]?.id ?? null;
+  const selectedId = resolveSelectedPackId(picked, rows);
 
   const [importing, setImporting] = useState(false);
 
@@ -52,7 +51,7 @@ export function LibraryPage() {
           <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>
         )}
 
-        {packs.error instanceof ApiError && (
+        {packs.error && (
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
             <div className="cn-banner-h">Couldn't load the library</div>
             <div className="cn-banner-p">{packs.error.message}</div>
@@ -62,7 +61,7 @@ export function LibraryPage() {
         {!packs.isLoading && !packs.error && rows.length === 0 && (
           <div className="ct-empty">
             <div className="ct-empty-h">No packs imported yet</div>
-            <div className="ct-empty-p">Import a pack from a GitHub or git URL — its <strong>agents</strong> and <strong>skills</strong> become a source category here you can browse and re-sync.</div>
+            <div className="ct-empty-p">Import a pack from a GitHub or git URL — its <strong>agents</strong> and <strong>skills</strong> become a source category here you can browse.</div>
             <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>
               <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import a pack</button>
             </div>
@@ -118,7 +117,7 @@ function PackDetailPane({ packId }: { packId: string }) {
 
   if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
 
-  if (detail.error instanceof ApiError) {
+  if (detail.error) {
     return (
       <div className="lib-detail">
         <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
@@ -156,9 +155,10 @@ function PackDetailPane({ packId }: { packId: string }) {
   );
 }
 
-/** The pack's freshness chips — git ref, short commit, and when it was last synced. Hidden for local packs. */
+/** The pack's freshness chips — git ref, short commit, and when it was last synced. Hidden for local packs and for a pack with no freshness yet (a fresh import before its first sync completes). */
 function Freshness({ pack }: { pack: PackSummary }) {
-  if (pack.kind === "Custom") return null;
+  const hasFreshness = pack.reference || pack.lastSyncedSha || pack.lastSyncedDate;
+  if (pack.kind === "Custom" || !hasFreshness) return null;
 
   return (
     <div className="lib-fresh">

@@ -22,6 +22,18 @@ export function splitArtifacts(artifacts: PackArtifactSummary[]): { agents: Pack
   };
 }
 
+/**
+ * Resolve which pack the detail pane shows: an explicit pick wins, but only while it still exists in the
+ * current list; otherwise fall back to the first pack. This reconciles a stale pick (the picked pack was
+ * removed/renamed server-side, so a later refetch dropped it) instead of leaving the rail with no active row
+ * and the detail stranded on a 404 — and it stays a pure function so it needs no setState-in-effect.
+ */
+export function resolveSelectedPackId(picked: string | null, packs: PackSummary[]): string | null {
+  if (picked && packs.some((p) => p.id === picked)) return picked;
+
+  return packs[0]?.id ?? null;
+}
+
 /** Short source label for a pack header — `owner/repo` for github/git URLs, else the pack name. */
 export function sourceLabel(pack: PackSummary): string {
   if (!pack.url) return pack.name;
