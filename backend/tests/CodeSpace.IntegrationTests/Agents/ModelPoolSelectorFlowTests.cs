@@ -319,6 +319,80 @@ public class ModelPoolSelectorFlowTests
         (await ResolvePinnedBrainRowIdAsync(teamId, row)).ShouldBeNull("an empty eligible-provider set yields no brain");
     }
 
+    // ─── Availability soft-filter (anti-strand): the unpinned auto pick prefers reachable rows, never strands, pins ignore it ───
+
+    [Fact]
+    public async Task An_unpinned_pick_prefers_an_available_row_over_an_unavailable_one()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "aaa-model", available: false);   // sorts FIRST by id, but unreachable
+        await AddModelReturningIdAsync(cred, "zzz-model", available: true);
+
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("zzz-model", "the auto pick prefers a reachable model over an unavailable one, despite the id order");
+    }
+
+    [Fact]
+    public async Task An_unpinned_pick_falls_back_to_the_full_pool_when_every_candidate_is_unavailable()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "aaa-model", available: false);
+        await AddModelReturningIdAsync(cred, "zzz-model", available: false);
+
+        // Anti-strand: all-unavailable ⇒ keep the full pool + pick by the normal order — a maybe-dead model beats no model (a NoModelStop).
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("aaa-model", "when every candidate is unavailable the pick falls back to the full pool, never returns null");
+    }
+
+    [Fact]
+    public async Task A_pin_resolves_even_when_its_last_probe_failed()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "pinned-model", available: false);
+
+        // The availability soft-filter is skipped on the pin path — explicit operator intent wins (the probe may be a transient blip).
+        (await SelectAsync(teamId, "Anthropic", pinned: "pinned-model"))!.ModelId.ShouldBe("pinned-model", "an explicit pin resolves even when its last probe marked it unavailable");
+    }
+
+    [Fact]
+    public async Task The_brain_auto_pick_prefers_a_reachable_eligible_row()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "aaa-brain", available: false);   // sorts first, but unreachable
+        var liveRow = await AddModelReturningIdAsync(cred, "zzz-brain", available: true);
+
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(liveRow, "the brain auto-pick prefers a reachable eligible row over an unavailable one");
+    }
+
+    [Fact]
+    public async Task The_brain_anti_strand_fallback_never_widens_past_eligibility()
+    {
+        var teamId = await SeedTeamAsync();
+        var anthropic = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var eligibleRow = await AddModelReturningIdAsync(anthropic, "zzz-eligible", available: false);   // eligible (structured) but unreachable
+        var ollama = await SeedCredentialAsync(teamId, "Ollama", key: "sk-o");
+        await AddModelReturningIdAsync(ollama, "aaa-ineligible", available: true);   // reachable but NOT structured-eligible
+
+        // The only eligible row is unavailable ⇒ the anti-strand fallback keeps it, but MUST NOT widen to the available
+        // Ollama row (which has no structured client — the decider would NoBrainModelStop on it AFTER launch).
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(eligibleRow, "the anti-strand fallback stays within the eligible set — never bakes a provider-ineligible brain");
+    }
+
+    [Fact]
+    public async Task Never_probed_rows_are_preferred_so_an_unprobed_pool_is_byte_identical()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelReturningIdAsync(cred, "claude-opus-4-8");      // available = null (never probed)
+        await AddModelReturningIdAsync(cred, "claude-sonnet-4-6");
+
+        // Null availability counts as preferred (Available != false) → no filtering → identical to before the column existed.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8", "never-probed rows are preferred — the alphabetical order is unchanged from before the availability column");
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldNotBeNull("an unprobed pool still yields a brain");
+    }
+
     [Fact]
     public async Task An_unpinned_pick_prefers_the_higher_capability_tier_over_model_id_order()
     {
@@ -408,12 +482,12 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().ResolvePinnedBrainRowIdAsync(teamId, rowId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true)
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true, bool? available = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier, Available = available });
         await db.SaveChangesAsync();
         return id;
     }

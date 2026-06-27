@@ -58,10 +58,22 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // PURPOSE: it is locale-INDEPENDENT, so the pick is identical in CI and locally (the prior DB-collation tie-break
         // could differ across environments — see LlmCompleteUsageFlowTests). Advisory ordering only — never a filter.
         var candidates = await query
-            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.Available, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var row = candidates
+        // Availability soft-filter (anti-strand) — ONLY on the UNPINNED auto path (a pin honours explicit intent verbatim,
+        // even if the last probe failed). Prefer reachable rows; `Available != false` keeps NULL/never-probed rows
+        // PREFERRED, so an un-probed pool is byte-identical to before this column existed. Fall back to the full set when
+        // EVERY candidate is known-unavailable — a maybe-dead model beats no model (a NoModelStop). #762 is the tier axis.
+        var pool = candidates;
+
+        if (pin == null)
+        {
+            var reachable = candidates.Where(c => c.Available != false).ToList();
+            if (reachable.Count > 0) pool = reachable;
+        }
+
+        var row = pool
             .OrderByDescending(m => m.IsDefault)
             .ThenByDescending(m => (int)(m.CapabilityTier ?? ModelCapabilityTier.Unknown))
             .ThenBy(m => m.ModelId, StringComparer.Ordinal)
@@ -148,16 +160,24 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .Select(m => new { m.Id, m.ModelId, m.IsDefault, m.CapabilityTier, Provider = m.Credential.Provider })
+            .Select(m => new { m.Id, m.ModelId, m.IsDefault, m.CapabilityTier, m.Available, Provider = m.Credential.Provider })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // The highest-precedence STRUCTURED-eligible row — the operator's default (IsDefault, #746) first, then the cached
-        // capability TIER (frontier > strong > basic > unknown — "auto = the strongest available brain"), then model id /
-        // row id — so a starred brain wins, else the strongest, else alphabetical (a non-eligible row is excluded). A
-        // replay re-derives the SAME brain (a stable total order over a frozen pool snapshot). Ordered IN-MEMORY because
-        // capability_tier is stored as TEXT (a DB ORDER BY would sort it alphabetically, not by rank).
-        return rows
-            .Where(r => eligible.Contains(r.Provider.ToLower()))
+        // Eligible (structured-capable) providers FIRST — the fail-closed floor; THEN an availability soft-filter over
+        // ONLY that eligible subset. The anti-strand fallback (all-unavailable ⇒ keep the full eligible set) must never
+        // widen PAST eligibility, else it could bake a provider-ineligible brain the decider can't run (a post-launch
+        // NoModelStop). `Available != false` keeps NULL/never-probed rows preferred (byte-identical when un-probed).
+        var eligibleRows = rows.Where(r => eligible.Contains(r.Provider.ToLower())).ToList();
+
+        var reachable = eligibleRows.Where(r => r.Available != false).ToList();
+
+        var pool = reachable.Count > 0 ? reachable : eligibleRows;
+
+        // The highest-precedence row — the operator's default (IsDefault, #746) first, then the cached capability TIER
+        // (frontier > strong > basic > unknown — "auto = the strongest available brain"), then model id / row id — so a
+        // starred brain wins, else the strongest, else alphabetical. A replay re-derives the SAME brain (a stable total
+        // order over a frozen pool snapshot). Ordered IN-MEMORY because capability_tier is stored as TEXT.
+        return pool
             .OrderByDescending(r => r.IsDefault)
             .ThenByDescending(r => (int)(r.CapabilityTier ?? ModelCapabilityTier.Unknown))
             .ThenBy(r => r.ModelId, StringComparer.Ordinal)
