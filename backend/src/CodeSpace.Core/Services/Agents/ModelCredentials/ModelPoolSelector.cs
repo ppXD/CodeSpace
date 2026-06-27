@@ -58,7 +58,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // PURPOSE: it is locale-INDEPENDENT, so the pick is identical in CI and locally (the prior DB-collation tie-break
         // could differ across environments — see LlmCompleteUsageFlowTests). Advisory ordering only — never a filter.
         var candidates = await query
-            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.Available, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Available, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // Availability soft-filter (anti-strand) — ONLY on the UNPINNED auto path (a pin honours explicit intent verbatim,
@@ -73,9 +73,11 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             if (reachable.Count > 0) pool = reachable;
         }
 
+        // Rank by the EFFECTIVE tier = objectively-probed (opaque-id probe) ?? brain-inferred ?? Unknown, so a probed
+        // Strong lifts a capable opaque model above an un-probed Unknown without erasing the brain verdict.
         var row = pool
             .OrderByDescending(m => m.IsDefault)
-            .ThenByDescending(m => (int)(m.CapabilityTier ?? ModelCapabilityTier.Unknown))
+            .ThenByDescending(m => (int)EffectiveTier(m.ProbedCapabilityTier, m.CapabilityTier))
             .ThenBy(m => m.ModelId, StringComparer.Ordinal)
             .ThenBy(m => m.Id)
             .FirstOrDefault();
@@ -138,13 +140,15 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // the operator default orders the PICK (SelectAsync / SelectBrainRowIdAsync), not this displayed menu, and
         // tier-aware ORDERING of this catalog is a later slice; this slice only surfaces the tier as a render hint.
         var rows = await query
-            .Select(m => new { m.ModelId, m.Credential.Provider, m.CapabilityTier })
+            .Select(m => new { m.ModelId, m.Credential.Provider, m.CapabilityTier, m.ProbedCapabilityTier })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
+        // Surface the EFFECTIVE tier = objectively-probed ?? brain-inferred ?? Unknown, so the catalog shows a capable
+        // opaque model's probed Strong rather than the brain's Unknown.
         return rows
             .GroupBy(r => new { r.ModelId, r.Provider })
-            .Select(g => new PoolModelInfo(g.Key.ModelId, g.Key.Provider, g.Max(r => r.CapabilityTier ?? ModelCapabilityTier.Unknown)))
+            .Select(g => new PoolModelInfo(g.Key.ModelId, g.Key.Provider, g.Max(r => EffectiveTier(r.ProbedCapabilityTier, r.CapabilityTier))))
             .OrderBy(p => p.ModelId, StringComparer.Ordinal).ThenBy(p => p.Provider, StringComparer.Ordinal)
             .ToList();
     }
@@ -160,7 +164,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .Select(m => new { m.Id, m.ModelId, m.IsDefault, m.CapabilityTier, m.Available, Provider = m.Credential.Provider })
+            .Select(m => new { m.Id, m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Available, Provider = m.Credential.Provider })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // Eligible (structured-capable) providers FIRST — the fail-closed floor; THEN an availability soft-filter over
@@ -173,13 +177,13 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         var pool = reachable.Count > 0 ? reachable : eligibleRows;
 
-        // The highest-precedence row — the operator's default (IsDefault, #746) first, then the cached capability TIER
-        // (frontier > strong > basic > unknown — "auto = the strongest available brain"), then model id / row id — so a
-        // starred brain wins, else the strongest, else alphabetical. A replay re-derives the SAME brain (a stable total
-        // order over a frozen pool snapshot). Ordered IN-MEMORY because capability_tier is stored as TEXT.
+        // The highest-precedence row — the operator's default (IsDefault, #746) first, then the EFFECTIVE capability tier
+        // (probed ?? brain ?? Unknown — frontier > strong > basic > unknown, "auto = the strongest available brain"), then
+        // model id / row id — so a starred brain wins, else the strongest, else alphabetical. A replay re-derives the SAME
+        // brain (a stable total order over a frozen pool snapshot). Ordered IN-MEMORY because the tier is stored as TEXT.
         return pool
             .OrderByDescending(r => r.IsDefault)
-            .ThenByDescending(r => (int)(r.CapabilityTier ?? ModelCapabilityTier.Unknown))
+            .ThenByDescending(r => (int)EffectiveTier(r.ProbedCapabilityTier, r.CapabilityTier))
             .ThenBy(r => r.ModelId, StringComparer.Ordinal)
             .ThenBy(r => r.Id)
             .Select(r => (Guid?)r.Id)
@@ -218,4 +222,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     };
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>The EFFECTIVE capability tier used for ordering: the objectively-PROBED tier (the opaque-id probe) wins, else the brain-inferred tier, else Unknown (un-probed / un-tiered). So a probed Strong outranks a brain Unknown without erasing the brain verdict, and an un-probed pool orders identically to before this column.</summary>
+    private static ModelCapabilityTier EffectiveTier(ModelCapabilityTier? probed, ModelCapabilityTier? brain) => probed ?? brain ?? ModelCapabilityTier.Unknown;
 }

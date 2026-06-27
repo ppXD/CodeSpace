@@ -22,6 +22,9 @@ public class ModelCredentialModelConfiguration : IEntityTypeConfiguration<ModelC
         // The cached capability tier is likewise stored as its string name (null = not yet tiered).
         builder.Property(m => m.CapabilityTier).HasConversion<string>();
 
+        // The objectively-probed tier for an opaque id (a SEPARATE column from the brain verdict above).
+        builder.Property(m => m.ProbedCapabilityTier).HasConversion<string>();
+
         builder.HasOne(m => m.Credential)
             .WithMany(c => c.Models)
             .HasForeignKey(m => m.ModelCredentialId)

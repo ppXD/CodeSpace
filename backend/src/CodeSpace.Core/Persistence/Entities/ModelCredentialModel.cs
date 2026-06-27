@@ -47,5 +47,11 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>When <see cref="Available"/> was last probed — the staleness gate (a 30-minute re-probe window; availability is volatile, so unlike <see cref="LastTieredAt"/> it RE-evaluates). Null = never probed.</summary>
     public DateTimeOffset? LastPingedAt { get; set; }
 
+    /// <summary>Cached, advisory capability tier OBJECTIVELY probed for an OPAQUE id (<see cref="CapabilityTier"/> == <see cref="ModelCapabilityTier.Unknown"/>): the model DEMONSTRATES capability on a fixed in-code micro-battery, graded in code (never self-rated). Kept SEPARATE from <see cref="CapabilityTier"/> so the brain-vs-probe provenance stays legible. Caps at <see cref="ModelCapabilityTier.Strong"/> (never Frontier — a small battery can't separate the two) and only ever UPGRADES (monotonic). The auto pick reads the EFFECTIVE tier = this ?? <see cref="CapabilityTier"/>, so a probed Strong lifts a capable opaque model off last place. Null = not probed.</summary>
+    public ModelCapabilityTier? ProbedCapabilityTier { get; set; }
+
+    /// <summary>When <see cref="ProbedCapabilityTier"/> was last probed — the staleness gate (a days-long re-probe window; an opaque alias's backing model rarely changes). Null = never probed.</summary>
+    public DateTimeOffset? LastProbedCapabilityAt { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }
