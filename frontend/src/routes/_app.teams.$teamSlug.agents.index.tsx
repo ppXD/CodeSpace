@@ -5,6 +5,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentBoundSkill } from "@/api/agents";
 import { ApiError } from "@/api/request";
 import { AgentEditorModal } from "@/components/agents/AgentEditor";
+import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
 import { useAgentDefinitions } from "@/hooks/use-agents";
@@ -30,6 +31,7 @@ function AgentsListPage() {
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState<OriginFilter>("all");
   const [editor, setEditor] = useState<EditorState>(null);
+  const [importing, setImporting] = useState(false);
 
   const openNew = () => setEditor({ mode: "create" });
   const openAgent = (id: string) => setEditor({ mode: "edit", id });
@@ -49,6 +51,7 @@ function AgentsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Agents</h1>
           <div className="ct-actions">
+            <button type="button" className="btn" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
             <button type="button" className="btn btn-primary" onClick={openNew}><Ic.Plus size={14} /> New agent</button>
           </div>
         </div>
@@ -81,7 +84,10 @@ function AgentsListPage() {
           <div className="ct-empty">
             <div className="ct-empty-h">No agents yet</div>
             <div className="ct-empty-p">Reusable personas — a system prompt, model, skills, and tools you can <strong>@-mention</strong> from a workflow — will appear here.</div>
-            <button type="button" className="btn btn-primary" style={{ marginTop: 14 }} onClick={openNew}><Ic.Plus size={14} /> New agent</button>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 14 }}>
+              <button type="button" className="btn" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import a pack</button>
+              <button type="button" className="btn btn-primary" onClick={openNew}><Ic.Plus size={14} /> New agent</button>
+            </div>
           </div>
         )}
 
@@ -165,6 +171,8 @@ function AgentsListPage() {
           onClose={() => setEditor(null)}
         />
       )}
+
+      {importing && <ImportPackModal onClose={() => setImporting(false)} />}
     </section>
   );
 }
