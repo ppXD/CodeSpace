@@ -61,7 +61,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses (and the optional live duration/tool-count extras) → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim). The compact (model/tokens) folds from the ledger; <paramref name="extrasByAgent"/> carries the figures that don't (duration, tool count) — omitted leaves those ref fields null.</summary>
     public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunExtras>? extrasByAgent = null)
     {
-        var rollup = new AgentRollup(agentStatusById, AgentResultsById(decisions), extrasByAgent ?? EmptyExtras);
+        var rollup = new AgentRollup(agentStatusById, AgentResultsById(decisions), extrasByAgent ?? EmptyExtras, AllocationMap(decisions));
 
         var phases = decisions.Select(d => ToPhase(d, rollup)).ToList();
 
@@ -143,6 +143,44 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         return map;
     }
 
+    /// <summary>
+    /// The per-agent ALLOCATION the model authored: <c>agentRunId → (role, subtask title)</c>. Joins the latest plan's
+    /// subtasks (<c>subtaskId → title</c>) and the spawn's per-agent dispatch roles (<c>subtaskId → role</c>) onto each
+    /// staged agent through the SAME <c>subtaskIds[i] ↔ agentRunIds[i]</c> staging order as <see cref="SubtaskAgentMap"/>
+    /// — so a spawn fans the title+role onto exactly the agent that ran it. A retry re-runs ONE subtask as a fresh agent
+    /// (carrying the subtask title; no per-agent role on a retry). Pure + best-effort — a homogeneous spawn (no
+    /// <c>agents[]</c>) or a flat plan simply yields null role/title, byte-identical to before.
+    /// </summary>
+    private static IReadOnlyDictionary<Guid, AgentAllocation> AllocationMap(IReadOnlyList<SupervisorDecisionRecord> decisions)
+    {
+        var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+        var titleBySubtask = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson)
+            .GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.Last().Title);
+
+        var map = new Dictionary<Guid, AgentAllocation>();
+
+        foreach (var d in decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry).OrderBy(d => d.Sequence))
+        {
+            var agentIds = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson);
+
+            if (d.DecisionKind == SupervisorDecisionKinds.Spawn)
+            {
+                var subtaskIds = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
+                var rolesBySubtask = SupervisorOutcome.ReadSpawnAgentRoles(d.PayloadJson);
+
+                for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
+                    map[agentIds[i]] = new AgentAllocation(rolesBySubtask.GetValueOrDefault(subtaskIds[i]), titleBySubtask.GetValueOrDefault(subtaskIds[i]));
+            }
+            else if (SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } retried && agentIds.Count > 0)
+                map[agentIds[0]] = new AgentAllocation(Role: null, SubtaskTitle: titleBySubtask.GetValueOrDefault(retried));
+        }
+
+        return map;
+    }
+
+    /// <summary>One agent's model-authored allocation — its semantic role + the planned subtask title it was assigned. Either may be null.</summary>
+    private sealed record AgentAllocation(string? Role, string? SubtaskTitle);
+
     /// <summary>A phase's status folds from its agents: none → Pending; any failed/cancelled/timed-out → Failed; all succeeded → Succeeded; else still Active.</summary>
     private static PhaseStatus PhaseStatusFromAgents(IReadOnlyList<PhaseAgentRef> agents)
     {
@@ -209,12 +247,14 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         private readonly IReadOnlyDictionary<Guid, AgentRunStatus> _status;
         private readonly IReadOnlyDictionary<Guid, SupervisorAgentResult> _compact;
         private readonly IReadOnlyDictionary<Guid, AgentRunExtras> _extras;
+        private readonly IReadOnlyDictionary<Guid, AgentAllocation> _allocation;
 
-        public AgentRollup(IReadOnlyDictionary<Guid, AgentRunStatus> status, IReadOnlyDictionary<Guid, SupervisorAgentResult> compact, IReadOnlyDictionary<Guid, AgentRunExtras> extras)
+        public AgentRollup(IReadOnlyDictionary<Guid, AgentRunStatus> status, IReadOnlyDictionary<Guid, SupervisorAgentResult> compact, IReadOnlyDictionary<Guid, AgentRunExtras> extras, IReadOnlyDictionary<Guid, AgentAllocation> allocation)
         {
             _status = status;
             _compact = compact;
             _extras = extras;
+            _allocation = allocation;
         }
 
         /// <summary>True when the real agent row was found (status resolved) — the gate for emitting a ref.</summary>
@@ -225,12 +265,15 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         {
             var compact = _compact.GetValueOrDefault(id);
             var extras = _extras.GetValueOrDefault(id);
+            var allocation = _allocation.GetValueOrDefault(id);
             var model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model;
 
             return new PhaseAgentRef
             {
                 AgentRunId = id,
                 Status = _status[id].ToString(),
+                Role = allocation?.Role,
+                AssignedSubtask = allocation?.SubtaskTitle,
                 Model = model,
                 InputTokens = compact?.InputTokens,
                 OutputTokens = compact?.OutputTokens,

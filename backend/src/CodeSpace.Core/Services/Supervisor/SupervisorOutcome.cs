@@ -749,6 +749,40 @@ public static class SupervisorOutcome
         }
     }
 
+    /// <summary>Read the model-authored per-agent ROLE off a <c>spawn</c> decision's PAYLOAD <c>agents[]</c> (the <see cref="SupervisorAgentDispatch"/> specs) → <c>subtaskId → role</c>, only the entries that named a role; empty when absent/malformed (a homogeneous spawn omits <c>agents[]</c>). A NARROW projection — reads only the role leaf, never the repo/harness/autonomy fields (so the raw-JsonElement <c>targetRepos</c> never has to deserialize on this read path). Pure + best-effort, mirroring <see cref="ReadSpawnSubtaskIds"/>.</summary>
+    public static IReadOnlyDictionary<string, string> ReadSpawnAgentRoles(string? spawnPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(spawnPayloadJson)) return EmptyRoles;
+
+        try
+        {
+            var root = JsonDocument.Parse(spawnPayloadJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("agents", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return EmptyRoles;
+
+            var map = new Dictionary<string, string>();
+
+            foreach (var e in arr.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                if (!e.TryGetProperty("subtaskId", out var sid) || sid.ValueKind != JsonValueKind.String) continue;
+                if (!e.TryGetProperty("role", out var role) || role.ValueKind != JsonValueKind.String) continue;
+
+                var roleStr = role.GetString();
+                if (!string.IsNullOrWhiteSpace(roleStr)) map[sid.GetString()!] = roleStr!;
+            }
+
+            return map;
+        }
+        catch (JsonException)
+        {
+            return EmptyRoles;
+        }
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> EmptyRoles = new Dictionary<string, string>();
+
     /// <summary>Read the single plan-local subtask id off a <c>retry</c> decision's PAYLOAD — null when absent/malformed. A retry re-runs ONE subtask as a fresh agent, so the phase projection (C2) remaps that subtask to the retry's fresh agent (latest attempt wins) rather than the original failed one.</summary>
     public static string? ReadRetrySubtaskId(string? retryPayloadJson)
     {

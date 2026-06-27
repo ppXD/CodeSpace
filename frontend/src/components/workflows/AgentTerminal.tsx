@@ -65,6 +65,15 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         {onClose && <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>}
       </div>
 
+      {/* The model's allocation for this agent — its authored role + the subtask it was assigned. Absent for a
+          homogeneous spawn / non-supervisor agent (both fields null). */}
+      {(agent.role || agent.assignedSubtask) && (
+        <div className="agent-terminal-alloc">
+          {agent.role && <span className="agent-terminal-role">{agent.role}</span>}
+          {agent.assignedSubtask && <span className="agent-terminal-subtask">{agent.assignedSubtask}</span>}
+        </div>
+      )}
+
       {identity.length > 0 && (
         <div className="agent-terminal-meta">
           {identity.map((part, i) => <span key={i}>{part}</span>)}

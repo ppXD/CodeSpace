@@ -59,6 +59,14 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
         <span className="agent-tile-name" title={name}>{name}</span>
         <span className="agent-tile-flag" aria-hidden="true">{stateFlag(state)}</span>
       </div>
+      {/* The model's allocation for this agent — its authored ROLE + the subtask it was assigned — so a fan-out reads
+          as a division of labour, not anonymous clones. Both optional; the row is absent for a homogeneous spawn. */}
+      {(agent.role || agent.assignedSubtask) && (
+        <div className="agent-tile-alloc">
+          {agent.role && <span className="agent-tile-role">{agent.role}</span>}
+          {agent.assignedSubtask && <span className="agent-tile-subtask" title={agent.assignedSubtask}>{agent.assignedSubtask}</span>}
+        </div>
+      )}
       <div className="agent-tile-body">{bodyLines(state, latest, summary, failReason)}</div>
       {rerun && <div className="agent-tile-rerun" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} role="presentation">{rerun}</div>}
     </div>

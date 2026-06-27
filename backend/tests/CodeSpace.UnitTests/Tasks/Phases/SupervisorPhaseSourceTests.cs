@@ -148,6 +148,52 @@ public class SupervisorPhaseSourceTests
     }
 
     [Fact]
+    public void A_spawn_with_per_agent_roles_carries_each_agents_role_and_assigned_subtask_title()
+    {
+        var agentA = Guid.NewGuid();
+        var agentB = Guid.NewGuid();
+
+        // The plan PAYLOAD carries the subtask decomposition (id + title); the spawn PAYLOAD carries the fan-out order
+        // (subtaskIds) + the model-authored per-agent dispatch roles (agents[]). The join is positional: subtaskIds[i] ↔
+        // agentRunIds[i], so each agent gets its own subtask title + role.
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded,
+            payloadJson: """{"subtasks":[{"id":"sa","title":"Trace DI registration","instruction":"..."},{"id":"sb","title":"Analyze template store","instruction":"..."}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":2,"agentRunIds":["{{agentA}}","{{agentB}}"]}""",
+            payloadJson: """{"subtaskIds":["sa","sb"],"agents":[{"subtaskId":"sa","role":"Tracer"},{"subtaskId":"sb","role":"Analyst"}]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Running, [agentB] = AgentRunStatus.Running };
+
+        var spawnPhase = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn }, statuses).Single(p => p.Kind == SupervisorDecisionKinds.Spawn);
+
+        var a = spawnPhase.Agents.Single(x => x.AgentRunId == agentA);
+        a.Role.ShouldBe("Tracer");
+        a.AssignedSubtask.ShouldBe("Trace DI registration");
+
+        var b = spawnPhase.Agents.Single(x => x.AgentRunId == agentB);
+        b.Role.ShouldBe("Analyst");
+        b.AssignedSubtask.ShouldBe("Analyze template store");
+    }
+
+    [Fact]
+    public void A_homogeneous_spawn_without_an_agents_array_leaves_role_null_but_still_maps_the_subtask_title()
+    {
+        var agentA = Guid.NewGuid();
+
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded,
+            payloadJson: """{"subtasks":[{"id":"sa","title":"Do the thing","instruction":"..."}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{agentA}}"]}""", payloadJson: """{"subtaskIds":["sa"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Running };
+
+        var a = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn }, statuses).Single(p => p.Kind == SupervisorDecisionKinds.Spawn).Agents.ShouldHaveSingleItem();
+
+        a.Role.ShouldBeNull("a homogeneous spawn omits agents[] → no per-agent role");
+        a.AssignedSubtask.ShouldBe("Do the thing", "the subtask title still joins from the plan's decomposition");
+    }
+
+    [Fact]
     public void A_phase_status_folds_to_failed_when_one_of_its_agents_failed()
     {
         var agentA = Guid.NewGuid();
