@@ -1,4 +1,5 @@
 using Autofac;
+using Microsoft.EntityFrameworkCore;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
@@ -34,7 +35,7 @@ public class TeamRunsIndexFlowTests
     public TeamRunsIndexFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Lists_teams_top_level_runs_newest_first_keeping_forks_dropping_children()
+    public async Task Lists_teams_top_level_runs_newest_first_collapsing_forks_dropping_children()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var (teamB, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -43,8 +44,9 @@ public class TeamRunsIndexFlowTests
         // Task / snapshot runs (null WorkflowId) — the index must include them, and they avoid the request's
         // workflow_id FK. The query has no WorkflowId predicate, so this also covers the authored-run path.
         var older = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null);
-        // A replay fork: it carries a ParentRunId (lineage to `older`) but is a top-level run the user launched — kept.
-        var fork = await InsertRunAsync(teamA, parentRunId: older, createdDate: t.AddMinutes(-5), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        // A replay fork of `older` (production sets RootRunId = older): a top-level run the user launched — INCLUDED, but
+        // it COLLAPSES with `older` into one lineage, so only its latest attempt (the fork) shows, not both rows.
+        var fork = await InsertRunAsync(teamA, parentRunId: older, rootRunId: older, createdDate: t.AddMinutes(-5), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
         var newer = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
         // A sub-workflow child: runs inside its parent's Run Room — excluded.
         await InsertRunAsync(teamA, parentRunId: older, createdDate: t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.ChildWorkflow);
@@ -52,8 +54,120 @@ public class TeamRunsIndexFlowTests
 
         var result = await ListAsync(teamA, 50);
 
-        result.Select(r => r.Id).ShouldBe(new[] { newer, fork, older });   // newest-first; child + other-team filtered out, fork kept
-        result[0].WorkflowId.ShouldBeNull();                                // a task run (null WorkflowId) is in the index
+        result.Select(r => r.Id).ShouldBe(new[] { newer, fork });   // newest-first; `older` collapsed into the fork, child + other-team filtered out
+        result.Single(r => r.Id == fork).AttemptCount.ShouldBe(2, "the fork's lineage is {older, fork}");
+        result.Single(r => r.Id == newer).AttemptCount.ShouldBe(1, "a never-rerun run is its own lineage of one");
+        result[0].WorkflowId.ShouldBeNull();                        // a task run (null WorkflowId) is in the index
+    }
+
+    [Fact]
+    public async Task The_0082_backfill_walks_a_pre_migration_fork_chain_up_to_its_root()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // Pre-migration rows: forks carry parent_run_id but root_run_id is NULL (the column didn't exist yet). The
+        // backfill must walk parent_run_id up to the root for every fork, skip the original + a standalone (they ARE
+        // roots), and skip a sub-workflow child (parent_run_id set, but excluded from the index and never a rerun).
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null);
+        var r1 = await InsertRunAsync(teamA, parentRunId: original, createdDate: t.AddMinutes(-8), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        var r2 = await InsertRunAsync(teamA, parentRunId: r1, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        var standalone = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
+        var child = await InsertRunAsync(teamA, parentRunId: original, createdDate: t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.ChildWorkflow);
+
+        // Re-run the backfill exactly as migration 0082 ships it (mirror of 0082_workflow_run_root_lineage.sql; that
+        // file is immutable once journaled). Idempotent: rows already carrying a root are left untouched (... IS NULL).
+        await RunBackfillAsync();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var roots = await db.WorkflowRun.AsNoTracking().Where(r => r.TeamId == teamA).ToDictionaryAsync(r => r.Id, r => r.RootRunId);
+
+        roots[r1].ShouldBe(original, "a one-hop fork's root is the original");
+        roots[r2].ShouldBe(original, "a two-hop fork (rerun of a rerun) walks all the way up to the same root");
+        roots[original].ShouldBeNull("the original IS the root — left NULL (its own id is the group key)");
+        roots[standalone].ShouldBeNull("a never-rerun run is its own root — untouched");
+        roots[child].ShouldBeNull("a sub-workflow child is skipped — it never sits in a rerun chain");
+    }
+
+    [Fact]
+    public async Task Collapses_a_rerun_chain_to_its_latest_attempt_with_the_full_attempt_count()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // A linear rerun chain original → r1 → r2: every fork inherits the SAME root (the original), so the whole chain
+        // is one lineage. The index shows ONLY r2 (the newest attempt); the standalone run is untouched.
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null, status: WorkflowRunStatus.Failure);
+        var r1 = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-8), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Failure);
+        var r2 = await InsertRunAsync(teamA, parentRunId: r1, rootRunId: original, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);
+        var standalone = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Select(r => r.Id).ShouldBe(new[] { standalone, r2 }, "the chain collapses to its latest attempt (r2); original + r1 are superseded");
+        var entry = result.Single(r => r.Id == r2);
+        entry.AttemptCount.ShouldBe(3, "the lineage spans original + r1 + r2");
+        entry.RootRunId.ShouldBe(original, "the entry's lineage key is the chain root");
+        result.Single(r => r.Id == standalone).RootRunId.ShouldBe(standalone, "a never-rerun run is its own root (RootRunId ?? Id)");
+    }
+
+    [Fact]
+    public async Task Collapses_a_branched_lineage_to_the_single_newest_attempt()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // A BRANCHED lineage — the original is rerun twice off the same point (both forks share the root). The collapse
+        // must still yield exactly ONE row (the single newest of the three), not one row per leaf.
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-10), workflowId: null);
+        var branchA = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-5), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        var branchB = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Select(r => r.Id).ShouldBe(new[] { branchB }, "a forked lineage collapses to its single newest attempt, never one row per branch");
+        result.Single().AttemptCount.ShouldBe(3, "the count is every run sharing the root, across both branches");
+    }
+
+    [Fact]
+    public async Task A_status_filter_matches_the_collapsed_representative_so_a_resolved_failure_drops_from_Failed()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // original failed, then a rerun succeeded (same lineage). The representative is the latest attempt (Success), so
+        // a Failed filter shows NOTHING (the failure was resolved) and a Success filter shows the rerun — collapse is
+        // applied over the unfiltered lineage, then the filter narrows the survivor.
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-5), workflowId: null, status: WorkflowRunStatus.Failure);
+        var rerun = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);
+
+        (await FilterAsync(teamA, new RunListFilter { Statuses = new[] { WorkflowRunStatus.Failure } }))
+            .ShouldBeEmpty("the lineage's latest attempt succeeded — the resolved failure is not in the Failed view");
+        (await FilterAsync(teamA, new RunListFilter { Statuses = new[] { WorkflowRunStatus.Success } }))
+            .Select(r => r.Id).ShouldBe(new[] { rerun }, "the representative (latest attempt) is the Success rerun");
+    }
+
+    [Fact]
+    public async Task Summary_and_offset_total_count_collapsed_lineages_consistently_with_the_list()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // A 3-attempt lineage + one standalone run = TWO logical entries. The list, the offset total, and the summary
+        // Today count must ALL see two — never the raw five rows — so the pager and the cards agree with the page.
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-9), workflowId: null);
+        var r1 = await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(-6), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        await InsertRunAsync(teamA, parentRunId: r1, rootRunId: original, createdDate: t.AddMinutes(-3), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
+
+        (await ListAsync(teamA, 50)).Count.ShouldBe(2, "the list shows one row per lineage");
+
+        var page = await OffsetPageAsync(teamA, RunListFilter.None, page: 1, pageSize: 50);
+        page.TotalCount.ShouldBe(2, "the offset total counts collapsed lineages, not raw rows — so 'page X of Y' is right");
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+        s.Today.ShouldBe(2, "the summary cards count over the same collapsed set the list pages");
     }
 
     [Fact]
@@ -629,6 +743,32 @@ public class TeamRunsIndexFlowTests
         s.Today.ShouldBe(2, "createdDate >= the day-start is inclusive; the earlier run is excluded");
     }
 
+    /// <summary>The backfill body of migration 0082, verbatim — walks each fork's parent_run_id up to the root. Mirror of an IMMUTABLE journaled migration (it can't drift), run again to exercise the recursive CTE against real chains.</summary>
+    private async Task RunBackfillAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Database.ExecuteSqlRawAsync(@"
+WITH RECURSIVE chain AS (
+    SELECT id AS run_id, parent_run_id AS ancestor
+    FROM workflow_run
+    WHERE parent_run_id IS NOT NULL AND source_type <> 'workflow.child'
+    UNION ALL
+    SELECT c.run_id, wr.parent_run_id
+    FROM chain c
+    JOIN workflow_run wr ON wr.id = c.ancestor
+    WHERE wr.parent_run_id IS NOT NULL
+)
+UPDATE workflow_run t
+SET root_run_id = roots.root
+FROM (
+    SELECT c.run_id, c.ancestor AS root
+    FROM chain c
+    WHERE NOT EXISTS (SELECT 1 FROM workflow_run p WHERE p.id = c.ancestor AND p.parent_run_id IS NOT NULL)
+) roots
+WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
+    }
+
     private async Task<RunSummary> SummaryAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart)
     {
         using var scope = _fixture.BeginScope();
@@ -673,7 +813,7 @@ public class TeamRunsIndexFlowTests
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -706,6 +846,7 @@ public class TeamRunsIndexFlowTests
             RunRequestId = requestId,
             SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
+            RootRunId = rootRunId,   // a production fork carries its lineage root; null = its own root (group key = own Id)
             Status = status,
             StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
             ScopeRepositoryIds = repositoryIds ?? [],

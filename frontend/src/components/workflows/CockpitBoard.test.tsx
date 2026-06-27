@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  return { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), ...o };
+  return { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, ...o };
 }
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
@@ -158,6 +158,20 @@ describe("CockpitBoard", () => {
     const task = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Task")!;
     expect(task.querySelector(".run-row2-type")?.getAttribute("data-type")).toBe("task");
     expect(task.querySelector(".run-row2-ver")).toBeNull();                                     // a task run has no version label
+  });
+
+  it("shows an 'N attempts' chip only on a collapsed lineage (attemptCount > 1)", () => {
+    const { container } = board({ history: hist([
+      run("rerun", "Success", { attemptCount: 3 }),   // a run + 2 reruns, collapsed to this latest attempt
+      run("once", "Success", { attemptCount: 1 }),    // a never-rerun run
+    ]) });
+
+    const rows = [...container.querySelectorAll(".run-row2")];
+    const collapsed = rows.find((r) => r.querySelector(".run-row2-id")?.textContent === "rerun")!;
+    const single = rows.find((r) => r.querySelector(".run-row2-id")?.textContent === "once")!;
+
+    expect(collapsed.querySelector(".run-row2-attempts")?.textContent).toContain("3 attempts");
+    expect(single.querySelector(".run-row2-attempts")).toBeNull();   // no chip when there's only one attempt
   });
 
   it("boxes a failed run's error on a third line, with the duration still shown", () => {

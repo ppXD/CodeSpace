@@ -196,6 +196,11 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
           <span className="run-row2-title" title={title}>{title}</span>
           <span className="run-row2-type" data-type={type.toLowerCase()}>{type}</span>
           {version && <span className="run-row2-ver">{version}</span>}
+          {run.attemptCount > 1 && (
+            <span className="run-row2-attempts" title={`${run.attemptCount} attempts — showing the latest`}>
+              <Ic.Branch size={10} aria-hidden="true" />{run.attemptCount} attempts
+            </span>
+          )}
           <span className="run-row2-gap" />
           <span className="run-row2-when">{relativeTime(when)}</span>
         </div>

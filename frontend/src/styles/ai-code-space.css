@@ -2801,6 +2801,7 @@ textarea:-webkit-autofill {
 .acs-root .run-row2-type { flex: none; font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 5px; white-space: nowrap; color: var(--ink-2); background: var(--soft); }
 .acs-root .run-row2-type[data-type="workflow"] { color: #9E4A2C; background: var(--accent-soft); }
 .acs-root .run-row2-ver { flex: none; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
+.acs-root .run-row2-attempts { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 1px 7px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .acs-root .run-row2-when { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .acs-root .run-row2-sw { flex: none; font-size: 12px; font-weight: 500; color: var(--muted); }
 .acs-root .run-row2-sw[data-tone="ok"]        { color: #1F6B3F; }

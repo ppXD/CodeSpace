@@ -141,6 +141,15 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public Guid? ParentRunId { get; set; }
 
     /// <summary>
+    /// The lineage ROOT — the original run a replay/rerun chain descends from. NULL means "I am my own
+    /// root" (a first-time run, or the original being forked from), so the group key is <c>RootRunId ?? Id</c>.
+    /// A fork inherits its parent's root (<c>parent.RootRunId ?? parent.Id</c>); the team Runs index collapses
+    /// every run sharing a root into ONE entry (its latest attempt). FK-free bare column, same stance as
+    /// <see cref="ParentRunId"/>.
+    /// </summary>
+    public Guid? RootRunId { get; set; }
+
+    /// <summary>
     /// FK-free pointer (same stance as <see cref="ParentRunId"/> — a bare lineage column, no enforced FK / nav)
     /// to the owning <c>WorkSession</c> — the long-term work-context thread this run is ONE turn of. NULL for a
     /// session-less run, which is every run until the session layer starts binding them (so the default is

@@ -27,4 +27,13 @@ public sealed record WorkflowRunSummary
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
     public required DateTimeOffset CreatedDate { get; init; }
+
+    /// <summary>
+    /// Lineage key for this entry — the <c>RootRunId ?? Id</c> the team index collapses on. A row in the index is
+    /// always the LATEST attempt of its lineage; <see cref="AttemptCount"/> counts how many runs share it.
+    /// </summary>
+    public required Guid RootRunId { get; init; }
+
+    /// <summary>How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip.</summary>
+    public required int AttemptCount { get; init; }
 }
