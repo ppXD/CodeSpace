@@ -20,6 +20,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   harness: "",
   agentDefinitionId: "",
   runnerKind: "",
+  cwdMode: "auto",
   maxParallel: "5",
   maxRounds: "6",
   maxAgents: "20",
@@ -132,6 +133,18 @@ describe("buildLaunchInput — base fields", () => {
   it("never sends acceptanceCriteria on a single-agent tier (inert)", () => {
     expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
     expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
+  });
+
+  it("omits workingDirMode at the auto default (byte-identical)", () => {
+    expect(buildLaunchInput(form({ cwdMode: "auto" }))).not.toHaveProperty("workingDirMode");
+    expect(buildLaunchInput(form())).not.toHaveProperty("workingDirMode");
+  });
+
+  it("sends workingDirMode when set, on ANY tier (an agent-setup knob, not caps-gated)", () => {
+    expect(buildLaunchInput(form({ cwdMode: "workspace" })).workingDirMode).toBe("workspace");
+    expect(buildLaunchInput(form({ cwdMode: "primary" })).workingDirMode).toBe("primary");
+    expect(buildLaunchInput(form({ effort: "quick", cwdMode: "primary" })).workingDirMode).toBe("primary");
+    expect(buildLaunchInput(form({ effort: "deep", cwdMode: "workspace" })).workingDirMode).toBe("workspace");
   });
 });
 

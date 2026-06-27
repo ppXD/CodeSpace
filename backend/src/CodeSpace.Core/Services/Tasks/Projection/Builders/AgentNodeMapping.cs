@@ -45,6 +45,9 @@ internal static class AgentNodeMapping
         AddIfPresent(config, "runnerKind", NullIfBlank(profile?.RunnerKind));
         AddIfPresent(config, "autonomyLevel", NullIfBlank(profile?.AutonomyLevel));
         AddIfPresent(config, "tools", profile?.AllowedTools);
+        // Multi-repo working-dir mode — the enum NAME ("WorkspaceRoot"/"PrimaryRepo"); null (Auto) ⇒ omitted ⇒ the
+        // node's Auto default ⇒ byte-identical. AgentCodeNode reads it back via WorkspaceCwdModeWire.FromWire.
+        AddIfPresent(config, "cwdMode", profile?.CwdMode?.ToString());
         // The operator's per-agent wall-clock (seconds): a positive value caps the run, an explicit 0 ⇒ NO wall-clock
         // (AgentCodeNode maps 0 → infinite); absent ⇒ the node's bounded 1h default. The same key an authored node reads.
         AddIfPresent(config, "timeoutSeconds", profile?.TimeoutSeconds);

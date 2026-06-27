@@ -53,6 +53,38 @@ public class WorkspaceSpecTests
     }
 
     [Fact]
+    public void FromAuthoredRepos_defaults_cwd_mode_to_auto_and_threads_an_explicit_one()
+    {
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Read } };
+
+        WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, related)!.CwdMode.ShouldBe(WorkspaceCwdMode.Auto, "absent ⇒ Auto (byte-identical)");
+        WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, related, cwdMode: WorkspaceCwdMode.WorkspaceRoot)!.CwdMode.ShouldBe(WorkspaceCwdMode.WorkspaceRoot);
+        WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, related, cwdMode: WorkspaceCwdMode.PrimaryRepo)!.CwdMode.ShouldBe(WorkspaceCwdMode.PrimaryRepo);
+    }
+
+    [Theory]
+    [InlineData("workspace", WorkspaceCwdMode.WorkspaceRoot)]
+    [InlineData("WorkspaceRoot", WorkspaceCwdMode.WorkspaceRoot)]
+    [InlineData("primary", WorkspaceCwdMode.PrimaryRepo)]
+    [InlineData("PrimaryRepo", WorkspaceCwdMode.PrimaryRepo)]
+    public void WorkspaceCwdModeWire_parses_both_the_modal_and_enum_vocabularies(string wire, WorkspaceCwdMode expected)
+    {
+        WorkspaceCwdModeWire.FromWire(wire).ShouldBe(expected);
+        WorkspaceCwdModeWire.FromWire(wire.ToUpperInvariant()).ShouldBe(expected, "case-insensitive");
+    }
+
+    [Theory]
+    [InlineData("auto")]
+    [InlineData("Auto")]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("bogus")]
+    public void WorkspaceCwdModeWire_folds_auto_blank_and_unknown_to_null_so_the_default_is_omitted(string? wire)
+    {
+        WorkspaceCwdModeWire.FromWire(wire).ShouldBeNull("auto / blank / unknown ⇒ null ⇒ the Auto default, omitted (byte-identical)");
+    }
+
+    [Fact]
     public void FromAuthoredRepos_assembles_the_primary_plus_related()
     {
         var web = Guid.NewGuid();

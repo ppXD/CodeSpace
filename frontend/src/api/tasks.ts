@@ -65,6 +65,8 @@ export interface LaunchTaskInput {
   integrateBranches?: boolean;
   /** Deep-only: free-text acceptance criteria the supervisor targets (rendered into its prompt, never executed). Omitted when unchanged from the default. */
   acceptanceCriteria?: string[];
+  /** Multi-repo working-directory mode (`"workspace"` / `"primary"`). Omitted for `"auto"` (the default). Inert on a single-repo run. */
+  workingDirMode?: string;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

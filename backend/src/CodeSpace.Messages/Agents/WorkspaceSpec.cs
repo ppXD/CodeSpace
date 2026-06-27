@@ -61,7 +61,7 @@ public sealed record WorkspaceSpec
     /// first authored occurrence win. Without this, the same repo would clone into two mount folders with conflicting
     /// access. Symmetric to the alias de-dup: a collision is collapsed, never a double-clone.</para>
     /// </summary>
-    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false)
+    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto)
     {
         if (relatedRepositories.Count == 0) return null;
 
@@ -83,7 +83,7 @@ public sealed record WorkspaceSpec
             repos.Add(related with { Alias = alias, IsPrimary = false });
         }
 
-        return new WorkspaceSpec { Repositories = repos, PrimaryAlias = DefaultAlias, CwdMode = WorkspaceCwdMode.Auto };
+        return new WorkspaceSpec { Repositories = repos, PrimaryAlias = DefaultAlias, CwdMode = cwdMode };
     }
 
     /// <summary>
@@ -162,6 +162,22 @@ public enum WorkspaceCwdMode
 
     /// <summary>Always the primary repo's root (even in a multi-repo workspace — the agent starts inside the primary, reaches siblings by relative path).</summary>
     PrimaryRepo = 2,
+}
+
+/// <summary>
+/// Maps the wire vocabulary (the launch modal's <c>"auto"/"workspace"/"primary"</c>, or a <see cref="WorkspaceCwdMode"/>
+/// enum name like <c>"WorkspaceRoot"</c>) to the enum. Returns NULL for <c>"auto"</c> / blank / unknown so the
+/// <see cref="WorkspaceCwdMode.Auto"/> default is OMITTED end-to-end (an unset working-dir keeps every projection +
+/// the persisted task_json byte-identical). Consumers fold a null back to <see cref="WorkspaceCwdMode.Auto"/>.
+/// </summary>
+public static class WorkspaceCwdModeWire
+{
+    public static WorkspaceCwdMode? FromWire(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "workspace" or "workspaceroot" => WorkspaceCwdMode.WorkspaceRoot,
+        "primary" or "primaryrepo" => WorkspaceCwdMode.PrimaryRepo,
+        _ => null,
+    };
 }
 
 /// <summary>Whether an agent may write a workspace repo or only read it as context.</summary>

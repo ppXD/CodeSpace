@@ -244,6 +244,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             AutonomyLevel = ClampAutonomy(request, route),
             TimeoutSeconds = request.Overrides.TimeoutSeconds,
             IntegrateBranches = request.Overrides.IntegrateBranches,
+            CwdMode = WorkspaceCwdModeWire.FromWire(request.Overrides.CwdMode),
         };
     }
 

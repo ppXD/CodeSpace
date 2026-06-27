@@ -123,6 +123,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         AddIfPresent(map, "enableMcp", profile.EnableMcp);
         AddIfPresent(map, "integrateBranches", profile.IntegrateBranches);
         AddIfPresent(map, "autonomyLevel", NullIfBlank(profile.AutonomyLevel));
+        AddIfPresent(map, "cwdMode", profile.CwdMode?.ToString());
 
         return map.Count > 0 ? map : null;
     }
