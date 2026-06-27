@@ -251,6 +251,74 @@ public class ModelPoolSelectorFlowTests
         (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(opusRow, "a row whose provider has no structured client is never auto-picked as the brain");
     }
 
+    // ─── ResolvePinnedBrainRowIdAsync: honor the operator's pinned "Brain model" chip, fail-closed to null otherwise ───
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_returns_the_pin_when_it_is_an_enabled_active_structured_eligible_row()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var row = await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+
+        (await ResolvePinnedBrainRowIdAsync(teamId, row, "Anthropic", "OpenAI")).ShouldBe(row,
+            "an enabled row under an active credential whose provider a structured client serves is the operator's brain verbatim");
+    }
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_rejects_a_pin_whose_provider_has_no_structured_client()
+    {
+        var teamId = await SeedTeamAsync();
+        var ollamaCred = await SeedCredentialAsync(teamId, "Ollama", key: "sk-o");
+        var row = await AddModelReturningIdAsync(ollamaCred, "llama3");
+
+        // A non-structured pin can't run the decider — null → the caller falls back to auto rather than baking a NoBrainModelStop brain.
+        (await ResolvePinnedBrainRowIdAsync(teamId, row, "Anthropic", "OpenAI")).ShouldBeNull(
+            "a pin whose provider no structured client serves is rejected to null");
+    }
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_rejects_a_disabled_row()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var row = await AddModelReturningIdAsync(cred, "claude-opus-4-8", enabled: false);
+
+        (await ResolvePinnedBrainRowIdAsync(teamId, row, "Anthropic")).ShouldBeNull("a disabled row is rejected — same enabled guard as the auto pick");
+    }
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_rejects_a_row_under_a_revoked_credential()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a", active: false);
+        var row = await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+
+        (await ResolvePinnedBrainRowIdAsync(teamId, row, "Anthropic")).ShouldBeNull("a pin under a revoked / deleted credential is rejected");
+    }
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_rejects_a_cross_team_row()
+    {
+        var teamA = await SeedTeamAsync();
+        var teamB = await SeedTeamAsync();
+        var credB = await SeedCredentialAsync(teamB, "Anthropic", key: "sk-b");
+        var rowB = await AddModelReturningIdAsync(credB, "claude-opus-4-8");
+
+        // Team A pins a row Team B owns — rejected (no cross-team brain), indistinguishable from a missing row.
+        (await ResolvePinnedBrainRowIdAsync(teamA, rowB, "Anthropic")).ShouldBeNull("another team's row is never resolvable as this team's brain");
+    }
+
+    [Fact]
+    public async Task ResolvePinnedBrainRowId_returns_null_when_no_provider_is_structured_eligible()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var row = await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+
+        // No structured providers at all (none registered) → no eligible brain, even for a real team row (the fail-closed floor).
+        (await ResolvePinnedBrainRowIdAsync(teamId, row)).ShouldBeNull("an empty eligible-provider set yields no brain");
+    }
+
     [Fact]
     public async Task An_unpinned_pick_prefers_the_higher_capability_tier_over_model_id_order()
     {
@@ -334,12 +402,18 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null)
+    private async Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid rowId, params string[] eligibleProviders)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IModelPoolSelector>().ResolvePinnedBrainRowIdAsync(teamId, rowId, eligibleProviders, CancellationToken.None);
+    }
+
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, IsDefault = isDefault, CapabilityTier = tier });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier });
         await db.SaveChangesAsync();
         return id;
     }

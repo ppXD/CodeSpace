@@ -282,6 +282,83 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_honors_the_operator_pinned_brain_model()
+    {
+        // The operator picked a "Brain model" in Launch — the chosen ModelCredentialModel row (Overrides.ModelCredentialModelId)
+        // must PIN the supervisor brain verbatim, not fall through to the auto pick. The whole reason the chip exists: a
+        // pinned brain is the operator's explicit reasoning-model choice. Frozen-def assertion (don't walk the run).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            // Seed a DEDICATED row under a structured-eligible provider (TestPlanner is registered as IStructuredLLMClient)
+            // and pin THAT — so the pin is honored by construction. (FirstTeamPoolRowAsync has no OrderBy and the default
+            // pool carries one non-structured row, which would non-deterministically trip the auto fallback.)
+            var (_, pinnedRow) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pinned-brain-model", provider: DeterministicPlannerLlmClient.ProviderTag);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { ModelCredentialModelId = pinnedRow },
+            });
+
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane");
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorBrainModelId(run.DefinitionSnapshotJson!).ShouldBe(pinnedRow.ToString(),
+                customMessage: "the operator's pinned brain row binds verbatim into the supervisor's brain model — not the auto pick");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_deep_launch_falls_back_to_auto_when_the_pinned_brain_is_not_structured_eligible()
+    {
+        // A pinned brain under a provider NO structured client serves can't run the decider — honoring it verbatim would
+        // bake a turn-1 NoBrainModelStop. So a non-structured (here Ollama) pin falls back to the auto ladder: the baked
+        // brain is a DIFFERENT, structured-eligible team row, never the unusable pin (a working brain beats a stop).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var (_, ollamaRow) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "llama3", provider: "Ollama");
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { ModelCredentialModelId = ollamaRow },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            var bakedBrain = ReadSupervisorBrainModelId(run.DefinitionSnapshotJson!);
+            bakedBrain.ShouldNotBeNull("a non-structured pin still yields a brain — the auto fallback, never NoBrainModelStop");
+            bakedBrain.ShouldNotBe(ollamaRow.ToString(), "the unusable (non-structured) pin is NOT baked — auto picks a structured-eligible row instead");
+            (await IsTeamPoolRowAsync(Guid.Parse(bakedBrain!), teamId)).ShouldBeTrue("the fallback brain is a real team pool row");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_deep_launch_bakes_the_operator_allowed_model_pool_into_the_supervisor_snapshot()
     {
         // The operator's agent model pool (AllowedModelIds — credentialed-model row ids) must bind through the full

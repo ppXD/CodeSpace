@@ -21,6 +21,9 @@ export interface LaunchFormState {
   autonomy: string;
   model: string;
   modelCredentialId: string;
+  /** The picked model's ROW id (`ModelCredentialModel` id), resolved from `(model, modelCredentialId)`. On Deep it
+   *  pins the supervisor brain; on single-agent the agent model. Empty ⇒ Auto. */
+  modelCredentialModelId: string;
   harness: string;
   agentDefinitionId: string;
   runnerKind: string;
@@ -73,6 +76,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     agentDefinitionId: state.agentDefinitionId || null,
     runnerKind: state.runnerKind || null,
     modelCredentialId: state.modelCredentialId || null,
+    modelCredentialModelId: state.modelCredentialModelId || null,
   };
 
   const relatedRepositories = buildRelatedRepositories(state.workspace, primary);

@@ -16,6 +16,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   autonomy: "Standard",
   model: "",
   modelCredentialId: "",
+  modelCredentialModelId: "",
   harness: "",
   agentDefinitionId: "",
   runnerKind: "",
@@ -90,6 +91,11 @@ describe("buildLaunchInput — base fields", () => {
     expect(set.modelCredentialId).toBe("c");
     expect(set.agentDefinitionId).toBe("a");
     expect(set.runnerKind).toBe("local");
+  });
+
+  it("sends the picked model ROW id (pins the brain / agent model by row), null when unset", () => {
+    expect(buildLaunchInput(form()).modelCredentialModelId).toBeNull();
+    expect(buildLaunchInput(form({ modelCredentialModelId: "row-1" })).modelCredentialModelId).toBe("row-1");
   });
 });
 

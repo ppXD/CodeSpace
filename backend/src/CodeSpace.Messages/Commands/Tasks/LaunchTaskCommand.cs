@@ -63,6 +63,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The <c>ModelCredential</c> reference the agent authenticates with. Null → the persona default → the team/operator fallback.</summary>
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>
+    /// A picked credentialed-model ROW (<c>ModelCredentialModel</c> id) — the operator's one concrete (model, credential)
+    /// choice from the Launch "Brain model" / "Agent model" chip. Sets both the model id and its backing credential from
+    /// one pick (precedence over the loose <see cref="Model"/> / <see cref="ModelCredentialId"/>). On a Deep (supervisor)
+    /// launch it pins the SUPERVISOR BRAIN; on single-agent it pins the agent's model. Null → the loose fields → defaults.
+    /// </summary>
+    public Guid? ModelCredentialModelId { get; init; }
+
     /// <summary>The agent run's wall-clock cap, in seconds. Null → the projection's bounded default (1h). 0 → NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). A positive value caps the run.</summary>
     public int? TimeoutSeconds { get; init; }
 

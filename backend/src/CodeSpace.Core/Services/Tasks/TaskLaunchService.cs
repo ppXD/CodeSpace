@@ -79,9 +79,10 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // on earlier CODE (not just the narrative). Empty on a fresh launch / no repo / no prior branch ⇒ default branches.
         var baseRefs = await ResolveBaseRefsAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
 
-        // Deep/Auto: self-resolve the supervisor's brain model so the decider has one instead of stopping turn-1. Inert
-        // (null) for every non-supervisor projection — single-agent / map launches are byte-identical.
-        var brainModelId = await ResolveSupervisorBrainModelAsync(route, request.TeamId, cancellationToken).ConfigureAwait(false);
+        // Deep/Auto: the supervisor's brain model — the operator's pinned "Brain model" chip when set + usable, else
+        // self-resolved so the decider has one instead of stopping turn-1. Inert (null) for every non-supervisor
+        // projection — single-agent / map launches are byte-identical.
+        var brainModelId = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
         var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds };
 
@@ -99,14 +100,17 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     }
 
     /// <summary>
-    /// The supervisor's brain-model row id when the route projects an <c>agent.supervisor</c> node (the Deep/Auto lane)
-    /// and the operator pinned none — self-resolved from the team's pool, bounded to the providers a structured-LLM
-    /// client actually serves (so it never trades NoBrainModelStop for NoModelStop). Null for every other projection
-    /// (single-agent / map are byte-identical) and for an empty / structured-incapable pool (the builder then emits no
-    /// brain — the honest fail-closed floor). Resolved ONCE here + baked into the immutable snapshot, so every turn +
-    /// replay reads the same brain (a decide-time pick would drift if the pool changed mid-run).
+    /// The supervisor's brain-model row id when the route projects an <c>agent.supervisor</c> node (the Deep/Auto lane).
+    /// The operator's pinned "Brain model" chip (<c>Overrides.ModelCredentialModelId</c>) wins when it resolves to a real
+    /// enabled/active team row a structured client can serve; otherwise — including a missing / disabled / cross-team /
+    /// non-structured pin — it self-resolves from the team's pool, bounded to the providers a structured-LLM client
+    /// actually serves (so it never trades NoBrainModelStop for NoModelStop). The chip drives the BRAIN only — the
+    /// dispatched agents draw from the allowed pool (the brain authors per-agent), so this is the one place the pin lands.
+    /// Null for every other projection (single-agent / map are byte-identical) and for an empty / structured-incapable
+    /// pool (the builder then emits no brain — the honest fail-closed floor). Resolved ONCE here + baked into the
+    /// immutable snapshot, so every turn + replay reads the same brain (a decide-time pick would drift if the pool changed).
     /// </summary>
-    private async Task<Guid?> ResolveSupervisorBrainModelAsync(RoutePlan route, Guid teamId, CancellationToken cancellationToken)
+    private async Task<Guid?> ResolveSupervisorBrainModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
     {
         if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return null;
 
@@ -114,7 +118,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         if (structuredProviders.Count == 0) return null;
 
-        return await _modelSelector.SelectBrainRowIdAsync(teamId, structuredProviders, cancellationToken).ConfigureAwait(false);
+        if (request.Overrides.ModelCredentialModelId is { } pin
+            && await _modelSelector.ResolvePinnedBrainRowIdAsync(request.TeamId, pin, structuredProviders, cancellationToken).ConfigureAwait(false) is { } pinnedBrain)
+            return pinnedBrain;
+
+        return await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The grounding the run is primed with: on a CONTINUE, the session's prior-turn digest composed over any seed grounding; on a fresh launch, only the seed's own grounding (null for chat). The projection folds this into the agent prompt.</summary>

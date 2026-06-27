@@ -64,6 +64,17 @@ public interface IModelPoolSelector
     /// an eligible provider (the honest fail-closed floor — nothing to run the brain on).
     /// </summary>
     Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Validate an OPERATOR-PINNED brain model (the Launch "Brain model" chip → one <c>ModelCredentialModel</c> row) for
+    /// the Deep/Auto supervisor: returns <paramref name="modelCredentialModelId"/> verbatim IFF it is a real ENABLED row
+    /// under an ACTIVE team credential whose provider a structured-LLM client serves (in <paramref name="eligibleProviders"/>);
+    /// else <c>null</c>. Same enabled/active/structured-eligible guards as <see cref="SelectBrainRowIdAsync"/>, so a pinned
+    /// brain and an auto brain are interchangeable — a missing / disabled / revoked / cross-team / non-structured pin
+    /// resolves to <c>null</c> and the caller falls back to the auto ladder rather than baking a brain the decider would
+    /// <c>NoBrainModelStop</c> on (a working brain beats a turn-1 stop). Pure read; never decrypts.
+    /// </summary>
+    Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 }
 
 /// <summary>One pooled model the brain may dispatch — its canonical id, the provider tag whose harness can drive it, and its cached advisory capability <see cref="ModelCapabilityTier"/> (default <see cref="ModelCapabilityTier.Unknown"/> when un-tiered). Catalog-only (no credential, no secret).</summary>

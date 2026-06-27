@@ -68,6 +68,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
         AgentDefinitionId = request.AgentDefinitionId,
         RunnerKind = request.RunnerKind,
         ModelCredentialId = request.ModelCredentialId,
+        ModelCredentialModelId = request.ModelCredentialModelId,
         TimeoutSeconds = request.TimeoutSeconds,
     };
 
