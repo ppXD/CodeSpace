@@ -70,6 +70,7 @@ public class ListTeamRunsQueryHandlerTests
         }
 
         // ── the rest of IWorkflowService is unused by this handler ──
+        public Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<IReadOnlyList<WorkflowSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<WorkflowDetail?> GetAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
