@@ -210,6 +210,16 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return provider != null && eligible.Contains(provider.ToLower()) ? modelCredentialModelId : null;
     }
 
+    public async Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) =>
+        // The top enabled pool row across ALL active team credentials in the credential resolver's precedence order
+        // (IsDefault > model id > row id — NOT Ordinal, to MATCH ModelCredentialResolver's DB ordering so the two agree
+        // in any environment), provider-AGNOSTIC. Only the provider tag; no decrypt.
+        await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
+            .Select(m => m.Credential.Provider)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {
         ModelId = modelId,

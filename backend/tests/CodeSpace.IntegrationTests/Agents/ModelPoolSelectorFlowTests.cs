@@ -510,6 +510,31 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().ResolvePinnedBrainRowIdAsync(teamId, rowId, eligibleProviders, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task ResolveTeamDefaultProvider_picks_the_default_rows_provider_across_providers()
+    {
+        // The harness-auto lookup (B4): provider-AGNOSTIC, in the credential resolver's IsDefault > model id > row id order.
+        var teamId = await SeedTeamAsync();
+        var anthropic = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        await AddModelReturningIdAsync(anthropic, "claude-opus", isDefault: true);   // the team default
+        var openai = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-o");
+        await AddModelReturningIdAsync(openai, "aaa-gpt");   // sorts first by id, but not the default
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IModelPoolSelector>().ResolveTeamDefaultProviderAsync(teamId, CancellationToken.None))
+            .ShouldBe("Anthropic", "the IsDefault row's provider wins, provider-agnostic, outranking model-id order — so the auto harness follows it");
+    }
+
+    [Fact]
+    public async Task ResolveTeamDefaultProvider_returns_null_for_an_empty_pool()
+    {
+        var teamId = await SeedTeamAsync();   // this file's SeedTeamAsync seeds NO pool (unlike WorkflowsTestSeed)
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IModelPoolSelector>().ResolveTeamDefaultProviderAsync(teamId, CancellationToken.None))
+            .ShouldBeNull("no enabled pool model → null (the reconciler then keeps its harness floor)");
+    }
+
     private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true, bool? available = null, ModelCapabilityTier? probedTier = null)
     {
         using var scope = _fixture.BeginScope();

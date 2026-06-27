@@ -16,6 +16,7 @@ public class HarnessModelReconcilerTests
     private static readonly IAgentHarness Codex = new FakeHarness("codex-cli", "OpenAI", "OpenRouter", "Ollama", "Custom");
     private static readonly IAgentHarness Claude = new FakeHarness("claude-code", "Anthropic", "Custom");
     private static readonly IReadOnlyList<IAgentHarness> Pool = new[] { Codex, Claude };
+    private const string Default = "codex-cli";   // the registered default harness — wins the multi-driver tie-break
 
     [Theory]
     [InlineData("codex-cli", "OpenAI", "codex-cli", false)]    // compatible → kept
@@ -26,11 +27,26 @@ public class HarnessModelReconcilerTests
     [InlineData("codex-cli", "anthropic", "claude-code", true)] // provider match is case-insensitive
     public void Reconciles_to_a_harness_that_can_drive_the_provider(string authoredKind, string provider, string expectedKind, bool expectedRepaired)
     {
-        var result = HarnessModelReconciler.Reconcile(authoredKind, provider, Pool);
+        var result = HarnessModelReconciler.Reconcile(authoredKind, provider, Pool, Default);
 
         result.HarnessKind.ShouldBe(expectedKind);
         result.Repaired.ShouldBe(expectedRepaired);
         (result.Note is null).ShouldBe(!expectedRepaired, "a repair carries a timeline note; a kept harness does not");
+    }
+
+    [Theory]
+    [InlineData("codex-cli", "codex-cli")]      // default codex → a Custom (OpenAI-wire) gateway derives codex, not the alphabetically-first claude
+    [InlineData("claude-code", "claude-code")]  // a claude default → Custom derives claude
+    public void Among_multiple_drivers_the_default_harness_wins_the_tie_break(string defaultKind, string expected)
+    {
+        // "Custom" is driven by BOTH codex-cli and claude-code. When the authored harness can't drive it (here a keyless
+        // stub), the DEFAULT harness wins — so a Custom gateway follows the OpenAI-wire default rather than alphabetical order.
+        var pool = new IAgentHarness[] { new KeylessHarness("local-stub"), Codex, Claude };
+
+        var result = HarnessModelReconciler.Reconcile("local-stub", "Custom", pool, defaultKind);
+
+        result.HarnessKind.ShouldBe(expected);
+        result.Repaired.ShouldBeTrue();
     }
 
     [Fact]
@@ -38,7 +54,7 @@ public class HarnessModelReconcilerTests
     {
         // The honest floor: nothing to fall back to → don't silently run a wrong model; let the credential resolver
         // surface its precise "cannot drive" error.
-        var result = HarnessModelReconciler.Reconcile("codex-cli", "SomeUnsupportedProvider", Pool);
+        var result = HarnessModelReconciler.Reconcile("codex-cli", "SomeUnsupportedProvider", Pool, Default);
 
         result.HarnessKind.ShouldBe("codex-cli");
         result.Repaired.ShouldBeFalse();
@@ -52,7 +68,7 @@ public class HarnessModelReconcilerTests
         var keyless = new KeylessHarness("local-stub");
         var pool = new IAgentHarness[] { keyless, Claude };
 
-        var result = HarnessModelReconciler.Reconcile("local-stub", "Anthropic", pool);
+        var result = HarnessModelReconciler.Reconcile("local-stub", "Anthropic", pool, Default);
 
         result.HarnessKind.ShouldBe("claude-code", "the keyless harness can't drive Anthropic, so reconcile to the one that can");
         result.Repaired.ShouldBeTrue();

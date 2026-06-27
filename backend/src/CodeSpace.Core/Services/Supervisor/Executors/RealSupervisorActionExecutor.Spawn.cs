@@ -284,7 +284,7 @@ public sealed partial class RealSupervisorActionExecutor
         // Authoring-time compatibility clamp (P1): the resolved model runs on a credential of THIS provider, so pin a
         // harness that can drive it — the authored/default harness if it already can, else a registered one that does.
         // The model authored the MODEL; the server makes the harness match it (the run-time reconciler is the backstop).
-        var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, _harnesses.All).HarnessKind;
+        var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, _harnesses.All, AgentHarnessDefaults.DefaultHarness).HarnessKind;
 
         return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId, Harness = harness };
     }
