@@ -17,7 +17,7 @@ import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
 import { dedupRunAgents } from "./runPhases";
-import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
+import { groupMapBranches, nodeIterationLabel, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
 export { RunStatusBadge };
@@ -119,7 +119,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
             <RunNodeRow
               key={`${n.nodeId}:${n.iterationKey}`}
               node={n}
-              branch={branchBadge(n)}
+              branch={nodeIterationLabel(n)}
               parallel={concurrent.has(runNodeKey(n))}
               suppressChildEmbed={n.childRunId === r.pendingWait?.token}
               depth={depth}
@@ -268,10 +268,10 @@ function RunNodeRow({ node: n, branch, parallel, suppressChildEmbed, depth, onOp
         ) : (
           <span className="wf-run-node-id">{n.nodeId}</span>
         )}
-        {/* Element-branch badge — which map element this row belongs to (#i, or #i/#j for a nested
-            map-in-map). Lets K identical body-node rows read as K distinct branches at a glance. */}
+        {/* Iteration badge — which map element (#i, or #i/#j nested) OR which supervisor turn (turn 2 · parked)
+            this row belongs to. Lets K identical body-node rows read as K distinct iterations at a glance. */}
         {branch && (
-          <span className="wf-run-node-branch" title="Map element branch (index per map level)">{branch}</span>
+          <span className="wf-run-node-branch" title="Iteration — map element index, or supervisor decision turn">{branch}</span>
         )}
         {/* For an agent.code node, the raw node status is "Suspended" the whole time the agent is actually
             working (the node parks on its AgentRun wait). Surface the agent run's live status instead so the

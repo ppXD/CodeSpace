@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkflowRunNodeSummary } from "@/api/workflows";
-import { branchBadge, branchGroupKey, fanBranches, fanBreakdown, groupMapBranches, parseIterationKey } from "./mapBranches";
+import { branchBadge, branchGroupKey, fanBranches, fanBreakdown, fanoutSummary, groupMapBranches, nodeIterationLabel, parseIterationKey, parseTurnKey } from "./mapBranches";
 
 /**
  * The map-branch parsing/grouping backbone — pins the engine iteration-key format
@@ -202,5 +202,43 @@ describe("fanBranches / isMapFanout / fanBreakdown", () => {
       mapNode({ nodeId: "a", iterationKey: "map#5", status: "Skipped" }),
     ];
     expect(fanBreakdown(fanBranches(rows))).toEqual({ total: 6, done: 2, running: 2, failed: 1, queued: 1 });
+  });
+});
+
+describe("supervisor turn legibility", () => {
+  it("parses <id>#turn{N} and its #park/#ask sub-state, rejecting non-turn keys", () => {
+    expect(parseTurnKey("sup#turn1")).toEqual({ turn: 1, sub: undefined });
+    expect(parseTurnKey("sup#turn2#park")).toEqual({ turn: 2, sub: "park" });
+    expect(parseTurnKey("sup#turn5#ask")).toEqual({ turn: 5, sub: "ask" });
+    expect(parseTurnKey("map#0")).toBeNull();   // a map branch is not a turn
+    expect(parseTurnKey("")).toBeNull();        // a top-level node
+  });
+
+  it("labels each row distinctly: map branch #i, supervisor turn, nothing for plain/loop rows", () => {
+    expect(nodeIterationLabel(mapNode({ nodeId: "a", iterationKey: "map#2" }))).toBe("#2");
+    expect(nodeIterationLabel(node({ nodeId: "sup", iterationKey: "sup#turn1" }))).toBe("turn 1");
+    expect(nodeIterationLabel(node({ nodeId: "sup", iterationKey: "sup#turn2#park" }))).toBe("turn 2 · parked");
+    expect(nodeIterationLabel(node({ nodeId: "sup", iterationKey: "sup#turn5#ask" }))).toBe("turn 5 · awaiting input");
+    expect(nodeIterationLabel(node({ nodeId: "body", iterationKey: "loop#0" }))).toBe("");   // loop pass stays unlabeled
+    expect(nodeIterationLabel(node({ nodeId: "start", iterationKey: "" }))).toBe("");        // top-level
+  });
+
+  it("counts a supervisor node's footer as TURNS (distinct turn numbers, ignoring #park/#ask), not branches", () => {
+    const rows = [
+      node({ nodeId: "sup", iterationKey: "" }),              // the top-level supervisor cell
+      node({ nodeId: "sup", iterationKey: "sup#turn1" }),
+      node({ nodeId: "sup", iterationKey: "sup#turn2#park" }),
+      node({ nodeId: "sup", iterationKey: "sup#turn3" }),
+    ];
+    expect(fanoutSummary(rows)).toEqual({ count: 3, noun: "turns" });   // 3 distinct turns, NOT "4 branches"
+  });
+
+  it("still calls a flow.map's footer BRANCHES", () => {
+    const rows = [mapNode({ nodeId: "a", iterationKey: "map#0" }), mapNode({ nodeId: "a", iterationKey: "map#1" })];
+    expect(fanoutSummary(rows)).toEqual({ count: 2, noun: "branches" });
+  });
+
+  it("a single-run node reports count 1 (no fan-out noun shown by the caller)", () => {
+    expect(fanoutSummary([node({ nodeId: "start", iterationKey: "" })])).toEqual({ count: 1, noun: "run" });
   });
 });

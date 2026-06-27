@@ -117,9 +117,10 @@ describe("WorkflowNode coze-style result footer", () => {
     expect(run.container.querySelector(".wf-rf-result-dur")).toBeNull();
   });
 
-  it("rolls a loop / non-map fan-out into one bar labelled with its branch count", () => {
+  it("rolls a loop / non-map fan-out into one bar with a NEUTRAL run count (not the misleading 'branches')", () => {
     // No containerKind → not a flow.map (a loop / try body shares the `<id>#<i>` key shape), so this keeps the
     // coze-style bar; a real flow.map fan-out renders the MapFanout panel instead (see the S3 describe below).
+    // The noun is "runs" (neutral) — only a real flow.map says "branches", only a supervisor says "turns".
     const run = renderNode({
       runStatus: "Success",
       runRows: [
@@ -127,7 +128,7 @@ describe("WorkflowNode coze-style result footer", () => {
         row({ iterationKey: "m#1", outputs: { v: 2 }, startedAt: "2026-06-22T00:00:00.000Z", completedAt: "2026-06-22T00:00:02.000Z" }),
       ],
     });
-    expect(run.container.querySelector(".wf-rf-result-label")?.textContent).toBe("Success · 2 branches");
+    expect(run.container.querySelector(".wf-rf-result-label")?.textContent).toBe("Success · 2 runs");
   });
 });
 
