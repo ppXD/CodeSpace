@@ -9,7 +9,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
  * the geometry to a full-height panel anchored right. Each view supplies its own head + body + optional foot.
  * Escape and the backdrop dismiss it (suspendable while a layered confirm dialog is open).
  */
-export function DrawerFrame({ onClose, escapeDisabled, head, foot, children }: { onClose: () => void; escapeDisabled?: boolean; head: React.ReactNode; foot?: React.ReactNode; children: React.ReactNode }) {
+export function DrawerFrame({ label, onClose, escapeDisabled, head, foot, children }: { label: string; onClose: () => void; escapeDisabled?: boolean; head: React.ReactNode; foot?: React.ReactNode; children: React.ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !escapeDisabled) onClose(); };
     window.addEventListener("keydown", onKey);
@@ -19,7 +19,7 @@ export function DrawerFrame({ onClose, escapeDisabled, head, foot, children }: {
   return createPortal(
     <>
       <div className="mdl-mask" onClick={onClose} />
-      <div className="mdl drw" role="dialog" aria-modal="true">
+      <div className="mdl drw" role="dialog" aria-modal="true" aria-label={label}>
         {head}
         <div className="mdl-body">{children}</div>
         {foot}

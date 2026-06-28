@@ -66,5 +66,5 @@ function MessageDrawer({ onClose, children }: { onClose: () => void; children: R
     </div>
   );
 
-  return <DrawerFrame onClose={onClose} head={head}>{children}</DrawerFrame>;
+  return <DrawerFrame label="Agent" onClose={onClose} head={head}>{children}</DrawerFrame>;
 }

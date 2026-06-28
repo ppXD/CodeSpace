@@ -119,7 +119,7 @@ export function AgentEditorForm({ mode, agentId, initial, boundSkills, immutable
   );
 
   return (
-    <DrawerFrame onClose={onCancel} escapeDisabled={confirming} head={head} foot={foot}>
+    <DrawerFrame label={mode === "create" ? "New agent" : "Edit agent"} onClose={onCancel} escapeDisabled={confirming} head={head} foot={foot}>
       {error && (
         <div className="cn-banner cn-banner-err" style={{ marginBottom: 14 }}>
           <div className="cn-banner-h">Couldn't save</div>

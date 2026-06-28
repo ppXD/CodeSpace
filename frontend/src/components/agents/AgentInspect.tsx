@@ -34,7 +34,7 @@ export function AgentInspect({ agent, onEdit, onClose }: { agent: AgentDefinitio
   );
 
   return (
-    <DrawerFrame onClose={onClose} head={head} foot={foot}>
+    <DrawerFrame label={agent.name} onClose={onClose} head={head} foot={foot}>
       <section className="drw-sec">
         <div className="drw-sec-h"><Ic.Bot size={13} /> Identity</div>
         <div className="drw-fld">Description</div>
