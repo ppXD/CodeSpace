@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PackPreview } from "@/api/packs";
-import { defaultSelectedPaths, flagFor } from "./packPreview";
+import { defaultSelectedPaths, filterRows, flagFor, type Row } from "./packPreview";
 
 describe("flagFor", () => {
   it("importable → new", () => {
@@ -36,5 +36,27 @@ describe("defaultSelectedPaths", () => {
 
   it("selects nothing when nothing is importable", () => {
     expect(defaultSelectedPaths({ reference: null, agents: [], skills: [] })).toEqual([]);
+  });
+});
+
+describe("filterRows", () => {
+  const row = (over: Partial<Row>): Row => ({ sourcePath: "p", name: "n", derivedSlug: "s", description: null, diagnostics: [], slugConflict: false, importable: true, kind: "skill", ...over });
+  const rows = [
+    row({ name: "Test Driven Development", derivedSlug: "test-driven-development", sourcePath: "skills/tdd/SKILL.md" }),
+    row({ name: "Brainstorming", derivedSlug: "brainstorming", sourcePath: "skills/brainstorm/SKILL.md" }),
+  ];
+
+  it("matches name, @handle, or source path (case-insensitive)", () => {
+    expect(filterRows(rows, "driven").map((r) => r.derivedSlug)).toEqual(["test-driven-development"]);
+    expect(filterRows(rows, "BRAINSTORM").map((r) => r.derivedSlug)).toEqual(["brainstorming"]);
+    expect(filterRows(rows, "tdd").map((r) => r.derivedSlug)).toEqual(["test-driven-development"]); // source path
+  });
+
+  it("returns all rows for a blank query", () => {
+    expect(filterRows(rows, "   ")).toHaveLength(2);
+  });
+
+  it("returns none when nothing matches", () => {
+    expect(filterRows(rows, "zzz")).toEqual([]);
   });
 });

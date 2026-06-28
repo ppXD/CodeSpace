@@ -34,3 +34,14 @@ export function flagFor(item: { importable: boolean; slugConflict: boolean }): I
 export function defaultSelectedPaths(preview: PackPreview): string[] {
   return [...preview.agents, ...preview.skills].filter((i) => i.importable).map((i) => i.sourcePath);
 }
+
+/** Case-insensitive substring filter over name / @handle / source path — the import modal's per-tab search. Blank → all. */
+export function filterRows(rows: Row[], query: string): Row[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return rows;
+
+  return rows.filter((r) =>
+    r.name.toLowerCase().includes(q)
+    || r.derivedSlug.toLowerCase().includes(q)
+    || (r.sourcePath?.toLowerCase().includes(q) ?? false));
+}
