@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { AgentCard } from "@/components/agents/AgentCard";
-import { AgentDrawer } from "@/components/agents/AgentDrawer";
+import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
@@ -95,7 +95,7 @@ function AgentsListPage() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search or ask — “security reviewer”, “backend implementer”…"
+                  placeholder="Search agents…"
                   aria-label="Search agents"
                 />
               </div>
@@ -132,7 +132,7 @@ function AgentsListPage() {
       </div>
 
       {editor && (
-        <AgentDrawer
+        <AgentEditorModal
           mode={editor.mode}
           agentId={editor.mode === "edit" ? editor.id : undefined}
           onClose={() => setEditor(null)}
