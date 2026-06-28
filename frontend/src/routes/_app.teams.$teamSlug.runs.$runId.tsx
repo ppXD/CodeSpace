@@ -14,6 +14,8 @@ import { ContinueRunButton } from "@/components/workflows/ContinueRunButton";
 import { StopRunButton } from "@/components/workflows/StopRunButton";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { isRunActive, usePendingDecisions, useReplayRun, useRunAttempts, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
+import { useRunSession } from "@/hooks/use-sessions";
+import { SessionRoom } from "@/components/sessions/SessionRoom";
 
 /**
  * The canonical run-detail page — the Run Room. A run is run-neutral (manual, scheduled, webhook, replay, task,
@@ -55,6 +57,9 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   const run = useWorkflowRun(effectiveRunId);
   // The run-neutral outline (the phase projection) — a separate endpoint, polled on the same cadence.
   const phases = useRunPhases(effectiveRunId);
+  // If this run belongs to a work session, the run-detail experience IS the Session room (the conversation of turns,
+  // each turn's box a live/historical canvas). Null for a session-less run (authored workflow) → the classic Run Room.
+  const session = useRunSession(effectiveRunId);
   // The cross-grain decision queue, narrowed to this run — polled while the run can still park one. Agent-grain
   // decisions key off the agent run id, so we pass the run's fanned-out agent ids (from the phase projection).
   const pendingPoll = run.data ? isRunActive(run.data.status) : true;
@@ -66,6 +71,9 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   // The outline drives the center: a selected PHASE filters the Activity tiles to it; a selected AGENT opens its terminal.
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [selectedPhaseId, setSelectedPhaseId] = useState<string | null>(null);
+  // Escape hatch: the Session room "Run Room" button flips this to render the classic rich detail (activity /
+  // terminals / trace / decisions) for the anchored run.
+  const [forceRoom, setForceRoom] = useState(false);
   // Selecting a phase is a fresh focus — clear any open agent so its terminal can't linger after the tiles filter away
   // from it. (Selecting an AGENT sets its phase then itself, in that order, so the agent still wins.)
   const selectPhase = (phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); };
@@ -77,6 +85,12 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
       params: { teamSlug, runId: result.runId },
     });
   };
+
+  // A run that belongs to a session opens AS the Session room (the conversation), unless the user flipped to the
+  // classic Run Room. The resolver returns the whole thread anchored at this run's turn.
+  if (!forceRoom && session.data) {
+    return <SessionRoom teamSlug={teamSlug} session={session.data} anchorRunId={effectiveRunId} onOpenRoom={() => setForceRoom(true)} />;
+  }
 
   return (
     <section className="ct">
@@ -96,6 +110,7 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
             {attempts.data && <RunAttemptsSummary attempts={attempts.data.attempts} />}
           </div>
           <div className="ct-actions">
+            {session.data && <button className="btn" onClick={() => setForceRoom(false)} title="Back to the Session room (the conversation of turns)."><Ic.Bot size={13} /> Session view</button>}
             {run.data && <StopRunButton runId={effectiveRunId} status={run.data.status} />}
             {run.data && <ContinueRunButton runId={effectiveRunId} status={run.data.status} hasPendingWait={run.data.pendingWait != null} />}
             <button
