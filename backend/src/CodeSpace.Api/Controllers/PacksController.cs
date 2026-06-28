@@ -33,6 +33,14 @@ public class PacksController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>One server-side page of a pack's store artifacts of a single kind (the paginated detail tab + the pickers), optionally name/handle-filtered. <c>GET /api/packs/{id}/artifacts?kind=Agent&amp;search=&amp;page=0&amp;pageSize=20</c>.</summary>
+    [HttpGet("{packId:guid}/artifacts")]
+    public async Task<IActionResult> ListArtifacts([FromRoute] Guid packId, [FromQuery] ListPackArtifactsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { PackId = packId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Re-pull a pack from its saved source — refresh its already-imported artifacts and return what changed (up-to-date / updated) plus the discovered-but-not-imported artifacts to add.</summary>
     [HttpPost("{packId:guid}/sync")]
     public async Task<IActionResult> Sync([FromRoute] Guid packId, CancellationToken cancellationToken)
