@@ -4,7 +4,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -245,6 +248,34 @@ public class SkillDefinitionServiceFlowTests
         var foreignSnapshot = await SeedStoreSkillSnapshotAsync(otherTeam, "foreign-skill");
         using (var scope = _fixture.BeginScope())
             await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, foreignSnapshot, userId, default));
+    }
+
+    [Fact]
+    public async Task Author_into_library_creates_a_store_skill_under_the_custom_pack_off_the_bench()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        // Drive through the mediator so the command handler's field mapping + identity wiring are exercised (not just
+        // the service in isolation), matching the agent author test.
+        Guid id;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            id = await scope.Resolve<IMediator>().Send(new AuthorStoreSkillCommand { Name = "Threat Modeling", Body = "STRIDE.", Category = "security" });
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var customPack = await db.Pack.AsNoTracking().SingleAsync(p => p.TeamId == teamId && p.Kind == PackKind.Custom && p.DeletedDate == null);
+        customPack.Name.ShouldBe("Custom");
+
+        var skill = await db.SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == id);
+        skill.Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+        skill.Scope.ShouldBe(DefinitionScope.Store, "an authored Library skill lives in the store, not on the bindable bench");
+        skill.PackId.ShouldBe(customPack.Id);
+        skill.Body.ShouldBe("STRIDE.");
+
+        // Off the bindable bench list (you instantiate a working copy to bind it).
+        var list = await verify.Resolve<ISkillDefinitionService>().ListAsync(teamId, default);
+        list.Select(s => s.Id).ShouldNotContain(id);
     }
 
     private async Task<Guid> CreateSkillAsync(Guid teamId, Guid userId, string name, string body)

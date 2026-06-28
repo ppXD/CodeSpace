@@ -18,11 +18,13 @@ namespace CodeSpace.Core.Services.Agents;
 public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ICustomPackProvider _customPacks;
     private readonly ILogger<AgentDefinitionService> _logger;
 
-    public AgentDefinitionService(CodeSpaceDbContext db, ILogger<AgentDefinitionService> logger)
+    public AgentDefinitionService(CodeSpaceDbContext db, ICustomPackProvider customPacks, ILogger<AgentDefinitionService> logger)
     {
         _db = db;
+        _customPacks = customPacks;
         _logger = logger;
     }
 
@@ -116,6 +118,38 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
         await SaveCreateAsync(agent, slug, input.Name, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Agent persona created: team={TeamId} agent={AgentId} slug={Slug}", teamId, agent.Id, slug);
+        return agent.Id;
+    }
+
+    public async Task<Guid> AuthorStoreAgentAsync(Guid teamId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        // A hand-authored Library entry: Authored (the operator wrote it) but Scope=Store (it lives in the Library,
+        // not on the bench) under the team's Custom pack — symmetric with an imported snapshot. No slug-uniqueness
+        // check: store handles aren't unique (the team-slug index is Working-only), so it never collides. You
+        // instantiate a working copy (InstantiateFromStoreAsync) to run it.
+        var slug = DeriveValidSlug(input.Name);
+        var packId = await _customPacks.EnsureForTeamAsync(teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Origin = AgentDefinitionOrigin.Authored,
+            Scope = DefinitionScope.Store,
+            PackId = packId,
+            CreatedDate = now,
+            CreatedBy = actorUserId,
+            LastModifiedDate = now,
+            LastModifiedBy = actorUserId,
+        };
+        ApplyEditableFields(agent, input);
+
+        _db.AgentDefinition.Add(agent);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);   // flushes the Custom pack (if new) + the store agent atomically
+
+        _logger.LogInformation("Agent authored into Library: team={TeamId} agent={AgentId} slug={Slug} pack={PackId}", teamId, agent.Id, slug, packId);
         return agent.Id;
     }
 

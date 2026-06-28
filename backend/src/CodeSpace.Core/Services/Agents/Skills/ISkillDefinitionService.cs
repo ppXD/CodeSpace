@@ -18,6 +18,13 @@ public interface ISkillDefinitionService
     Task<Guid> CreateAsync(Guid teamId, SkillDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Author a new skill directly INTO the Library — a store entry (<c>Origin=Authored</c>, <c>Scope=Store</c>) under
+    /// the team's synthetic Custom pack (created on first use). Symmetric with an imported snapshot: not bindable as-is,
+    /// you instantiate a working copy to bind it. No slug-uniqueness check (store handles aren't unique).
+    /// </summary>
+    Task<Guid> AuthorStoreSkillAsync(Guid teamId, SkillDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Instantiate a new WORKING (bindable) skill by COPYING a Library STORE snapshot's content — the skill analogue of
     /// <c>AgentDefinitionService.InstantiateFromStoreAsync</c>. The copy is <c>Origin=Imported</c>, <c>Scope=Working</c>,
     /// carries <c>SourceDefinitionId</c> + <c>SourceVersion</c> provenance (no <c>PackId</c>, so it doesn't re-appear in
