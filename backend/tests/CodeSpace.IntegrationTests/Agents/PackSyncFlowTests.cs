@@ -94,6 +94,44 @@ public class PackSyncFlowTests
     }
 
     [Fact]
+    public async Task Sync_refreshes_only_store_snapshots_and_never_clobbers_a_grandfathered_bench_row()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        var runners = seedScope.Resolve<ISandboxRunnerRegistry>();
+        if (!await GitReadyAsync(runners)) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(runners);
+
+        try
+        {
+            // A grandfathered import: a pack rooted at src + a WORKING bench agent carrying its (PackId, "agents/reviewer.md"),
+            // but NO store snapshot. The repo's reviewer.md has a DIFFERENT body, so a clobber would be visible.
+            var (packId, benchId) = await SeedGrandfatheredPackAgentAsync(teamId, userId, src, "agents/reviewer.md", "reviewer", "OLD GRANDFATHERED PROMPT");
+
+            var sync = await SendAsync(teamId, userId, new SyncPackCommand { PackId = packId });
+
+            // The existing-row lookup is Store-scoped, so it finds NO snapshot to refresh — the grandfathered Working
+            // row is invisible to the sync and reviewer.md surfaces as a discoverable-but-not-imported artifact.
+            sync.Updated.ShouldBe(0, "no store snapshot exists to refresh — the bench row must not be touched");
+            sync.NewArtifacts.Agents.ShouldContain(a => a.DerivedSlug == "reviewer", "the artifact is discovered as new, not matched to the bench row");
+
+            await AssertStateAsync(async db =>
+            {
+                var bench = await db.AgentDefinition.SingleAsync(a => a.Id == benchId);
+                bench.Scope.ShouldBe(DefinitionScope.Working);
+                bench.SystemPrompt.ShouldBe("OLD GRANDFATHERED PROMPT", "a re-sync must NOT clobber the live bench agent's content");
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
     public async Task Sync_of_another_teams_pack_is_not_found()
     {
         var (teamA, userA) = await SeedTeamAsync();
@@ -199,6 +237,23 @@ public class PackSyncFlowTests
         foreach (var s in await db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && slugs.Contains(s.Slug) && s.DeletedDate == null).Select(s => new { s.Slug, s.LastModifiedDate }).ToListAsync())
             map[s.Slug] = s.LastModifiedDate;
         return map;
+    }
+
+    /// <summary>Stages a PRE-store-model import: a Pack rooted at <paramref name="url"/> plus a grandfathered WORKING bench agent carrying that pack's (PackId, SourcePath). Returns the pack + agent ids.</summary>
+    private async Task<(Guid PackId, Guid AgentId)> SeedGrandfatheredPackAgentAsync(Guid teamId, Guid userId, string url, string sourcePath, string slug, string systemPrompt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var packId = Guid.NewGuid();
+        db.Pack.Add(new Pack { Id = packId, TeamId = teamId, Kind = PackKind.GitUrl, Name = "grandfathered", Url = url, LastSyncedDate = now, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        var agentId = Guid.NewGuid();
+        db.AgentDefinition.Add(new AgentDefinition { Id = agentId, TeamId = teamId, Slug = slug, Name = slug, SystemPrompt = systemPrompt, Origin = AgentDefinitionOrigin.Imported, Scope = DefinitionScope.Working, PackId = packId, SourcePath = sourcePath, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        await db.SaveChangesAsync();
+        return (packId, agentId);
     }
 
     private async Task<Guid> SeedRemotePackAsync(Guid teamId, Guid userId)

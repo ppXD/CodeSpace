@@ -15,11 +15,12 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// The unified URL preview end-to-end through the REAL <see cref="PackImportService"/> (fetcher → walker) + real
 /// git clone of a LOCAL repo (no network): a pack with agents AND skills previews into a <see cref="PackPreview"/>.
-/// In the store model an import lands as a STORE snapshot, which carries no unique handle, so an artifact is
-/// importable whenever it is parseable + named — even when the team already owns that handle on the bench. This
-/// proves the discover→preview vertical, that a pre-existing handle (agent OR skill) no longer makes a preview item
-/// conflict, and that a nameless artifact previews as un-importable with diagnostics rather than crashing.
-/// (Clone reclamation is proven separately in <c>PackCloneFetcherFlowTests</c>.)
+/// In the store model an import lands as a STORE snapshot carrying no unique handle, so the preview is purely
+/// STRUCTURAL and DB-independent — an artifact is importable whenever it is parseable + named, with no team-handle
+/// lookup at all. This proves the discover→preview vertical and that a nameless artifact previews as un-importable
+/// with diagnostics rather than crashing. (The bench-coexistence guarantee — that an owned handle does not block
+/// the import and the bench is never clobbered — is touched at commit time, where the DB is read, and is proven in
+/// <c>PackCommitFlowTests</c>. Clone reclamation is proven separately in <c>PackCloneFetcherFlowTests</c>.)
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
