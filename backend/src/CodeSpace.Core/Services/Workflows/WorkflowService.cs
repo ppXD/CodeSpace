@@ -779,6 +779,48 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return resumed;
     }
 
+    public async Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        // Tenancy + fail-closed: a foreign / phantom run is a clean 404 (the same KeyNotFoundException ApproveRunAsync
+        // throws), never a leak of existence. This is the user-triggered, single-run twin of the reconciler's
+        // stranded-Suspended re-dispatch (StuckRunReconcilerService.RedispatchStrandedSuspendedAsync) — it drives the
+        // EXACT same continuation a stranded run would otherwise wait for the ≤2-min sweep to perform.
+        var status = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => (WorkflowRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (status is null) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
+
+        // Only a STRANDED Suspended run continues here: Suspended with NO pending wait. A run still parked on a pending
+        // wait (approval / timer / callback) is legitimately waiting → it resumes via /resume or its wait signal, not
+        // here. A terminal (Failure / Success / Cancelled) or Running run can't continue in place — a Failure is
+        // revived by replay / rerun-from-node, never in place.
+        if (status.Value != WorkflowRunStatus.Suspended) return false;
+
+        var hasPendingWait = await _db.WorkflowRunWait
+            .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending, cancellationToken).ConfigureAwait(false);
+
+        if (hasPendingWait) return false;
+
+        // CAS Suspended → Pending. 0 rows = the reconciler / a concurrent continue already flipped it → no-op (the
+        // dispatcher's own Pending → Enqueued CAS is the final guard against a double-dispatch).
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == WorkflowRunStatus.Suspended)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0) return false;
+
+        // Dispatch AFTER the command's transaction commits (the same post-commit discipline as RunManuallyAsync), so
+        // the dispatcher's Pending → Enqueued CAS sees the committed Pending, not a stale Suspended.
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Workflow run continued by operator. RunId={RunId} TeamId={TeamId}", runId, teamId);
+
+        return true;
+    }
+
     public async Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         // Tenancy + fail-closed: read the run's current status only if it's the caller's team. A foreign / phantom

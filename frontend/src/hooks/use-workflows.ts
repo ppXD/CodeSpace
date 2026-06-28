@@ -373,6 +373,20 @@ export function useResumeRun(runId: string) {
   });
 }
 
+/** Continue a stranded Suspended run (Suspended with no pending wait) on demand — drives the same re-dispatch the reconciler does. */
+export function useContinueRun(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => workflowsApi.continueRun(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["run-phases", runId] });
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+      qc.invalidateQueries({ queryKey: ["team-runs"] });
+    },
+  });
+}
+
 export function useNodeManifests() {
   return useQuery({
     queryKey: ["node-manifests"],

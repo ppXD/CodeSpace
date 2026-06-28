@@ -131,6 +131,16 @@ public interface IWorkflowService
     /// </summary>
     Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Continue a STRANDED Suspended run (Suspended with NO pending wait) on demand — the user-triggered, single-run
+    /// twin of the reconciler's stranded-Suspended re-dispatch. CAS Suspended → Pending then post-commit dispatch,
+    /// driving the SAME continuation the ≤2-min sweep would. TEAM-SCOPED: a foreign run throws
+    /// <see cref="KeyNotFoundException"/> (404). Returns <c>true</c> if this call drove it; <c>false</c> when the run
+    /// is terminal / Running, still parked on a pending wait (use <c>/resume</c>), or the CAS lost to a concurrent
+    /// continue. Idempotent + race-safe (the dispatcher's Pending → Enqueued CAS is the double-dispatch guard).
+    /// </summary>
+    Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
+
     IReadOnlyList<NodeManifestDto> ListNodeManifests();
 
     /// <summary>
