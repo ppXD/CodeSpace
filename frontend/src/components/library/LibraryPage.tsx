@@ -41,11 +41,13 @@ export function LibraryPage() {
       <div className="ct-head" style={{ paddingBottom: 0 }}>
         <div className="ct-crumbs"><span className="cur">Library</span></div>
         <div className="ct-title-row"><h1 className="ct-title">Library</h1></div>
-        {/* One tab today (the packs of agents + skills); the strip leaves room for future Library sections, and
-            hosts Import on its right per the design. */}
+        {/* One section today (the packs of agents + skills); the strip leaves room for future Library sections,
+            and hosts Import on its right per the design. Rendered as a styled label, not an interactive tab —
+            with a single non-clickable section the ARIA tab roles + pointer affordance would mislead; they'd
+            return when a second section makes it a real tablist. */}
         <div className="lib-tabrow">
-          <div className="ct-tabs" role="tablist" aria-label="Library sections">
-            <span className="ct-tab" role="tab" aria-selected="true" data-active="true">
+          <div className="ct-tabs">
+            <span className="ct-tab lib-tab-static" data-active="true">
               Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{totalAgents + totalSkills}</span> : null}
             </span>
           </div>

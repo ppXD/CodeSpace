@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -15,26 +15,30 @@ export function SkillDetailModal({ skillId, onClose }: { skillId: string; onClos
   const skill = useSkill(skillId);
   const remove = useDeleteSkill();
   const confirm = useConfirm();
+  const [confirming, setConfirming] = useState(false);
 
-  // Block dismissal while a delete is in flight so its error can't be lost with the modal.
-  const dismiss = () => { if (!remove.isPending) onClose(); };
+  // Block dismissal while a delete is in flight (so its error can't be lost) or while the layered delete-confirm
+  // is open (so one Escape cancels only that dialog, not this modal underneath it — same guard as the agent editor).
+  const dismiss = () => { if (!remove.isPending && !confirming) onClose(); };
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !remove.isPending) onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !remove.isPending && !confirming) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, remove.isPending]);
+  }, [onClose, remove.isPending, confirming]);
 
   async function handleDelete() {
     const data = skill.data;
     if (!data) return;
 
+    setConfirming(true);
     const ok = await confirm({
       title: "Delete skill?",
       message: (<><strong>{data.name}</strong> will be removed. Any agent that carries it will drop it.</>),
       confirmLabel: "Delete",
       destructive: true,
     });
+    setConfirming(false);
     if (!ok) return;
 
     try {

@@ -435,6 +435,9 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 /* Library / store — packs-as-categories rail (left) + the selected pack's artifacts (right). */
 /* Library tab strip: the underline tabs on the left, the Import action lifted off the row's bottom rule. */
 .acs-root .lib-tabrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 8px; border-bottom: 1px solid var(--line); }
+/* The lone section label looks like an active tab but isn't clickable — suppress the pointer + hover shift. */
+.acs-root .ct-tab.lib-tab-static { cursor: default; }
+.acs-root .ct-tab.lib-tab-static:hover { color: var(--ink); }
 .acs-root .lib-tabrow > .btn { margin-bottom: 7px; }
 .acs-root .lib { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding-top: 16px; align-items: start; }
 /* The source rail sits in its own panel (the "big box" wrapping the pack cards). */
