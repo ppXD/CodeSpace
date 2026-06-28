@@ -12,4 +12,7 @@ namespace CodeSpace.UnitTests.Workflows;
 public sealed class CodexHarnessContractTests : AgentHarnessContractTests
 {
     protected override IAgentHarness Harness { get; } = new CodexHarness();
+
+    protected override (string Line, string ExpectedId) SessionIdLine =>
+        ("{\"type\":\"thread.started\",\"thread_id\":\"thr-contract-codex\"}", "thr-contract-codex");
 }

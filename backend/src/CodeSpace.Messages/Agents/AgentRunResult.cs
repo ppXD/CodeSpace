@@ -49,6 +49,14 @@ public sealed record AgentRunResult
 
     public AgentTokenUsage? TokenUsage { get; init; }
 
+    /// <summary>
+    /// P3.1a: the harness-native session/thread id of the agent's CLI conversation (Claude's <c>session_id</c>,
+    /// Codex's <c>thread_id</c>), captured off the run's event stream. The handle a later rerun threads back as
+    /// <c>--resume &lt;id&gt;</c> / <c>exec resume &lt;id&gt;</c> to CONTINUE the prior conversation instead of cold-starting.
+    /// Null when the stream carried none (a pre-session CLI, or a run that never reached its session-bearing line).
+    /// </summary>
+    public string? SessionId { get; init; }
+
     /// <summary>Failure detail when <see cref="Status"/> is <see cref="AgentRunStatus.Failed"/>.</summary>
     public string? Error { get; init; }
 

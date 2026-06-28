@@ -387,6 +387,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, result.Status)
                 .SetProperty(r => r.ResultJson, resultJson)
+                .SetProperty(r => r.SessionId, result.SessionId)
                 .SetProperty(r => r.Error, result.Error)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
