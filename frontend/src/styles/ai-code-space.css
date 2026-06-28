@@ -3493,6 +3493,32 @@ textarea:-webkit-autofill {
 .mdl .na-list { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 /* The agents pane is narrower than the full modal — list them one per row, not the 2-col choice grid. */
 .mdl .na-list .wf-add-choices { grid-template-columns: 1fr; }
+
+/* Agent-editor skill-binding dropdown — an INLINE (non-modal) multi-select laid out left-right like the Library:
+   a pack rail + the selected pack's skills (server-paged), toggled with a check. It lives inside the editor's
+   scrolling .mdl-body, so it expands in flow rather than floating (which the modal's overflow would clip). */
+.mdl .skb { display: flex; flex-direction: column; align-items: flex-start; }
+.mdl .skb-caret { transition: transform .12s ease; }
+.mdl .skb-caret[data-open="true"] { transform: rotate(180deg); }
+.mdl .skb-panel { align-self: stretch; margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 10px; display: grid; grid-template-columns: 160px 1fr; gap: 12px; height: 300px; }
+.mdl .skb-panel-msg { display: block; height: auto; }
+.mdl .skb-rail { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; min-height: 0; }
+.mdl .skb-rail-item { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; transition: background .12s ease, border-color .12s ease; }
+.mdl .skb-rail-item:hover { background: var(--panel); }
+.mdl .skb-rail-item[data-active="true"] { background: var(--accent-soft); border-color: transparent; }
+.mdl .skb-rail-item:focus-visible { outline: none; border-color: var(--accent); }
+.mdl .skb-rail-name { min-width: 0; flex: 1; font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mdl .skb-rail-sub { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.mdl .skb-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.mdl .skb-search { max-width: none; margin-bottom: 8px; flex: 0 0 auto; }
+.mdl .skb-list { flex: 1 1 auto; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
+.mdl .skb-skill { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; width: 100%; font: inherit; transition: background .12s ease; }
+.mdl .skb-skill:hover:not(:disabled) { background: var(--panel); }
+.mdl .skb-skill[data-on="true"] { background: var(--accent-soft); }
+.mdl .skb-skill:disabled { opacity: .55; cursor: default; }
+.mdl .skb-check { width: 16px; display: grid; place-items: center; color: var(--accent); flex-shrink: 0; }
+.mdl .skb-skill-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mdl .skb-skill-handle { font-size: 11px; color: var(--muted); margin-left: auto; flex-shrink: 0; }
 /* Pager inside a portaled picker modal (the in-page .acs-root .lib-pager rules don't reach here). */
 .mdl .lib-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px 0 2px; }
 .mdl .lib-pager-info { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
