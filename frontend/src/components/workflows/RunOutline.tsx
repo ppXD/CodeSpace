@@ -118,10 +118,11 @@ function PhaseBox({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAg
           <div className="run-outline-aglist">
             <div className="run-outline-aghead"><span>Agent</span><span>Time</span></div>
             {agents.map((a) => {
-              // Prefer the model-authored ROLE (e.g. "agent implementation investigator") as the agent's name —
-              // like Claude Code's task list. Truncated to one line (.run-outline-agname ellipsis); the full role
-              // shows on hover via title= below. Falls back to label / iterationKey / short id when there's no role.
-              const name = a.role ?? a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
+              // Name each agent by the most meaningful authored string — the supervisor's model-authored ROLE, else a
+              // plain node / map agent's GOAL title (so a fan-out branch reads as its subtask, not a structural map#N
+              // key) — unified across run types. Truncated to one line (.run-outline-agname ellipsis); the full text
+              // shows on hover via title= below. Falls back to label / iterationKey / short id when none is present.
+              const name = a.role ?? a.goal ?? a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
               const selected = a.agentRunId === selectedAgentRunId;
               const body = (<><span className="run-outline-agname">{name}</span><span className="run-outline-agtime">{formatDuration(a.durationMs)}</span></>);
 
