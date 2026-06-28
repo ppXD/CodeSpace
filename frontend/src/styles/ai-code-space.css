@@ -3472,6 +3472,27 @@ textarea:-webkit-autofill {
 
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* New-agent "From Library": a wider modal laid out like the Library page — a left rail of packs (the categories)
+   and a right pane with the selected pack's agents (search + server-paged). na-lib is a self-contained scroll
+   region sized to the viewport, so neither the rail nor the list double-scrolls the modal body. */
+.mdl.mdl-wide { width: 760px; }
+.mdl .na-lib { display: grid; grid-template-columns: 200px 1fr; gap: 14px; height: min(440px, 62vh); }
+.mdl .na-rail { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; padding-right: 2px; }
+.mdl .na-rail-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; transition: background .12s ease, border-color .12s ease; }
+.mdl .na-rail-item:hover { background: var(--panel-2); }
+.mdl .na-rail-item[data-active="true"] { background: var(--accent-soft); border-color: transparent; }
+.mdl .na-rail-item:focus-visible { outline: none; border-color: var(--accent); }
+.mdl .na-rail-ic { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line); flex-shrink: 0; }
+.mdl .na-rail-item[data-active="true"] .na-rail-ic { background: var(--panel); color: var(--accent); border-color: transparent; }
+.mdl .na-rail-body { min-width: 0; display: flex; flex-direction: column; }
+.mdl .na-rail-name { font-size: 12.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mdl .na-rail-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.mdl .na-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.mdl .na-search { max-width: none; margin-bottom: 10px; flex: 0 0 auto; }
+.mdl .na-list { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+/* The agents pane is narrower than the full modal — list them one per row, not the 2-col choice grid. */
+.mdl .na-list .wf-add-choices { grid-template-columns: 1fr; }
 /* Pager inside a portaled picker modal (the in-page .acs-root .lib-pager rules don't reach here). */
 .mdl .lib-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px 0 2px; }
 .mdl .lib-pager-info { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
