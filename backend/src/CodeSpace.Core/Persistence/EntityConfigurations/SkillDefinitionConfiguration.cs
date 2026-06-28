@@ -13,6 +13,9 @@ public class SkillDefinitionConfiguration : IEntityTypeConfiguration<SkillDefini
         // Stored as its string name (matches AgentDefinition.Origin); 16 chars covers "Authored"/"Imported".
         builder.Property(s => s.Origin).HasConversion<string>().HasMaxLength(16);
 
+        // Working / Store discriminator, stored as its string name (same convention as Origin).
+        builder.Property(s => s.Scope).HasConversion<string>().HasMaxLength(16);
+
         // Verbatim frontmatter kept as a string (same convention as AgentDefinition.RawFrontmatterJson).
         builder.Property(s => s.RawFrontmatterJson).HasColumnName("raw_frontmatter_jsonb").HasColumnType("jsonb");
 

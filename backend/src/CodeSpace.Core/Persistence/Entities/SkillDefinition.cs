@@ -48,6 +48,18 @@ public class SkillDefinition : IEntity<Guid>, IAuditable
     /// <summary>Path within the pack (e.g. "skills/test-driven-development/SKILL.md"). NULL for an authored skill. With <see cref="PackId"/> this is the unified sync identity.</summary>
     public string? SourcePath { get; set; }
 
+    /// <summary>Working (in the team's skill library, bindable) vs Store (a snapshot, instantiated into working copies). Defaults to Working.</summary>
+    public DefinitionScope Scope { get; set; } = DefinitionScope.Working;
+
+    /// <summary>For a Working copy instantiated from a Store snapshot: that snapshot's id (soft ref, no FK). NULL on snapshots, authored, and grandfathered rows.</summary>
+    public Guid? SourceDefinitionId { get; set; }
+
+    /// <summary>The Store snapshot's content version captured when this copy was instantiated (the LHS of the sync comparison). NULL until instantiated-from-store.</summary>
+    public string? SourceVersion { get; set; }
+
+    /// <summary>A Store snapshot's CURRENT content version — a per-file content hash (the RHS of the sync comparison). NULL on Working rows.</summary>
+    public string? ContentVersion { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
