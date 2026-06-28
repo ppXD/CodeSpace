@@ -22,10 +22,18 @@ public class WorkSessionConfiguration : IEntityTypeConfiguration<WorkSession>
         builder.Property(s => s.Title).HasMaxLength(WorkSession.TitleMaxLength);
         builder.Property(s => s.ScopeJson).HasColumnName("scope_jsonb").HasColumnType("jsonb");
 
+        // The MRU sort key carries a store DEFAULT now() (migration 0089) — so any writer that doesn't set it (the
+        // service open path does) still lands a real instant, never 0001-01-01. EF sends an explicit value when set.
+        builder.Property(s => s.LastActivityAt).HasDefaultValueSql("now()");
+
         builder.HasOne(s => s.Team).WithMany().HasForeignKey(s => s.TeamId);
 
         // "List a team's sessions, newest first" — the session-index access path. Created_date DESC
         // serves both the all-sessions and open-only views (Status is a cheap recheck-tier filter).
         builder.HasIndex(s => new { s.TeamId, s.CreatedDate });
+
+        // "List a team's sessions, most-recently-active first" — the MRU sessions-index keyset path (the read API's
+        // ListAsync). Mirror migration 0089_work_session_last_activity.sql (last_activity_at DESC, id DESC).
+        builder.HasIndex(s => new { s.TeamId, s.LastActivityAt });
     }
 }

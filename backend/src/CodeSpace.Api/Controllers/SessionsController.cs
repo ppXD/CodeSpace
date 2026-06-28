@@ -1,0 +1,37 @@
+using CodeSpace.Messages.Queries.Sessions;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+
+namespace CodeSpace.Api.Controllers;
+
+/// <summary>
+/// REST surface for the SESSION resource — a work thread (one <c>WorkSession</c>) the user reads as a conversation of
+/// turns (each turn = one run). Rooted FLAT at <c>api/sessions</c>; team scope comes from <c>ICurrentTeam</c> in the
+/// handlers, never the body. READ-ONLY — a thread is CONTINUED by launching a run with its <c>sessionId</c>
+/// (<c>POST api/workflows/runs</c>), and the run-anchored thread lookup is <c>api/workflows/runs/{runId}/session</c>, so
+/// there is no write action here. Every action is a thin mediator dispatch (Rule 16).
+/// </summary>
+[ApiController]
+[Route("api/sessions")]
+public class SessionsController : ControllerBase
+{
+    private readonly IMediator _mediator;
+
+    public SessionsController(IMediator mediator) { _mediator = mediator; }
+
+    /// <summary>The team's sessions index — every work thread, most-recently-active first, keyset-paginated. Team-scoped.</summary>
+    [HttpGet]
+    public async Task<IActionResult> List([FromQuery] ListTeamSessionsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>One thread as a conversation — its turns (each turn = a run; reruns nested as attempts). Team-scoped; foreign / absent → 404.</summary>
+    [HttpGet("{sessionId:guid}")]
+    public async Task<IActionResult> Get([FromRoute] Guid sessionId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetSessionDetailQuery { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+}

@@ -78,6 +78,14 @@ public class WorkSession : IEntity<Guid>, IAuditable
     /// </summary>
     public int LastTurnIndex { get; set; } = 1;
 
+    /// <summary>
+    /// The thread's most-recent activity instant — the MRU ordering key for the sessions index (newest first). Stamped
+    /// at <c>WorkSessionService</c> open (= creation) and bumped on every continue (a new top-level turn). A denormalised
+    /// sort key so the index rides <c>(team_id, last_activity_at DESC, id DESC)</c> with no correlated MAX(run) sort.
+    /// (Run-completion bumps are a later refinement — open + continue already track the user-perceived activity.)
+    /// </summary>
+    public DateTimeOffset LastActivityAt { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
