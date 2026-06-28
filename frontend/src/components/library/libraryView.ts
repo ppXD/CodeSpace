@@ -1,8 +1,8 @@
-import type { PackArtifactSummary, PackSummary } from "@/api/packs";
+import type { PackSummary } from "@/api/packs";
 
 /**
- * Pure view helpers for the Library/store page — kept out of the component so the rail subtitle and the
- * agent/skill split are unit-testable without rendering. No React, no fetching.
+ * Pure view helpers for the Library/store page — kept out of the component so the rail subtitle, the detail-tab
+ * reconciliation and the pack-selection are unit-testable without rendering. No React, no fetching.
  */
 
 /** Compact "N agents · M skills" subtitle for a pack row / detail header. Empty pack ⇒ "empty". */
@@ -12,14 +12,6 @@ export function countLabel(agentCount: number, skillCount: number): string {
   if (skillCount > 0) parts.push(`${skillCount} ${skillCount === 1 ? "skill" : "skills"}`);
 
   return parts.length === 0 ? "empty" : parts.join(" · ");
-}
-
-/** Split a pack's artifacts into its agent + skill sections, preserving the server's display order within each. */
-export function splitArtifacts(artifacts: PackArtifactSummary[]): { agents: PackArtifactSummary[]; skills: PackArtifactSummary[] } {
-  return {
-    agents: artifacts.filter((a) => a.kind === "Agent"),
-    skills: artifacts.filter((a) => a.kind === "Skill"),
-  };
 }
 
 /**
