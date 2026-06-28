@@ -25,7 +25,9 @@ public sealed class RunRecordTimelineSource : IRunTimelineSource, IScopedDepende
     {
         var records = await LoadRecordsAsync(context.RunId, cancellationToken).ConfigureAwait(false);
 
-        return records.Select(RunRecordTimelineMap.ToEvent).OfType<RunTimelineEvent>().ToList();
+        // Project (not a bare per-record map) so the durable-RESUME mechanics fold: only the first RunStarted is a
+        // milestone, every later RunStarted + all RunReplayed become foldable Detail (see RunRecordTimelineMap.Project).
+        return RunRecordTimelineMap.Project(records);
     }
 
     /// <summary>The run's ledger records in ledger order (Sequence). The run is already team-checked by the projector, so reading by RunId is in-scope. AsNoTracking — pure read.</summary>

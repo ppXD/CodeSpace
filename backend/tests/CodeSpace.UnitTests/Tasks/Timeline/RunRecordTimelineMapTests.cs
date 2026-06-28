@@ -85,13 +85,14 @@ public class RunRecordTimelineMapTests
     }
 
     [Theory]
-    // Run lifecycle, a node FAILURE, and a retry are milestones; the per-node started/completed/waiting/skipped churn folds.
+    // Run lifecycle, a node FAILURE, and a retry are milestones; the per-node started/completed/waiting/skipped churn
+    // folds. RunReplayed is a resume mechanic (always Detail); a RESUME's repeated RunStarted is demoted by Project.
     [InlineData(WorkflowRunRecordTypes.RunStarted, TimelineLevel.Milestone)]
     [InlineData(WorkflowRunRecordTypes.RunCompleted, TimelineLevel.Milestone)]
     [InlineData(WorkflowRunRecordTypes.RunFailed, TimelineLevel.Milestone)]
-    [InlineData(WorkflowRunRecordTypes.RunReplayed, TimelineLevel.Milestone)]
     [InlineData(WorkflowRunRecordTypes.NodeFailed, TimelineLevel.Milestone)]
     [InlineData(WorkflowRunRecordTypes.AttemptFailed, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.RunReplayed, TimelineLevel.Detail)]
     [InlineData(WorkflowRunRecordTypes.NodeStarted, TimelineLevel.Detail)]
     [InlineData(WorkflowRunRecordTypes.NodeCompleted, TimelineLevel.Detail)]
     [InlineData(WorkflowRunRecordTypes.NodeSuspended, TimelineLevel.Detail)]
@@ -99,6 +100,30 @@ public class RunRecordTimelineMapTests
     public void Levels_milestones_above_structural_node_churn(string recordType, TimelineLevel expected)
     {
         RunRecordTimelineMap.ToEvent(Record(recordType, nodeId: "code")).ShouldNotBeNull().Level.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Project_keeps_only_the_first_RunStarted_a_milestone_and_folds_every_resume_into_detail()
+    {
+        // The engine writes RunStarted on every dispatch + RunReplayed on every resume; a supervisor suspends/resumes
+        // once per turn, so these repeat. Only the FIRST RunStarted is a milestone — the rest, and all RunReplayed,
+        // fold so the story isn't drowned by the resume mechanic.
+        var records = new[]
+        {
+            Record(WorkflowRunRecordTypes.RunStarted, sequence: 1),                                  // first dispatch — the milestone
+            Record(WorkflowRunRecordTypes.NodeSuspended, nodeId: "sup", sequence: 2),                // turn 1 parks
+            Record(WorkflowRunRecordTypes.RunStarted, sequence: 3),                                  // resume re-dispatch — DETAIL
+            Record(WorkflowRunRecordTypes.RunReplayed, sequence: 4),                                 // resume replay — DETAIL
+            Record(WorkflowRunRecordTypes.NodeStarted, nodeId: "sup", sequence: 5),                  // sup re-enters — DETAIL
+            Record(WorkflowRunRecordTypes.RunFailed, payloadJson: """{"error":"gateway timed out"}""", sequence: 6),
+        };
+
+        var events = RunRecordTimelineMap.Project(records);
+
+        var levelByTitle = events.ToLookup(e => e.Title);
+        levelByTitle["Run started"].Select(e => e.Level).ShouldBe(new[] { TimelineLevel.Milestone, TimelineLevel.Detail }, "first RunStarted milestone, the resume RunStarted folds");
+        levelByTitle["Run replayed"].ShouldHaveSingleItem().Level.ShouldBe(TimelineLevel.Detail, "a replay is always a resume mechanic");
+        levelByTitle["Run failed"].ShouldHaveSingleItem().Level.ShouldBe(TimelineLevel.Milestone, "the real outcome stays a milestone");
     }
 
     [Fact]
