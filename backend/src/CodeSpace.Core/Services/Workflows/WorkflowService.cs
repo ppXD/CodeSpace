@@ -703,11 +703,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary><paramref name="exemptMapId"/> (D7-4) exempts EXACTLY that one map id from the container arm — it is the
     /// rerun-by-branch target, which re-enters + replays its siblings. Every OTHER map, every Loop/Try, and every
-    /// suspendable node stays refused (fail-closed). The from-node path passes null → no exemption (byte-identical).</summary>
+    /// suspendable node stays refused (fail-closed). The from-node path passes null → no exemption. Delegates to the
+    /// generic <see cref="Rerun.RerunDispositions"/> seam (byte-identical to the prior CanSuspend/Map/Loop/Try disjunction).</summary>
     private static bool IsRerunUnsupported(NodeManifest manifest, string nodeId, string? exemptMapId) =>
-        manifest.CanSuspend
-        || (manifest.Kind == NodeKind.Map && nodeId != exemptMapId)
-        || manifest.Kind is NodeKind.Loop or NodeKind.Try;
+        !Rerun.RerunDispositions.Admits(manifest, Rerun.RerunContext.FromNodeRoot, nodeId, exemptMapId);
 
     /// <summary>
     /// The kept (reused) top-level cells to pre-seed = the plan's KEPT set intersected with the original's

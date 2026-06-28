@@ -1054,6 +1054,35 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public void RerunDispositions_over_the_real_registry_match_the_frozen_from_node_gate_and_classify_agentcode_distinctly()
+    {
+        // DRIFT-DETECTOR over the REAL registry for the FROM-NODE gate seam (the companion to the branch-policy one
+        // above): every live node's disposition-based from-node admit equals the FROZEN pre-refactor IsRerunUnsupported
+        // negation, AND agent.code is the SOLE node earning ReStageExternalRun — the one node P2.2's single from-node
+        // arm will admit — while every other suspendable node is fail-closed RefuseSuspendable.
+        static bool OldUnsupported(NodeManifest m, string nodeId, string? exemptMapId) =>
+            m.CanSuspend || (m.Kind == NodeKind.Map && nodeId != exemptMapId) || m.Kind is NodeKind.Loop or NodeKind.Try;
+
+        using var scope = _fixture.BeginScope();
+        var registry = scope.Resolve<INodeRegistry>();
+
+        // exempt cases: no exemption, this node IS the exempt target, and SOME OTHER map is exempt (the
+        // `Map && nodeId != exemptMapId` non-exempt branch — exercised live, not just in the unit cube).
+        foreach (var n in registry.All)
+        foreach (var exemptMapId in new[] { (string?)null, n.TypeKey, "__some_other_map__" })
+            RerunDispositions.Admits(n.Manifest, RerunContext.FromNodeRoot, n.TypeKey, exemptMapId)
+                .ShouldBe(!OldUnsupported(n.Manifest, n.TypeKey, exemptMapId), $"from-node gate drifted for {n.TypeKey} exempt={exemptMapId ?? "null"}");
+
+        var reStage = registry.All.Where(n => RerunDispositions.For(n.Manifest) == RerunDisposition.ReStageExternalRun).Select(n => n.TypeKey).OrderBy(k => k).ToList();
+        reStage.ShouldHaveSingleItem().ShouldBe("agent.code", "agent.code is the SOLE ReStageExternalRun — the node P2.2's one-line from-node flip will open");
+
+        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code")
+            .ShouldAllBe(n => RerunDispositions.For(n.Manifest) == RerunDisposition.RefuseSuspendable, "every other suspendable node is fail-closed RefuseSuspendable");
+
+        registry.All.Select(n => RerunDispositions.For(n.Manifest)).Distinct().Count().ShouldBeGreaterThan(1, "the live registry spans multiple dispositions (non-vacuous)");
+    }
+
+    [Fact]
     public async Task Rerun_map_branch_with_a_nested_container_body_is_refused()
     {
         // A nested flow.map inside the target map's body is rerun-unsupported in v1 (the body scan refuses any

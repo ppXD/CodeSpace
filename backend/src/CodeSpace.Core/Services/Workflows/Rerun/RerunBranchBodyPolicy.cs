@@ -48,9 +48,7 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 /// </summary>
 public static class RerunBranchBodyPolicy
 {
-    /// <summary>True iff a node with this manifest is REFUSED as a re-run map-branch body (fail-closed allowlist).</summary>
+    /// <summary>True iff a node with this manifest is REFUSED as a re-run map-branch body (fail-closed allowlist). Delegates to the generic <see cref="RerunDispositions"/> seam (byte-identical to the prior un-opted-suspendable / both-flagged / nested-container disjunction).</summary>
     public static bool IsRefusedAsBranchBody(NodeManifest manifest) =>
-        (manifest.CanSuspend && !manifest.IsRerunnableWhenSuspendable)   // un-opted suspendable: strands / forks-ungated-child / distinct-shape
-        || (manifest.IsSideEffecting && manifest.CanSuspend)             // both-flagged (chat.post_message): D7-3 gate can't compose with the node's own suspend
-        || manifest.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;   // nested container: separate hard problem (the one-level scan is complete only because of this arm)
+        !RerunDispositions.Admits(manifest, RerunContext.ContainerBody, nodeId: string.Empty, exemptMapId: null);
 }
