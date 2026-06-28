@@ -97,6 +97,9 @@ public static class SupervisorOutcome
     /// <summary>Read the human's free-text answer (the <c>comment</c>) from a resolved Action wait's <c>{ action, by, comment }</c> payload. Empty string when absent/malformed (a click with no comment). The rehydrate fold AND the executor's resolved-wait recovery both read the answer through here.</summary>
     public static string ReadAnswerComment(string? payloadJson) => ReadStringField(payloadJson, "comment") ?? "";
 
+    /// <summary>The model-authored closing line a <c>stop</c> outcome recorded — the <c>summary</c> field <c>ExecuteStop</c> wrote to <c>{ stopped, outcome, summary }</c>. The run's "here's what I did" narration; null when absent / malformed.</summary>
+    public static string? ReadStopSummary(string? outcomeJson) => ReadStringField(outcomeJson, "summary");
+
     /// <summary>Best-effort read of a top-level string field from an outcome object (null when absent / malformed / not a string).</summary>
     private static string? ReadStringField(string? outcomeJson, string field)
     {

@@ -34,4 +34,20 @@ public class SessionsController : ControllerBase
         var result = await _mediator.Send(new GetSessionDetailQuery { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
+
+    /// <summary>The backend-authored Session Room for the session a run belongs to, focused on that run's turn — the AI work transcript the frontend renders by block type. Team-scoped; foreign / session-less / absent → 404.</summary>
+    [HttpGet("by-run/{runId:guid}/room")]
+    public async Task<IActionResult> RunRoom([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRunRoomQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>The Session Room for a session, focused on <c>focusRunId</c>'s turn when given (else the latest turn). Team-scoped; foreign / absent → 404.</summary>
+    [HttpGet("{sessionId:guid}/room")]
+    public async Task<IActionResult> SessionRoom([FromRoute] Guid sessionId, [FromQuery] GetSessionRoomQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
 }

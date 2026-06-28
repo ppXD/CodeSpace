@@ -58,6 +58,9 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>High base offset for the model-authored SEMANTIC PHASES (L4 arc C) — they sort AFTER both the structural node phases AND the per-decision tape, as their own top-level band on the board.</summary>
     public const int PhaseOrderBase = 2_000_000;
 
+    /// <summary>The <see cref="RunPhase.Kind"/> of a model-authored semantic phase (L4 arc C) — the shared discriminator the room projector reads to separate "the plan's shape" (the map) from "the decision tape" (the narrative).</summary>
+    public const string AuthoredPhaseKind = "phase";
+
     /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses (and the optional live duration/tool-count extras) → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim). The compact (model/tokens) folds from the ledger; <paramref name="extrasByAgent"/> carries the figures that don't (duration, tool count) — omitted leaves those ref fields null.</summary>
     public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunExtras>? extrasByAgent = null)
     {
@@ -103,7 +106,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         {
             Id = $"phase-{phase.Id}",
             Label = phase.Title,
-            Kind = "phase",
+            Kind = AuthoredPhaseKind,
             Status = PhaseStatusFromAgents(agents),
             Order = PhaseOrderBase + index,
             Agents = agents,
@@ -314,10 +317,12 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         _ => decision.DecisionKind,
     };
 
-    /// <summary>For ask_human: the question, joined with the human's answer when one has been folded in. Otherwise the failure reason (when terminal-failed). Null when neither.</summary>
+    /// <summary>For ask_human: the question, joined with the human's answer when one has been folded in. For stop: the model's closing summary (else the failure reason). Otherwise the failure reason (when terminal-failed). Null when neither.</summary>
     private static string? SummaryFor(SupervisorDecisionRecord decision)
     {
         if (decision.DecisionKind == SupervisorDecisionKinds.AskHuman) return AskHumanSummary(decision);
+
+        if (decision.DecisionKind == SupervisorDecisionKinds.Stop) return SupervisorOutcome.ReadStopSummary(decision.OutcomeJson) ?? decision.Error;
 
         return decision.Error;
     }
