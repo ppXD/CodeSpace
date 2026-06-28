@@ -6,10 +6,10 @@ import { toolsLabel } from "./agentRuntime";
 import { RoleAvatar, RoleBadge } from "./roleBadge";
 
 /**
- * One agent on the bench — a role-tinted card that reads like a character sheet: identity (avatar; the name on
- * its own line, then @handle + the role badge pinned to a fixed second line so it never shifts with name length),
- * a one-line runtime spec (model · autonomy · tools), then a divider and the skills it carries as tokens. The
- * role is a display-only heuristic (see deriveRole). Click / Enter opens the editor.
+ * One agent on the bench — a role-tinted card that reads like a character sheet: identity (avatar; the name with
+ * its role badge alongside on line one — the name truncates so the badge keeps its place — then @handle on line
+ * two), a one-line runtime spec (model · autonomy · tools), then a divider and the skills it carries as tokens.
+ * The role is a display-only heuristic (see deriveRole). Click / Enter opens the editor.
  */
 export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; onOpen: () => void }) {
   const role = deriveRole(agent);
@@ -27,10 +27,10 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
         <div className="ab-id">
           <div className="ab-namerow">
             <span className="ab-name" title={agent.name}>{agent.name}</span>
+            <RoleBadge role={role} />
           </div>
           <div className="ab-subrow">
             <span className="ab-handle">@{agent.slug}</span>
-            <RoleBadge role={role} />
           </div>
           {agent.description && <div className="ab-desc" title={agent.description}>{agent.description}</div>}
         </div>
