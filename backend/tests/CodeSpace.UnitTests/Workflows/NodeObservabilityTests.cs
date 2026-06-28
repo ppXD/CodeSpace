@@ -169,6 +169,7 @@ public class NodeObservabilityTests
         }
 
         // ─── Unused members — these tests only exercise external_call.* ─────────
+        public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
         public Task RunQueuedAsync(Guid runId, string sourceType, Guid? actorId, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RunStartedAsync(Guid runId, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task ReleaseLoadedAsync(Guid runId, int version, string definitionHash, int nodeCount, int edgeCount, CancellationToken cancellationToken) => Task.CompletedTask;

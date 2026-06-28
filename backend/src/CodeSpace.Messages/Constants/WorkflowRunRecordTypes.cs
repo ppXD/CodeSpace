@@ -106,6 +106,22 @@ public static class WorkflowRunRecordTypes
     /// <summary>External call threw (network error, non-2xx with retry-exhausted, etc). Payload: {"target":"...","error":"...","duration_ms":N}.</summary>
     public const string ExternalCallFailed = "external_call.failed";
 
+    // ─── Model interactions (the generic LLM/reasoning capture) ───────────────
+    // Paired by correlation_id, exactly like external_call.* — one .started + one .completed (or
+    // .failed). An OPEN `kind` payload field names the step (supervisor.decision / planner.plan /
+    // llm.complete.node / any future caller), so the SAME three types carry every model-touching
+    // step with no per-caller record type. Prompt / completion / reasoning ride the payload inline
+    // when small, else as a {"$artifact_id":...} ref. Captured generically at the LLM-client seam.
+
+    /// <summary>A model call began. Payload: {"kind":"...","model":"...","params":{...},"prompt":{"system":...,"user":...}} — prompt fields inline-or-$artifact_id.</summary>
+    public const string InteractionStarted = "interaction.started";
+
+    /// <summary>A model call returned. Payload: {"kind":"...","model":"...","usage":{"inputTokens":N,"outputTokens":N,"finishReason":"..."},"output":...} — output inline-or-$artifact_id.</summary>
+    public const string InteractionCompleted = "interaction.completed";
+
+    /// <summary>A model call threw. Payload: {"kind":"...","error":"...","category"?:"..."}.</summary>
+    public const string InteractionFailed = "interaction.failed";
+
     // ─── Log lines ────────────────────────────────────────────────────────────
 
     /// <summary>Free-form log line emitted by a node. Payload: {"level":"info|warn|error","message":"..."}.</summary>

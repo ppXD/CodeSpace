@@ -269,7 +269,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             scope.Resolve<IDecisionQueueService>(),
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
-            scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }

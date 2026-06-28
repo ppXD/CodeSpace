@@ -94,7 +94,7 @@ public class SupervisorTurnServiceTests
             ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
 
         // A decider that would NEVER stop on its own — proving the budget, not the decider, terminates.
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
@@ -116,7 +116,7 @@ public class SupervisorTurnServiceTests
         // — the same forward-compat exposure a future irreversible/merge-PR policy would open. Asserts the gate
         // turns the denied side effect into a force-STOP carrying the GovernanceDenied reason and stages NO agent.
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 0, ApprovalPolicy = (SupervisorApprovalPolicy)999 };
         var spawn = new SupervisorDecision { Kind = kind, PayloadJson = """{"subtaskIds":["a","b"]}""" };
@@ -138,7 +138,7 @@ public class SupervisorTurnServiceTests
         // The safety floor wired end-to-end through the REAL gate: under None (autonomous) a spawn runs unchanged,
         // but a resolve — which dispatches an agent to autonomously RE-MERGE code — escalates to a human approval
         // card (it parks), because GateSideEffectingDecision passes irreversible=IsIrreversible(kind) for resolve.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         var context = new SupervisorTurnContext { Goal = "goal", SupervisorRunId = _runId, TeamId = _teamId, NodeId = "sup", TurnNumber = 1, ApprovalPolicy = SupervisorApprovalPolicy.None, ConversationId = Guid.NewGuid() };
 
@@ -416,7 +416,7 @@ public class SupervisorTurnServiceTests
     {
         var ledger = new FakeSupervisorDecisionLog();
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         // First pass: turn 0 (plan) executes once + records terminal.
         await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
@@ -455,7 +455,7 @@ public class SupervisorTurnServiceTests
 
         var decider = new NonDeterministicDecider(SupervisorDecisionKinds.Plan, plannedA, SupervisorDecisionKinds.Stop, """{"reason":"divergent-B"}""");
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, decider, executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, decider, executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
@@ -473,12 +473,12 @@ public class SupervisorTurnServiceTests
     }
 
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
-        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
     // ── L4 P1 stop-acceptance test helpers ──────────────────────────────────────────
 
     private SupervisorTurnService ServiceWith(FakeSupervisorDecisionLog ledger, ISupervisorDecider decider, FakeAcceptanceGrader grader) =>
-        new(ledger, decider, new StubSupervisorActionExecutor(), db: null!, grader, new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, decider, new StubSupervisorActionExecutor(), db: null!, grader, new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
     private static SupervisorDecision StopDecision() => new() { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" };
 
