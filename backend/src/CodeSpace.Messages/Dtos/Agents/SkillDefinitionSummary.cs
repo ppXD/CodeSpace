@@ -7,6 +7,9 @@ namespace CodeSpace.Messages.Dtos.Agents;
 /// <c>Body</c> — the whole point of skills is progressive disclosure, so a library of hundreds stays cheap to
 /// list (name + description + grouping only); the body is fetched per-skill via the detail read. <see cref="PackId"/>
 /// + <see cref="Origin"/> let the UI show which library a skill came from (a store concept) vs an authored one.
+/// <see cref="SourceDefinitionId"/> is the Library STORE snapshot a working copy was instantiated from — it lets
+/// the skill-binding picker recognise that an already-bound working skill IS a copy of a given store skill, so a
+/// re-open shows it as bound instead of minting a duplicate.
 /// </summary>
 public sealed record SkillDefinitionSummary
 {
@@ -18,5 +21,6 @@ public sealed record SkillDefinitionSummary
     public string? Category { get; init; }
     public required SkillDefinitionOrigin Origin { get; init; }
     public Guid? PackId { get; init; }
+    public Guid? SourceDefinitionId { get; init; }
     public required DateTimeOffset CreatedDate { get; init; }
 }

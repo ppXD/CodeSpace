@@ -13,6 +13,8 @@ export interface SkillSummary {
   category: string | null;
   origin: SkillDefinitionOrigin;
   packId: string | null;
+  /** The Library STORE snapshot this working skill was instantiated from (null for hand-authored skills). Lets the binding picker recognise an already-bound copy of a store skill. */
+  sourceDefinitionId: string | null;
   createdDate: string;
 }
 

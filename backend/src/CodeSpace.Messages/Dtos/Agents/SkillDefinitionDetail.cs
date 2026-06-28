@@ -19,6 +19,7 @@ public sealed record SkillDefinitionDetail
     public required string RawFrontmatterJson { get; init; }
     public required SkillDefinitionOrigin Origin { get; init; }
     public Guid? PackId { get; init; }
+    public Guid? SourceDefinitionId { get; init; }
     public string? SourcePath { get; init; }
     public required DateTimeOffset CreatedDate { get; init; }
 }

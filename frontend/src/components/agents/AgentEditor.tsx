@@ -262,7 +262,11 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
  */
 function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
-  const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
+  const list = skills.data ?? [];
+  const labels = skillLabels(list, boundSkills ?? []);
+  // working-skill id → the store snapshot it was instantiated from — lets the picker recognise an already-bound
+  // working skill as a copy of a given store skill, so re-opening shows it bound instead of minting a duplicate.
+  const sourceByWorking = new Map(list.flatMap((s) => (s.sourceDefinitionId ? [[s.id, s.sourceDefinitionId] as const] : [])));
 
-  return <SkillBindingDropdown selected={selected} onChange={onChange} labelFor={(id) => labels.get(id) ?? "skill"} />;
+  return <SkillBindingDropdown selected={selected} onChange={onChange} labelFor={(id) => labels.get(id) ?? "skill"} sourceByWorking={sourceByWorking} />;
 }
