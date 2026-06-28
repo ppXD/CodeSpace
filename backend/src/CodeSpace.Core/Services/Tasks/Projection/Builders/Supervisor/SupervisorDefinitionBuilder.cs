@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
@@ -91,6 +92,11 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // structured-capable brain, so the build stays pure + a bare supervisor still validates (it just fails closed
         // at decide time — the honest floor).
         AddIfPresent(config, "supervisorModelId", context.SupervisorBrainModelId?.ToString());
+        // The decision-critic mode + its reviewer model — baked so every turn + replay reads the same critic config.
+        // None (the default) ⇒ omitted ⇒ the critic decorator is a pure passthrough ⇒ byte-identical. Baked as the enum's
+        // INT (the supervisor config deserializer has no string-enum converter), round-tripping to ReviewMode by default.
+        AddIfPresent(config, "decisionReviewMode", context.DecisionReviewMode == ReviewMode.None ? (object?)null : (int)context.DecisionReviewMode);
+        AddIfPresent(config, "reviewerModelId", context.ReviewerModelId?.ToString());
         // The operator's allowed model pool (credentialed-model row ids) for the agents this supervisor dispatches —
         // baked as a string-uuid array onto the node's allowedModelIds, where a dispatched model out of the pool fails
         // closed. Omitted (null) when empty, so a bare supervisor draws from all the team's models — byte-identical.

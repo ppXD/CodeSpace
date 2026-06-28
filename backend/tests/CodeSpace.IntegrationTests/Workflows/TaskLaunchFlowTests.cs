@@ -463,6 +463,44 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_decision_critic_config_into_the_supervisor_snapshot()
+    {
+        // The operator's decision-critic mode + reviewer model must bind through the command path → TaskBuildContext →
+        // the supervisor node's decisionReviewMode (baked as the enum int) + reviewerModelId, where the critic decorator
+        // reads them durably each turn + replay. Unset ⇒ omitted ⇒ None ⇒ the decorator is a pure passthrough
+        // (byte-identical — the other deep tests exercise that default path).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var reviewerRow = await FirstTeamPoolRowAsync(teamId);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                DecisionReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRow,
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorDecisionReviewMode(run.DefinitionSnapshotJson!).ShouldBe((int)ReviewMode.Improve,
+                "the operator's decision-review mode binds into the supervisor config as the enum int");
+            ReadSupervisorReviewerModelId(run.DefinitionSnapshotJson!).ShouldBe(reviewerRow.ToString(),
+                "the operator's reviewer model binds into the supervisor config");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_deep_launch_bakes_the_operator_working_dir_mode_into_the_supervisor_snapshot()
     {
         // The operator's multi-repo working-dir choice (wire "workspace") must bind through the command → TaskBuildContext
@@ -1276,6 +1314,24 @@ public class TaskLaunchFlowTests
         if (!sup.GetProperty("config").TryGetProperty("allowedTools", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
 
         return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's <c>decisionReviewMode</c> (the baked int) out of the frozen snapshot. Null when absent (None ⇒ no critic, byte-identical).</summary>
+    private static int? ReadSupervisorDecisionReviewMode(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("decisionReviewMode", out var v) ? v.GetInt32() : null;
+    }
+
+    /// <summary>Reads the supervisor node's <c>reviewerModelId</c> out of the frozen snapshot. Null when absent (the critic auto-picks).</summary>
+    private static string? ReadSupervisorReviewerModelId(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("reviewerModelId", out var v) ? v.GetString() : null;
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

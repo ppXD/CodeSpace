@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Dtos.Decisions;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Agents;
 
@@ -125,6 +126,15 @@ public sealed record SupervisorTurnContext
 
     /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModelIds"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
     public Guid? SupervisorModelId { get; init; }
+
+    /// <summary>How (if at all) an INDEPENDENT critic reviews each turn's decision before its side effect (carried from <c>SupervisorGoalConfig.DecisionReviewMode</c>). <see cref="ReviewMode.None"/> (the default) ⇒ the critic decorator is a pure passthrough ⇒ byte-identical. <see cref="ReviewMode.Improve"/> ⇒ one bounded re-decide against the critique. Baked durably so every turn + replay reads the same mode.</summary>
+    public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW id the decision critic runs on (carried from <c>SupervisorGoalConfig.ReviewerModelId</c>). Null ⇒ the critic auto-picks the team's strongest structured-eligible brain. Only consulted when <see cref="DecisionReviewMode"/> is not <see cref="ReviewMode.None"/>.</summary>
+    public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>TRANSIENT (never baked): the critic's critique folded in for ONE bounded re-decide. Set ONLY by the critic decorator's second <c>DecideAsync</c> call (with <see cref="DecisionReviewMode"/> reset to None to prevent recursion); the decider renders it into its prompt so the model revises against it. Null on the first decide.</summary>
+    public string? ReviewerCritique { get; init; }
 
     /// <summary>
     /// The PENDING decisions this run's CHILD agent runs raised and are blocked on (Decision substrate D4c-2), read off
