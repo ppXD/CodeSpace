@@ -53,7 +53,7 @@ export function LibraryPage() {
               Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{totalAgents + totalSkills}</span> : null}
             </span>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="lib-tabrow-actions">
             <button type="button" className="btn" onClick={() => setAdding(true)}><Ic.Plus size={14} /> Add</button>
             <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
           </div>

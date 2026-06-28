@@ -441,6 +441,8 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ct-tab.lib-tab-static { cursor: default; }
 .acs-root .ct-tab.lib-tab-static:hover { color: var(--ink); }
 .acs-root .lib-tabrow > .btn { margin-bottom: 7px; }
+/* The Add + Import action group sits at the row's bottom edge; lift it off the ct-head divider so the buttons aren't flush against the line. */
+.acs-root .lib-tabrow-actions { display: flex; gap: 8px; margin-bottom: 12px; }
 /* On the Library page the body itself does NOT scroll — the rail + detail boxes own their overflow (grid stretch
    keeps them level), so the page stays a fixed two-box layout no matter how many artifacts a pack has. */
 .acs-root .ct-body.lib-body { overflow: hidden; min-height: 0; }
@@ -472,6 +474,8 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .lib-dtab[data-on="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
 .acs-root .lib-dtab[data-on="true"] svg { color: var(--accent); }
 .acs-root .lib-dtab-c { color: var(--muted-2); font-size: 11px; }
+/* The first artifact row sits right under the tabs — drop its top border so it doesn't read as a second line hugging the tab control. */
+.acs-root .lib-dtabs + .lib-art { border-top: none; }
 /* The pager sits below the list, centered. */
 .acs-root .lib-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 4px; border-top: 1px solid var(--line); margin-top: 4px; }
 .acs-root .lib-pager-info { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
