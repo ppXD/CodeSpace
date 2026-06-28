@@ -28,8 +28,10 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
 
     public async Task<IReadOnlyList<AgentDefinitionSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken)
     {
+        // The bench lists only WORKING personas — the @-mentionable, runnable agents. Store snapshots (Origin=Imported,
+        // Scope=Store) live in the Library and are reached through GetAsync via the editor, never on this list.
         var rows = await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.DeletedDate == null)
+            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null)
             .OrderBy(a => a.CreatedDate)
             .Select(SummaryProjection())
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -206,8 +208,10 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
 
     private async Task EnsureSlugAvailableAsync(Guid teamId, string slug, string requestedName, CancellationToken cancellationToken)
     {
+        // Only WORKING handles must be unique — that's what the team-slug index enforces. A Library STORE snapshot may
+        // share the handle, so it must NOT block authoring/importing a runnable persona of the same name.
         var exists = await _db.AgentDefinition.AsNoTracking()
-            .AnyAsync(a => a.TeamId == teamId && a.Slug == slug && a.DeletedDate == null, cancellationToken)
+            .AnyAsync(a => a.TeamId == teamId && a.Slug == slug && a.Scope == DefinitionScope.Working && a.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
 
         if (exists) throw SlugTakenError(slug, requestedName, null);

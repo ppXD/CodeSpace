@@ -7,11 +7,11 @@ namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// EF-backed <see cref="IPackImportService"/>. Composes the proven pieces — <see cref="IPackSourceFetcher"/>
-/// (host-allowlist + clone-to-temp) → <see cref="IPackSourceWalker"/> (recursive agent + skill discovery) → a
-/// per-team conflict check — into the unified URL preview. The transient clone is disposed as soon as discovery
-/// finishes (the <c>using</c>), so a preview leaves nothing on disk. Slug derivation reuses
-/// <see cref="AgentDefinitionService.DeriveSlug"/> (the same handle rule authoring/import already use), and
-/// importability mirrors the agent-only preview: parseable + named + no active-slug conflict.
+/// (host-allowlist + clone-to-temp) → <see cref="IPackSourceWalker"/> (recursive agent + skill discovery) into the
+/// unified URL preview. The transient clone is disposed as soon as discovery finishes (the <c>using</c>), so a
+/// preview leaves nothing on disk. Slug derivation reuses <see cref="AgentDefinitionService.DeriveSlug"/> (the same
+/// handle rule authoring/import already use). Imports land as STORE snapshots, which carry no unique handle, so
+/// importability is simply parseable + named — there is no team-slug conflict to check.
 /// </summary>
 public sealed partial class PackImportService : IPackImportService, IScopedDependency
 {
@@ -32,25 +32,21 @@ public sealed partial class PackImportService : IPackImportService, IScopedDepen
 
         var pack = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
-        // Conflict is checked against the team's PERSISTED handles only — two items in the SAME pack that derive
-        // to one slug both preview Importable=true; the per-team unique index resolves that at commit (first wins,
-        // the rest are Skipped). Importable is a "no existing conflict" signal, not a commit guarantee.
-        var agentSlugs = await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false);
-        var skillSlugs = await ActiveSlugsAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null).Select(s => s.Slug), cancellationToken).ConfigureAwait(false);
-
+        // An import lands as a STORE snapshot, which carries no unique handle (the team-slug index is Working-only),
+        // so nothing in the team — not a sibling artifact, not a grandfathered bench row — can conflict with it.
+        // Importability is therefore just "parseable + named"; there is no handle to check against.
         return new PackPreview
         {
             Reference = reference,
-            Agents = pack.Agents.Select(a => BuildAgentItem(a, agentSlugs)).ToList(),
-            Skills = pack.Skills.Select(s => BuildSkillItem(s, skillSlugs)).ToList(),
+            Agents = pack.Agents.Select(BuildAgentItem).ToList(),
+            Skills = pack.Skills.Select(BuildSkillItem).ToList(),
         };
     }
 
-    private static AgentPackPreviewItem BuildAgentItem(ParsedAgentDefinition a, IReadOnlySet<string> existingSlugs)
+    private static AgentPackPreviewItem BuildAgentItem(ParsedAgentDefinition a)
     {
         var slug = AgentDefinitionService.DeriveSlug(a.Name);
         var hasName = !string.IsNullOrWhiteSpace(a.Name) && slug.Length > 0;
-        var conflict = hasName && existingSlugs.Contains(slug);
 
         return new AgentPackPreviewItem
         {
@@ -63,16 +59,15 @@ public sealed partial class PackImportService : IPackImportService, IScopedDepen
             Tools = a.Tools,
             RawFrontmatterJson = a.RawFrontmatterJson,
             Diagnostics = a.Diagnostics,
-            SlugConflict = conflict,
-            Importable = hasName && !conflict,
+            SlugConflict = false,
+            Importable = hasName,
         };
     }
 
-    private static SkillPackPreviewItem BuildSkillItem(ParsedSkillDefinition s, IReadOnlySet<string> existingSlugs)
+    private static SkillPackPreviewItem BuildSkillItem(ParsedSkillDefinition s)
     {
         var slug = AgentDefinitionService.DeriveSlug(s.Name);
         var hasName = !string.IsNullOrWhiteSpace(s.Name) && slug.Length > 0;
-        var conflict = hasName && existingSlugs.Contains(slug);
 
         return new SkillPackPreviewItem
         {
@@ -84,11 +79,8 @@ public sealed partial class PackImportService : IPackImportService, IScopedDepen
             Category = s.Category,
             RawFrontmatterJson = s.RawFrontmatterJson,
             Diagnostics = s.Diagnostics,
-            SlugConflict = conflict,
-            Importable = hasName && !conflict,
+            SlugConflict = false,
+            Importable = hasName,
         };
     }
-
-    private static async Task<IReadOnlySet<string>> ActiveSlugsAsync(IQueryable<string> slugs, CancellationToken cancellationToken) =>
-        (await slugs.ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet(StringComparer.Ordinal);
 }

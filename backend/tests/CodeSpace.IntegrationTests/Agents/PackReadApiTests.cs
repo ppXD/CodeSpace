@@ -12,9 +12,10 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
-/// The Library/store read model (<see cref="IPackService"/>): ListAsync returns the team's packs ordered by
-/// name with ACTIVE agent + skill counts and freshness; GetAsync returns a pack's artifacts (agents + skills,
-/// active only) or null for an unknown / cross-team pack. Tenant-scoped throughout.
+/// The Library/store read model (<see cref="IPackService"/>): ListAsync returns the team's packs that own at
+/// least one STORE snapshot, ordered by name with ACTIVE store agent + skill counts and freshness (a pack whose
+/// artifacts are all grandfathered Working rows is hidden); GetAsync returns a pack's STORE artifacts (agents +
+/// skills, active only) or null for an unknown / cross-team pack. Tenant-scoped throughout.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -25,28 +26,36 @@ public class PackReadApiTests
     public PackReadApiTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task List_returns_packs_ordered_with_active_counts_and_freshness()
+    public async Task List_returns_store_packs_ordered_with_active_counts_hiding_grandfathered_packs()
     {
         var (teamId, userId) = await SeedTeamAsync();
 
         var synced = DateTimeOffset.UtcNow.AddHours(-2);
         var filled = await SeedPackAsync(teamId, userId, "z-filled", PackKind.Github, "https://github.com/obra/superpowers", "v6.0.3", "abc123", synced);
-        var empty = await SeedPackAsync(teamId, userId, "a-empty", PackKind.GitUrl, "https://git.example.com/x", null, null, null);
+        var grandfathered = await SeedPackAsync(teamId, userId, "a-grandfathered", PackKind.GitUrl, "https://git.example.com/x", null, null, null);
 
+        // z-filled owns STORE snapshots — the Library shape.
         await SeedAgentAsync(teamId, userId, "backend-architect", filled, deleted: false);
         await SeedAgentAsync(teamId, userId, "code-reviewer", filled, deleted: false);
         await SeedSkillAsync(teamId, userId, "tdd", filled, deleted: false);
         await SeedSkillAsync(teamId, userId, "gone", filled, deleted: true);   // soft-deleted → must not count
-        await SeedAgentAsync(teamId, userId, "authored-one", packId: null, deleted: false);   // no pack → counts toward nothing
 
-        // A different team's pack must never appear.
+        // The grandfathered pack's artifacts are all WORKING (imported before the store model) → the Library hides it.
+        await SeedAgentAsync(teamId, userId, "legacy-agent", grandfathered, deleted: false, scope: DefinitionScope.Working);
+        await SeedSkillAsync(teamId, userId, "legacy-skill", grandfathered, deleted: false, scope: DefinitionScope.Working);
+
+        await SeedAgentAsync(teamId, userId, "authored-one", packId: null, deleted: false, scope: DefinitionScope.Working);   // no pack → counts toward nothing
+
+        // A different team's pack — WITH a store snapshot, so ONLY tenancy (never the empty-filter) can exclude it.
         var (otherTeam, otherUser) = await SeedTeamAsync();
-        await SeedPackAsync(otherTeam, otherUser, "foreign", PackKind.Github, "https://github.com/x/y", null, null, null);
+        var foreign = await SeedPackAsync(otherTeam, otherUser, "foreign", PackKind.Github, "https://github.com/x/y", null, null, null);
+        await SeedAgentAsync(otherTeam, otherUser, "foreign-agent", foreign, deleted: false);
 
         using var scope = _fixture.BeginScope();
         var list = await scope.Resolve<IPackService>().ListAsync(teamId, CancellationToken.None);
 
-        list.Select(p => p.Name).ShouldBe(new[] { "a-empty", "z-filled" }, "ordered by name, the foreign team's pack excluded");
+        list.Select(p => p.Name).ShouldBe(new[] { "z-filled" }, "only packs with a store snapshot show: the grandfathered (all-Working) pack and the foreign team's pack are both absent");
+        list.Select(p => p.Id).ShouldNotContain(grandfathered, "a pack whose artifacts are all grandfathered Working rows is hidden until re-imported");
 
         var filledRow = list.Single(p => p.Id == filled);
         filledRow.AgentCount.ShouldBe(2);
@@ -55,10 +64,6 @@ public class PackReadApiTests
         filledRow.Reference.ShouldBe("v6.0.3");
         filledRow.LastSyncedSha.ShouldBe("abc123");
         filledRow.LastSyncedDate!.Value.ShouldBe(synced, TimeSpan.FromSeconds(1));
-
-        var emptyRow = list.Single(p => p.Id == empty);
-        emptyRow.AgentCount.ShouldBe(0);
-        emptyRow.SkillCount.ShouldBe(0);
     }
 
     [Fact]
@@ -73,6 +78,7 @@ public class PackReadApiTests
         await SeedSkillAsync(teamId, userId, "yak", pack, deleted: false);
         await SeedSkillAsync(teamId, userId, "beta", pack, deleted: false);
         await SeedSkillAsync(teamId, userId, "gone", pack, deleted: true);
+        await SeedAgentAsync(teamId, userId, "grandfathered", pack, deleted: false, scope: DefinitionScope.Working);   // a Working bench row in this pack — Get is store-scoped, so it must NOT appear
 
         using var scope = _fixture.BeginScope();
         var service = scope.Resolve<IPackService>();
@@ -133,19 +139,21 @@ public class PackReadApiTests
         return id;
     }
 
-    private async Task SeedAgentAsync(Guid teamId, Guid userId, string slug, Guid? packId, bool deleted)
+    // A pack artifact defaults to a STORE snapshot — that's the Library shape PackService surfaces. Pass scope=Working
+    // to seed a grandfathered import (Imported + Working) or an authored row, which the Library must NOT count.
+    private async Task SeedAgentAsync(Guid teamId, Guid userId, string slug, Guid? packId, bool deleted, DefinitionScope scope = DefinitionScope.Store)
     {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        db.AgentDefinition.Add(new AgentDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = packId == null ? AgentDefinitionOrigin.Authored : AgentDefinitionOrigin.Imported, PackId = packId, SourcePath = packId == null ? null : $"agents/{slug}.md", DeletedDate = deleted ? DateTimeOffset.UtcNow : null, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
+        using var s = _fixture.BeginScope();
+        var db = s.Resolve<CodeSpaceDbContext>();
+        db.AgentDefinition.Add(new AgentDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = packId == null ? AgentDefinitionOrigin.Authored : AgentDefinitionOrigin.Imported, Scope = scope, PackId = packId, SourcePath = packId == null ? null : $"agents/{slug}.md", DeletedDate = deleted ? DateTimeOffset.UtcNow : null, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedSkillAsync(Guid teamId, Guid userId, string slug, Guid? packId, bool deleted)
+    private async Task SeedSkillAsync(Guid teamId, Guid userId, string slug, Guid? packId, bool deleted, DefinitionScope scope = DefinitionScope.Store)
     {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        db.SkillDefinition.Add(new SkillDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = packId == null ? SkillDefinitionOrigin.Authored : SkillDefinitionOrigin.Imported, PackId = packId, SourcePath = packId == null ? null : $"skills/{slug}/SKILL.md", DeletedDate = deleted ? DateTimeOffset.UtcNow : null, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
+        using var s = _fixture.BeginScope();
+        var db = s.Resolve<CodeSpaceDbContext>();
+        db.SkillDefinition.Add(new SkillDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = packId == null ? SkillDefinitionOrigin.Authored : SkillDefinitionOrigin.Imported, Scope = scope, PackId = packId, SourcePath = packId == null ? null : $"skills/{slug}/SKILL.md", DeletedDate = deleted ? DateTimeOffset.UtcNow : null, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
         await db.SaveChangesAsync();
     }
 

@@ -21,10 +21,11 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// The COMMIT half of the URL pack flow, driven through the REAL mediator (so <c>TransactionalBehavior</c>'s
 /// single ambient transaction wraps it — the production path) + a real git clone of a LOCAL repo (no network).
 /// The transient <c>IPackSourceFetcher</c> is overridden per-scope with an allowlist-bypassing clone so a local
-/// path is reachable; everything else (walker, DB, transaction) is real. Proves: a mixed commit
-/// (Imported/Skipped/Failed) is atomic + persists; a re-sync UPSERTS the row CONTENT while keeping the handle;
-/// a handle that collides with a DIFFERENT active definition is Skipped (agents AND skills); and a soft-deleted
-/// prior import re-imports as a fresh row rather than colliding.
+/// path is reachable; everything else (walker, DB, transaction) is real. Proves: an import lands every named
+/// artifact as a STORE snapshot — a handle already owned on the bench no longer skips it, the two coexist; a
+/// re-sync UPSERTS the snapshot CONTENT while keeping the handle; two same-handle files in one commit both land as
+/// distinct snapshots (keyed on source-path) without a 23505 abort; and a soft-deleted prior snapshot re-imports
+/// as a fresh row rather than colliding.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -35,7 +36,7 @@ public class PackCommitFlowTests
     public PackCommitFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task A_mixed_commit_imports_skips_conflicts_and_fails_unknowns_atomically_through_the_mediator()
+    public async Task A_mixed_commit_imports_named_artifacts_as_store_snapshots_coexisting_with_the_bench_atomically()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -43,24 +44,25 @@ public class PackCommitFlowTests
         if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
 
         var (teamId, userId) = await SeedTeamAsync();
-        await SeedAgentAsync(teamId, userId, "backend-architect");   // an authored persona the pack agent collides with
-        await SeedSkillAsync(teamId, userId, "tdd");                 // an authored skill the pack skill collides with
+        await SeedAgentAsync(teamId, userId, "backend-architect");   // an authored bench persona sharing the pack agent's handle
+        await SeedSkillAsync(teamId, userId, "tdd");                 // an authored bench skill sharing the pack skill's handle
         var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
 
         try
         {
             var result = await CommitViaMediatorAsync(src, new[]
             {
-                "agents/backend-architect.md",        // conflict -> Skipped
-                "agents/code-reviewer.md",            // new       -> Imported
-                "skills/tdd/SKILL.md",                // conflict -> Skipped
-                "skills/systematic-debugging/SKILL.md", // new     -> Imported
-                "agents/ghost.md",                    // unknown   -> Failed
+                "agents/backend-architect.md",        // handle on the bench -> a coexisting store snapshot, Imported
+                "agents/code-reviewer.md",            // new                 -> Imported
+                "skills/tdd/SKILL.md",                // handle on the bench -> a coexisting store snapshot, Imported
+                "skills/systematic-debugging/SKILL.md", // new               -> Imported
+                "agents/ghost.md",                    // unknown             -> Failed
             }, teamId, userId);
 
-            Outcome(result, "agents/backend-architect.md").ShouldBe(PackImportOutcome.Skipped);
+            // A store snapshot has no unique handle, so a bench handle never suppresses it — every named artifact lands.
+            Outcome(result, "agents/backend-architect.md").ShouldBe(PackImportOutcome.Imported);
             Outcome(result, "agents/code-reviewer.md").ShouldBe(PackImportOutcome.Imported);
-            Outcome(result, "skills/tdd/SKILL.md").ShouldBe(PackImportOutcome.Skipped);
+            Outcome(result, "skills/tdd/SKILL.md").ShouldBe(PackImportOutcome.Imported);
             Outcome(result, "skills/systematic-debugging/SKILL.md").ShouldBe(PackImportOutcome.Imported);
 
             var ghost = result.Items.Single(i => i.SourcePath == "agents/ghost.md");
@@ -71,16 +73,23 @@ public class PackCommitFlowTests
             {
                 (await db.Pack.CountAsync(p => p.TeamId == teamId && p.DeletedDate == null)).ShouldBe(1);
 
-                // The two NEW artifacts landed atomically, pack-rooted, in one committed transaction.
+                // The fresh artifacts landed atomically as pack-rooted STORE snapshots in one committed transaction.
                 var imported = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "code-reviewer" && a.DeletedDate == null);
                 imported.Origin.ShouldBe(AgentDefinitionOrigin.Imported);
+                imported.Scope.ShouldBe(DefinitionScope.Store);
                 imported.PackId.ShouldBe(result.PackId);
 
-                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "systematic-debugging" && s.PackId == result.PackId && s.DeletedDate == null)).ShouldBeTrue();
+                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "systematic-debugging" && s.Scope == DefinitionScope.Store && s.PackId == result.PackId && s.DeletedDate == null)).ShouldBeTrue();
 
-                // The pre-existing authored definitions are untouched (still authored, no pack), not overwritten.
-                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.DeletedDate == null)).Origin.ShouldBe(AgentDefinitionOrigin.Authored);
-                (await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.DeletedDate == null)).Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+                // The bench handle now has BOTH rows: the untouched authored Working persona AND a new store snapshot.
+                var benchArchitect = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.Scope == DefinitionScope.Working && a.DeletedDate == null);
+                benchArchitect.Origin.ShouldBe(AgentDefinitionOrigin.Authored);
+                benchArchitect.PackId.ShouldBeNull();
+                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.Scope == DefinitionScope.Store && a.DeletedDate == null)).PackId.ShouldBe(result.PackId);
+
+                var benchTdd = await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.Scope == DefinitionScope.Working && s.DeletedDate == null);
+                benchTdd.Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+                (await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.Scope == DefinitionScope.Store && s.DeletedDate == null)).PackId.ShouldBe(result.PackId);
             });
         }
         finally
@@ -182,7 +191,7 @@ public class PackCommitFlowTests
     }
 
     [Fact]
-    public async Task An_intra_pack_duplicate_handle_skips_the_second_in_one_commit()
+    public async Task Two_intra_pack_files_with_the_same_handle_both_land_as_distinct_snapshots()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -194,16 +203,17 @@ public class PackCommitFlowTests
 
         try
         {
-            // Two files in ONE commit derive the same handle. The fix decides this in memory (claimedSlugs), so one
-            // is Imported and the other Skipped — NOT two INSERTs that 23505 and abort the whole transaction.
+            // Two files in ONE commit derive the same handle. A store snapshot's handle is non-unique (keyed on
+            // source-path), so BOTH import as distinct snapshots — never a 23505 that aborts the whole transaction.
             var result = await CommitViaMediatorAsync(src, new[] { "agents/dup-a.md", "agents/dup-b.md" }, teamId, userId);
 
-            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(1);
-            result.Items.Count(i => i.Outcome == PackImportOutcome.Skipped).ShouldBe(1);
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(2);
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Skipped).ShouldBe(0);
 
-            // Atomic + correct: the committed transaction left exactly one active agent for the shared handle.
+            // Atomic + correct: the committed transaction left two active store snapshots for the shared handle,
+            // one per source file.
             await AssertStateAsync(async db =>
-                (await db.AgentDefinition.CountAsync(a => a.TeamId == teamId && a.Slug == "duplicate-agent" && a.DeletedDate == null)).ShouldBe(1));
+                (await db.AgentDefinition.CountAsync(a => a.TeamId == teamId && a.Slug == "duplicate-agent" && a.Scope == DefinitionScope.Store && a.DeletedDate == null)).ShouldBe(2));
         }
         finally
         {

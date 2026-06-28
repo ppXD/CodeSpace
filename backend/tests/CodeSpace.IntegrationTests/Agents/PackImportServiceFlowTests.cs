@@ -13,13 +13,13 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
-/// The unified URL preview end-to-end through the REAL <see cref="PackImportService"/> (fetcher → walker →
-/// per-team conflict check) + real git clone of a LOCAL repo (no network): a pack with agents AND skills,
-/// some of whose handles already exist in the team, previews into a <see cref="PackPreview"/> whose agents +
-/// skills carry the right slug-conflict / importable flags. Proves the discover→conflict→preview vertical,
-/// that conflicts do NOT bleed across the agent/skill namespaces (the load-bearing property of unifying the two
-/// into one service), and that a nameless artifact previews as un-importable with diagnostics rather than
-/// crashing. (Clone reclamation is proven separately in <c>PackCloneFetcherFlowTests</c>.)
+/// The unified URL preview end-to-end through the REAL <see cref="PackImportService"/> (fetcher → walker) + real
+/// git clone of a LOCAL repo (no network): a pack with agents AND skills previews into a <see cref="PackPreview"/>.
+/// In the store model an import lands as a STORE snapshot, which carries no unique handle, so an artifact is
+/// importable whenever it is parseable + named — even when the team already owns that handle on the bench. This
+/// proves the discover→preview vertical, that a pre-existing handle (agent OR skill) no longer makes a preview item
+/// conflict, and that a nameless artifact previews as un-importable with diagnostics rather than crashing.
+/// (Clone reclamation is proven separately in <c>PackCloneFetcherFlowTests</c>.)
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -30,7 +30,7 @@ public class PackImportServiceFlowTests
     public PackImportServiceFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Previews_agents_and_skills_from_a_url_flagging_handle_conflicts()
+    public async Task Previews_agents_and_skills_from_a_url_as_importable_store_snapshots()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -39,11 +39,11 @@ public class PackImportServiceFlowTests
         if (!await GitReadyAsync(runners)) return;
 
         var (teamId, userId) = await SeedTeamAsync();
-        await SeedAgentAsync(teamId, userId, "reviewer");   // an existing AGENT handle the pack agent collides with
-        await SeedSkillAsync(teamId, userId, "tdd");        // an existing SKILL handle the pack skill collides with
 
-        // Cross-namespace bait: an existing SKILL sharing the pack AGENT's handle and an existing AGENT sharing the
-        // pack SKILL's handle. Conflict sets are per-namespace, so neither must bleed onto the other's preview item.
+        // Seed every one of the pack's handles as an ALREADY-OWNED bench row (agents AND skills, cross-namespace).
+        // In the store model none of these may suppress the preview — a snapshot has no unique handle to collide on.
+        await SeedAgentAsync(teamId, userId, "reviewer");
+        await SeedSkillAsync(teamId, userId, "tdd");
         await SeedSkillAsync(teamId, userId, "backend-architect");
         await SeedAgentAsync(teamId, userId, "systematic-debugging");
 
@@ -61,29 +61,24 @@ public class PackImportServiceFlowTests
                 preview = await service.PreviewFromUrlAsync(src, reference: null, teamId, CancellationToken.None);
             }
 
-            // Agents: the colliding handle is flagged un-importable; the fresh one is importable.
-            var reviewer = preview.Agents.Single(a => a.DerivedSlug == "reviewer");
-            reviewer.SlugConflict.ShouldBeTrue("an agent whose handle already exists in the team is a conflict");
-            reviewer.Importable.ShouldBeFalse();
+            // Every named artifact is importable with NO conflict, even though its handle is already owned on the
+            // bench — store snapshots never team-slug-conflict, so a re-import of a grandfathered pack stays selectable.
+            foreach (var slug in new[] { "reviewer", "backend-architect" })
+            {
+                var agent = preview.Agents.Single(a => a.DerivedSlug == slug);
+                agent.SlugConflict.ShouldBeFalse($"a store snapshot of '{slug}' carries no unique handle to conflict on");
+                agent.Importable.ShouldBeTrue();
+            }
 
-            // backend-architect is importable EVEN THOUGH a SKILL named backend-architect exists — agent conflicts
-            // are checked against agent handles only, so the cross-namespace skill must not bleed in.
-            var fresh = preview.Agents.Single(a => a.DerivedSlug == "backend-architect");
-            fresh.SlugConflict.ShouldBeFalse("a same-named SKILL must not make a pack AGENT conflict");
-            fresh.Importable.ShouldBeTrue();
-
-            // Skills: same conflict semantics on the skill handle.
-            var tdd = preview.Skills.Single(s => s.DerivedSlug == "tdd");
-            tdd.SlugConflict.ShouldBeTrue();
-            tdd.Importable.ShouldBeFalse();
-
-            // Mirror image: systematic-debugging is importable even though a same-named AGENT exists.
-            var freshSkill = preview.Skills.Single(s => s.DerivedSlug == "systematic-debugging");
-            freshSkill.SlugConflict.ShouldBeFalse("a same-named AGENT must not make a pack SKILL conflict");
-            freshSkill.Importable.ShouldBeTrue();
+            foreach (var slug in new[] { "tdd", "systematic-debugging" })
+            {
+                var skill = preview.Skills.Single(s => s.DerivedSlug == slug);
+                skill.SlugConflict.ShouldBeFalse($"a store snapshot of '{slug}' carries no unique handle to conflict on");
+                skill.Importable.ShouldBeTrue();
+            }
 
             // A nameless SKILL.md is still discovered (every SKILL.md is a skill) but previews as un-importable with
-            // a diagnostic — never importable, never a crash.
+            // a diagnostic — name is the one thing a snapshot still needs, so this is never importable, never a crash.
             var namelessSkill = preview.Skills.Single(s => s.SourcePath.Contains("nameless"));
             namelessSkill.Importable.ShouldBeFalse();
             namelessSkill.SlugConflict.ShouldBeFalse();

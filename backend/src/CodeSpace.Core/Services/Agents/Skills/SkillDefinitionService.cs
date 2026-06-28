@@ -26,9 +26,11 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
         _logger = logger;
     }
 
+    // Lists only WORKING skills — the team's bindable, editable skills (the editor's skill picker). Library STORE
+    // snapshots (Scope=Store) are reached through GetAsync, never on this list.
     public async Task<IReadOnlyList<SkillDefinitionSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken) =>
         await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.TeamId == teamId && s.DeletedDate == null)
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null)
             .OrderBy(s => s.CreatedDate)
             .Select(s => new SkillDefinitionSummary
             {
@@ -138,8 +140,10 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
 
     private async Task EnsureSlugAvailableAsync(Guid teamId, string slug, string requestedName, CancellationToken cancellationToken)
     {
+        // Only WORKING handles must be unique (the team-slug index is Working-only). A Library STORE snapshot sharing
+        // the handle must NOT block authoring a runnable skill of the same name.
         var exists = await _db.SkillDefinition.AsNoTracking()
-            .AnyAsync(s => s.TeamId == teamId && s.Slug == slug && s.DeletedDate == null, cancellationToken)
+            .AnyAsync(s => s.TeamId == teamId && s.Slug == slug && s.Scope == DefinitionScope.Working && s.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
 
         if (exists) throw SlugTakenError(slug, requestedName, null);

@@ -106,13 +106,15 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         // Normalize the handle the SAME way authoring derives a slug from a name, so a brain that authored a display
         // name ("Security Reviewer") or the exact handle ("security-reviewer") both resolve. A handle that yields no
         // slug → no match (null). Team-scoped + non-deleted, mirroring LoadPersonaAsync so a foreign / soft-deleted
-        // slug never resolves.
+        // slug never resolves. Scoped to WORKING: a @-mention resolves only to a runnable bench persona, never to a
+        // Library STORE snapshot — and a snapshot may legally share a Working row's handle (the team-slug uniqueness
+        // is Working-only), so without this filter SingleOrDefault could match two rows and throw.
         var normalized = AgentDefinitionService.DeriveSlug(slug);
 
         if (normalized.Length == 0) return null;
 
         return await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Slug == normalized && a.DeletedDate == null)
+            .Where(a => a.TeamId == teamId && a.Slug == normalized && a.Scope == DefinitionScope.Working && a.DeletedDate == null)
             .Select(a => (Guid?)a.Id)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }

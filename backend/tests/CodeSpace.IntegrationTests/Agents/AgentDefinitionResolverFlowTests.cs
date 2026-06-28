@@ -293,16 +293,38 @@ public class AgentDefinitionResolverFlowTests
         (await ResolveSlugAsync("shared-slug", teamA)).ShouldBeNull("a soft-deleted persona's slug no longer resolves");
     }
 
+    [Fact]
+    public async Task ResolveSlugAsync_resolves_to_the_working_persona_ignoring_a_store_snapshot_of_the_same_handle()
+    {
+        var teamId = await SeedTeamAsync();
+
+        // A STORE snapshot and a WORKING persona legally share a handle (team-slug uniqueness is Working-only).
+        // The @-mention must resolve to the runnable bench persona — and must NOT throw on the two-row match.
+        var workingId = await SeedPersonaAsync(teamId, "Bench reviewer.", model: null, slug: "code-reviewer", scope: DefinitionScope.Working);
+        await SeedPersonaAsync(teamId, "Library snapshot.", model: null, slug: "code-reviewer", scope: DefinitionScope.Store);
+
+        (await ResolveSlugAsync("code-reviewer", teamId)).ShouldBe(workingId, "a @-mention resolves to the WORKING persona, never the Library store snapshot");
+    }
+
+    [Fact]
+    public async Task ResolveSlugAsync_returns_null_when_only_a_store_snapshot_owns_the_handle()
+    {
+        var teamId = await SeedTeamAsync();
+        await SeedPersonaAsync(teamId, "Library snapshot only.", model: null, slug: "snapshot-only", scope: DefinitionScope.Store);
+
+        (await ResolveSlugAsync("snapshot-only", teamId)).ShouldBeNull("a store snapshot is not runnable — its handle must not resolve for an @-mention");
+    }
+
     private async Task<Guid?> ResolveSlugAsync(string slug, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IAgentDefinitionResolver>().ResolveSlugAsync(slug, teamId, CancellationToken.None);
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null, string? slug = null)
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null, string? slug = null, DefinitionScope scope = DefinitionScope.Working)
     {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
+        using var s = _fixture.BeginScope();
+        var db = s.Resolve<CodeSpaceDbContext>();
 
         var now = DateTimeOffset.UtcNow;
         var agent = new AgentDefinition
@@ -315,7 +337,8 @@ public class AgentDefinitionResolverFlowTests
             Model = model,
             ModelCredentialId = modelCredentialId,
             ToolsJson = toolsJson,
-            Origin = AgentDefinitionOrigin.Authored,
+            Origin = scope == DefinitionScope.Store ? AgentDefinitionOrigin.Imported : AgentDefinitionOrigin.Authored,
+            Scope = scope,
             CreatedDate = now,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedDate = now,
