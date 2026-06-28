@@ -57,6 +57,18 @@ export function useDeleteAgent() {
   });
 }
 
+/** Full-replace a persona's bound skills; invalidates the list + that persona's detail (its boundSkills changed). */
+export function useSetAgentSkills() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, skillIds }: { id: string; skillIds: string[] }) => agentsApi.setAgentSkills(id, skillIds),
+    onSuccess: (_data, { id }) => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["agents"] }),
+      queryClient.invalidateQueries({ queryKey: ["agent", id] }),
+    ]),
+  });
+}
+
 /** The harnesses registered in the engine — deployment-level, so a long staleTime; backs the agent node's harness picker. */
 export function useHarnesses() {
   return useQuery({

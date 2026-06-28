@@ -204,6 +204,10 @@ export const agentsApi = {
   // `command with { AgentDefinitionId = id }` (the URL is authoritative). Same pattern as the variables PUTs.
   updateAgentDefinition: (id: string, input: AgentDefinitionInput) =>
     fetchJson<void>(`/api/agents/${id}`, { method: "PUT", body: JSON.stringify({ ...input, agentDefinitionId: id }) }),
+  // Full-replace the persona's bound skills. agentDefinitionId is duplicated in the URL + body (same Rule-17
+  // reason as the PUT above — the body satisfies the command's required member; the URL is authoritative).
+  setAgentSkills: (id: string, skillDefinitionIds: string[]) =>
+    fetchJson<void>(`/api/agents/${id}/skills`, { method: "PUT", body: JSON.stringify({ agentDefinitionId: id, skillDefinitionIds }) }),
   deleteAgentDefinition: (id: string) => fetchJson<void>(`/api/agents/${id}`, { method: "DELETE" }),
   listHarnesses: () => fetchJson<HarnessSummary[]>("/api/agents/harnesses"),
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),

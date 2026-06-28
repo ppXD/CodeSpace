@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -6,18 +6,20 @@ import type { AgentBoundSkill, AgentDefinitionInput } from "@/api/agents";
 import { ApiError } from "@/api/request";
 import { Combo, type Option } from "@/components/common/Combo";
 import { useConfirm } from "@/components/dialog";
-import { useAgentDefinition, useCreateAgent, useDeleteAgent, useUpdateAgent } from "@/hooks/use-agents";
+import { useAgentDefinition, useCreateAgent, useDeleteAgent, useSetAgentSkills, useUpdateAgent } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
+import { useSkills } from "@/hooks/use-skills";
 
 import { AUTONOMY, EMPTY_FORM, type FormState, formFromPersona, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
+import { availableSkillOptions, skillLabels } from "./skillPicker";
 
 /**
  * Create / edit an Agent persona — a warm-theme centered MODAL over the authorable surface, grouped into three
  * sections (Identity / Runtime / Capabilities). All dropdowns are the in-house warm {@link Combo}; the model
  * picker loads the team's REAL credentialed models. A persona is harness-AGNOSTIC (no harness field); skills are
- * bound via import (shown read-only) — in-app binding is a follow-up. The async edit-load is lifted here so the
- * form mounts (and inits its state from props) only once data is ready — no populate-from-query effect.
+ * bound in the Capabilities section (or via a pack import) and persisted on Save. The async edit-load is lifted
+ * here so the form mounts (and inits its state from props) only once data is ready — no populate-from-query effect.
  */
 export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | "edit"; agentId?: string; onClose: () => void }) {
   const existing = useAgentDefinition(mode === "edit" ? agentId : undefined);
@@ -83,6 +85,7 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   const createAgent = useCreateAgent();
   const updateAgent = useUpdateAgent();
   const deleteAgent = useDeleteAgent();
+  const setSkills = useSetAgentSkills();
 
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -91,11 +94,15 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   const [autonomy, setAutonomy] = useState(initial.autonomy);
   const [toolsMode, setToolsMode] = useState<"inherit" | "custom">(initial.toolsMode);
   const [toolsText, setToolsText] = useState(initial.toolsText);
+  const [skillIds, setSkillIds] = useState<string[]>(() => (boundSkills ?? []).map((s) => s.skillDefinitionId));
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Survives a partial-create retry: once create succeeds, a re-Save reuses this id (update + re-bind) rather
+  // than re-creating and colliding on the unique handle.
+  const createdIdRef = useRef<string | null>(null);
 
   const handle = deriveSlug(name);
-  const saving = createAgent.isPending || updateAgent.isPending;
+  const saving = createAgent.isPending || updateAgent.isPending || setSkills.isPending;
   const canSave = name.trim().length > 0 && handle.length > 0 && !saving;
 
   // Every credentialed model the team exposes (NOT deduped — same as the launch composer; the credential
@@ -121,8 +128,21 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
     };
 
     try {
-      if (mode === "create") await createAgent.mutateAsync(input);
-      else await updateAgent.mutateAsync({ id: agentId!, input });
+      // Skills are a separate join (not part of AgentDefinitionInput): persist the fields first, then replace
+      // the bound set. On create the agent must exist before it can be bound, so we use the returned id. If a
+      // prior attempt already created the agent but the binding failed, createdIdRef holds that id — reuse it
+      // (update + re-bind) instead of re-creating, which would collide on the unique handle.
+      if (mode === "edit") {
+        await updateAgent.mutateAsync({ id: agentId!, input });
+        await setSkills.mutateAsync({ id: agentId!, skillIds });
+      } else if (createdIdRef.current === null) {
+        const created = await createAgent.mutateAsync(input);
+        createdIdRef.current = created.id;
+        if (skillIds.length > 0) await setSkills.mutateAsync({ id: created.id, skillIds });
+      } else {
+        await updateAgent.mutateAsync({ id: createdIdRef.current, input });
+        await setSkills.mutateAsync({ id: createdIdRef.current, skillIds });
+      }
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't save the agent.");
@@ -222,19 +242,44 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
           )}
         </div>
 
-        {mode === "edit" && (
-          <>
-            <div className="ed-sec-h" style={{ marginTop: 6 }}><Ic.Puzzle size={13} /> Capabilities</div>
-            <div className="wf-form-row">
-              <span className="wf-form-label">Bound skills</span>
-              {boundSkills && boundSkills.length > 0
-                ? <div className="wf-triggers">{boundSkills.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}</div>
-                : <span className="wf-trigger-muted">none</span>}
-              <span className="wf-form-help">Skills are bound when importing a pack; in-app binding is coming soon.</span>
-            </div>
-          </>
-        )}
+        <div className="ed-sec-h" style={{ marginTop: 6 }}><Ic.Puzzle size={13} /> Capabilities</div>
+        <div className="wf-form-row">
+          <span className="wf-form-label">Bound skills</span>
+          <SkillPicker selected={skillIds} onChange={setSkillIds} boundSkills={boundSkills} />
+          <span className="wf-form-help">Skills the agent loads when it runs. Add your team's skills, or import a pack to bring in more.</span>
+        </div>
       </div>
     </ModalFrame>
+  );
+}
+
+/**
+ * Editable skill-binding control — the team's skills as selectable tokens. Selected skills show as removable
+ * chips; an "Add a skill" picker appends from the unselected ones. The parent persists the set on Save.
+ */
+function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
+  const skills = useSkills();
+
+  const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
+  const available = availableSkillOptions(skills.data ?? [], selected);
+  const teamHasNoSkills = !skills.isLoading && (skills.data?.length ?? 0) === 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {selected.length > 0 && (
+        <div className="wf-triggers">
+          {selected.map((id) => (
+            <span key={id} className="wf-trigger-chip">
+              {labels.get(id) ?? "skill"}
+              <button type="button" className="ed-tok-x" aria-label={`Remove ${labels.get(id) ?? "skill"}`} onClick={() => onChange(selected.filter((x) => x !== id))}><Ic.X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {teamHasNoSkills && selected.length === 0
+        ? <span className="wf-form-empty">No skills in this team yet — import a pack to add some.</span>
+        : available.length > 0 && <Combo value="" options={available} onChange={(id) => onChange([...selected, id])} placeholder="Add a skill…" searchable />}
+    </div>
   );
 }
