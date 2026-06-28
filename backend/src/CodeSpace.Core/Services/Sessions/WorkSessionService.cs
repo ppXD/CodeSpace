@@ -38,6 +38,7 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
             Title = SanitizeTitle(title),
             Kind = kind,
             Status = WorkSessionStatus.Open,
+            LastActivityAt = DateTimeOffset.UtcNow,   // opening activity — the MRU sort key; bumped on every continue below
             CreatedBy = actorUserId,
             LastModifiedBy = actorUserId,
         };
@@ -56,7 +57,7 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
         // bump the counter. The claim runs in the launch's transaction, so a failed launch rolls the increment back.
         var claimed = await _db.Database
             .SqlQueryRaw<int>(
-                "UPDATE work_session SET last_turn_index = last_turn_index + 1 WHERE id = {0} AND team_id = {1} AND status = 'Open' RETURNING last_turn_index AS \"Value\"",
+                "UPDATE work_session SET last_turn_index = last_turn_index + 1, last_activity_at = now() WHERE id = {0} AND team_id = {1} AND status = 'Open' RETURNING last_turn_index AS \"Value\"",
                 sessionId, teamId)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 

@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Queries.Sessions;
 using CodeSpace.Messages.Queries.Tasks;
 using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
@@ -54,6 +55,14 @@ public class WorkflowRunsController : ControllerBase
     public async Task<IActionResult> Get([FromRoute] Guid runId, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetWorkflowRunQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>The work-session thread this run belongs to, as a conversation anchored at the run's turn — for the run-detail → session view. Any run in the thread (a turn or a rerun attempt) resolves to the same thread. Team-scoped; session-less / foreign / absent → 404.</summary>
+    [HttpGet("{runId:guid}/session")]
+    public async Task<IActionResult> GetSession([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetSessionByRunQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 
