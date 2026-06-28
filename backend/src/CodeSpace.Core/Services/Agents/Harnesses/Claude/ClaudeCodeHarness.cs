@@ -143,10 +143,35 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
             // Project the persona's skills as SKILL.md files the runner writes under CLAUDE_CONFIG_DIR/skills/<slug>/;
             // Claude Code's native loader discovers them there (personal scope) and does the progressive disclosure.
-            ConfigHomeFiles = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot),
+            // On a CONTINUE the prior session's transcript is restored alongside them (see BuildConfigHomeFiles).
+            ConfigHomeFiles = BuildConfigHomeFiles(task),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
+    }
+
+    /// <summary>
+    /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
+    /// session's restored transcript at <c>projects/&lt;sanitized-cwd&gt;/&lt;sessionId&gt;.jsonl</c> where
+    /// <c>claude --resume</c> reads it (P3.3a). The transcript is added ONLY when the run carries both the session id
+    /// AND the captured bytes AND a workspace cwd to key the path on — otherwise the skills list is returned unchanged
+    /// (byte-identical for a fresh run). The cwd encoding is the SHARPEST hazard (see <see cref="ClaudeTranscriptPath"/>):
+    /// it must be the resolved cwd the process runs in, which the producer slice supplies.
+    /// </summary>
+    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
+    {
+        var skills = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot);
+
+        if (task.ResumeFromSessionId is not { Length: > 0 } sessionId
+            || task.RestoredTranscript is not { Length: > 0 } transcript
+            || string.IsNullOrWhiteSpace(task.WorkspaceDirectory))
+            return skills;
+
+        return skills.Append(new ConfigHomeFile
+        {
+            RelativePath = ClaudeTranscriptPath.For(task.WorkspaceDirectory, sessionId),
+            Content = transcript,
+        }).ToList();
     }
 
     public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
