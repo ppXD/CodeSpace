@@ -31,6 +31,19 @@ export function useAuthorStoreSkill() {
   });
 }
 
+/** Instantiate a working (bindable) skill by copying a Library store skill; invalidates the skill list (so the new copy's label resolves) + the Library. Returns the new id. */
+export function useInstantiateSkillFromStore() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (sourceDefinitionId: string) => skillsApi.instantiateFromStore(sourceDefinitionId),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["skills"] }),
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
+    ]),
+  });
+}
+
 /**
  * Soft-delete a skill. Refreshes everything the deletion touches: the skill list + picker, the Library packs/
  * detail (the skill drops from its pack), and the agents (a deleted skill drops from any persona's bound set).

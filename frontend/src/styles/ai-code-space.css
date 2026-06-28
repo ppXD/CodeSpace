@@ -3463,6 +3463,12 @@ textarea:-webkit-autofill {
 
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* Pager inside a portaled picker modal (the in-page .acs-root .lib-pager rules don't reach here). */
+.mdl .lib-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px 0 2px; }
+.mdl .lib-pager-info { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mdl .lib-pager-btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); cursor: pointer; }
+.mdl .lib-pager-btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--accent); color: var(--accent); }
+.mdl .lib-pager-btn:disabled { opacity: .4; cursor: default; }
 .mdl .wf-add-choice {
   position: relative; display: flex; flex-direction: column; gap: 4px; text-align: left;
   padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
