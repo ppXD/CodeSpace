@@ -2606,8 +2606,6 @@ textarea:-webkit-autofill {
 /* the identity strip — harness · model · tool count · run time, the agent's whole identity in one line */
 .acs-root .agent-terminal-meta { display: flex; flex-wrap: wrap; align-items: center; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 .acs-root .agent-terminal-meta > span:not(:first-child)::before { content: "·"; margin: 0 8px; color: var(--muted-2); }
-.acs-root .agent-terminal-alloc { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); min-width: 0; }
-.acs-root .agent-terminal-role { flex: none; font-size: 11px; font-weight: 550; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 .acs-root .agent-terminal-goal { background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-terminal-goal > summary { padding: 7px 12px; font-size: 11px; font-weight: 550; color: var(--muted); cursor: pointer; user-select: none; list-style-position: inside; }
 .acs-root .agent-terminal-goal > summary:hover { color: var(--ink-2); }

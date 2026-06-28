@@ -65,14 +65,8 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         {onClose && <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>}
       </div>
 
-      {/* The model's authored ROLE for this agent — its persona chip. The subtask it was assigned moves down into
-          the Instruction block below, next to the prompt. Absent for a homogeneous / non-supervisor agent. */}
-      {agent.role && (
-        <div className="agent-terminal-alloc">
-          <span className="agent-terminal-role">{agent.role}</span>
-        </div>
-      )}
-
+      {/* The role isn't repeated here — the outline on the left already names this agent by its role, so the terminal
+          leads straight into the run's identity (harness · model · tools · time) and what it was told to do. */}
       {identity.length > 0 && (
         <div className="agent-terminal-meta">
           {identity.map((part, i) => <span key={i}>{part}</span>)}
