@@ -34,11 +34,14 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
             .Select(SummaryProjection())
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var summaries = rows.Select(ToSummary).ToList();
+        var boundSkills = await LoadBoundSkillsAsync(teamId, rows.Select(r => r.Id).ToList(), cancellationToken).ConfigureAwait(false);
+        var packNames = await LoadPackNamesAsync(teamId, rows.Where(r => r.PackId != null).Select(r => r.PackId!.Value).ToList(), cancellationToken).ConfigureAwait(false);
 
-        var boundSkills = await LoadBoundSkillsAsync(teamId, summaries.Select(s => s.Id).ToList(), cancellationToken).ConfigureAwait(false);
-
-        return summaries.Select(s => s with { BoundSkills = boundSkills.GetValueOrDefault(s.Id, Array.Empty<AgentBoundSkill>()) }).ToList();
+        return rows.Select(r => ToSummary(r) with
+        {
+            BoundSkills = boundSkills.GetValueOrDefault(r.Id, Array.Empty<AgentBoundSkill>()),
+            PackName = r.PackId == null ? null : packNames.GetValueOrDefault(r.PackId.Value),
+        }).ToList();
     }
 
     public async Task<AgentDefinitionSummary?> GetAsync(Guid teamId, Guid agentDefinitionId, CancellationToken cancellationToken)
@@ -50,10 +53,14 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
 
         if (row == null) return null;
 
-        var summary = ToSummary(row);
-        var boundSkills = await LoadBoundSkillsAsync(teamId, new[] { summary.Id }, cancellationToken).ConfigureAwait(false);
+        var boundSkills = await LoadBoundSkillsAsync(teamId, new[] { row.Id }, cancellationToken).ConfigureAwait(false);
+        var packNames = row.PackId == null ? null : await LoadPackNamesAsync(teamId, new[] { row.PackId.Value }, cancellationToken).ConfigureAwait(false);
 
-        return summary with { BoundSkills = boundSkills.GetValueOrDefault(summary.Id, Array.Empty<AgentBoundSkill>()) };
+        return ToSummary(row) with
+        {
+            BoundSkills = boundSkills.GetValueOrDefault(row.Id, Array.Empty<AgentBoundSkill>()),
+            PackName = row.PackId == null ? null : packNames!.GetValueOrDefault(row.PackId.Value),
+        };
     }
 
     /// <summary>The skills bound to each of <paramref name="agentIds"/>, via the AgentSkillBinding join through to ACTIVE skills in <paramref name="teamId"/>, ordered by handle — one batched query, no N+1. The skill side is team-scoped as defense-in-depth (matching <c>AgentDefinitionResolver.LoadSkillsAsync</c>): the binding writer already enforces same-team, but the read never trusts a stray row. Agents with no bindings are simply absent from the map.</summary>
@@ -71,6 +78,16 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
         return rows
             .GroupBy(r => r.AgentDefinitionId)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<AgentBoundSkill>)g.Select(r => new AgentBoundSkill { SkillDefinitionId = r.Id, Slug = r.Slug, Name = r.Name }).ToList());
+    }
+
+    /// <summary>The pack name (owner/repo) for each of <paramref name="packIds"/>, team-scoped — one batched query so the bench list never N+1s a pack lookup per imported persona.</summary>
+    private async Task<IReadOnlyDictionary<Guid, string>> LoadPackNamesAsync(Guid teamId, IReadOnlyCollection<Guid> packIds, CancellationToken cancellationToken)
+    {
+        if (packIds.Count == 0) return new Dictionary<Guid, string>();
+
+        return await _db.Pack.AsNoTracking()
+            .Where(p => p.TeamId == teamId && packIds.Contains(p.Id) && p.DeletedDate == null)
+            .ToDictionaryAsync(p => p.Id, p => p.Name, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<Guid> CreateAsync(Guid teamId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
@@ -287,6 +304,7 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
             DefaultAutonomy = a.DefaultAutonomy,
             ToolsJson = a.ToolsJson,
             Origin = a.Origin,
+            PackId = a.PackId,
             CreatedDate = a.CreatedDate,
         };
 
@@ -318,6 +336,7 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
         public string? DefaultAutonomy { get; init; }
         public string? ToolsJson { get; init; }
         public AgentDefinitionOrigin Origin { get; init; }
+        public Guid? PackId { get; init; }
         public DateTimeOffset CreatedDate { get; init; }
     }
 }

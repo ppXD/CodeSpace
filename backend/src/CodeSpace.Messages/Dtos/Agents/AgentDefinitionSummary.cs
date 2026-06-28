@@ -24,6 +24,9 @@ public sealed record AgentDefinitionSummary
     public IReadOnlyList<string>? Tools { get; init; }
     public required AgentDefinitionOrigin Origin { get; init; }
 
+    /// <summary>The source pack's name (its `owner/repo`) for an imported persona, so the bench can show where it came from. NULL for an authored persona (or an imported one whose pack was removed).</summary>
+    public string? PackName { get; init; }
+
     /// <summary>The skills bound to this persona (handle + name), ordered by handle. Empty when none are bound.</summary>
     public IReadOnlyList<AgentBoundSkill> BoundSkills { get; init; } = Array.Empty<AgentBoundSkill>();
 

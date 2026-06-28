@@ -494,6 +494,8 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ab-handle { font-size: 12.5px; color: var(--muted-2); }
 .acs-root .ab-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .ab-origin { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
+/* The source-pack owner/repo can be long — cap + ellipsis so it never squeezes the identity column. */
+.acs-root .ab-origin-pack { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .ab-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 /* One-line runtime spec: model · autonomy · tools, hung under the identity (aligned past the avatar). */
 .acs-root .ab-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0 0 52px; font-size: 11.5px; color: var(--muted); }
