@@ -37,6 +37,7 @@ export function Sidebar() {
   const isLibraryActive = /^\/teams\/[^/]+\/library/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
   const isRunsActive = /^\/teams\/[^/]+\/runs/.test(pathname);
+  const isSessionsActive = /^\/teams\/[^/]+\/sessions/.test(pathname);
   const isSettingsActive = /^\/teams\/[^/]+\/settings/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
@@ -354,6 +355,20 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Play size={15} /></span>
           <span className="sb-nav-lbl">Runs</span>
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isSessionsActive}
+          onClick={() => {
+            // The team's work sessions — each a thread of runs the user can read as a conversation + continue.
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/sessions", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Sessions"
+        >
+          <span className="sb-nav-ic"><Ic.Bot size={15} /></span>
+          <span className="sb-nav-lbl">Sessions</span>
         </div>
         <div
           className="sb-nav-item"
