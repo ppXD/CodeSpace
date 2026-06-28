@@ -433,7 +433,15 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ct-empty-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 
 /* Library / store — packs-as-categories rail (left) + the selected pack's artifacts (right). */
+/* Library tab strip: the underline tabs on the left, the Import action lifted off the row's bottom rule. */
+.acs-root .lib-tabrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 8px; border-bottom: 1px solid var(--line); }
+/* The lone section label looks like an active tab but isn't clickable — suppress the pointer + hover shift. */
+.acs-root .ct-tab.lib-tab-static { cursor: default; }
+.acs-root .ct-tab.lib-tab-static:hover { color: var(--ink); }
+.acs-root .lib-tabrow > .btn { margin-bottom: 7px; }
 .acs-root .lib { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding-top: 16px; align-items: start; }
+/* The source rail sits in its own panel (the "big box" wrapping the pack cards). */
+.acs-root .lib-railbox { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px; }
 .acs-root .lib-rail { display: flex; flex-direction: column; gap: 4px; }
 .acs-root .lib-rail-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 11px; border: 1px solid transparent; border-radius: var(--radius); cursor: pointer; transition: background .12s ease, border-color .12s ease; }
 .acs-root .lib-rail-item:hover { background: rgba(31,30,29,.04); }
@@ -461,7 +469,10 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .lib-sec-h { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 8px; }
 .acs-root .lib-sec-h svg { color: var(--ink-2); }
 .acs-root .lib-sec-c { color: var(--muted-2); font-weight: 500; }
-.acs-root .lib-art { padding: 9px 0; border-top: 1px solid var(--line); }
+.acs-root .lib-art { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-top: 1px solid var(--line); cursor: pointer; border-radius: 6px; transition: background .12s ease; }
+.acs-root .lib-art:hover { background: var(--panel-2); }
+.acs-root .lib-art:focus-visible { outline: none; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--accent); }
+.acs-root .lib-art > svg { color: var(--muted-2); flex-shrink: 0; margin-left: auto; }
 .acs-root .lib-sec-h + .lib-art { border-top: none; }
 
 /* Agent bench — the Agents page as a roster of schedulable units (cards first, Fleet-health scorecard below). */
@@ -1409,6 +1420,8 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 /* Remove (×) affordance on an editable bound-skill chip in the agent editor. */
 .ed-tok-x { appearance: none; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; padding: 0 0 0 5px; display: inline-flex; align-items: center; vertical-align: -1px; }
 .ed-tok-x:hover { color: var(--danger); }
+/* Preformatted body block in a portaled modal (the skill detail's SKILL.md). Root-level, like .mdl. */
+.mdl-pre { font-size: 12px; color: var(--ink-2); background: var(--panel-2); border-radius: 8px; padding: 10px 12px; margin: 0; font-family: var(--font-mono, ui-monospace, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
 
 /* Connected identities (Model B) — per-user provider-identity management list. */
 .acs-identities { padding: 20px 24px; max-width: 720px; }
