@@ -34,7 +34,7 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
 
         var correlationId = Guid.NewGuid();
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
-            () => StartedPayloadAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
+            () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
         LLMCompletion completion;
         try
@@ -43,12 +43,12 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
         }
         catch (Exception ex)
         {
-            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, ex)), cancellationToken).ConfigureAwait(false);
+            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), cancellationToken).ConfigureAwait(false);
             throw;
         }
 
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, completion.Model, completion.Usage, await OffloadTextAsync(scope, completion.Text, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadTextAsync(scope, completion.Text, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
         return completion;
     }
 
@@ -62,7 +62,7 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
 
         var correlationId = Guid.NewGuid();
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionStarted, correlationId,
-            () => StartedPayloadAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
+            () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
         StructuredLLMCompletion completion;
         try
@@ -71,12 +71,12 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
         }
         catch (Exception ex)
         {
-            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, ex)), cancellationToken).ConfigureAwait(false);
+            await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), cancellationToken).ConfigureAwait(false);
             throw;
         }
 
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
-            async () => CompletedPayload(scope, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+            async () => CompletedPayload(scope, Provider, completion.Model, completion.Usage, await OffloadJsonAsync(scope, completion.Json, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
         return completion;
     }
 
@@ -94,7 +94,7 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
         }
     }
 
-    private static async Task<JsonElement> StartedPayloadAsync(LlmCallScope scope, string model, string system, string user, double temperature, int maxOutputTokens, CancellationToken cancellationToken)
+    private static async Task<JsonElement> StartedPayloadAsync(LlmCallScope scope, string provider, string model, string system, string user, double temperature, int maxOutputTokens, CancellationToken cancellationToken)
     {
         var sys = await OffloadTextAsync(scope, system, cancellationToken).ConfigureAwait(false);
         var usr = await OffloadTextAsync(scope, user, cancellationToken).ConfigureAwait(false);
@@ -102,25 +102,27 @@ public sealed class RecordingLLMClientDecorator : ILLMClient, IStructuredLLMClie
         return JsonSerializer.SerializeToElement(new
         {
             kind = scope.Kind,
+            provider,
             model,
             @params = new { temperature, maxOutputTokens },
             prompt = new { system = sys, user = usr },
         });
     }
 
-    private static JsonElement CompletedPayload(LlmCallScope scope, string model, LlmUsage usage, object? output) =>
+    private static JsonElement CompletedPayload(LlmCallScope scope, string provider, string model, LlmUsage usage, object? output) =>
         JsonSerializer.SerializeToElement(new
         {
             kind = scope.Kind,
+            provider,
             model,
             usage = new { inputTokens = usage.InputTokens, outputTokens = usage.OutputTokens, finishReason = usage.FinishReason },
             output,
         });
 
-    private static JsonElement FailedPayload(LlmCallScope scope, Exception ex)
+    private static JsonElement FailedPayload(LlmCallScope scope, string provider, Exception ex)
     {
         var category = ex is LlmApiException llm ? llm.Category.ToString() : null;
-        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, error = ex.Message, category });
+        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error = ex.Message, category });
     }
 
     /// <summary>A plain-text field (a prompt / a text completion): the inline string when small, else a content-addressed <c>$artifact_id</c> ref. Null/empty rides as-is.</summary>

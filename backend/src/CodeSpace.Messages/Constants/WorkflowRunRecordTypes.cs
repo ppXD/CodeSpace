@@ -113,13 +113,13 @@ public static class WorkflowRunRecordTypes
     // step with no per-caller record type. Prompt / completion / reasoning ride the payload inline
     // when small, else as a {"$artifact_id":...} ref. Captured generically at the LLM-client seam.
 
-    /// <summary>A model call began. Payload: {"kind":"...","model":"...","params":{...},"prompt":{"system":...,"user":...}} — prompt fields inline-or-$artifact_id.</summary>
+    /// <summary>A model call began. Payload: {"kind":"...","provider":"...","model":"...","params":{...},"prompt":{"system":...,"user":...}} — prompt fields inline-or-$artifact_id.</summary>
     public const string InteractionStarted = "interaction.started";
 
-    /// <summary>A model call returned. Payload: {"kind":"...","model":"...","usage":{"inputTokens":N,"outputTokens":N,"finishReason":"..."},"output":...} — output inline-or-$artifact_id.</summary>
+    /// <summary>A model call returned. Payload: {"kind":"...","provider":"...","model":"...","usage":{"inputTokens":N,"outputTokens":N,"finishReason":"..."},"output":...} — output inline-or-$artifact_id.</summary>
     public const string InteractionCompleted = "interaction.completed";
 
-    /// <summary>A model call threw. Payload: {"kind":"...","error":"...","category"?:"..."}.</summary>
+    /// <summary>A model call threw. Payload: {"kind":"...","provider":"...","error":"...","category"?:"..."}.</summary>
     public const string InteractionFailed = "interaction.failed";
 
     // ─── Log lines ────────────────────────────────────────────────────────────
