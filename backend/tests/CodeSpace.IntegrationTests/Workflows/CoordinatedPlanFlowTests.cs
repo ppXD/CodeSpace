@@ -145,7 +145,7 @@ public class CoordinatedPlanFlowTests
     private DeterministicCoordinatedLlmClient ResetSharedFake()
     {
         using var scope = _fixture.BeginScope();
-        var fake = scope.Resolve<IEnumerable<ILLMClient>>().OfType<DeterministicCoordinatedLlmClient>().Single();
+        var fake = scope.Resolve<DeterministicCoordinatedLlmClient>();   // concrete type → the raw shared singleton, past the ILLMClient recording decorator
         fake.Reset();
         return fake;
     }
@@ -171,7 +171,7 @@ public class CoordinatedPlanFlowTests
     private DeterministicCoordinatedLlmClient ResolveSharedFake()
     {
         using var scope = _fixture.BeginScope();
-        return scope.Resolve<IEnumerable<ILLMClient>>().OfType<DeterministicCoordinatedLlmClient>().Single();
+        return scope.Resolve<DeterministicCoordinatedLlmClient>();   // concrete type → the raw shared singleton, past the ILLMClient recording decorator
     }
 
     private async Task<bool> ApproveAsync(Guid runId, Guid teamId, Guid userId)

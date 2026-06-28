@@ -327,6 +327,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         // retargeted llm.complete nodes resolve the SAME instance — the coordinator's round counter is shared
         // across the two engine rounds. The single coordinated test Reset()s the counter at its start.
         builder.RegisterType<Workflows.Infrastructure.DeterministicCoordinatedLlmClient>()
+            .AsSelf()   // also resolvable by concrete type so a test can grab the shared instance past the recording decorator that wraps the ILLMClient service
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
