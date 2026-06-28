@@ -21,6 +21,9 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
   const [url, setUrl] = useState("");
   const [reference, setReference] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // The url/ref actually fetched — snapshotted on a successful preview so the rail label and the commit always
+  // reflect the previewed pack, even if the operator edits the URL field afterwards without re-fetching.
+  const [fetched, setFetched] = useState<{ url: string; reference: string } | null>(null);
 
   const preview = usePreviewPack();
   const importPack = useImportPack();
@@ -42,7 +45,7 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
 
   function fetchPreview() {
     if (!url.trim()) return;
-    preview.mutate({ url: url.trim(), reference }, { onSuccess: (p) => setSelected(new Set(defaultSelectedPaths(p))) });
+    preview.mutate({ url: url.trim(), reference }, { onSuccess: (p) => { setSelected(new Set(defaultSelectedPaths(p))); setFetched({ url: url.trim(), reference }); } });
   }
 
   function toggle(sourcePath: string) {
@@ -54,7 +57,8 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
   }
 
   function commit() {
-    importPack.mutate({ url: url.trim(), reference, sourcePaths: [...selected] }, { onSuccess: onClose });
+    if (!fetched) return;
+    importPack.mutate({ url: fetched.url, reference: fetched.reference, sourcePaths: [...selected] }, { onSuccess: onClose });
   }
 
   const previewErr = preview.error instanceof ApiError ? preview.error.message : preview.error ? "Couldn't fetch the pack." : null;
@@ -98,13 +102,13 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
             <div className="wf-form-empty" style={{ marginTop: 16 }}>No agents or skills found in this pack{data.reference ? ` at ${data.reference}` : ""}.</div>
           )}
 
-          {data && rows.length > 0 && (
+          {data && fetched && rows.length > 0 && (
             <div className="imp-cols">
               <div className="imp-rail">
                 <div className="imp-rk">Repository</div>
-                <div className="imp-rv"><Ic.Box size={13} /> {repoLabel(url)}</div>
+                <div className="imp-rv"><Ic.Box size={13} /> <span className="imp-rv-t" title={repoLabel(fetched.url)}>{repoLabel(fetched.url)}</span></div>
                 <div className="imp-rk">Branch / tag</div>
-                <div className="imp-rv"><Ic.Branch size={13} /> {(reference.trim() || data.reference) ?? "default branch"}</div>
+                <div className="imp-rv"><Ic.Branch size={13} /> <span className="imp-rv-t" title={fetched.reference || data.reference || "default branch"}>{fetched.reference || data.reference || "default branch"}</span></div>
                 <div className="imp-rk">Discovered</div>
                 <div className="imp-rv"><Ic.Bot size={13} /> {agentRows.length} {agentRows.length === 1 ? "agent" : "agents"}</div>
                 <div className="imp-rv"><Ic.Puzzle size={13} /> {skillRows.length} {skillRows.length === 1 ? "skill" : "skills"}</div>
@@ -128,7 +132,7 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        {data && rows.length > 0 && (
+        {data && fetched && rows.length > 0 && (
           <div className="mdl-foot">
             <div className="mdl-foot-info">{installSummary(selectedAgents, selectedSkills)}{conflicts > 0 ? ` · ${conflicts} already installed` : ""}</div>
             <div style={{ display: "flex", gap: 8 }}>

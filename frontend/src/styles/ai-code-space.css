@@ -1396,6 +1396,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .imp-rk { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
 .imp-rv { font-size: 12.5px; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .imp-rv svg { color: var(--muted-2); flex-shrink: 0; }
+.imp-rv-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imp-rv + .imp-rv { margin-top: -8px; }
 .imp-rv-muted { color: var(--muted); }
 .imp-rv-warn, .imp-rv-warn svg { color: var(--warn); }
