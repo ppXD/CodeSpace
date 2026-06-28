@@ -7,7 +7,7 @@ import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
-import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, paginate, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 import { SkillDetailModal } from "./SkillDetailModal";
 import { SyncResultModal } from "./SyncResultModal";
 
@@ -55,7 +55,7 @@ export function LibraryPage() {
         </div>
       </div>
 
-      <div className="ct-body">
+      <div className={hasPacks ? "ct-body lib-body" : "ct-body"}>
         {packs.isLoading && (
           <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>
         )}
@@ -128,6 +128,8 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
 }
 
 /** The detail pane — the selected pack's source + freshness header (with Sync), then its agent + skill sections. */
+const DETAIL_PAGE_SIZE = 8;
+
 function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: PackArtifactKind, id: string) => void }) {
   const detail = usePack(packId);
   const sync = useSyncPack();
@@ -135,6 +137,11 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
   // its selection re-seeds from the new preview (no remount → the old result's selection would linger).
   const syncSeq = useRef(0);
   const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult; seq: number } | null>(null);
+
+  // null = no explicit pick yet → default to whichever kind has rows (skill-only packs open on Skills). A click pins
+  // the choice. page is clamped by paginate(), so a tab switch (which resets it to 0) or a shrunk list stays valid.
+  const [tab, setTab] = useState<"agents" | "skills" | null>(null);
+  const [page, setPage] = useState(0);
 
   if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
 
@@ -154,9 +161,14 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
   const { pack, artifacts } = detail.data;
   const { agents, skills } = splitArtifacts(artifacts);
 
+  const activeTab = tab ?? (agents.length > 0 ? "agents" : "skills");
+  const paged = paginate(activeTab === "agents" ? agents : skills, page, DETAIL_PAGE_SIZE);
+
   // A Custom (locally-authored) pack has no remote source to re-pull, so it can't be synced.
   const canSync = pack.kind !== "Custom";
   const syncErr = sync.error ? sync.error.message : null;
+
+  function selectTab(next: "agents" | "skills") { setTab(next); setPage(0); }
 
   function runSync() {
     sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result, seq: ++syncSeq.current }) });
@@ -188,12 +200,34 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
         </div>
       )}
 
-      {artifacts.length === 0 && (
+      {artifacts.length === 0 ? (
         <div className="ct-empty"><div className="ct-empty-h">No active artifacts</div><div className="ct-empty-p">Every agent + skill from this pack has been removed.</div></div>
-      )}
+      ) : (
+        <>
+          <div className="lib-dtabs" role="tablist" aria-label="Artifact kind">
+            <button type="button" role="tab" aria-selected={activeTab === "agents"} className="lib-dtab" data-on={activeTab === "agents"} onClick={() => selectTab("agents")}>
+              <Ic.Bot size={13} /> Agents <span className="lib-dtab-c">{agents.length}</span>
+            </button>
+            <button type="button" role="tab" aria-selected={activeTab === "skills"} className="lib-dtab" data-on={activeTab === "skills"} onClick={() => selectTab("skills")}>
+              <Ic.Book size={13} /> Skills <span className="lib-dtab-c">{skills.length}</span>
+            </button>
+          </div>
 
-      <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} onOpen={onOpen} />
-      <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} onOpen={onOpen} />
+          <div className="lib-dlist">
+            {paged.items.length === 0
+              ? <div className="ct-empty"><div className="ct-empty-p">No {activeTab} in this pack.</div></div>
+              : paged.items.map((a) => <ArtifactRow key={a.id} artifact={a} onOpen={onOpen} />)}
+          </div>
+
+          {paged.pageCount > 1 && (
+            <div className="lib-pager">
+              <button type="button" className="lib-pager-btn" disabled={paged.page === 0} onClick={() => setPage(paged.page - 1)} aria-label="Previous page"><Ic.ChevronLeft size={15} /></button>
+              <span className="lib-pager-info">{paged.page * DETAIL_PAGE_SIZE + 1}–{Math.min((paged.page + 1) * DETAIL_PAGE_SIZE, paged.total)} of {paged.total}</span>
+              <button type="button" className="lib-pager-btn" disabled={paged.page >= paged.pageCount - 1} onClick={() => setPage(paged.page + 1)} aria-label="Next page"><Ic.ChevronRight size={15} /></button>
+            </div>
+          )}
+        </>
+      )}
 
       {syncResult && <SyncResultModal key={syncResult.seq} pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
     </div>
@@ -214,30 +248,22 @@ function Freshness({ pack }: { pack: PackSummary }) {
   );
 }
 
-/** One kind-section of the detail — a labelled heading + the artifact rows. Each row opens its detail. Renders nothing when empty. */
-function ArtifactSection({ title, icon, items, onOpen }: { title: string; icon: React.ReactNode; items: PackArtifactSummary[]; onOpen: (kind: PackArtifactKind, id: string) => void }) {
-  if (items.length === 0) return null;
-
+/** One artifact row in the detail list — opens its detail (agent editor / skill modal) on click or Enter/Space. */
+function ArtifactRow({ artifact: a, onOpen }: { artifact: PackArtifactSummary; onOpen: (kind: PackArtifactKind, id: string) => void }) {
   return (
-    <div className="lib-sec">
-      <div className="lib-sec-h">{icon} {title} <span className="lib-sec-c">{items.length}</span></div>
-      {items.map((a) => (
-        <div
-          className="lib-art"
-          key={a.id}
-          role="button"
-          tabIndex={0}
-          aria-label={`Open ${a.name}`}
-          onClick={() => onOpen(a.kind, a.id)}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a.kind, a.id); } }}
-        >
-          <div className="repo-info">
-            <div className="repo-name">{a.name}<span className="wf-trigger-muted" style={{ marginLeft: 8 }}>@{a.slug}</span></div>
-            {a.description && <div className="repo-path"><span className="repo-path-desc" title={a.description}>{a.description}</span></div>}
-          </div>
-          <Ic.ChevronRight size={15} />
-        </div>
-      ))}
+    <div
+      className="lib-art"
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${a.name}`}
+      onClick={() => onOpen(a.kind, a.id)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a.kind, a.id); } }}
+    >
+      <div className="repo-info">
+        <div className="repo-name">{a.name}<span className="wf-trigger-muted" style={{ marginLeft: 8 }}>@{a.slug}</span></div>
+        {a.description && <div className="repo-path"><span className="repo-path-desc" title={a.description}>{a.description}</span></div>}
+      </div>
+      <Ic.ChevronRight size={15} />
     </div>
   );
 }
