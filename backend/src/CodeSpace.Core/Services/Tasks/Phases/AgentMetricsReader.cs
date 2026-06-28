@@ -62,7 +62,8 @@ public sealed class AgentMetricsReader : IScopedDependency
     public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, int toolCount, DateTimeOffset now)
     {
         var result = TryDeserialize<ResultSlice>(resultJson);
-        var rawModel = TryDeserialize<ModelSlice>(taskJson)?.Model;
+        var task = TryDeserialize<TaskSlice>(taskJson);
+        var rawModel = task?.Model;
         var model = string.IsNullOrWhiteSpace(rawModel) ? null : rawModel;
 
         var tokens = result?.TokenUsage;
@@ -70,6 +71,7 @@ public sealed class AgentMetricsReader : IScopedDependency
         return new AgentRunMetrics
         {
             Status = status,
+            Goal = DeriveTitle(task?.Goal),
             DurationMs = ComputeDuration(startedAt, completedAt, now),
             InputTokens = tokens?.InputTokens,
             OutputTokens = tokens?.OutputTokens,
@@ -102,8 +104,28 @@ public sealed class AgentMetricsReader : IScopedDependency
     /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
     private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles);
 
-    /// <summary>The model leaf of <c>AgentTask</c> — a narrow projection so the task envelope's heavy fields (workspace / permissions / prompt) are never materialized here.</summary>
-    private sealed record ModelSlice(string? Model);
+    /// <summary>The display leaves of <c>AgentTask</c> — its model + goal — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
+    private sealed record TaskSlice(string? Model, string? Goal);
+
+    /// <summary>
+    /// A concise one-line display TITLE from an agent's goal — so a fan-out branch reads as its subtask rather than a
+    /// structural <c>map#N</c> key. A persona-resolved goal is <c>"&lt;systemPrompt&gt;\n\n&lt;task&gt;"</c>
+    /// (see <c>AgentDefinitionResolver.ComposeGoal</c>), so take the LAST blank-line block (the task half), its first
+    /// non-empty line, trimmed and capped. A null/empty/whitespace goal → null (the row keeps its structural fallback).
+    /// </summary>
+    internal static string? DeriveTitle(string? goal)
+    {
+        if (string.IsNullOrWhiteSpace(goal)) return null;
+
+        var normalized = goal.Replace("\r\n", "\n").Replace('\r', '\n');
+        var block = normalized.Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? normalized;
+        var line = block.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+
+        if (string.IsNullOrEmpty(line)) return null;
+
+        const int max = 140;
+        return line.Length <= max ? line : line[..max].TrimEnd() + "…";
+    }
 
     private sealed record Row(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? ResultJson, string? TaskJson);
 

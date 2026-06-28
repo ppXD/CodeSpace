@@ -132,11 +132,12 @@ public class WorkflowNodePhaseSourceTests
         var statuses = new Dictionary<Guid, AgentRunStatus> { [agentRunId] = AgentRunStatus.Succeeded };
         var metrics = new Dictionary<Guid, AgentRunMetrics>
         {
-            [agentRunId] = new() { Status = AgentRunStatus.Succeeded, DurationMs = 12_000, InputTokens = 200, OutputTokens = 80, ToolCount = 3, Model = "claude-opus-4", CostUsd = 0.05m, FilesChanged = 4 },
+            [agentRunId] = new() { Status = AgentRunStatus.Succeeded, Goal = "Refactor the auth module", DurationMs = 12_000, InputTokens = 200, OutputTokens = 80, ToolCount = 3, Model = "claude-opus-4", CostUsd = 0.05m, FilesChanged = 4 },
         };
 
         var agent = WorkflowNodePhaseSource.ProjectNodes(nodes, statuses, metrics).ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
 
+        agent.Goal.ShouldBe("Refactor the auth module", "the goal-derived title threads onto the ref as the agent's display name");
         agent.DurationMs.ShouldBe(12_000);
         agent.InputTokens.ShouldBe(200);
         agent.OutputTokens.ShouldBe(80);

@@ -152,6 +152,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             NodeId = node.NodeId,
             IterationKey = string.IsNullOrEmpty(node.IterationKey) ? null : node.IterationKey,
             Status = agentStatusById.TryGetValue(agentRunId, out var status) ? status.ToString() : node.Status.ToString(),
+            Goal = metrics?.Goal,   // the agent's subtask as a display name, so the row reads as its goal not a map#N key
             Model = metrics?.Model,
             InputTokens = metrics?.InputTokens,
             OutputTokens = metrics?.OutputTokens,
