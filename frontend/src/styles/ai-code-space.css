@@ -464,6 +464,31 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .lib-art { padding: 9px 0; border-top: 1px solid var(--line); }
 .acs-root .lib-sec-h + .lib-art { border-top: none; }
 
+/* Agent bench — the Agents page as a roster of schedulable units (cards first, Fleet-health scorecard below). */
+.acs-root .ab-section-lbl { font-size: 12px; font-weight: 600; color: var(--muted); margin: 4px 0 10px; }
+.acs-root .ab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.acs-root .ab-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
+.acs-root .ab-card:hover { border-color: var(--accent); box-shadow: var(--shadow-1); }
+.acs-root .ab-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.acs-root .ab-top { display: flex; gap: 12px; align-items: flex-start; }
+.acs-root .ab-avatar { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; flex-shrink: 0; }
+.acs-root .ab-id { flex: 1; min-width: 0; }
+.acs-root .ab-namerow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acs-root .ab-name { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; }
+.acs-root .ab-handle { font-size: 12.5px; color: var(--muted-2); }
+.acs-root .ab-role { font-size: 11px; font-weight: 500; padding: 1px 8px; border-radius: 999px; }
+.acs-root .ab-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .ab-origin { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
+.acs-root .ab-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.acs-root .ab-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 11px 0 0 52px; }
+.acs-root .ab-chip { font-size: 11.5px; color: var(--muted); background: var(--panel-2); border-radius: 6px; padding: 3px 8px; display: inline-flex; align-items: center; gap: 5px; }
+.acs-root .ab-chip svg { color: var(--muted-2); }
+.acs-root .ab-chip-muted { color: var(--muted-2); }
+.acs-root .ab-tok { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: #99452A; font-family: var(--font-mono, ui-monospace, monospace); }
+.acs-root .ab-perf { font-size: 12px; color: var(--muted); margin: 10px 0 0 52px; display: flex; align-items: center; gap: 6px; }
+.acs-root .ab-perf-empty { color: var(--muted-2); }
+.acs-root .ab-fleet { margin-top: 22px; }
+
 /* Model-credential cards (Settings → Model credentials) — provider logo + masked key, never the secret. */
 .acs-root .mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 14px; padding: 16px; }
 .acs-root .mc-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; transition: border-color .12s ease, box-shadow .12s ease; }
