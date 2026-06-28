@@ -113,6 +113,68 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_transient_brain_fault_on_consecutive_turns_is_retried_and_the_spawn_stages_each_agent_exactly_once()
+    {
+        // Slice A, the real-engine proof: a TRANSIENT gateway fault on the brain call mid-orchestration used to
+        // terminalize the whole durable run (the supervisor node's default single attempt). The production
+        // RetryingSupervisorDeciderDecorator that wraps the (scripted) decider must now recover it IN PLACE — and the
+        // recovered spawn must still stage each agent EXACTLY ONCE (the brain-call retries re-ask the decision, they
+        // never re-execute it), reusing the same multi-agent staging path the persona-merge test drives.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+        var (credentialId, _) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PersonaModel);
+        var personaId = await SeedPersonaAsync(teamId, PersonaPrompt, PersonaModel, $"[\"{PersonaTool}\"]");
+        var conversationId = Guid.NewGuid();
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, repoId, personaId, conversationId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // the binary-less harness must not run; we inspect the staged agents
+
+        // A transient on the PLAN turn (once) AND the SPAWN turn (twice) — both within the default 3-attempt budget.
+        SupervisorDecisionScript script;
+        using (var s = _fixture.BeginScope())
+        {
+            script = s.Resolve<SupervisorDecisionScript>();
+            script.FailTransientlyOnTurn(0, 1);
+            script.FailTransientlyOnTurn(1, 2);
+        }
+
+        try
+        {
+            await RunEngineAsync(runId);          // turn 0 plan — throws transient once, the retry recovers
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);          // turn 1 spawn — throws transient twice, the third attempt stages both
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // Every injected fault was actually thrown → the decider really faulted on both turns (not a silent no-op).
+            script.RemainingTransientFaults(0).ShouldBe(0, "the plan-turn transient was thrown");
+            script.RemainingTransientFaults(1).ShouldBe(0, "both spawn-turn transients were thrown");
+
+            // The retry recovered both, and the spawn staged EXACTLY 2 agents — the two spawn-turn retries re-ask the
+            // decision but never re-execute it, so neither subtask's agent is staged twice.
+            var spawned = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            spawned.Count.ShouldBe(2, "the recovered spawn staged each subtask's agent exactly once despite two brain-call retries");
+
+            // Both decisions are recorded terminal Succeeded — recovered cleanly, never stranded Running, never Failed.
+            var plan = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Plan);
+            plan.Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the plan turn recovered from its transient and completed");
+
+            var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+            spawn.Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the spawn recovered from two transients and completed — not Failed, not stranded Running");
+        }
+        finally
+        {
+            using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().ClearTransientFaults();
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_spawn_referencing_a_non_existent_persona_fails_cleanly_without_stranding_the_decision()
     {
         // A profile authored with a persona id that doesn't exist for the team — the dispatch-time resolver
