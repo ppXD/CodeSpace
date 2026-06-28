@@ -22,6 +22,19 @@ export function splitArtifacts(artifacts: PackArtifactSummary[]): { agents: Pack
   };
 }
 
+/**
+ * Which kind-tab the detail shows: the explicit pick, UNLESS that kind is now empty while the other has rows — then
+ * fall back to the populated kind (mirrors resolveSelectedPackId reconciling a stale pack pick), so a sync that drops
+ * every artifact of the pinned kind never strands the user on an empty tab. No pick yet ⇒ the populated kind (a
+ * skill-only pack opens on Skills).
+ */
+export function resolveDetailTab(picked: "agents" | "skills" | null, agentCount: number, skillCount: number): "agents" | "skills" {
+  if (picked === "agents" && agentCount === 0 && skillCount > 0) return "skills";
+  if (picked === "skills" && skillCount === 0 && agentCount > 0) return "agents";
+
+  return picked ?? (agentCount > 0 ? "agents" : "skills");
+}
+
 /** One page of a list. <c>page</c> is the CLAMPED 0-based index actually used (so a now-shorter list never strands the view past its end). */
 export interface Page<T> {
   items: T[];

@@ -7,7 +7,7 @@ import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
-import { countLabel, paginate, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 import { SkillDetailModal } from "./SkillDetailModal";
 import { SyncResultModal } from "./SyncResultModal";
 
@@ -161,7 +161,9 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
   const { pack, artifacts } = detail.data;
   const { agents, skills } = splitArtifacts(artifacts);
 
-  const activeTab = tab ?? (agents.length > 0 ? "agents" : "skills");
+  // resolveDetailTab reconciles a pinned tab whose kind has since emptied (e.g. a sync dropped every agent) back to
+  // the populated kind, so the user is never stranded on an empty tab — mirroring resolveSelectedPackId for packs.
+  const activeTab = resolveDetailTab(tab, agents.length, skills.length);
   const paged = paginate(activeTab === "agents" ? agents : skills, page, DETAIL_PAGE_SIZE);
 
   // A Custom (locally-authored) pack has no remote source to re-pull, so it can't be synced.
@@ -171,7 +173,9 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
   function selectTab(next: "agents" | "skills") { setTab(next); setPage(0); }
 
   function runSync() {
-    sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result, seq: ++syncSeq.current }) });
+    // A sync can add/remove artifacts, so reset pagination to the first page (a stale page index can't resurrect
+    // when the list later grows back); the tab is reconciled by resolveDetailTab above.
+    sync.mutate(pack.id, { onSuccess: (result) => { setPage(0); setSyncResult({ pack, result, seq: ++syncSeq.current }); } });
   }
 
   return (
@@ -213,11 +217,9 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
             </button>
           </div>
 
-          <div className="lib-dlist">
-            {paged.items.length === 0
-              ? <div className="ct-empty"><div className="ct-empty-p">No {activeTab} in this pack.</div></div>
-              : paged.items.map((a) => <ArtifactRow key={a.id} artifact={a} onOpen={onOpen} />)}
-          </div>
+          {paged.items.length === 0
+            ? <div className="ct-empty"><div className="ct-empty-p">No {activeTab} in this pack.</div></div>
+            : paged.items.map((a) => <ArtifactRow key={a.id} artifact={a} onOpen={onOpen} />)}
 
           {paged.pageCount > 1 && (
             <div className="lib-pager">

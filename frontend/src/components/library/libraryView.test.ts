@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PackArtifactSummary, PackSummary } from "@/api/packs";
 
-import { countLabel, paginate, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 
 const pack = (over: Partial<PackSummary>): PackSummary => ({
   id: "p1", kind: "Github", name: "agents", url: null, reference: null,
@@ -76,6 +76,27 @@ describe("sourceLabel", () => {
 
   it("falls back to the pack name when there is no url", () => {
     expect(sourceLabel(pack({ url: null, name: "Local" }))).toBe("Local");
+  });
+});
+
+describe("resolveDetailTab", () => {
+  it("defaults to the populated kind when there is no pick", () => {
+    expect(resolveDetailTab(null, 3, 0)).toBe("agents");
+    expect(resolveDetailTab(null, 0, 3)).toBe("skills");   // skill-only pack opens on Skills
+  });
+
+  it("honours an explicit pick while that kind has rows", () => {
+    expect(resolveDetailTab("skills", 3, 2)).toBe("skills");
+    expect(resolveDetailTab("agents", 3, 2)).toBe("agents");
+  });
+
+  it("falls back to the populated kind when the pinned kind has emptied (e.g. after a sync)", () => {
+    expect(resolveDetailTab("agents", 0, 4)).toBe("skills");
+    expect(resolveDetailTab("skills", 5, 0)).toBe("agents");
+  });
+
+  it("keeps the pinned kind when BOTH are empty (no better choice to fall back to)", () => {
+    expect(resolveDetailTab("agents", 0, 0)).toBe("agents");
   });
 });
 
