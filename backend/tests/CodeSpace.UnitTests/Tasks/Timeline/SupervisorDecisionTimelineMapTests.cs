@@ -35,7 +35,6 @@ public class SupervisorDecisionTimelineMapTests
 
     [Theory]
     [InlineData(SupervisorDecisionKinds.Plan, "Supervisor planned the work")]
-    [InlineData(SupervisorDecisionKinds.Retry, "Supervisor retried a subtask")]
     [InlineData(SupervisorDecisionKinds.AskHuman, "Supervisor asked you")]
     [InlineData(SupervisorDecisionKinds.Merge, "Supervisor merged the results")]
     [InlineData(SupervisorDecisionKinds.Resolve, "Supervisor resolved a conflict")]
@@ -73,6 +72,19 @@ public class SupervisorDecisionTimelineMapTests
         var outcome = count == 0 ? null : StagedAgents(count);
 
         SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Spawn, outcome: outcome)).Title.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Retry_title_says_nothing_re_ran_when_a_settled_retry_staged_no_agent()
+    {
+        // A real retry re-ran a subtask (staged its agent) → the plain verb.
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry, outcome: StagedAgents(1))).Title
+            .ShouldBe("Supervisor retried a subtask");
+
+        // A retry that SETTLED having staged NO agent re-ran nothing (the model authored an empty/unknown subtask id,
+        // the server no-op'd it) — say so, instead of implying work happened.
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry, SupervisorDecisionStatus.Succeeded, outcome: StagedAgents(0))).Title
+            .ShouldBe("Supervisor retried — no subtask to re-run");
     }
 
     [Theory]

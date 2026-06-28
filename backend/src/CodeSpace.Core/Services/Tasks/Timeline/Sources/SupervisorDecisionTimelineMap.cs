@@ -39,7 +39,7 @@ public static class SupervisorDecisionTimelineMap
     {
         SupervisorDecisionKinds.Plan => "Supervisor planned the work",
         SupervisorDecisionKinds.Spawn => SpawnTitle(d),
-        SupervisorDecisionKinds.Retry => "Supervisor retried a subtask",
+        SupervisorDecisionKinds.Retry => RetryTitle(d),
         SupervisorDecisionKinds.AskHuman => "Supervisor asked you",
         SupervisorDecisionKinds.Merge => "Supervisor merged the results",
         SupervisorDecisionKinds.Resolve => "Supervisor resolved a conflict",
@@ -54,6 +54,12 @@ public static class SupervisorDecisionTimelineMap
 
         return n switch { 0 => "Supervisor spawned agents", 1 => "Supervisor spawned 1 agent", _ => $"Supervisor spawned {n} agents" };
     }
+
+    /// <summary>A retry that SETTLED having staged NO agent re-ran nothing — the model authored a retry with no (or an unknown) subtask id, so the server no-op'd it. Say so, instead of "retried a subtask", which implies work happened. A still-in-flight retry (not yet settled) keeps the plain verb.</summary>
+    private static string RetryTitle(SupervisorDecisionRecord d) =>
+        d.Status == SupervisorDecisionStatus.Succeeded && SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson).Count == 0
+            ? "Supervisor retried — no subtask to re-run"
+            : "Supervisor retried a subtask";
 
     // A finished decision is Success, a failed one Error, a reaper-expired one Warning; everything still in flight
     // (Pending / AwaitingApproval / Running) is Info. The closed status axis is the ONLY thing severity reads.
