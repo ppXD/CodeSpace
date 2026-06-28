@@ -1389,6 +1389,18 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
    have room to grow either side without something giving. */
 .mdl-foot-info { font-size: 12.5px; color: var(--muted); min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Import-as-capability-install — a source metadata rail (left) + the selectable items (right). Root-level
+   (not under .acs-root) because the modal portals to document.body. */
+.imp-cols { display: flex; margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.imp-rail { width: 182px; flex-shrink: 0; background: var(--panel-2); padding: 14px; border-right: 1px solid var(--line); }
+.imp-rk { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.imp-rv { font-size: 12.5px; color: var(--ink); margin-bottom: 12px; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.imp-rv svg { color: var(--muted-2); flex-shrink: 0; }
+.imp-rv + .imp-rv { margin-top: -8px; }
+.imp-rv-muted { color: var(--muted); }
+.imp-rv-warn, .imp-rv-warn svg { color: var(--warn); }
+.imp-list { flex: 1; min-width: 0; padding: 0 16px 14px; }
+
 /* Agent detail DRAWER — the `mdl drw` panel reuses the .mdl head/body/foot + form/control styling above and
    overrides the geometry to a full-height panel anchored right. These classes are root-level (not under
    .acs-root) because the drawer portals to document.body, like .mdl. */
