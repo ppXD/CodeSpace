@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { PackArtifactSummary, PackSummary } from "@/api/packs";
+import type { PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
-import { usePack, usePacks } from "@/hooks/use-packs";
+import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
 import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { SyncResultModal } from "./SyncResultModal";
 
 /**
  * Library / store — the team's imported packs as source categories. The left rail lists each pack (a github /
@@ -75,7 +76,10 @@ export function LibraryPage() {
                 <PackRailItem key={p.id} pack={p} active={p.id === selectedId} onSelect={() => setPicked(p.id)} />
               ))}
             </div>
-            {selectedId && <PackDetailPane packId={selectedId} />}
+            {/* Keyed by pack: a pack switch remounts the pane, resetting the per-pack Sync mutation + result so
+                an in-flight sync's late onSuccess lands on the unmounted instance (a harmless no-op) instead of
+                popping pack A's result over pack B, and a failed sync's error banner can't leak to another pack. */}
+            {selectedId && <PackDetailPane key={selectedId} packId={selectedId} />}
           </div>
         )}
       </div>
@@ -111,9 +115,14 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
   );
 }
 
-/** The detail pane — the selected pack's source + freshness header, then its agent + skill sections. */
+/** The detail pane — the selected pack's source + freshness header (with Sync), then its agent + skill sections. */
 function PackDetailPane({ packId }: { packId: string }) {
   const detail = usePack(packId);
+  const sync = useSyncPack();
+  // seq makes each sync result a distinct modal identity, so a same-pack re-sync remounts the result modal and
+  // its selection re-seeds from the new preview (no remount → the old result's selection would linger).
+  const syncSeq = useRef(0);
+  const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult; seq: number } | null>(null);
 
   if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
 
@@ -133,6 +142,14 @@ function PackDetailPane({ packId }: { packId: string }) {
   const { pack, artifacts } = detail.data;
   const { agents, skills } = splitArtifacts(artifacts);
 
+  // A Custom (locally-authored) pack has no remote source to re-pull, so it can't be synced.
+  const canSync = pack.kind !== "Custom";
+  const syncErr = sync.error ? sync.error.message : null;
+
+  function runSync() {
+    sync.mutate(pack.id, { onSuccess: (result) => setSyncResult({ pack, result, seq: ++syncSeq.current }) });
+  }
+
   return (
     <div className="lib-detail">
       <div className="lib-dhead">
@@ -142,8 +159,22 @@ function PackDetailPane({ packId }: { packId: string }) {
             ? <a className="lib-dhead-src" href={pack.url} target="_blank" rel="noreferrer"><Ic.Link size={12} /> {sourceLabel(pack)}</a>
             : <span className="lib-dhead-src lib-dhead-src-mute">authored in this team</span>}
         </div>
-        <Freshness pack={pack} />
+        <div className="lib-dhead-actions">
+          <Freshness pack={pack} />
+          {canSync && (
+            <button type="button" className="btn" onClick={runSync} disabled={sync.isPending} title="Re-pull this pack from its source">
+              <Ic.Sync size={13} /> {sync.isPending ? "Syncing…" : "Sync"}
+            </button>
+          )}
+        </div>
       </div>
+
+      {syncErr && (
+        <div className="cn-banner cn-banner-err" style={{ marginTop: 12 }}>
+          <div className="cn-banner-h">Couldn't sync this pack</div>
+          <div className="cn-banner-p">{syncErr}</div>
+        </div>
+      )}
 
       {artifacts.length === 0 && (
         <div className="ct-empty"><div className="ct-empty-h">No active artifacts</div><div className="ct-empty-p">Every agent + skill from this pack has been removed.</div></div>
@@ -151,6 +182,8 @@ function PackDetailPane({ packId }: { packId: string }) {
 
       <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} />
       <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} />
+
+      {syncResult && <SyncResultModal key={syncResult.seq} pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
     </div>
   );
 }

@@ -60,6 +60,7 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCw,
   Scale,
   Search,
   Settings,
@@ -156,6 +157,7 @@ export const Ic = {
   At: wrap(AtSign),
   Copy: wrap(Copy),
   Download: wrap(Download),
+  Sync: wrap(RefreshCw),
   Expand: wrap(Maximize2),
   Collapse: wrap(Minimize2),
 };
