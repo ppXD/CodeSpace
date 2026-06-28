@@ -23,7 +23,7 @@ public enum RerunDisposition
     /// <summary>A side-effecting (but non-suspendable) leaf — admits both contexts; the runtime D7-3 approval gate fires at execution, not at the rerun gate.</summary>
     SideEffectGuarded,
 
-    /// <summary>An agent.code node — the <c>IsRerunnableWhenSuspendable</c> opt-in: its external agent run is RE-STAGED. Admitted as a container BODY today (the proven map-branch re-stage); a from-node ROOT stays refused until the root re-stage substrate lands (P2.2 — the single <see cref="RerunContext.FromNodeRoot"/> arm).</summary>
+    /// <summary>An agent.code node — the <c>IsRerunnableWhenSuspendable</c> opt-in: its external agent run is RE-STAGED. Admitted in BOTH contexts — as a container BODY (the proven map-branch re-stage) and, since P2.2, as a from-node ROOT: a from-node fork mints a fresh run id, so the re-staged agent run is unique by construction and the stateless agent.code node re-walks through the same generic stage chain. The re-stage gets a FRESH tool-call ledger, so irreversible side effects (git push / open_pr) re-execute on rerun — governed at the MCP tool level, not the rerun gate.</summary>
     ReStageExternalRun,
 
     /// <summary>Any other suspendable node (supervisor / subworkflow / wait_* / sleep / chat.post_message) with no built re-stage — refused in BOTH contexts (fail-closed).</summary>
@@ -34,10 +34,12 @@ public enum RerunDisposition
 /// The single source of truth for "can a rerun target this node, in this context" — the switch key the from-node gate
 /// (<c>WorkflowService.IsRerunUnsupported</c>) and the map-branch policy (<see cref="RerunBranchBodyPolicy"/>) consult
 /// instead of re-deriving the raw <c>CanSuspend</c> / <c>IsSideEffecting</c> / <c>IsRerunnableWhenSuspendable</c>
-/// disjunction at each site. BYTE-IDENTICAL to those predicates (proven exhaustively over the full flag cube + every
-/// live node kind); the win is one classification per node-kind and a SINGLE place — the
-/// <see cref="RerunContext.FromNodeRoot"/> arm for <see cref="RerunDisposition.ReStageExternalRun"/> — for P2.2 to admit
-/// a new from-node root, instead of duplicating the from-node-vs-body distinction across two predicates.
+/// disjunction at each site. The win is one classification per node-kind and a SINGLE place — the
+/// <see cref="RerunContext.FromNodeRoot"/> / <see cref="RerunContext.ContainerBody"/> arms — that decides which
+/// dispositions each context admits, instead of duplicating the from-node-vs-body distinction across two predicates.
+/// P2.2 admitted <see cref="RerunDisposition.ReStageExternalRun"/> (agent.code) as a from-node root by extending that
+/// one arm; every other cell stays byte-identical to the original predicates (proven over the full flag cube + every
+/// live node kind in the disposition tests).
 /// </summary>
 public static class RerunDispositions
 {
@@ -57,7 +59,7 @@ public static class RerunDispositions
     {
         var dispositionAdmits = context switch
         {
-            RerunContext.FromNodeRoot => For(manifest) is RerunDisposition.PureReExecute or RerunDisposition.SideEffectGuarded,
+            RerunContext.FromNodeRoot => For(manifest) is RerunDisposition.PureReExecute or RerunDisposition.SideEffectGuarded or RerunDisposition.ReStageExternalRun,
             RerunContext.ContainerBody => For(manifest) is RerunDisposition.PureReExecute or RerunDisposition.SideEffectGuarded or RerunDisposition.ReStageExternalRun,
             _ => false,
         };

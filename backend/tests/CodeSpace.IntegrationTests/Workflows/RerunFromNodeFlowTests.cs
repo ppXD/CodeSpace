@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
@@ -723,6 +724,38 @@ public class RerunFromNodeFlowTests
     }
 
     [Fact]
+    public async Task Rerun_from_an_agent_code_root_with_an_unsupported_downstream_is_refused_on_the_downstream_not_the_root()
+    {
+        // P2.2 made agent.code an ADMITTED from-node root. A from-node ROOT re-walks its WHOLE forward closure, so an
+        // unsupported node DOWNSTREAM of the admitted root must STILL refuse the rerun (the admission is surgical, not
+        // a hole). start → agent.code(a) → suspendprobe(b) → end; rerun from "a" scans the closure {a, b, end}. The
+        // discriminator proves BOTH halves at once: BlockedNodeIds holds "b" (the gate still does its job downstream)
+        // but NOT "a" — the agent.code root is admitted. That ShouldNotContain("a") is the load-bearing control:
+        // revert the one-line P2.2 flip and "a" reappears here (agent.code refused as a root), failing this test.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-agentroot-unsupported-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(probeKey);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // park agent.code(a) cleanly; never run the binary-less harness
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentThenSuspendProbeDef(probeKey));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);   // suspends parked on agent.code(a)'s AgentRun wait
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
+
+        var before = await RunCountAsync(teamId);
+        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
+            await RerunAsync(originalRunId, "a", teamId, userId));   // "a" = the admitted agent.code root
+
+        ex.BlockedNodeIds.ShouldContain("b", "the unsupported suspendprobe DOWNSTREAM of the admitted agent.code root still refuses the rerun");
+        ex.BlockedNodeIds.ShouldNotContain("a", "the agent.code root is ADMITTED (P2.2) — revert the flip and it would be blocked here too: the load-bearing control");
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "a downstream-blocked rerun must write nothing");
+    }
+
+    [Fact]
     public async Task The_run_detail_RerunnableFromHere_flag_matches_what_the_endpoint_accepts_per_node()
     {
         // P1.1 honest gating: the run-detail RerunnableFromHere flag is computed by the SAME gate the rerun endpoint
@@ -763,9 +796,10 @@ public class RerunFromNodeFlowTests
     [Fact]
     public async Task The_flag_is_false_for_a_suspendable_node_and_its_upstream_matching_the_endpoint_refusal()
     {
-        // The CanSuspend ARM — the agent.code / agent.supervisor class. A suspendable node (here a SuspendProbe; a
-        // supervisor / agent node is the same CanSuspend manifest) and ANYTHING upstream of it are not from-node
-        // rerunnable, so the flag is false for both — matching the endpoint's RerunBlockedByUnsupportedNodeException.
+        // The fail-closed CanSuspend ARM — the supervisor / un-opted suspendable class (every CanSuspend node EXCEPT
+        // the agent.code re-stage opt-in, which P2.2 admits). A SuspendProbe (CanSuspend, IsRerunnableWhenSuspendable
+        // unset → RefuseSuspendable, like a supervisor) and ANYTHING upstream of it are not from-node rerunnable, so the
+        // flag is false for both — matching the endpoint's RerunBlockedByUnsupportedNodeException.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "rerun-flag-cansuspend-" + Guid.NewGuid().ToString("N");
         SuspendProbeNode.Reset(probeKey);
@@ -781,7 +815,7 @@ public class RerunFromNodeFlowTests
 
         bool Flag(string nodeId) => detail!.Nodes.Single(n => n.NodeId == nodeId && n.IterationKey == WorkflowIterationKeys.TopLevel).RerunnableFromHere;
 
-        Flag("suspendprobe").ShouldBeFalse("a CanSuspend node is never a from-node rerun target (the supervisor / agent.code class)");
+        Flag("suspendprobe").ShouldBeFalse("an un-opted CanSuspend node is never a from-node rerun target (the supervisor class; agent.code opts in via P2.2)");
         Flag("start").ShouldBeFalse("start's closure includes the suspendable node → the endpoint would refuse");
     }
 
@@ -1044,6 +1078,26 @@ public class RerunFromNodeFlowTests
         },
     };
 
+    // start → agent.code(a) [admitted from-node root, P2.2] → suspendprobe(b) [unsupported] → end.
+    private static WorkflowDefinition AgentThenSuspendProbeDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "a", TypeKey = "agent.code",
+                    Config = WorkflowsTestSeed.Json("""{ "goal": "Work on alpha", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "b", TypeKey = SuspendProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}","item":"x"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "a" },
+            new() { From = "a", To = "b" },
+            new() { From = "b", To = "end" },
+        },
+    };
+
     // start → loop(1 pass; body: loop_start → bodyjson — PURE, no side effects) → end. The loop is still
     // refused in a rerun closure by KIND (slice-1 conservatism), independent of its pure body.
     private static WorkflowDefinition PureBodiedLoopDef() => new()
@@ -1168,6 +1222,12 @@ public class RerunFromNodeFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    private InMemoryBackgroundJobClient ResolveJobClient()
+    {
+        using var scope = _fixture.BeginScope();
+        return scope.Resolve<InMemoryBackgroundJobClient>();
     }
 
     /// <summary>Flip a Suspended run back to Enqueued — simulates a spurious reconciler / duplicate-worker re-dispatch so a re-walk can be exercised.</summary>
