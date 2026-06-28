@@ -44,7 +44,7 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new FakeClient(Completion());
         var logger = new CapturingLogger();
-        var decorator = new RecordingLLMClientDecorator(inner);
+        var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         StructuredLLMCompletion result;
         using (PushScope(logger))
@@ -80,7 +80,7 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new FakeClient(Completion());
 
-        var result = await new RecordingLLMClientDecorator(inner).CompleteStructuredAsync(Request(), CancellationToken.None);
+        var result = await new RecordingStructuredLLMClientDecorator(inner).CompleteStructuredAsync(Request(), CancellationToken.None);
 
         result.ShouldBeSameAs(inner.StructuredResult, "no run scope ⇒ a pure delegate, no capture, no fault");
     }
@@ -90,7 +90,7 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new ThrowingClient(new InvalidOperationException("gateway boom"));
         var logger = new CapturingLogger();
-        var decorator = new RecordingLLMClientDecorator(inner);
+        var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         using (PushScope(logger))
         {
@@ -107,7 +107,7 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new FakeClient(Completion());
         var logger = new CapturingLogger();
-        var decorator = new RecordingLLMClientDecorator(inner);
+        var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new OffloadingOffloader())))
         {
@@ -131,7 +131,7 @@ public class RecordingLLMClientDecoratorTests
     {
         var inner = new FakeClient(Completion());
         var logger = new CapturingLogger { ThrowOnRecord = true };
-        var decorator = new RecordingLLMClientDecorator(inner);
+        var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         StructuredLLMCompletion result;
         using (PushScope(logger))
@@ -143,20 +143,49 @@ public class RecordingLLMClientDecoratorTests
     }
 
     [Fact]
-    public void Autofac_decorates_ILLMClient_so_the_registry_cast_to_IStructuredLLMClient_lands_on_the_recorder()
+    public async Task A_plain_text_call_records_started_then_completed_off_the_scope()
     {
-        // Mirrors the real wiring: a provider registers as BOTH interfaces; the decorator is registered over ILLMClient
-        // (the interface LLMClientRegistry holds + the decider casts). Resolving the registry's IEnumerable<ILLMClient>
-        // must yield the decorator, and the .OfType<IStructuredLLMClient>() cast the decider does must land on it.
+        var inner = new PlainClient();
+        var logger = new CapturingLogger();
+        var decorator = new RecordingLLMClientDecorator(inner);
+
+        LLMCompletion result;
+        using (PushScope(logger))
+        {
+            result = await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "SYS", UserPrompt = "USR" }, CancellationToken.None);
+        }
+
+        result.Text.ShouldBe("plain-text", "the inner plain-text completion flows through verbatim — pure side-channel");
+
+        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted });
+        logger.Calls[0].Payload.GetProperty("prompt").GetProperty("user").GetString().ShouldBe("USR");
+        logger.Calls[1].Payload.GetProperty("output").GetString().ShouldBe("plain-text", "a plain-text completion is captured as the text output");
+    }
+
+    [Fact]
+    public void Autofac_conditionally_wraps_a_structured_client_as_structured_and_a_plain_client_as_plain()
+    {
+        // The TWO recording decorators are registered conditionally so the WRAPPED type mirrors the inner: a
+        // structured-capable client stays IStructuredLLMClient (the decider's .OfType<IStructuredLLMClient>() cast lands
+        // on it), a plain-text-only client stays non-structured (the merge synthesis's `is not IStructuredLLMClient`
+        // text-provider pick still finds it). The regression #824 introduced: a single decorator implementing BOTH
+        // unconditionally lied about the plain client → the synthesis fell through to the wrong client.
         var builder = new ContainerBuilder();
         builder.RegisterInstance(new FakeClient(Completion())).As<ILLMClient>().As<IStructuredLLMClient>().SingleInstance();
-        builder.RegisterDecorator<RecordingLLMClientDecorator, ILLMClient>();
+        builder.RegisterInstance(new PlainClient()).As<ILLMClient>().SingleInstance();
+        builder.RegisterDecorator<RecordingStructuredLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is IStructuredLLMClient);
+        builder.RegisterDecorator<RecordingLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is not IStructuredLLMClient);
 
         using var container = builder.Build();
+        var clients = container.Resolve<IEnumerable<ILLMClient>>().ToList();
 
-        var asILLMClient = container.Resolve<IEnumerable<ILLMClient>>().Single();
-        asILLMClient.ShouldBeOfType<RecordingLLMClientDecorator>("the registry's ILLMClient enumeration is decorated");
-        asILLMClient.ShouldBeAssignableTo<IStructuredLLMClient>("so the decider's .OfType<IStructuredLLMClient>() cast lands on the recorder, not the raw client");
+        var structured = clients.Single(c => c.Provider == "anthropic");
+        structured.ShouldBeOfType<RecordingStructuredLLMClientDecorator>("a structured client is wrapped by the structured recorder");
+        structured.ShouldBeAssignableTo<IStructuredLLMClient>("so the decider's .OfType<IStructuredLLMClient>() cast lands on the recorder, not the raw client");
+
+        var plain = clients.Single(c => c.Provider == "plain");
+        plain.ShouldBeOfType<RecordingLLMClientDecorator>("a plain-text-only client is wrapped by the narrow recorder");
+        plain.ShouldNotBeAssignableTo<IStructuredLLMClient>("so a `is not IStructuredLLMClient` text-provider pick still finds it — the regression that broke the merge synthesis");
     }
 
     // ── Fakes ──────────────────────────────────────────────────────────────
@@ -168,6 +197,12 @@ public class RecordingLLMClientDecoratorTests
         public string Provider => "anthropic";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "t", Model = "m" });
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(StructuredResult);
+    }
+
+    private sealed class PlainClient : ILLMClient
+    {
+        public string Provider => "plain";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "plain-text", Model = "m" });
     }
 
     private sealed class ThrowingClient : ILLMClient, IStructuredLLMClient
