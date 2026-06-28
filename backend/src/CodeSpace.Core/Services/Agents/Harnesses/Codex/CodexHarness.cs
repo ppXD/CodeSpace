@@ -150,8 +150,12 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         // recognizable usage is the run total. Null when the stream carried none. Useful on failure too.
         var usage = AgentTokenUsageReader.TryRead(events);
 
+        // P3.1a: capture the CLI thread id (Codex's thread.started event carries thread_id) — the handle a rerun
+        // threads back as `codex exec resume <id>` to CONTINUE this conversation. Null when the stream carried none.
+        var sessionId = AgentSessionIdReader.TryRead(events);
+
         if (exitCode == 0)
-            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage };
+            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage, SessionId = sessionId };
 
         // Prefer an explicit Error event, else the CLI's final message (on a non-zero exit that's the
         // failure reason — e.g. a provider 401), else the bare exit code — so the real reason reaches
@@ -160,7 +164,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
                     ?? $"codex exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}";
 
-        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
+        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage, SessionId = sessionId };
     }
 
     /// <summary>

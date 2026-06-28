@@ -64,6 +64,14 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>The normalized <c>AgentRunResult</c> as JSON, written on completion. NULL while in-flight.</summary>
     public string? ResultJson { get; set; }
 
+    /// <summary>
+    /// P3.1a: the harness-native session/thread id captured off the run's CLI conversation (Claude's
+    /// <c>session_id</c>, Codex's <c>thread_id</c>) — promoted from <c>result_jsonb</c> to a first-class column so a
+    /// rerun's CONTINUE lookup is a column read, not a JSON probe. NULL while in-flight, and for a run whose stream
+    /// carried no session id (a pre-session CLI). Set on completion from <c>AgentRunResult.SessionId</c>.
+    /// </summary>
+    public string? SessionId { get; set; }
+
     /// <summary>Worker liveness ping; a stuck-Running reconciler reads this to recover crashed runs.</summary>
     public DateTimeOffset? HeartbeatAt { get; set; }
 

@@ -19,6 +19,11 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
 
         builder.Property(r => r.TaskJson).HasColumnName("task_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.ResultJson).HasColumnName("result_jsonb").HasColumnType("jsonb");
+
+        // P3.1a — the harness-native CLI session/thread id, promoted from result_jsonb so the rerun CONTINUE lookup
+        // is a column read. Nullable (a pre-session CLI / in-flight run has none).
+        builder.Property(r => r.SessionId).HasColumnName("session_id");
+
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");
         builder.Property(r => r.FenceEpoch).HasColumnName("fence_epoch");
         builder.Property(r => r.LeaseExpiresAt).HasColumnName("lease_expires_at");

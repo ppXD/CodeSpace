@@ -364,6 +364,36 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Build_result_captures_the_session_id_from_the_result_line()
+    {
+        // P3.1a: Claude's result line carries the run's session_id; parsed via the harness (so Data is the real
+        // root) it must surface on AgentRunResult.SessionId so a later rerun can `claude --resume <id>`.
+        var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false,"session_id":"sess-claude-7f3a"}""").Single();
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, resultLine };
+
+        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBe("sess-claude-7f3a", "the captured session id is the handle a CONTINUE resumes");
+    }
+
+    [Fact]
+    public void Build_result_leaves_session_id_null_when_the_stream_carried_none()
+    {
+        // A result line with no session_id (or a pre-session CLI) → null, byte-identical to today; never fabricated.
+        var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false}""").Single();
+
+        Harness.BuildResult(new[] { resultLine }, exitCode: 0).SessionId.ShouldBeNull("no session_id in the stream → null");
+    }
+
+    [Fact]
+    public void Build_result_captures_the_session_id_even_on_a_failed_run()
+    {
+        // A FAILED run still has a resumable conversation — the failure return must carry SessionId too, so a rerun
+        // can CONTINUE from where it broke (the whole point of P3 for the "continue-from-where-it-broke" intent).
+        var errorResult = Harness.ParseEvents("""{"type":"result","subtype":"error_during_execution","result":"API Error (429)","is_error":true,"session_id":"sess-claude-failed"}""").Single();
+
+        Harness.BuildResult(new[] { errorResult }, exitCode: 1).SessionId.ShouldBe("sess-claude-failed", "a failed run's session id is captured so a rerun can continue the broken conversation");
+    }
+
+    [Fact]
     public void Build_result_falls_back_to_an_exit_code_error_when_no_error_event()
     {
         Harness.BuildResult(Array.Empty<AgentEvent>(), exitCode: 137).Error.ShouldContain("137");

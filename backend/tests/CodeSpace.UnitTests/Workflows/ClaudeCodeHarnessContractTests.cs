@@ -13,4 +13,7 @@ namespace CodeSpace.UnitTests.Workflows;
 public sealed class ClaudeCodeHarnessContractTests : AgentHarnessContractTests
 {
     protected override IAgentHarness Harness { get; } = new ClaudeCodeHarness();
+
+    protected override (string Line, string ExpectedId) SessionIdLine =>
+        ("""{"type":"result","subtype":"success","result":"done","is_error":false,"session_id":"sess-contract-claude"}""", "sess-contract-claude");
 }

@@ -325,6 +325,36 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Build_result_captures_the_thread_id_from_the_thread_started_line()
+    {
+        // P3.1a: Codex's thread.started event carries the run's thread_id; parsed via the harness (so Data is the
+        // real root) it must surface on AgentRunResult.SessionId so a later rerun can `codex exec resume <id>`.
+        var threadStarted = Harness.ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"thr-codex-9c21\"}").Single();
+        var events = new[] { threadStarted, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
+
+        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBe("thr-codex-9c21", "the captured thread id is the handle a CONTINUE resumes");
+    }
+
+    [Fact]
+    public void Build_result_leaves_session_id_null_when_the_stream_carried_no_thread_id()
+    {
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
+
+        Harness.BuildResult(events, exitCode: 0).SessionId.ShouldBeNull("no thread.started → null");
+    }
+
+    [Fact]
+    public void Build_result_captures_the_thread_id_even_on_a_failed_run()
+    {
+        // A FAILED run still has a resumable thread — the failure return must carry SessionId too, so a rerun can
+        // `codex exec resume <id>` to continue from where it broke.
+        var threadStarted = Harness.ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"thr-codex-failed\"}").Single();
+        var events = new[] { threadStarted, new AgentEvent { Kind = AgentEventKind.Error, Text = "patch failed to apply" } };
+
+        Harness.BuildResult(events, exitCode: 1).SessionId.ShouldBe("thr-codex-failed", "a failed run's thread id is captured so a rerun can continue the broken conversation");
+    }
+
+    [Fact]
     public void Version_uses_the_default_then_the_env_override()
     {
         var original = System.Environment.GetEnvironmentVariable(CodexHarness.VersionEnvVar);

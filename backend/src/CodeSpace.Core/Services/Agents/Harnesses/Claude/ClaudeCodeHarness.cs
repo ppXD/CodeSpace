@@ -177,8 +177,12 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // tolerantly extracts input/output tokens from it. Null when the stream carried none. On failure too.
         var usage = AgentTokenUsageReader.TryRead(events);
 
+        // P3.1a: capture the CLI session id (Claude's result line carries session_id) — the handle a rerun
+        // threads back as `claude --resume <id>` to CONTINUE this conversation. Null when the stream carried none.
+        var sessionId = AgentSessionIdReader.TryRead(events);
+
         if (exitCode == 0)
-            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage };
+            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage, SessionId = sessionId };
 
         // Surface the most actionable text we have: an explicit Error event, else the CLI's final
         // message (on a non-zero exit that's the failure reason — e.g. a provider 401), else the bare
@@ -188,7 +192,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
                     ?? $"claude exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}";
 
-        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
+        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage, SessionId = sessionId };
     }
 
     /// <summary>Direct Anthropic, or any Anthropic-compatible gateway/proxy via a base-URL + auth-token override ("Custom").</summary>

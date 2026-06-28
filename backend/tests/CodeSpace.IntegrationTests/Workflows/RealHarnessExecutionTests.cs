@@ -77,6 +77,23 @@ public class RealHarnessExecutionTests
         {"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false,"usage":{"input_tokens":1450,"output_tokens":260}}
         """;
 
+    // The codex happy stream led by the `thread.started` event real codex emits first (carrying the thread_id the
+    // production CodexHarness.BuildResult folds into AgentRunResult.SessionId — the handle a `codex exec resume` uses).
+    private const string CodexSessionFixture =
+        """
+        {"type":"thread.started","thread_id":"thr-codex-realexec"}
+        {"type":"agent_message","message":"Fixed the billing calculation."}
+        {"type":"task_complete","message":"completed"}
+        """;
+
+    // The claude happy stream whose final `result` line carries the run `session_id` (the handle a `claude --resume` uses).
+    private const string ClaudeSessionFixture =
+        """
+        {"type":"system","subtype":"init","cwd":"/tmp/ws"}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"Looking into the billing tests."}]}}
+        {"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false,"session_id":"sess-claude-realexec"}
+        """;
+
     [Theory]
     [InlineData("codex-cli")]
     [InlineData("claude-code")]
@@ -112,6 +129,43 @@ public class RealHarnessExecutionTests
         {
             "codex-cli" => (CodexHarness.CommandEnvVar, CodexUsageFixture),
             "claude-code" => (ClaudeCodeHarness.CommandEnvVar, ClaudeUsageFixture),
+            _ => throw new ArgumentOutOfRangeException(nameof(harnessKind), harnessKind, null),
+        };
+
+    [Theory]
+    [InlineData("codex-cli", "thr-codex-realexec")]
+    [InlineData("claude-code", "sess-claude-realexec")]
+    public async Task Real_harness_captures_the_session_id_off_the_pipe_and_persists_it_on_the_agent_run(string harnessKind, string expectedSessionId)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // P3.1a end-to-end at the high-fidelity tier: the REAL harness parses its native session-bearing line
+        // (codex thread.started / claude result.session_id) off a real OS pipe, the REAL executor folds it onto
+        // AgentRunResult.SessionId, and persists it BOTH on the promoted AgentRun.session_id column (the handle the
+        // CONTINUE lookup reads) and inside result_jsonb. No binary, no model — just the production pipeline.
+        var (commandEnvVar, fixture) = SessionCase(harnessKind);
+        using var cli = new FakeCli(commandEnvVar, fixture);
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, harnessKind, cli.Env());
+
+        await ExecuteRealAsync(runId);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"{harnessKind}: the real harness streamed + parsed the fixture and the run folded to Succeeded");
+        run.SessionId.ShouldBe(expectedSessionId, $"{harnessKind}: the real harness captured its CLI session/thread id off the pipe and the executor persisted it on the promoted column");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.SessionId.ShouldBe(expectedSessionId, $"{harnessKind}: the captured id also round-trips through result_jsonb");
+    }
+
+    private (string CommandEnvVar, string Fixture) SessionCase(string harnessKind) =>
+        harnessKind switch
+        {
+            "codex-cli" => (CodexHarness.CommandEnvVar, CodexSessionFixture),
+            "claude-code" => (ClaudeCodeHarness.CommandEnvVar, ClaudeSessionFixture),
             _ => throw new ArgumentOutOfRangeException(nameof(harnessKind), harnessKind, null),
         };
 
