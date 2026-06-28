@@ -1,7 +1,9 @@
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentDefinitionSummary } from "@/api/agents";
 
-import { type AgentRole, deriveRole } from "./agentRole";
+import { deriveRole } from "./agentRole";
+import { toolsLabel } from "./agentRuntime";
+import { RoleAvatar, RoleBadge } from "./roleBadge";
 
 /**
  * One agent on the bench — a role-tinted card that reads as a schedulable unit: identity (avatar + role badge +
@@ -11,8 +13,6 @@ import { type AgentRole, deriveRole } from "./agentRole";
  */
 export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; onOpen: () => void }) {
   const role = deriveRole(agent);
-  const meta = ROLE_META[role];
-  const Avatar = meta.Icon;
 
   return (
     <article
@@ -23,12 +23,12 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
     >
       <div className="ab-top">
-        <div className="ab-avatar" style={{ background: meta.bg, color: meta.fg }}><Avatar size={18} /></div>
+        <RoleAvatar role={role} />
         <div className="ab-id">
           <div className="ab-namerow">
             <span className="ab-name">{agent.name}</span>
             <span className="ab-handle">@{agent.slug}</span>
-            <span className="ab-role" style={{ background: meta.bg, color: meta.fg }}>{meta.label}</span>
+            <RoleBadge role={role} />
           </div>
           {agent.description && <div className="ab-desc" title={agent.description}>{agent.description}</div>}
         </div>
@@ -67,21 +67,3 @@ function SkillTokens({ skills }: { skills: AgentDefinitionSummary["boundSkills"]
     </>
   );
 }
-
-/** Tools tri-state matching the AgentDefinition null-vs-empty contract: null = harness default, [] = none, list = a count. */
-function toolsLabel(tools: string[] | null): string {
-  if (tools === null) return "Default tools";
-  if (tools.length === 0) return "No tools";
-
-  return `${tools.length} ${tools.length === 1 ? "tool" : "tools"}`;
-}
-
-// Each fg is a hand-darkened shade of its tint so the 11px badge text clears WCAG AA (4.5:1) on the soft bg —
-// raw var(--accent) on --accent-soft is only 2.5:1. The avatar icon reuses fg (a non-text 3:1 surface, fine).
-const ROLE_META: Record<AgentRole, { label: string; Icon: typeof Ic.Bot; bg: string; fg: string }> = {
-  Architect: { label: "Architect", Icon: Ic.Compass, bg: "var(--accent-soft)", fg: "#99452A" },
-  Reviewer: { label: "Reviewer", Icon: Ic.Shield, bg: "#EAF4EE", fg: "#2D6A48" },
-  Tracer: { label: "Tracer", Icon: Ic.Bug, bg: "#FBEAF0", fg: "#99365A" },
-  Planner: { label: "Planner", Icon: Ic.Map, bg: "#EEF1FB", fg: "#2F5BA8" },
-  Generalist: { label: "Generalist", Icon: Ic.Bot, bg: "var(--panel-2)", fg: "var(--ink-2)" },
-};

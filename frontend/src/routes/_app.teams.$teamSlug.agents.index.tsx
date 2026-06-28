@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { AgentCard } from "@/components/agents/AgentCard";
-import { AgentEditorModal } from "@/components/agents/AgentEditor";
+import { AgentDrawer } from "@/components/agents/AgentDrawer";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
@@ -132,7 +132,7 @@ function AgentsListPage() {
       </div>
 
       {editor && (
-        <AgentEditorModal
+        <AgentDrawer
           mode={editor.mode}
           agentId={editor.mode === "edit" ? editor.id : undefined}
           onClose={() => setEditor(null)}

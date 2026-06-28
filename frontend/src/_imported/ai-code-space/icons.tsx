@@ -61,6 +61,7 @@ import {
   MoreHorizontal,
   PanelLeft,
   Pause,
+  Pencil,
   Play,
   Plus,
   Puzzle,
@@ -171,6 +172,7 @@ export const Ic = {
   Map: wrap(Map),
   Wrench: wrap(Wrench),
   Puzzle: wrap(Puzzle),
+  Edit: wrap(Pencil),
   Expand: wrap(Maximize2),
   Collapse: wrap(Minimize2),
 };
