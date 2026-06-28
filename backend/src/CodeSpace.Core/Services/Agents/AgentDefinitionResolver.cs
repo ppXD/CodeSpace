@@ -70,7 +70,7 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
     {
         var skills = await _db.AgentSkillBinding.AsNoTracking()
             .Where(b => b.AgentDefinitionId == agentId)
-            .Join(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null),
+            .Join(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null),
                 b => b.SkillDefinitionId, s => s.Id, (b, s) => new { b.CreatedDate, s })
             .OrderBy(x => x.CreatedDate).ThenBy(x => x.s.Slug)
             .Select(x => new AgentSkill { Slug = x.s.Slug, Description = x.s.Description, Body = x.s.Body })

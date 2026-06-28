@@ -78,7 +78,8 @@ public class PackReadApiTests
         await SeedSkillAsync(teamId, userId, "yak", pack, deleted: false);
         await SeedSkillAsync(teamId, userId, "beta", pack, deleted: false);
         await SeedSkillAsync(teamId, userId, "gone", pack, deleted: true);
-        await SeedAgentAsync(teamId, userId, "grandfathered", pack, deleted: false, scope: DefinitionScope.Working);   // a Working bench row in this pack — Get is store-scoped, so it must NOT appear
+        await SeedAgentAsync(teamId, userId, "grandfathered-agent", pack, deleted: false, scope: DefinitionScope.Working);   // a Working bench agent in this pack — Get is store-scoped, so it must NOT appear
+        await SeedSkillAsync(teamId, userId, "grandfathered-skill", pack, deleted: false, scope: DefinitionScope.Working);   // …and a Working bench skill, guarding the skill-side store filter independently
 
         using var scope = _fixture.BeginScope();
         var service = scope.Resolve<IPackService>();

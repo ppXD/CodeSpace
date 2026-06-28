@@ -40,12 +40,12 @@ public class PackImportServiceFlowTests
 
         var (teamId, userId) = await SeedTeamAsync();
 
-        // Seed every one of the pack's handles as an ALREADY-OWNED bench row (agents AND skills, cross-namespace).
-        // In the store model none of these may suppress the preview — a snapshot has no unique handle to collide on.
+        // Seed TWO of the pack's handles as already-owned bench rows — the pack agent "reviewer" and the pack skill
+        // "tdd". This is the regression guard: a snapshot carries no unique handle, so a matching bench handle must
+        // NOT flip the preview item to un-importable. If the preview ever regressed to DB-conflict suppression, these
+        // two would go Importable=false and the test would fail.
         await SeedAgentAsync(teamId, userId, "reviewer");
         await SeedSkillAsync(teamId, userId, "tdd");
-        await SeedSkillAsync(teamId, userId, "backend-architect");
-        await SeedAgentAsync(teamId, userId, "systematic-debugging");
 
         var src = await CreateSourceRepoAsync(runners);
         try
@@ -61,27 +61,18 @@ public class PackImportServiceFlowTests
                 preview = await service.PreviewFromUrlAsync(src, reference: null, teamId, CancellationToken.None);
             }
 
-            // Every named artifact is importable with NO conflict, even though its handle is already owned on the
-            // bench — store snapshots never team-slug-conflict, so a re-import of a grandfathered pack stays selectable.
-            foreach (var slug in new[] { "reviewer", "backend-architect" })
-            {
-                var agent = preview.Agents.Single(a => a.DerivedSlug == slug);
-                agent.SlugConflict.ShouldBeFalse($"a store snapshot of '{slug}' carries no unique handle to conflict on");
-                agent.Importable.ShouldBeTrue();
-            }
-
-            foreach (var slug in new[] { "tdd", "systematic-debugging" })
-            {
-                var skill = preview.Skills.Single(s => s.DerivedSlug == slug);
-                skill.SlugConflict.ShouldBeFalse($"a store snapshot of '{slug}' carries no unique handle to conflict on");
-                skill.Importable.ShouldBeTrue();
-            }
+            // "reviewer" / "tdd" are importable DESPITE owning a matching bench handle (the regression guard); the
+            // fresh handles are importable on their own merit. (That a real owned-handle import actually COEXISTS as a
+            // store snapshot is proven at commit time in PackCommitFlowTests, which is where the DB is touched.)
+            preview.Agents.Single(a => a.DerivedSlug == "reviewer").Importable.ShouldBeTrue("a matching bench handle must not suppress a snapshot import");
+            preview.Skills.Single(s => s.DerivedSlug == "tdd").Importable.ShouldBeTrue("a matching bench handle must not suppress a snapshot import");
+            preview.Agents.Single(a => a.DerivedSlug == "backend-architect").Importable.ShouldBeTrue();
+            preview.Skills.Single(s => s.DerivedSlug == "systematic-debugging").Importable.ShouldBeTrue();
 
             // A nameless SKILL.md is still discovered (every SKILL.md is a skill) but previews as un-importable with
             // a diagnostic — name is the one thing a snapshot still needs, so this is never importable, never a crash.
             var namelessSkill = preview.Skills.Single(s => s.SourcePath.Contains("nameless"));
             namelessSkill.Importable.ShouldBeFalse();
-            namelessSkill.SlugConflict.ShouldBeFalse();
             namelessSkill.Diagnostics.ShouldNotBeEmpty();
 
             // A frontmatter-less .md is a doc, NOT an agent — the walker filters it, so it never reaches the preview.

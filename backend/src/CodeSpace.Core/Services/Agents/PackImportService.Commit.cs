@@ -209,16 +209,22 @@ public sealed partial class PackImportService
         return SkillResult(parsed.SourcePath, PackImportOutcome.Imported, skill.Id);
     }
 
-    /// <summary>The team's active skills as a handle→id map — the resolver for an imported agent's declared <c>skills:</c>, extended in memory as new skills are added this batch (last-wins, so a same-batch Store skill shadows a grandfathered Working row of the same handle).</summary>
+    /// <summary>The team's active STORE skills as a handle→id map — the resolver for a freshly-imported (store-snapshot)
+    /// agent's declared <c>skills:</c>, extended in memory as new store skills are added this batch. A store agent's
+    /// declared skills bind to store skills (its own pack's snapshots), never to a Working bench skill, so this is
+    /// Store-scoped. A snapshot handle is NOT unique, so two store skills may share a slug; the query orders by
+    /// (created, id) and the map keeps the newest — a deterministic last-wins, so the seed is stable across identical
+    /// imports (the unscoped/unordered map would clobber by arbitrary DB row order once Working/Store coexist).</summary>
     private async Task<Dictionary<string, Guid>> ActiveSkillSlugToIdAsync(Guid teamId, CancellationToken cancellationToken)
     {
         var rows = await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.TeamId == teamId && s.DeletedDate == null)
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null)
+            .OrderBy(s => s.CreatedDate).ThenBy(s => s.Id)
             .Select(s => new { s.Slug, s.Id })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var map = new Dictionary<string, Guid>(StringComparer.Ordinal);
-        foreach (var row in rows) map[row.Slug] = row.Id;   // slug is unique per active team, so no clobber
+        foreach (var row in rows) map[row.Slug] = row.Id;   // Store-scoped; on a dup handle the newest (ordered) row wins — deterministic
         return map;
     }
 

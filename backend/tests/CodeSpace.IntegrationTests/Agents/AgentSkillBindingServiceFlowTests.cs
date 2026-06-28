@@ -165,6 +165,45 @@ public class AgentSkillBindingServiceFlowTests
         await Should.ThrowAsync<KeyNotFoundException>(() => SetAsync(teamId, agent, new[] { s1 }, userId));
     }
 
+    [Fact]
+    public async Task Set_rejects_a_store_snapshot_skill()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var agent = await CreateAgentAsync(teamId, userId, "Dev");
+        var snapshot = await SeedStoreSkillSnapshotAsync(teamId, "library-snapshot");
+
+        // A Library STORE snapshot is not runnable — binding it to an agent would freeze a snapshot's body into a
+        // real run. The write-validation is Working-scoped, so a snapshot id is rejected like any non-bindable id.
+        await Should.ThrowAsync<KeyNotFoundException>(() => SetAsync(teamId, agent, new[] { snapshot }, userId));
+
+        (await CountBindingsAsync(agent)).ShouldBe(0, customMessage: "a rejected store-snapshot binding must leave no row behind");
+    }
+
+    private async Task<Guid> SeedStoreSkillSnapshotAsync(Guid teamId, string slug)
+    {
+        var id = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.SkillDefinition.Add(new SkillDefinition
+        {
+            Id = id,
+            TeamId = teamId,
+            Slug = slug,
+            Name = slug,
+            Body = "snapshot body",
+            Origin = SkillDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Store,
+            PackId = null,   // pack provenance is irrelevant to the binding-validation under test (and skill_definition has a real pack FK)
+            SourcePath = $"skills/{slug}/SKILL.md",
+            CreatedDate = DateTimeOffset.UtcNow,
+            CreatedBy = Guid.NewGuid(),
+            LastModifiedDate = DateTimeOffset.UtcNow,
+            LastModifiedBy = Guid.NewGuid(),
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
     private async Task<int> CountBindingsAsync(Guid agentId)
     {
         using var scope = _fixture.BeginScope();

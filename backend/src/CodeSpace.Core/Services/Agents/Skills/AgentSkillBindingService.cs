@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -129,8 +130,11 @@ public sealed class AgentSkillBindingService : IAgentSkillBindingService, IScope
     {
         if (skillIds.Count == 0) return;
 
+        // A binding may only target a WORKING skill — a Library STORE snapshot is not runnable, so binding it to an
+        // agent would freeze a snapshot's body into a real run. Scoping the validation to Working rejects a snapshot
+        // id as "not accessible", closing that leak at the write.
         var found = await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.TeamId == teamId && s.DeletedDate == null && skillIds.Contains(s.Id))
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null && skillIds.Contains(s.Id))
             .Select(s => s.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 

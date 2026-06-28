@@ -343,6 +343,47 @@ public class PackCommitFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_store_agents_declared_skill_binds_to_the_store_snapshot_not_a_same_handle_bench_skill()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        await SeedSkillAsync(teamId, userId, "tdd");   // an authored WORKING bench skill sharing the pack skill's handle
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        try
+        {
+            // First import tdd alone → a STORE snapshot 'tdd' now coexists with the Working bench 'tdd'.
+            await CommitViaMediatorAsync(src, new[] { "skills/tdd/SKILL.md" }, teamId, userId);
+
+            // Then import the agent that declares tdd (NOT in this batch, so it resolves via the pre-seeded
+            // store-scoped map). Its binding must point at the STORE snapshot, never the Working bench skill — and
+            // deterministically so, which the unscoped/unordered map could not guarantee once the two coexist.
+            var second = await CommitViaMediatorAsync(src, new[] { "agents/skilled.md" }, teamId, userId);
+            var agentId = second.Items.Single(i => i.SourcePath == "agents/skilled.md").DefinitionId!.Value;
+
+            await AssertStateAsync(async db =>
+            {
+                var bound = await (from b in db.AgentSkillBinding
+                                   join s in db.SkillDefinition on b.SkillDefinitionId equals s.Id
+                                   where b.AgentDefinitionId == agentId
+                                   select s).ToListAsync();
+
+                bound.Select(s => s.Slug).ShouldBe(new[] { "tdd" });
+                bound[0].Scope.ShouldBe(DefinitionScope.Store, "a store agent's declared skill binds to the STORE snapshot of that handle");
+                bound[0].PackId.ShouldNotBeNull("…the imported snapshot, not the authored Working bench skill (which has no pack)");
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static PackImportOutcome Outcome(PackImportResult result, string sourcePath) =>
         result.Items.Single(i => i.SourcePath == sourcePath).Outcome;
 

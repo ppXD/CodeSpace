@@ -274,7 +274,7 @@ public class AgentDefinitionFlowTests
             Name = slug,
             Origin = AgentDefinitionOrigin.Imported,
             Scope = DefinitionScope.Store,
-            PackId = Guid.NewGuid(),
+            PackId = null,   // pack provenance is irrelevant to the scope filter under test
             SourcePath = $"agents/{slug}.md",
             CreatedDate = now,
             CreatedBy = userId,
