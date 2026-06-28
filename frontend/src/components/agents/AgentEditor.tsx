@@ -12,7 +12,8 @@ import { useSkills } from "@/hooks/use-skills";
 
 import { AUTONOMY, EMPTY_FORM, type FormState, formFromPersona, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
-import { availableSkillOptions, skillLabels } from "./skillPicker";
+import { SkillLibraryPickerModal } from "./SkillLibraryPickerModal";
+import { skillLabels } from "./skillPicker";
 
 /**
  * Create / edit an Agent persona — a warm-theme centered MODAL over the authorable surface, grouped into three
@@ -254,15 +255,18 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 }
 
 /**
- * Editable skill-binding control — the team's skills as selectable tokens. Selected skills show as removable
- * chips; an "Add a skill" picker appends from the unselected ones. The parent persists the set on Save.
+ * Editable skill-binding control. Bound skills show as removable chips; "Add skill" opens the Library picker, which
+ * instantiates a working copy of the chosen store skill and hands back its id (the "instantiate to use" model). The
+ * parent persists the bound set on Save. Labels resolve from the team's working skills once the new copy lands.
  */
 function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
+  const [picking, setPicking] = useState(false);
+  // The store skills instantiated this editor session — keyed by SOURCE id (each instantiate is a fresh working
+  // copy, so a working id can't dedupe). The picker disables an already-added source so the same skill isn't bound twice.
+  const [pickedSources, setPickedSources] = useState<Set<string>>(() => new Set());
 
   const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
-  const available = availableSkillOptions(skills.data ?? [], selected);
-  const teamHasNoSkills = !skills.isLoading && (skills.data?.length ?? 0) === 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -277,9 +281,19 @@ function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; 
         </div>
       )}
 
-      {teamHasNoSkills && selected.length === 0
-        ? <span className="wf-form-empty">No skills in this team yet — import a pack to add some.</span>
-        : available.length > 0 && <Combo value="" options={available} onChange={(id) => onChange([...selected, id])} placeholder="Add a skill…" searchable />}
+      <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => setPicking(true)}><Ic.Plus size={13} /> Add skill</button>
+
+      {picking && (
+        <SkillLibraryPickerModal
+          pickedSourceIds={pickedSources}
+          onPicked={(workingId, sourceId) => {
+            onChange([...selected, workingId]);
+            setPickedSources((s) => new Set(s).add(sourceId));
+            setPicking(false);
+          }}
+          onClose={() => setPicking(false)}
+        />
+      )}
     </div>
   );
 }

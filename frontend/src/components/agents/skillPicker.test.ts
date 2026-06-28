@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentBoundSkill } from "@/api/agents";
 import type { SkillSummary } from "@/api/skills";
 
-import { availableSkillOptions, skillLabels } from "./skillPicker";
+import { skillLabels } from "./skillPicker";
 
 const skill = (id: string, slug: string, name: string): SkillSummary => ({
   id, teamId: "t", slug, name, description: null, category: null, origin: "Authored", packId: null, createdDate: "2026-01-01T00:00:00Z",
@@ -19,18 +19,5 @@ describe("skillLabels", () => {
 
   it("is empty with no inputs", () => {
     expect(skillLabels([], []).size).toBe(0);
-  });
-});
-
-describe("availableSkillOptions", () => {
-  it("offers only the unselected skills, mapped to name + @slug", () => {
-    const skills = [skill("a", "tdd", "TDD"), skill("b", "debugging", "Debugging"), skill("c", "repro", "Repro")];
-    const opts = availableSkillOptions(skills, ["b"]);
-    expect(opts.map((o) => o.value)).toEqual(["a", "c"]);
-    expect(opts[0]).toEqual({ value: "a", label: "TDD", desc: "@tdd" });
-  });
-
-  it("is empty when everything is selected", () => {
-    expect(availableSkillOptions([skill("a", "tdd", "TDD")], ["a"])).toEqual([]);
   });
 });

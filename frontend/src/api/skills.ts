@@ -34,6 +34,10 @@ export const skillsApi = {
   authorStore: (input: { name: string; description?: string | null; body?: string | null; category?: string | null }) =>
     fetchJson<{ id: string }>("/api/skills/library", { method: "POST", body: JSON.stringify(input) }),
 
+  /** Copy a Library store skill into a new working (bindable) skill — how binding a Library skill to an agent works. */
+  instantiateFromStore: (sourceDefinitionId: string) =>
+    fetchJson<{ id: string }>("/api/skills/from-store", { method: "POST", body: JSON.stringify({ sourceDefinitionId }) }),
+
   /** Soft-delete a skill. */
   remove: (id: string) => fetchJson<void>(`/api/skills/${id}`, { method: "DELETE" }),
 };
