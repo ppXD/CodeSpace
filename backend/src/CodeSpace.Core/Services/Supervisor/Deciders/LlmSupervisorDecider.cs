@@ -102,7 +102,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // P3 — the team's persona library, so the brain authors a per-agent persona by slug. Mapped to the minimal
         // render noun (slug/name/description); empty when the team has no personas (the section is then omitted).
+        // CLAMPED to the operator's allowed agent pool (empty = all) so the brain only authors slugs it'll be allowed to
+        // dispatch — the persona analogue of ListPoolAsync clamping the model catalog (the dispatch gate is the floor).
         var personas = (await _agentDefinitions.ListAsync(context.TeamId, cancellationToken).ConfigureAwait(false))
+            .Where(p => context.AllowedAgentDefinitionIds is not { Count: > 0 } pool || pool.Contains(p.Id))
             .Select(p => new PersonaCatalogInfo(p.Slug, p.Name, p.Description)).ToList();
 
         return RenderCatalog(_harnesses.All, pool, personas);

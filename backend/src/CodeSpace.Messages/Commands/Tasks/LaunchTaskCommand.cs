@@ -90,6 +90,17 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
     /// <summary>
+    /// The operator's ALLOWED AGENT (persona) POOL for the agents a Deep (supervisor) run dispatches — a multi-select of
+    /// <c>AgentDefinition</c> (persona) ROW ids, the persona analogue of <see cref="AllowedModelIds"/>. EVERY id is
+    /// validated TEAM-SCOPED by the service (fail-closed, exactly like the repos / model pool): a foreign / deleted
+    /// persona rejects the whole launch. Baked into the projected <c>agent.supervisor</c> node's
+    /// <c>allowedAgentDefinitionIds</c>, where every dispatched agent's effective persona (model-authored slug OR the
+    /// profile default) must be in the pool (out of pool ⇒ fails closed at dispatch). Null / empty ⇒ the pool is ALL
+    /// the team's personas (byte-identical to no pool). Inert on a non-supervisor projection.
+    /// </summary>
+    public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
+
+    /// <summary>
     /// An operator-chosen autonomy CEILING (an open tier-name string, e.g. <c>"Standard"</c>) for the agents the run
     /// runs / dispatches — a TIGHTEN-ONLY bound the router merges onto the effort preset's ceiling (it can only LOWER
     /// it, never raise it), which then CLAMPS the run's autonomy via <c>ClampAutonomy</c>. Null / blank ⇒ inherit the

@@ -241,6 +241,13 @@ public sealed partial class RealSupervisorActionExecutor
         // is not bypassable via a persona reference or a profile default.
         resolved = await ApplyDispatchModelAsync(resolved, context, cancellationToken).ConfigureAwait(false);
 
+        // POST-RESOLUTION persona pool gate (same single-point design as the model gate): the EFFECTIVE persona — a
+        // model-authored slug (resolved to an id at ApplyDispatchPersonaAsync) OR the run-level profile default — must be
+        // in the operator's allowed agent pool. Gating the RESOLVED id once covers both paths uniformly, so the pool is
+        // not bypassable via a model-authored slug or the profile default. Empty pool = all team personas; no persona
+        // (pure-inline) = no gate. Out of pool → fail-closed (terminalized by the turn service's catch).
+        resolved = ApplyDispatchAgentPool(resolved, context);
+
         // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
         // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
         var turnCellKey = $"{context.NodeId}#turn{context.TurnNumber}";
@@ -287,6 +294,22 @@ public sealed partial class RealSupervisorActionExecutor
         var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, _harnesses.All, AgentHarnessDefaults.DefaultHarness).HarnessKind;
 
         return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId, Harness = harness };
+    }
+
+    /// <summary>
+    /// The persona analogue of <see cref="ApplyDispatchModelAsync"/>: the spawned agent's EFFECTIVE persona id (a
+    /// model-authored slug already resolved to an id, OR the run-level profile default) must be in the operator's
+    /// <see cref="SupervisorTurnContext.AllowedAgentDefinitionIds"/> pool (empty = ALL the team's personas). A null id is
+    /// a pure-inline run (no persona → no gate). Out of pool → <see cref="SupervisorAgentAccessException"/> (fail-closed,
+    /// terminalized by the turn service's catch) — so the pool is not bypassable via a model-authored slug or a profile default.
+    /// </summary>
+    private static AgentTask ApplyDispatchAgentPool(AgentTask resolved, SupervisorTurnContext context)
+    {
+        if (resolved.AgentDefinitionId is not { } personaId) return resolved;
+
+        if (context.AllowedAgentDefinitionIds is not { Count: > 0 } pool || pool.Contains(personaId)) return resolved;
+
+        throw new SupervisorAgentAccessException($"agent.supervisor spawn requests persona '{personaId}', which is not in this run's allowed agent pool.");
     }
 
     /// <summary>

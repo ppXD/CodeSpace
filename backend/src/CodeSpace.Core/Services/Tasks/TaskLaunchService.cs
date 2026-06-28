@@ -60,6 +60,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         await EnsureModelsInTeamAsync(request, cancellationToken).ConfigureAwait(false);
 
+        await EnsureAgentDefinitionsInTeamAsync(request, cancellationToken).ConfigureAwait(false);
+
         var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
         var profile = BuildAgentProfile(request, seed, route);
@@ -84,7 +86,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // projection — single-agent / map launches are byte-identical.
         var brainModelId = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds, AcceptanceCriteria = request.AcceptanceCriteria, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -211,6 +213,29 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         if (inTeam.Count != ids.Count)
             throw new KeyNotFoundException($"Model {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
+    }
+
+    /// <summary>
+    /// Validates EVERY operator-supplied allowed-agent-pool row (<c>AgentDefinition</c> persona id) is a team-owned,
+    /// non-deleted persona — the persona analogue of <see cref="EnsureModelsInTeamAsync"/>. A foreign / deleted persona
+    /// is an indistinguishable not-found (existence never leaks), and ANY bad id fails the whole launch fail-closed
+    /// BEFORE the session opens (no orphan). An empty pool ⇒ skip (all the team's personas — byte-identical). The
+    /// dispatch-time pool gate still fails closed too; this turns a silent "can't dispatch" into a clear launch rejection.
+    /// (Persona has no enabled/active flag — team + non-deleted is the whole predicate, matching <c>AgentDefinitionResolver</c>.)
+    /// </summary>
+    private async Task EnsureAgentDefinitionsInTeamAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    {
+        if (request.AllowedAgentDefinitionIds is not { Count: > 0 } pool) return;
+
+        var ids = pool.ToHashSet();
+
+        var inTeam = await _db.AgentDefinition.AsNoTracking()
+            .Where(a => ids.Contains(a.Id) && a.TeamId == request.TeamId && a.DeletedDate == null)
+            .Select(a => a.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (inTeam.Count != ids.Count)
+            throw new KeyNotFoundException($"Agent {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
     }
 
     /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical).</summary>

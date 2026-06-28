@@ -396,6 +396,65 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_allowed_agent_pool_into_the_supervisor_snapshot()
+    {
+        // The operator's agent (persona) pool (AllowedAgentDefinitionIds) must bind through the full command path →
+        // team-scope validation → TaskBuildContext → the supervisor node's allowedAgentDefinitionIds, so a dispatched
+        // persona out of the pool fails closed at run time. Frozen-def assertion (don't walk the run).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var personaId = await SeedPersonaAsync(teamId);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                AllowedAgentDefinitionIds = new[] { personaId },
+            });
+
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane");
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorAllowedAgentDefinitionIds(run.DefinitionSnapshotJson!).ShouldBe(new[] { personaId.ToString() },
+                customMessage: "the operator's persona pool binds through the command path into the supervisor's allowedAgentDefinitionIds");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_foreign_allowed_agent_persona_is_rejected_fail_closed_and_never_leaked()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // A persona id that is NOT a team-owned AgentDefinition (here a random id). The launch must reject it with a
+        // generic not-found — indistinguishable from a foreign team's persona, so existence never leaks — BEFORE any run
+        // is created. The dispatch-time pool gate fails closed too; this is the clean launch-time floor.
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Pin a foreign persona", RequestedEffort = TaskEffortModes.Deep,
+            AllowedAgentDefinitionIds = new[] { Guid.NewGuid() },
+        };
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("not found or not accessible", customMessage: "a foreign persona surfaces as a generic not-found");
+
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the launch must reject BEFORE starting any run");
+    }
+
+    [Fact]
     public async Task A_deep_launch_bakes_the_operator_integrate_branches_opt_in_into_the_supervisor_snapshot()
     {
         // The operator's "Integrate branches" opt-in must bind through the command path → TaskBuildContext → the
@@ -1270,6 +1329,35 @@ public class TaskLaunchFlowTests
         if (!sup.GetProperty("config").TryGetProperty("allowedModelIds", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
 
         return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's <c>allowedAgentDefinitionIds</c> array (the operator's persona pool) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
+    private static IReadOnlyList<string> ReadSupervisorAllowedAgentDefinitionIds(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        if (!sup.GetProperty("config").TryGetProperty("allowedAgentDefinitionIds", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Seeds one team-owned AgentDefinition (persona) and returns its id — a valid AllowedAgentDefinitionIds entry the launch must accept.</summary>
+    private async Task<Guid> SeedPersonaAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Slug = "persona-" + Guid.NewGuid().ToString("N")[..8], Name = "Pool persona",
+            SystemPrompt = "You are a pool persona.", Origin = AgentDefinitionOrigin.Authored,
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        db.AgentDefinition.Add(agent);
+        await db.SaveChangesAsync();
+        return agent.Id;
     }
 
     /// <summary>Reads the supervisor node's <c>acceptanceCriteria</c> array (the operator's free-text definition of done) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

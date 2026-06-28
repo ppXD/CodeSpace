@@ -29,13 +29,14 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
         SupervisorBrainModelId = brainModelId,
         AllowedModelIds = allowedModelIds,
+        AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
     };
 
     [Fact]
@@ -115,6 +116,28 @@ public class SupervisorDefinitionBuilderTests
 
         Builder.Build(Context(allowedModelIds: Array.Empty<Guid>())).Nodes.Single(n => n.Id == "sup")
             .Config.TryGetProperty("allowedModelIds", out _).ShouldBeFalse("an EMPTY pool also omits the key — empty means 'all models', not 'no models'");
+    }
+
+    [Fact]
+    public void Supervisor_config_bakes_the_allowed_agent_persona_pool_in_order()
+    {
+        var personaA = Guid.NewGuid();
+        var personaB = Guid.NewGuid();
+
+        var sup = Builder.Build(Context(allowedAgentDefinitionIds: new[] { personaA, personaB })).Nodes.Single(n => n.Id == "sup");
+
+        sup.Config.GetProperty("allowedAgentDefinitionIds").EnumerateArray().Select(e => e.GetString()).ShouldBe(
+            new[] { personaA.ToString(), personaB.ToString() }, "the operator's persona pool rows bake onto the supervisor's allowedAgentDefinitionIds in order");
+    }
+
+    [Fact]
+    public void Supervisor_config_omits_the_allowed_agent_pool_when_empty_or_unset()
+    {
+        Builder.Build(Context(allowedAgentDefinitionIds: null)).Nodes.Single(n => n.Id == "sup")
+            .Config.TryGetProperty("allowedAgentDefinitionIds", out _).ShouldBeFalse("a null pool omits the key — the supervisor draws from all the team's personas (byte-identical)");
+
+        Builder.Build(Context(allowedAgentDefinitionIds: Array.Empty<Guid>())).Nodes.Single(n => n.Id == "sup")
+            .Config.TryGetProperty("allowedAgentDefinitionIds", out _).ShouldBeFalse("an EMPTY pool also omits the key — empty means 'all personas', not 'no personas'");
     }
 
     [Theory]
