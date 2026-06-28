@@ -5195,6 +5195,37 @@ body.chat-resizing .acs-root .app { transition: none; }
 .lt3-inline .lt3-cust { margin-top: 8px; }
 .session-composer { padding: 6px 16px 16px; background: linear-gradient(to top, var(--bg) 72%, transparent); }
 
+/* Session room turn — the streaming step timeline (replaces the per-turn React Flow canvas). A left gutter of status
+ * glyphs joined by a connector line, each step a plain line that expands into the live agent terminal tiles. */
+.turn-tl { padding: 12px 14px 4px; }
+.turn-tl-empty { padding: 16px; color: var(--muted); font-size: 13px; }
+.turn-tl-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 14px; }
+.turn-tl-av { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; flex: none; }
+.turn-tl-head-name { font-weight: 500; font-size: 13px; color: var(--ink); }
+.turn-tl-head-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.turn-tl-head-dot-run { background: #3782c2; } .turn-tl-head-dot-ok { background: var(--good); }
+.turn-tl-head-dot-err { background: var(--danger); } .turn-tl-head-dot-wait { background: var(--warn); }
+.turn-tl-head-phrase { font-size: 13px; color: var(--muted); min-width: 0; }
+.turn-tl-steps { display: flex; flex-direction: column; }
+.turn-tl-step { display: flex; gap: 12px; }
+.turn-tl-gut { display: flex; flex-direction: column; align-items: center; width: 22px; flex: none; }
+.turn-tl-gl { width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 500; }
+.turn-tl-gl-ok { background: #e7f1ea; color: var(--good); }
+.turn-tl-gl-err { background: #f8e7e0; color: var(--danger); }
+.turn-tl-gl-run { background: #e6eef8; color: #3782c2; }
+.turn-tl-gl-wait { background: #f7eddc; color: var(--warn); }
+.turn-tl-gl-pending { border: 1px solid var(--line-2); color: var(--muted-2); }
+.turn-tl-line { width: 1px; flex: 1; background: var(--line); margin: 3px 0; min-height: 10px; }
+.turn-tl-body { flex: 1; min-width: 0; padding-bottom: 16px; }
+.turn-tl-row { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 1px 0; }
+.turn-tl-label { font-size: 14px; color: var(--ink); }
+.turn-tl-meta { font-size: 12px; color: var(--muted-2); }
+.turn-tl-caret { margin-left: auto; color: var(--muted-2); transition: transform .12s; font-size: 15px; }
+.turn-tl-caret[data-open] { transform: rotate(90deg); }
+.turn-tl-rerunrow { margin: 6px 0 2px; }
+.turn-tl-tiles { margin-top: 10px; }
+.turn-tl-termwrap { margin-top: 10px; }
+
 .lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }
