@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -12,13 +12,14 @@ import { useSkills } from "@/hooks/use-skills";
 
 import { AUTONOMY, EMPTY_FORM, type FormState, formFromPersona, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
+import { availableSkillOptions, skillLabels } from "./skillPicker";
 
 /**
  * Create / edit an Agent persona — a warm-theme centered MODAL over the authorable surface, grouped into three
  * sections (Identity / Runtime / Capabilities). All dropdowns are the in-house warm {@link Combo}; the model
  * picker loads the team's REAL credentialed models. A persona is harness-AGNOSTIC (no harness field); skills are
- * bound via import (shown read-only) — in-app binding is a follow-up. The async edit-load is lifted here so the
- * form mounts (and inits its state from props) only once data is ready — no populate-from-query effect.
+ * bound in the Capabilities section (or via a pack import) and persisted on Save. The async edit-load is lifted
+ * here so the form mounts (and inits its state from props) only once data is ready — no populate-from-query effect.
  */
 export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | "edit"; agentId?: string; onClose: () => void }) {
   const existing = useAgentDefinition(mode === "edit" ? agentId : undefined);
@@ -96,6 +97,9 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
   const [skillIds, setSkillIds] = useState<string[]>(() => (boundSkills ?? []).map((s) => s.skillDefinitionId));
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Survives a partial-create retry: once create succeeds, a re-Save reuses this id (update + re-bind) rather
+  // than re-creating and colliding on the unique handle.
+  const createdIdRef = useRef<string | null>(null);
 
   const handle = deriveSlug(name);
   const saving = createAgent.isPending || updateAgent.isPending || setSkills.isPending;
@@ -125,13 +129,19 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 
     try {
       // Skills are a separate join (not part of AgentDefinitionInput): persist the fields first, then replace
-      // the bound set. On create the agent must exist before it can be bound, so we use the returned id.
-      if (mode === "create") {
-        const created = await createAgent.mutateAsync(input);
-        if (skillIds.length > 0) await setSkills.mutateAsync({ id: created.id, skillIds });
-      } else {
+      // the bound set. On create the agent must exist before it can be bound, so we use the returned id. If a
+      // prior attempt already created the agent but the binding failed, createdIdRef holds that id — reuse it
+      // (update + re-bind) instead of re-creating, which would collide on the unique handle.
+      if (mode === "edit") {
         await updateAgent.mutateAsync({ id: agentId!, input });
         await setSkills.mutateAsync({ id: agentId!, skillIds });
+      } else if (createdIdRef.current === null) {
+        const created = await createAgent.mutateAsync(input);
+        createdIdRef.current = created.id;
+        if (skillIds.length > 0) await setSkills.mutateAsync({ id: created.id, skillIds });
+      } else {
+        await updateAgent.mutateAsync({ id: createdIdRef.current, input });
+        await setSkills.mutateAsync({ id: createdIdRef.current, skillIds });
       }
       onClose();
     } catch (e) {
@@ -250,16 +260,8 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
 
-  // Label lookup: prefer the live team list, fall back to the persona's bound skills (covers the first render
-  // before the list resolves). Both only carry ACTIVE skills, so a selected id always has a label here.
-  const labels = new Map<string, string>();
-  (boundSkills ?? []).forEach((s) => labels.set(s.skillDefinitionId, s.slug));
-  (skills.data ?? []).forEach((s) => labels.set(s.id, s.slug));
-
-  const available: Option[] = (skills.data ?? [])
-    .filter((s) => !selected.includes(s.id))
-    .map((s) => ({ value: s.id, label: s.name, desc: `@${s.slug}` }));
-
+  const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
+  const available = availableSkillOptions(skills.data ?? [], selected);
   const teamHasNoSkills = !skills.isLoading && (skills.data?.length ?? 0) === 0;
 
   return (
