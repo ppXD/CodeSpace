@@ -18,6 +18,11 @@ describe("deriveRole", () => {
   it("classifies a planner from coordination wording", () => {
     expect(deriveRole(a("Sprint planner", "Plans and coordinates the roadmap"))).toBe("Planner");
     expect(deriveRole(a("Supervisor"))).toBe("Planner");
+    expect(deriveRole(a("Roadmap lead", "Owns the quarterly roadmap"))).toBe("Planner");
+  });
+
+  it("does not let an incidental 'plan' outrank an explicit architect", () => {
+    expect(deriveRole(a("Solution architect", "Plans and designs the system"))).toBe("Architect");
   });
 
   it("classifies an architect from design/backend wording", () => {

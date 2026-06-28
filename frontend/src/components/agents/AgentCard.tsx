@@ -76,10 +76,12 @@ function toolsLabel(tools: string[] | null): string {
   return `${tools.length} ${tools.length === 1 ? "tool" : "tools"}`;
 }
 
+// Each fg is a hand-darkened shade of its tint so the 11px badge text clears WCAG AA (4.5:1) on the soft bg —
+// raw var(--accent) on --accent-soft is only 2.5:1. The avatar icon reuses fg (a non-text 3:1 surface, fine).
 const ROLE_META: Record<AgentRole, { label: string; Icon: typeof Ic.Bot; bg: string; fg: string }> = {
-  Architect: { label: "Architect", Icon: Ic.Compass, bg: "var(--accent-soft)", fg: "var(--accent)" },
-  Reviewer: { label: "Reviewer", Icon: Ic.Shield, bg: "#E7F1EB", fg: "#3E7C5A" },
-  Tracer: { label: "Tracer", Icon: Ic.Bug, bg: "#FBEAF0", fg: "#B0436A" },
-  Planner: { label: "Planner", Icon: Ic.Map, bg: "#EEF1FB", fg: "#5C7CD6" },
+  Architect: { label: "Architect", Icon: Ic.Compass, bg: "var(--accent-soft)", fg: "#99452A" },
+  Reviewer: { label: "Reviewer", Icon: Ic.Shield, bg: "#EAF4EE", fg: "#2D6A48" },
+  Tracer: { label: "Tracer", Icon: Ic.Bug, bg: "#FBEAF0", fg: "#99365A" },
+  Planner: { label: "Planner", Icon: Ic.Map, bg: "#EEF1FB", fg: "#2F5BA8" },
   Generalist: { label: "Generalist", Icon: Ic.Bot, bg: "var(--panel-2)", fg: "var(--ink-2)" },
 };

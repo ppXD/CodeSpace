@@ -118,13 +118,16 @@ function AgentsListPage() {
                 {visible.map((a) => <AgentCard key={a.id} agent={a} onOpen={() => openAgent(a.id)} />)}
               </div>
             )}
-
-            {/* Fleet health — the team's success / latency / spend over its run history. Measurement SECOND:
-                the schedulable units lead, the rollup sits beneath them. Self-contained (own team-scoped fetch). */}
-            <div className="ab-fleet">
-              <AgentScorecardPanel />
-            </div>
           </>
+        )}
+
+        {/* Fleet health — the team's success / latency / spend over its run history. Measurement SECOND: it
+            sits beneath the bench. Rendered once the list resolves regardless of agent count, so a team that has
+            historical scored runs but no current agents still sees its rollup (self-contained, own team fetch). */}
+        {!agents.isLoading && !agents.error && (
+          <div className="ab-fleet">
+            <AgentScorecardPanel />
+          </div>
         )}
       </div>
 

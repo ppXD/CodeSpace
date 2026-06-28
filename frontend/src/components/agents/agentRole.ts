@@ -9,7 +9,9 @@ export type AgentRole = "Architect" | "Reviewer" | "Tracer" | "Planner" | "Gener
 const PATTERNS: ReadonlyArray<[AgentRole, RegExp]> = [
   ["Reviewer", /\b(review|audit|security|secure|vulnerab|qa|lint|critic)/i],
   ["Tracer", /\b(bug|triage|debug|repro|trace|incident|diagnos|root.?cause)/i],
-  ["Planner", /\b(plan|coordinat|orchestrat|roadmap|strateg|supervis|manager|architect.+plan)/i],
+  // `plan` is matched only in its planner forms (planner/planning), not as a bare prefix — an incidental
+  // "Plans and designs" in an architect's description must not outrank the explicit "architect" token below.
+  ["Planner", /\b(plan(ner|ning)|coordinat|orchestrat|roadmap|strateg|supervis|manager)/i],
   ["Architect", /\b(architect|design|backend|frontend|api|infra|system|database|schema|implement|build|engineer)/i],
 ];
 
