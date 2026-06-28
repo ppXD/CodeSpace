@@ -7,6 +7,7 @@ import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
+import { AuthorIntoLibraryModal } from "./AuthorIntoLibraryModal";
 import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 import { SkillDetailModal } from "./SkillDetailModal";
 import { SyncResultModal } from "./SyncResultModal";
@@ -30,6 +31,7 @@ export function LibraryPage() {
   const selectedId = resolveSelectedPackId(picked, rows);
 
   const [importing, setImporting] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [viewing, setViewing] = useState<Viewing>(null);
 
   const hasPacks = !packs.isLoading && !packs.error && rows.length > 0;
@@ -51,7 +53,10 @@ export function LibraryPage() {
               Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{totalAgents + totalSkills}</span> : null}
             </span>
           </div>
-          <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn" onClick={() => setAdding(true)}><Ic.Plus size={14} /> Add</button>
+            <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
+          </div>
         </div>
       </div>
 
@@ -95,6 +100,7 @@ export function LibraryPage() {
       </div>
 
       {importing && <ImportPackModal onClose={() => setImporting(false)} />}
+      {adding && <AuthorIntoLibraryModal onClose={() => setAdding(false)} />}
       {viewing?.kind === "Agent" && <AgentEditorModal mode="edit" agentId={viewing.id} onClose={() => setViewing(null)} />}
       {viewing?.kind === "Skill" && <SkillDetailModal skillId={viewing.id} onClose={() => setViewing(null)} />}
     </section>
