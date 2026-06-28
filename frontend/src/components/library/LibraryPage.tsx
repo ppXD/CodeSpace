@@ -1,13 +1,18 @@
 import { useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
+import type { PackArtifactKind, PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
+import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
 import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { SkillDetailModal } from "./SkillDetailModal";
 import { SyncResultModal } from "./SyncResultModal";
+
+/** Which artifact the detail modal is showing — an agent (reuses the editor modal) or a skill (read-only modal). */
+type Viewing = { kind: PackArtifactKind; id: string } | null;
 
 /**
  * Library / store — the team's imported packs as source categories. The left rail lists each pack (a github /
@@ -25,6 +30,7 @@ export function LibraryPage() {
   const selectedId = resolveSelectedPackId(picked, rows);
 
   const [importing, setImporting] = useState(false);
+  const [viewing, setViewing] = useState<Viewing>(null);
 
   const hasPacks = !packs.isLoading && !packs.error && rows.length > 0;
   const totalAgents = rows.reduce((n, p) => n + p.agentCount, 0);
@@ -32,19 +38,19 @@ export function LibraryPage() {
 
   return (
     <section className="ct">
-      <div className="ct-head" style={{ paddingBottom: 18 }}>
+      <div className="ct-head" style={{ paddingBottom: 0 }}>
         <div className="ct-crumbs"><span className="cur">Library</span></div>
-        <div className="ct-title-row">
-          <h1 className="ct-title">Library</h1>
-          <div className="ct-actions">
-            <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
+        <div className="ct-title-row"><h1 className="ct-title">Library</h1></div>
+        {/* One tab today (the packs of agents + skills); the strip leaves room for future Library sections, and
+            hosts Import on its right per the design. */}
+        <div className="lib-tabrow">
+          <div className="ct-tabs" role="tablist" aria-label="Library sections">
+            <span className="ct-tab" role="tab" aria-selected="true" data-active="true">
+              Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{totalAgents + totalSkills}</span> : null}
+            </span>
           </div>
+          <button type="button" className="btn btn-primary" onClick={() => setImporting(true)}><Ic.Download size={14} /> Import</button>
         </div>
-        {hasPacks && (
-          <div className="ct-sub">
-            {rows.length} {rows.length === 1 ? "pack" : "packs"} · {countLabel(totalAgents, totalSkills)}
-          </div>
-        )}
       </div>
 
       <div className="ct-body">
@@ -71,20 +77,24 @@ export function LibraryPage() {
 
         {hasPacks && (
           <div className="lib">
-            <div className="lib-rail" role="listbox" aria-label="Packs">
-              {rows.map((p) => (
-                <PackRailItem key={p.id} pack={p} active={p.id === selectedId} onSelect={() => setPicked(p.id)} />
-              ))}
+            <div className="lib-railbox">
+              <div className="lib-rail" role="listbox" aria-label="Packs">
+                {rows.map((p) => (
+                  <PackRailItem key={p.id} pack={p} active={p.id === selectedId} onSelect={() => setPicked(p.id)} />
+                ))}
+              </div>
             </div>
             {/* Keyed by pack: a pack switch remounts the pane, resetting the per-pack Sync mutation + result so
                 an in-flight sync's late onSuccess lands on the unmounted instance (a harmless no-op) instead of
                 popping pack A's result over pack B, and a failed sync's error banner can't leak to another pack. */}
-            {selectedId && <PackDetailPane key={selectedId} packId={selectedId} />}
+            {selectedId && <PackDetailPane key={selectedId} packId={selectedId} onOpen={(kind, id) => setViewing({ kind, id })} />}
           </div>
         )}
       </div>
 
       {importing && <ImportPackModal onClose={() => setImporting(false)} />}
+      {viewing?.kind === "Agent" && <AgentEditorModal mode="edit" agentId={viewing.id} onClose={() => setViewing(null)} />}
+      {viewing?.kind === "Skill" && <SkillDetailModal skillId={viewing.id} onClose={() => setViewing(null)} />}
     </section>
   );
 }
@@ -116,7 +126,7 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
 }
 
 /** The detail pane — the selected pack's source + freshness header (with Sync), then its agent + skill sections. */
-function PackDetailPane({ packId }: { packId: string }) {
+function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: PackArtifactKind, id: string) => void }) {
   const detail = usePack(packId);
   const sync = useSyncPack();
   // seq makes each sync result a distinct modal identity, so a same-pack re-sync remounts the result modal and
@@ -180,8 +190,8 @@ function PackDetailPane({ packId }: { packId: string }) {
         <div className="ct-empty"><div className="ct-empty-h">No active artifacts</div><div className="ct-empty-p">Every agent + skill from this pack has been removed.</div></div>
       )}
 
-      <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} />
-      <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} />
+      <ArtifactSection title="Agents" icon={<Ic.Bot size={13} />} items={agents} onOpen={onOpen} />
+      <ArtifactSection title="Skills" icon={<Ic.Book size={13} />} items={skills} onOpen={onOpen} />
 
       {syncResult && <SyncResultModal key={syncResult.seq} pack={syncResult.pack} result={syncResult.result} onClose={() => setSyncResult(null)} />}
     </div>
@@ -202,19 +212,28 @@ function Freshness({ pack }: { pack: PackSummary }) {
   );
 }
 
-/** One kind-section of the detail — a labelled heading + the artifact rows. Renders nothing when empty. */
-function ArtifactSection({ title, icon, items }: { title: string; icon: React.ReactNode; items: PackArtifactSummary[] }) {
+/** One kind-section of the detail — a labelled heading + the artifact rows. Each row opens its detail. Renders nothing when empty. */
+function ArtifactSection({ title, icon, items, onOpen }: { title: string; icon: React.ReactNode; items: PackArtifactSummary[]; onOpen: (kind: PackArtifactKind, id: string) => void }) {
   if (items.length === 0) return null;
 
   return (
     <div className="lib-sec">
       <div className="lib-sec-h">{icon} {title} <span className="lib-sec-c">{items.length}</span></div>
       {items.map((a) => (
-        <div className="lib-art" key={a.id}>
+        <div
+          className="lib-art"
+          key={a.id}
+          role="button"
+          tabIndex={0}
+          aria-label={`Open ${a.name}`}
+          onClick={() => onOpen(a.kind, a.id)}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a.kind, a.id); } }}
+        >
           <div className="repo-info">
             <div className="repo-name">{a.name}<span className="wf-trigger-muted" style={{ marginLeft: 8 }}>@{a.slug}</span></div>
             {a.description && <div className="repo-path"><span className="repo-path-desc" title={a.description}>{a.description}</span></div>}
           </div>
+          <Ic.ChevronRight size={15} />
         </div>
       ))}
     </div>

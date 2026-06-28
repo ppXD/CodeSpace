@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -5,8 +6,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace CodeSpace.Api.Controllers;
 
 /// <summary>
-/// REST surface for the team-scoped skill library. Read-only for now — the editor's skill-binding picker reads
-/// it. Team scope comes from <c>X-Team-Id</c>; the MediatR pipeline vets membership before the handler runs.
+/// REST surface for the team-scoped skill library — list (the editor's skill-binding picker), the detail read
+/// (the Library detail modal), and soft-delete. Team scope comes from <c>X-Team-Id</c>; the MediatR pipeline
+/// vets membership before the handler runs.
 /// </summary>
 [ApiController]
 [Route("api/skills")]
@@ -22,5 +24,21 @@ public class SkillsController : ControllerBase
     {
         var result = await _mediator.Send(new ListSkillsQuery(), cancellationToken).ConfigureAwait(false);
         return Ok(result);
+    }
+
+    /// <summary>One skill with its SKILL.md body (the Library detail modal). 404 when not in the caller's team.</summary>
+    [HttpGet("{skillDefinitionId:guid}")]
+    public async Task<IActionResult> Get([FromRoute] Guid skillDefinitionId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetSkillQuery { SkillDefinitionId = skillDefinitionId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Soft-delete a skill.</summary>
+    [HttpDelete("{skillDefinitionId:guid}")]
+    public async Task<IActionResult> Delete([FromRoute] Guid skillDefinitionId, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new DeleteSkillCommand { SkillDefinitionId = skillDefinitionId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
     }
 }

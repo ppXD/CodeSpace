@@ -44,16 +44,23 @@ export function useUpdateAgent() {
     onSuccess: (_data, { id }) => Promise.all([
       queryClient.invalidateQueries({ queryKey: ["agents"] }),
       queryClient.invalidateQueries({ queryKey: ["agent", id] }),
+      // An imported persona's name/description show in the Library pack detail — keep it in sync.
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
     ]),
   });
 }
 
-/** Soft-delete a persona; invalidates the library list. */
+/** Soft-delete a persona; invalidates the library list + the Library packs (an imported persona belongs to a pack). */
 export function useDeleteAgent() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => agentsApi.deleteAgentDefinition(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agents"] }),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["agents"] }),
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
+    ]),
   });
 }
 
