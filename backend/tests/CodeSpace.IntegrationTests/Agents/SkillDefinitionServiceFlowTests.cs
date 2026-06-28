@@ -4,7 +4,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -252,9 +255,11 @@ public class SkillDefinitionServiceFlowTests
     {
         var (teamId, userId) = await SeedTeamAsync();
 
+        // Drive through the mediator so the command handler's field mapping + identity wiring are exercised (not just
+        // the service in isolation), matching the agent author test.
         Guid id;
-        using (var scope = _fixture.BeginScope())
-            id = await scope.Resolve<ISkillDefinitionService>().AuthorStoreSkillAsync(teamId, new SkillDefinitionInput { Name = "Threat Modeling", Body = "STRIDE.", Category = "security" }, userId, default);
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            id = await scope.Resolve<IMediator>().Send(new AuthorStoreSkillCommand { Name = "Threat Modeling", Body = "STRIDE.", Category = "security" });
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();

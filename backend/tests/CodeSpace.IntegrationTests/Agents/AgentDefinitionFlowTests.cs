@@ -379,7 +379,8 @@ public class AgentDefinitionFlowTests
         var bench = await benchScope.Resolve<IMediator>().Send(new ListAgentDefinitionsQuery());
         bench.Select(a => a.Id).ShouldNotContain(firstId, "an authored Library entry does not land on the bench");
 
-        // …but visible in the Library under the Custom pack.
+        // …but visible in the Library: the Custom pack lists (it has store artifacts) and its detail carries the entry.
+        (await benchScope.Resolve<IMediator>().Send(new ListPacksQuery())).Select(p => p.Id).ShouldContain(customPacks[0].Id);
         var detail = await benchScope.Resolve<IMediator>().Send(new GetPackQuery { PackId = customPacks[0].Id });
         detail!.Artifacts.Select(a => a.Id).ShouldContain(firstId);
     }
