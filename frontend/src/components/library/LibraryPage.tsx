@@ -4,11 +4,12 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PackArtifactKind, PackArtifactSummary, PackSummary, PackSyncResult } from "@/api/packs";
 import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
-import { usePack, usePacks, useSyncPack } from "@/hooks/use-packs";
+import { useDebounced } from "@/hooks/use-debounced";
+import { useListPackArtifacts, usePacks, useSyncPack } from "@/hooks/use-packs";
 import { relativeTime } from "@/lib/codeTree";
 
 import { AuthorIntoLibraryModal } from "./AuthorIntoLibraryModal";
-import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, resolveDetailTab, resolveSelectedPackId, sourceLabel } from "./libraryView";
 import { SkillDetailModal } from "./SkillDetailModal";
 import { SyncResultModal } from "./SyncResultModal";
 
@@ -29,6 +30,7 @@ export function LibraryPage() {
   // resolveSelectedPackId. Avoids the setState-in-effect the agent editor's load had to be refactored away from.
   const [picked, setPicked] = useState<string | null>(null);
   const selectedId = resolveSelectedPackId(picked, rows);
+  const selectedPack = rows.find((p) => p.id === selectedId) ?? null;
 
   const [importing, setImporting] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -93,8 +95,9 @@ export function LibraryPage() {
             </div>
             {/* Keyed by pack: a pack switch remounts the pane, resetting the per-pack Sync mutation + result so
                 an in-flight sync's late onSuccess lands on the unmounted instance (a harmless no-op) instead of
-                popping pack A's result over pack B, and a failed sync's error banner can't leak to another pack. */}
-            {selectedId && <PackDetailPane key={selectedId} packId={selectedId} onOpen={(kind, id) => setViewing({ kind, id })} />}
+                popping pack A's result over pack B, and a failed sync's error banner can't leak to another pack.
+                The remount also clears the paged-artifact placeholder, so a held page can't bleed across packs. */}
+            {selectedPack && <PackDetailPane key={selectedPack.id} pack={selectedPack} onOpen={(kind, id) => setViewing({ kind, id })} />}
           </div>
         )}
       </div>
@@ -133,11 +136,10 @@ function PackRailItem({ pack, active, onSelect }: { pack: PackSummary; active: b
   );
 }
 
-/** The detail pane — the selected pack's source + freshness header (with Sync), then its agent + skill sections. */
-const DETAIL_PAGE_SIZE = 8;
+/** The detail pane — the selected pack's source + freshness header (with Sync), then its agents/skills tab, paged server-side. */
+const DETAIL_PAGE_SIZE = 12;
 
-function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: PackArtifactKind, id: string) => void }) {
-  const detail = usePack(packId);
+function PackDetailPane({ pack, onOpen }: { pack: PackSummary; onOpen: (kind: PackArtifactKind, id: string) => void }) {
   const sync = useSyncPack();
   // seq makes each sync result a distinct modal identity, so a same-pack re-sync remounts the result modal and
   // its selection re-seeds from the new preview (no remount → the old result's selection would linger).
@@ -145,38 +147,36 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
   const [syncResult, setSyncResult] = useState<{ pack: PackSummary; result: PackSyncResult; seq: number } | null>(null);
 
   // null = no explicit pick yet → default to whichever kind has rows (skill-only packs open on Skills). A click pins
-  // the choice. page is clamped by paginate(), so a tab switch (which resets it to 0) or a shrunk list stays valid.
+  // the choice. page resets to 0 on a tab switch / search change / sync, and the server re-clamps it into range.
   const [tab, setTab] = useState<"agents" | "skills" | null>(null);
   const [page, setPage] = useState(0);
-
-  if (detail.isLoading) return <div className="lib-detail"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>;
-
-  if (detail.error) {
-    return (
-      <div className="lib-detail">
-        <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-          <div className="cn-banner-h">Couldn't load this pack</div>
-          <div className="cn-banner-p">{detail.error.message}</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!detail.data) return null;
-
-  const { pack, artifacts } = detail.data;
-  const { agents, skills } = splitArtifacts(artifacts);
+  const [searchInput, setSearchInput] = useState("");
+  const search = useDebounced(searchInput.trim(), 200);
 
   // resolveDetailTab reconciles a pinned tab whose kind has since emptied (e.g. a sync dropped every agent) back to
   // the populated kind, so the user is never stranded on an empty tab — mirroring resolveSelectedPackId for packs.
-  const activeTab = resolveDetailTab(tab, agents.length, skills.length);
-  const paged = paginate(activeTab === "agents" ? agents : skills, page, DETAIL_PAGE_SIZE);
+  const activeTab = resolveDetailTab(tab, pack.agentCount, pack.skillCount);
+  const kind: PackArtifactKind = activeTab === "agents" ? "Agent" : "Skill";
 
+  // One server-side page of the active kind, filtered by the debounced search. The tab counts come from the pack
+  // summary (the kind totals), so they stay correct independent of the search-filtered page.
+  const artifacts = useListPackArtifacts(pack.id, kind, search, page, DETAIL_PAGE_SIZE);
+
+  // keepPreviousData smooths page-to-page paging WITHIN a kind, but on a tab switch it briefly holds the OTHER
+  // kind's page (kind is part of the query key). Only render the held page once it actually belongs to the active
+  // kind, so a switch never flashes agents under the Skills tab (an empty page carries no kind, so it's safe to show).
+  const data = artifacts.data;
+  const showing = data && (data.items.length === 0 || data.items[0].kind === kind) ? data : undefined;
+
+  const isEmpty = pack.agentCount + pack.skillCount === 0;
   // A Custom (locally-authored) pack has no remote source to re-pull, so it can't be synced.
   const canSync = pack.kind !== "Custom";
   const syncErr = sync.error ? sync.error.message : null;
 
-  function selectTab(next: "agents" | "skills") { setTab(next); setPage(0); }
+  // A tab switch clears the search too: the search box is per-kind, and carrying a term across would leave the new
+  // tab showing a "no match" list while its badge advertises a positive count.
+  function selectTab(next: "agents" | "skills") { setTab(next); setPage(0); setSearchInput(""); }
+  function changeSearch(next: string) { setSearchInput(next); setPage(0); }
 
   function runSync() {
     // A sync can add/remove artifacts, so reset pagination to the first page (a stale page index can't resurrect
@@ -210,28 +210,43 @@ function PackDetailPane({ packId, onOpen }: { packId: string; onOpen: (kind: Pac
         </div>
       )}
 
-      {artifacts.length === 0 ? (
+      {isEmpty ? (
         <div className="ct-empty"><div className="ct-empty-h">No active artifacts</div><div className="ct-empty-p">Every agent + skill from this pack has been removed.</div></div>
       ) : (
         <>
-          <div className="lib-dtabs" role="tablist" aria-label="Artifact kind">
-            <button type="button" role="tab" aria-selected={activeTab === "agents"} className="lib-dtab" data-on={activeTab === "agents"} onClick={() => selectTab("agents")}>
-              <Ic.Bot size={13} /> Agents <span className="lib-dtab-c">{agents.length}</span>
-            </button>
-            <button type="button" role="tab" aria-selected={activeTab === "skills"} className="lib-dtab" data-on={activeTab === "skills"} onClick={() => selectTab("skills")}>
-              <Ic.Book size={13} /> Skills <span className="lib-dtab-c">{skills.length}</span>
-            </button>
+          <div className="lib-dtools">
+            <div className="lib-dtabs" role="tablist" aria-label="Artifact kind">
+              <button type="button" role="tab" aria-selected={activeTab === "agents"} className="lib-dtab" data-on={activeTab === "agents"} onClick={() => selectTab("agents")}>
+                <Ic.Bot size={13} /> Agents <span className="lib-dtab-c">{pack.agentCount}</span>
+              </button>
+              <button type="button" role="tab" aria-selected={activeTab === "skills"} className="lib-dtab" data-on={activeTab === "skills"} onClick={() => selectTab("skills")}>
+                <Ic.Book size={13} /> Skills <span className="lib-dtab-c">{pack.skillCount}</span>
+              </button>
+            </div>
+            <div className="imp-search lib-dsearch">
+              <Ic.Search size={14} />
+              <input value={searchInput} onChange={(e) => changeSearch(e.target.value)} placeholder={`Search ${activeTab}…`} aria-label={`Search ${activeTab}`} />
+            </div>
           </div>
 
-          {paged.items.length === 0
-            ? <div className="ct-empty"><div className="ct-empty-p">No {activeTab} in this pack.</div></div>
-            : paged.items.map((a) => <ArtifactRow key={a.id} artifact={a} onOpen={onOpen} />)}
+          <div className="lib-dlist">
+            {!showing
+              // Error only when there's nothing to show — a FAILED background refetch (the new invalidations make
+              // these routine) keeps the last good page on screen rather than blanking it.
+              ? (artifacts.isError && !data
+                  ? <div className="ct-empty"><div className="ct-empty-p">Couldn't load — {artifacts.error.message}</div></div>
+                  : <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>)
+              : showing.items.length === 0
+                ? <div className="ct-empty"><div className="ct-empty-p">{search ? `No ${activeTab} match “${search}”.` : `No ${activeTab} in this pack.`}</div></div>
+                : showing.items.map((a) => <ArtifactRow key={a.id} artifact={a} onOpen={onOpen} />)}
+          </div>
 
-          {paged.pageCount > 1 && (
+          {showing && showing.pageCount > 1 && (
+            // Disabled while a fetch is in flight, so a rapid double-click can't navigate off the held placeholder page.
             <div className="lib-pager">
-              <button type="button" className="lib-pager-btn" disabled={paged.page === 0} onClick={() => setPage(paged.page - 1)} aria-label="Previous page"><Ic.ChevronLeft size={15} /></button>
-              <span className="lib-pager-info">{paged.page * DETAIL_PAGE_SIZE + 1}–{Math.min((paged.page + 1) * DETAIL_PAGE_SIZE, paged.total)} of {paged.total}</span>
-              <button type="button" className="lib-pager-btn" disabled={paged.page >= paged.pageCount - 1} onClick={() => setPage(paged.page + 1)} aria-label="Next page"><Ic.ChevronRight size={15} /></button>
+              <button type="button" className="lib-pager-btn" disabled={showing.page === 0 || artifacts.isFetching} onClick={() => setPage(showing.page - 1)} aria-label="Previous page"><Ic.ChevronLeft size={15} /></button>
+              <span className="lib-pager-info">{showing.page * DETAIL_PAGE_SIZE + 1}–{Math.min((showing.page + 1) * DETAIL_PAGE_SIZE, showing.total)} of {showing.total}</span>
+              <button type="button" className="lib-pager-btn" disabled={showing.page >= showing.pageCount - 1 || artifacts.isFetching} onClick={() => setPage(showing.page + 1)} aria-label="Next page"><Ic.ChevronRight size={15} /></button>
             </div>
           )}
         </>

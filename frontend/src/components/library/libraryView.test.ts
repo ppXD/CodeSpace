@@ -1,16 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { PackArtifactSummary, PackSummary } from "@/api/packs";
+import type { PackSummary } from "@/api/packs";
 
-import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
+import { countLabel, paginate, resolveDetailTab, resolveSelectedPackId, sourceLabel } from "./libraryView";
 
 const pack = (over: Partial<PackSummary>): PackSummary => ({
   id: "p1", kind: "Github", name: "agents", url: null, reference: null,
   lastSyncedSha: null, lastSyncedDate: null, agentCount: 0, skillCount: 0, ...over,
-});
-
-const artifact = (kind: "Agent" | "Skill", slug: string): PackArtifactSummary => ({
-  kind, id: slug, slug, name: slug, description: null, sourcePath: `${slug}.md`,
 });
 
 describe("countLabel", () => {
@@ -26,21 +22,6 @@ describe("countLabel", () => {
 
   it("reports an empty pack", () => {
     expect(countLabel(0, 0)).toBe("empty");
-  });
-});
-
-describe("splitArtifacts", () => {
-  it("partitions by kind, preserving order within each section", () => {
-    const { agents, skills } = splitArtifacts([
-      artifact("Agent", "a1"), artifact("Skill", "s1"), artifact("Agent", "a2"), artifact("Skill", "s2"),
-    ]);
-
-    expect(agents.map((a) => a.slug)).toEqual(["a1", "a2"]);
-    expect(skills.map((s) => s.slug)).toEqual(["s1", "s2"]);
-  });
-
-  it("handles an empty pack", () => {
-    expect(splitArtifacts([])).toEqual({ agents: [], skills: [] });
   });
 });
 

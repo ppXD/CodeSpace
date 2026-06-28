@@ -27,6 +27,7 @@ export function useAuthorStoreSkill() {
     onSuccess: () => Promise.all([
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
       queryClient.invalidateQueries({ queryKey: ["pack"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] }),
     ]),
   });
 }
@@ -36,6 +37,8 @@ export function useInstantiateSkillFromStore() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (sourceDefinitionId: string) => skillsApi.instantiateFromStore(sourceDefinitionId),
+    // Instantiate creates a WORKING bindable copy (PackId null) — it doesn't touch any pack's Store artifacts, so
+    // the [pack-artifacts] detail lists stay valid; only the skill list + the Library's surfacing state can shift.
     onSuccess: () => Promise.all([
       queryClient.invalidateQueries({ queryKey: ["skills"] }),
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
@@ -56,6 +59,7 @@ export function useDeleteSkill() {
       queryClient.invalidateQueries({ queryKey: ["skills"] }),
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
       queryClient.invalidateQueries({ queryKey: ["pack"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] }),
       queryClient.invalidateQueries({ queryKey: ["agents"] }),
       queryClient.invalidateQueries({ queryKey: ["agent"] }),
     ]),
