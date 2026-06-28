@@ -13,6 +13,9 @@ public class AgentDefinitionConfiguration : IEntityTypeConfiguration<AgentDefini
         // Stored as its string name (matches AgentRunStatus etc.); 16 chars covers "Authored"/"Imported".
         builder.Property(a => a.Origin).HasConversion<string>().HasMaxLength(16);
 
+        // Working / Store discriminator, stored as its string name (same convention as Origin).
+        builder.Property(a => a.Scope).HasConversion<string>().HasMaxLength(16);
+
         // jsonb blobs kept as strings (same convention as AgentRun.TaskJson) — modelled by the service layer later.
         builder.Property(a => a.ToolsJson).HasColumnName("tools_jsonb").HasColumnType("jsonb");
         builder.Property(a => a.McpServersJson).HasColumnName("mcp_servers_jsonb").HasColumnType("jsonb");
