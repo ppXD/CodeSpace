@@ -239,6 +239,7 @@ public class CodeSpaceModule : Autofac.Module
     private static void RegisterDecorators(ContainerBuilder builder)
     {
         builder.RegisterDecorator<Services.Workflows.Planning.Planners.CriticPlannerDecorator, Services.Workflows.Planning.IWorkflowPlanner>();
+        builder.RegisterDecorator<Services.Supervisor.Deciders.CriticSupervisorDeciderDecorator, Services.Supervisor.ISupervisorDecider>();
     }
 
     private void RegisterDependency(ContainerBuilder builder)

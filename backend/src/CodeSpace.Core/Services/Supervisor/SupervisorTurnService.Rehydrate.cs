@@ -4,6 +4,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Dtos.Decisions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -103,6 +104,8 @@ public sealed partial class SupervisorTurnService
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
             AcceptanceCriteria = NormalizeTools(goalConfig?.AcceptanceCriteria),
             SupervisorModelId = goalConfig?.SupervisorModelId,
+            DecisionReviewMode = goalConfig?.DecisionReviewMode ?? ReviewMode.None,
+            ReviewerModelId = goalConfig?.ReviewerModelId,
             PendingChildDecisions = pendingChildDecisions,
         };
     }

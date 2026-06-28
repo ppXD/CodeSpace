@@ -154,6 +154,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine();
         }
 
+        // An independent critic reviewed the previous draft of THIS turn's decision and asked for a revision. Fold its
+        // critique in so the model improves the decision. Set ONLY on the critic decorator's one bounded re-decide
+        // (null on the first decide ⇒ byte-identical prompt).
+        if (!string.IsNullOrWhiteSpace(context.ReviewerCritique))
+        {
+            builder.AppendLine("An independent reviewer critiqued your previous decision for this turn. Revise the decision to address this critique:");
+            builder.AppendLine(context.ReviewerCritique.Trim());
+            builder.AppendLine();
+        }
+
         if (!string.IsNullOrWhiteSpace(catalog))
         {
             builder.AppendLine(catalog.TrimEnd());

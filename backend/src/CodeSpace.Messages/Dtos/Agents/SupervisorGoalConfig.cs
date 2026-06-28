@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Agents;
 
@@ -77,6 +78,12 @@ public sealed record SupervisorGoalConfig
     /// the right key. Null → the decider fails closed (the UI may recommend a default, but the input must be present).
     /// </summary>
     public Guid? SupervisorModelId { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each turn's decision before its side effect. <c>None</c> (the default) ⇒ no critic (byte-identical); <c>Improve</c> ⇒ one bounded re-decide against the critique. Baked so every turn + replay of this frozen run reads the same mode.</summary>
+    public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the decision critic runs on (a <c>ModelCredentialModel</c> id) — the INDEPENDENT reviewer, ideally distinct from <see cref="SupervisorModelId"/>. Null ⇒ the critic auto-picks the team's strongest structured-eligible brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 
     /// <summary>
     /// The operator's ALLOWED MODEL POOL for the agents this supervisor dispatches — a multi-select of credentialed-model

@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Messages.Tasks;
 
 /// <summary>
@@ -39,4 +41,10 @@ public sealed record TaskBuildContext
 
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c>, rendered into the decider prompt (NOT executed). Null / empty ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each supervisor decision — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>decisionReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
+    public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the decision critic runs on — baked into the node's <c>reviewerModelId</c>. Null ⇒ omitted ⇒ the critic auto-picks the team brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 }

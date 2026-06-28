@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks;
 
@@ -56,6 +57,12 @@ public sealed record TaskLaunchRequest
 
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — rendered into the supervisor decider prompt as the definition of done (NOT executed; distinct from the <c>acceptanceChecks</c> argv floor). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each supervisor decision (Deep only) — baked into the supervisor node so every turn + replay reads it. <see cref="ReviewMode.None"/> (the default) ⇒ no critic (byte-identical). Inert on a non-supervisor projection.</summary>
+    public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the decision critic runs on. Null ⇒ the critic auto-picks the team brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 
     /// <summary>The opaque per-surface payload (the folded <c>LaunchContext.Raw</c>) — ONLY the resolved seed provider reads it; the core never does. Defaults empty.</summary>
     public IReadOnlyDictionary<string, JsonElement> SurfacePayload { get; init; } = new Dictionary<string, JsonElement>();
