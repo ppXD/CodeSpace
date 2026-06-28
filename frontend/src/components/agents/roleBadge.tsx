@@ -32,5 +32,5 @@ export function RoleAvatar({ role, size = 40 }: { role: AgentRole; size?: number
 export function RoleBadge({ role }: { role: AgentRole }) {
   const meta = ROLE_META[role];
 
-  return <span style={{ fontSize: 11, fontWeight: 500, padding: "1px 8px", borderRadius: 999, background: meta.bg, color: meta.fg }}>{meta.label}</span>;
+  return <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 500, padding: "1px 8px", borderRadius: 999, background: meta.bg, color: meta.fg }}>{meta.label}</span>;
 }
