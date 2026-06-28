@@ -6,8 +6,8 @@ import { ApiError } from "@/api/request";
 import { useImportPack, usePreviewPack } from "@/hooks/use-packs";
 
 import { installSummary, repoLabel } from "./packInstall";
-import { defaultSelectedPaths, toRows } from "./packPreview";
-import { PreviewGroup } from "./packPreviewRows";
+import { defaultSelectedPaths, filterRows, toRows } from "./packPreview";
+import { PreviewRow } from "./packPreviewRows";
 
 /**
  * Import a capability pack — paste a GitHub/GitLab URL, clone + discover its agents AND skills (host-allowlist
@@ -24,6 +24,9 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
   // The url/ref actually fetched — snapshotted on a successful preview so the rail label and the commit always
   // reflect the previewed pack, even if the operator edits the URL field afterwards without re-fetching.
   const [fetched, setFetched] = useState<{ url: string; reference: string } | null>(null);
+  // Which kind the item list shows (a pack can carry hundreds; tabs keep agents + skills separate) + a search.
+  const [pickedTab, setPickedTab] = useState<"agents" | "skills" | null>(null);
+  const [query, setQuery] = useState("");
 
   const preview = usePreviewPack();
   const importPack = useImportPack();
@@ -43,9 +46,15 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
   const selectedSkills = skillRows.filter((r) => selected.has(r.sourcePath)).length;
   const conflicts = rows.filter((r) => r.slugConflict).length;
 
+  // Derived active tab (no effect): an explicit pick wins, else the first kind that has items.
+  const activeTab = pickedTab ?? (agentRows.length > 0 ? "agents" : "skills");
+  const activeRows = activeTab === "agents" ? agentRows : skillRows;
+  const visible = filterRows(activeRows, query);
+  const visibleSelected = visible.filter((r) => selected.has(r.sourcePath)).length;
+
   function fetchPreview() {
     if (!url.trim()) return;
-    preview.mutate({ url: url.trim(), reference }, { onSuccess: (p) => { setSelected(new Set(defaultSelectedPaths(p))); setFetched({ url: url.trim(), reference }); } });
+    preview.mutate({ url: url.trim(), reference }, { onSuccess: (p) => { setSelected(new Set(defaultSelectedPaths(p))); setFetched({ url: url.trim(), reference }); setPickedTab(null); setQuery(""); } });
   }
 
   function toggle(sourcePath: string) {
@@ -54,6 +63,15 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
       if (next.has(sourcePath)) next.delete(sourcePath); else next.add(sourcePath);
       return next;
     });
+  }
+
+  // Select-all / clear operate on the currently VISIBLE rows (the active tab, filtered by the search) — only
+  // importable ones can be added; conflicts / unparseable rows are never selectable.
+  function selectAllVisible() {
+    setSelected((s) => { const next = new Set(s); visible.filter((r) => r.importable).forEach((r) => next.add(r.sourcePath)); return next; });
+  }
+  function clearVisible() {
+    setSelected((s) => { const next = new Set(s); visible.forEach((r) => next.delete(r.sourcePath)); return next; });
   }
 
   function commit() {
@@ -118,8 +136,30 @@ export function ImportPackModal({ onClose }: { onClose: () => void }) {
                   : <div className="imp-rv imp-rv-muted">none</div>}
               </div>
               <div className="imp-list">
-                {agentRows.length > 0 && <PreviewGroup title="Agents" rows={agentRows} selected={selected} onToggle={toggle} />}
-                {skillRows.length > 0 && <PreviewGroup title="Skills" rows={skillRows} selected={selected} onToggle={toggle} />}
+                <div className="imp-toolbar">
+                  <div className="imp-tabs" role="tablist" aria-label="Artifact kind">
+                    <button type="button" role="tab" aria-selected={activeTab === "agents"} className="imp-tab" data-on={activeTab === "agents"} onClick={() => setPickedTab("agents")}>Agents <span className="imp-tab-c">{agentRows.length}</span></button>
+                    <button type="button" role="tab" aria-selected={activeTab === "skills"} className="imp-tab" data-on={activeTab === "skills"} onClick={() => setPickedTab("skills")}>Skills <span className="imp-tab-c">{skillRows.length}</span></button>
+                  </div>
+                  <div className="imp-search">
+                    <Ic.Search size={13} />
+                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" aria-label="Search artifacts" />
+                  </div>
+                </div>
+
+                <div className="imp-selbar">
+                  <span>{visibleSelected} of {visible.length} selected</span>
+                  <div>
+                    <button type="button" className="imp-link" onClick={selectAllVisible}>Select all</button>
+                    <button type="button" className="imp-link" onClick={clearVisible}>Clear</button>
+                  </div>
+                </div>
+
+                <div className="imp-rows">
+                  {visible.length === 0
+                    ? <div className="wf-form-empty">{query.trim() ? "No matches." : `No ${activeTab} in this pack.`}</div>
+                    : visible.map((r) => <PreviewRow key={r.sourcePath} row={r} checked={selected.has(r.sourcePath)} onToggle={() => toggle(r.sourcePath)} />)}
+                </div>
               </div>
             </div>
           )}

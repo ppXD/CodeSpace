@@ -16,7 +16,7 @@ export function PreviewGroup({ title, rows, selected, onToggle }: { title: strin
   );
 }
 
-function PreviewRow({ row, checked, onToggle }: { row: Row; checked: boolean; onToggle: () => void }) {
+export function PreviewRow({ row, checked, onToggle }: { row: Row; checked: boolean; onToggle: () => void }) {
   const flag = flagFor(row);
   return (
     <label style={{ display: "flex", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--line)", alignItems: "flex-start", cursor: row.importable ? "pointer" : "default", opacity: row.importable ? 1 : 0.65 }}>
