@@ -75,7 +75,7 @@ export function AgentScorecardView({ card, cost }: { card: AgentRunScorecard | u
 }
 
 function ScorecardHead() {
-  return <div className="sc-head"><Ic.Zap size={12} /> Agent scorecard</div>;
+  return <div className="sc-head"><Ic.Zap size={12} /> Fleet health</div>;
 }
 
 /** One headline metric. `accent` lifts the lead stat (success rate) in the warm Claude tone. */
