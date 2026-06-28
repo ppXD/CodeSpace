@@ -6,11 +6,10 @@ import { toolsLabel } from "./agentRuntime";
 import { RoleAvatar, RoleBadge } from "./roleBadge";
 
 /**
- * One agent on the bench — a role-tinted card that reads like a character sheet: identity (avatar + role badge +
- * name + @handle + description), a one-line runtime spec (model · autonomy · tools), then a divider and the
- * skills it carries as tokens, with a recent-performance footer. The role is a display-only heuristic (see
- * deriveRole). Per-agent performance isn't aggregated yet, so the footer shows "No recent runs" until that
- * backend slice lands. Click / Enter opens the detail.
+ * One agent on the bench — a role-tinted card that reads like a character sheet: identity (avatar; the name on
+ * its own line, then @handle + the role badge pinned to a fixed second line so it never shifts with name length),
+ * a one-line runtime spec (model · autonomy · tools), then a divider and the skills it carries as tokens. The
+ * role is a display-only heuristic (see deriveRole). Click / Enter opens the editor.
  */
 export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; onOpen: () => void }) {
   const role = deriveRole(agent);
@@ -19,7 +18,7 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
     <article
       className="ab-card"
       tabIndex={0}
-      aria-label={`Open ${agent.name}`}
+      aria-label={`Edit ${agent.name}`}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
     >
@@ -27,7 +26,9 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
         <RoleAvatar role={role} />
         <div className="ab-id">
           <div className="ab-namerow">
-            <span className="ab-name">{agent.name}</span>
+            <span className="ab-name" title={agent.name}>{agent.name}</span>
+          </div>
+          <div className="ab-subrow">
             <span className="ab-handle">@{agent.slug}</span>
             <RoleBadge role={role} />
           </div>
@@ -52,10 +53,6 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
 
       <div className="ab-skills">
         <SkillTokens skills={agent.boundSkills} />
-      </div>
-
-      <div className="ab-perf ab-perf-empty">
-        <span className="ab-dot" style={{ background: "var(--muted-2)" }} /> No recent runs
       </div>
     </article>
   );

@@ -472,8 +472,10 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ab-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .acs-root .ab-top { display: flex; gap: 12px; align-items: flex-start; }
 .acs-root .ab-id { flex: 1; min-width: 0; }
-.acs-root .ab-namerow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.acs-root .ab-name { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; }
+.acs-root .ab-namerow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acs-root .ab-name { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Second identity line — @handle + role badge, always below the name so the badge sits in a fixed position. */
+.acs-root .ab-subrow { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
 .acs-root .ab-handle { font-size: 12.5px; color: var(--muted-2); }
 .acs-root .ab-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .ab-origin { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
@@ -489,8 +491,6 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ab-skills-empty { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted-2); }
 .acs-root .ab-tok { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: #99452A; font-family: var(--font-mono, ui-monospace, monospace); }
 .acs-root .ab-tok-more { font-size: 11px; color: var(--muted-2); }
-.acs-root .ab-perf { font-size: 12px; color: var(--muted); margin: 12px 0 0 52px; display: flex; align-items: center; gap: 6px; }
-.acs-root .ab-perf-empty { color: var(--muted-2); }
 .acs-root .ab-fleet { margin-top: 22px; }
 
 /* Model-credential cards (Settings → Model credentials) — provider logo + masked key, never the secret. */
@@ -1402,26 +1402,10 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .imp-rv-warn, .imp-rv-warn svg { color: var(--warn); }
 .imp-list { flex: 1; min-width: 0; padding: 0 16px 14px; }
 
-/* Agent detail DRAWER — the `mdl drw` panel reuses the .mdl head/body/foot + form/control styling above and
-   overrides the geometry to a full-height panel anchored right. These classes are root-level (not under
-   .acs-root) because the drawer portals to document.body, like .mdl. */
-.mdl.drw { top: 0; left: auto; right: 0; transform: none; width: 460px; max-width: 94vw; height: 100vh; max-height: 100vh; border-radius: 0; border-top: 0; border-right: 0; border-bottom: 0; animation: drwIn .2s cubic-bezier(.2,.7,.2,1); }
-@keyframes drwIn { from { opacity: .5; transform: translateX(14px); } to { opacity: 1; transform: translateX(0); } }
-.drw-sec { padding: 16px 0; border-top: 1px solid var(--line); }
-.mdl-body > .drw-sec:first-child { border-top: 0; padding-top: 2px; }
-.drw-sec-h { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 10px; }
-.drw-sec-h svg { color: var(--ink-2); }
-.drw-fld { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
-.drw-val { font-size: 13px; color: var(--ink); margin-bottom: 12px; }
-.drw-muted { color: var(--muted); }
-.drw-prompt { font-size: 12px; color: var(--ink-2); background: var(--panel-2); border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; font-family: var(--font-mono, ui-monospace, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
-.drw-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 11px; }
-.drw-chip { font-size: 11.5px; color: var(--ink-2); background: var(--panel-2); border-radius: 6px; padding: 3px 9px; display: inline-flex; align-items: center; gap: 5px; }
-.drw-chip svg { color: var(--muted-2); }
-.drw-chip b { color: var(--ink); font-weight: 500; }
-.drw-perm { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-.drw-toks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.drw-tok { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: #99452A; font-family: var(--font-mono, ui-monospace, monospace); }
+/* Section header in the agent editor modal (Identity / Runtime / Capabilities). Root-level (not under .acs-root)
+   because the editor portals to document.body, like .mdl. */
+.ed-sec-h { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 10px; }
+.ed-sec-h svg { color: var(--ink-2); }
 
 /* Connected identities (Model B) — per-user provider-identity management list. */
 .acs-identities { padding: 20px 24px; max-width: 720px; }

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { AgentCard } from "@/components/agents/AgentCard";
-import { AgentDrawer } from "@/components/agents/AgentDrawer";
+import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
@@ -17,9 +17,8 @@ type EditorState = { mode: "create" } | { mode: "edit"; id: string } | null;
  * working unit: a role-tinted avatar + role badge (a display heuristic), its @handle, and its loadout (model /
  * autonomy / tools chips + the skills it carries from the AgentSkillBinding join). A persona is harness-AGNOSTIC,
  * so there's deliberately no per-card harness field — the per-harness split lives in the Fleet-health scorecard,
- * which sits BELOW the bench (measurement second, the units first). "New agent" + a card click open the editor;
- * "Import" opens the import-from-URL pack modal. (Per-agent performance isn't aggregated yet — cards show "No
- * recent runs" until that backend slice lands.)
+ * which sits BELOW the bench (measurement second, the units first). "New agent" + a card click open the editor
+ * modal; "Import" opens the import-from-URL pack modal.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
@@ -95,7 +94,7 @@ function AgentsListPage() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search or ask — “security reviewer”, “backend implementer”…"
+                  placeholder="Search agents…"
                   aria-label="Search agents"
                 />
               </div>
@@ -132,7 +131,7 @@ function AgentsListPage() {
       </div>
 
       {editor && (
-        <AgentDrawer
+        <AgentEditorModal
           mode={editor.mode}
           agentId={editor.mode === "edit" ? editor.id : undefined}
           onClose={() => setEditor(null)}
