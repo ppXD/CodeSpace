@@ -3497,8 +3497,15 @@ textarea:-webkit-autofill {
 /* Agent-editor skill-binding dropdown — an INLINE (non-modal) multi-select laid out left-right like the Library:
    a pack rail + the selected pack's skills (server-paged), toggled with a check. It lives inside the editor's
    scrolling .mdl-body, so it expands in flow rather than floating (which the modal's overflow would clip). */
-.mdl .skb { display: flex; flex-direction: column; align-items: flex-start; }
-.mdl .skb-caret { transition: transform .12s ease; }
+.mdl .skb { display: flex; flex-direction: column; align-items: stretch; }
+/* The token-input control: an input-styled field holding the bound-skill labels, opening the picker on click. */
+.mdl .skb-control { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 34px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
+.mdl .skb-control:hover { border-color: var(--line-2); }
+.mdl .skb-control:focus-visible { outline: none; border-color: var(--accent); }
+.mdl .skb-control[data-open="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.mdl .skb-placeholder { color: var(--muted); font-size: 12.5px; }
+.mdl .wf-trigger-chip.skb-chip { display: inline-flex; align-items: center; font-size: 11px; padding: 2.5px 4px 2.5px 8px; }
+.mdl .skb-caret { margin-left: auto; flex-shrink: 0; color: var(--muted-2); transition: transform .12s ease; }
 .mdl .skb-caret[data-open="true"] { transform: rotate(180deg); }
 .mdl .skb-panel { align-self: stretch; margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 10px; display: grid; grid-template-columns: 160px 1fr; gap: 12px; height: 300px; }
 .mdl .skb-panel-msg { display: block; height: auto; }

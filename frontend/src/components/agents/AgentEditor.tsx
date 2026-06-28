@@ -255,28 +255,14 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 }
 
 /**
- * Editable skill-binding control. Bound skills show as removable chips; "Add skill" opens the Library picker, which
- * instantiates a working copy of the chosen store skill and hands back its id (the "instantiate to use" model). The
- * parent persists the bound set on Save. Labels resolve from the team's working skills once the new copy lands.
+ * Editable skill-binding control. Bound skills show as removable labels INSIDE a token-input field; clicking the
+ * field opens the Library picker, which instantiates a working copy of the chosen store skill and hands back its id
+ * (the "instantiate to use" model). The parent persists the bound set on Save. Labels resolve from the team's
+ * working skills once the new copy lands.
  */
 function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
   const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {selected.length > 0 && (
-        <div className="wf-triggers">
-          {selected.map((id) => (
-            <span key={id} className="wf-trigger-chip">
-              {labels.get(id) ?? "skill"}
-              <button type="button" className="ed-tok-x" aria-label={`Remove ${labels.get(id) ?? "skill"}`} onClick={() => onChange(selected.filter((x) => x !== id))}><Ic.X size={11} /></button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <SkillBindingDropdown selected={selected} onChange={onChange} />
-    </div>
-  );
+  return <SkillBindingDropdown selected={selected} onChange={onChange} labelFor={(id) => labels.get(id) ?? "skill"} />;
 }
