@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { Fragment, memo, useMemo, useState } from "react";
 
 import type { PhaseAgentRef, WorkflowRunStatus } from "@/api/workflows";
 import { AgentTerminal } from "@/components/workflows/AgentTerminal";
@@ -57,6 +57,8 @@ export function TurnTimeline({ runId, onOpenRun }: { runId: string; onOpenRun: (
           <div className="turn-tl">
             <TurnHeader status={runStatus} focus={state.focus} activeAgents={state.activeAgents} totalAgents={state.totalAgents} waiting={state.waiting} />
 
+            <SpineGraph waves={waves} />
+
             <div className="turn-tl-steps">
               {waves.map((wave, i) => (
                 <TimelineStep
@@ -91,12 +93,12 @@ function TurnHeader({ status, focus, activeAgents, totalAgents, waiting }: { sta
   const tone = status === "Failure" ? "err" : status === "Success" ? "ok" : status === "Suspended" ? "wait" : "run";
 
   const phrase = (() => {
-    if (status === "Success") return "完成了。";
-    if (status === "Failure") return "这一轮失败了。";
-    if (status === "Cancelled") return "已取消。";
-    const lead = focus ? `正在${focus}` : "正在处理";
-    const agents = totalAgents > 0 ? ` · ${activeAgents}/${totalAgents} 个 agent 在跑` : "";
-    const need = waiting > 0 ? ` · ${waiting} 处需要你` : "";
+    if (status === "Success") return "Done.";
+    if (status === "Failure") return "Ended with an error.";
+    if (status === "Cancelled") return "Cancelled.";
+    const lead = focus ? `Working on ${focus}` : "Working";
+    const agents = totalAgents > 0 ? ` · ${activeAgents} of ${totalAgents} agents running` : "";
+    const need = waiting > 0 ? ` · ${waiting} need you` : "";
     return `${lead}${agents}${need}${live ? "…" : ""}`;
   })();
 
@@ -181,6 +183,31 @@ const TimelineStep = memo(function TimelineStep({ wave, last, rerunnableNodeIds,
     </div>
   );
 });
+
+/** A tidy, evenly-spaced node-graph spine on top — one pill per agent-bearing phase, joined by connectors, the active
+ *  one highlighted. The at-a-glance map above the streaming steps (the "node graph on top" the design calls for). */
+function SpineGraph({ waves }: { waves: AgentWave[] }) {
+  const nodes = waves.filter((w) => w.agents.length > 0);
+  if (nodes.length < 2) return null;
+
+  return (
+    <div className="turn-spine">
+      {nodes.map((w, i) => {
+        const b = waveBreakdown(w.agents);
+        const tone = b.failed > 0 ? "err" : (b.running > 0 || b.queued > 0) ? "run" : "ok";
+        return (
+          <Fragment key={w.id}>
+            {i > 0 && <span className="turn-spine-conn" />}
+            <span className="turn-spine-node" data-tone={tone} title={w.label}>
+              <span className={`turn-spine-dot turn-spine-dot-${tone}`} aria-hidden="true" />
+              <span className="turn-spine-label">{w.label}</span>
+            </span>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
 
 function glyph(tone: string): string {
   if (tone === "ok") return "✓";

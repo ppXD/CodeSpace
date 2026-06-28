@@ -5226,6 +5226,19 @@ body.chat-resizing .acs-root .app { transition: none; }
 .turn-tl-tiles { margin-top: 10px; }
 .turn-tl-termwrap { margin-top: 10px; }
 
+/* Tidy node-graph spine on top of a turn — evenly-spaced phase pills joined by connectors, the active one accented. */
+.turn-spine { display: flex; align-items: center; gap: 6px; padding: 0 2px 18px; flex-wrap: wrap; }
+.turn-spine-node { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 12px; color: var(--muted); max-width: 220px; min-width: 0; }
+.turn-spine-node[data-tone="run"] { border-color: var(--accent); color: var(--ink); font-weight: 500; }
+.turn-spine-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.turn-spine-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.turn-spine-dot-ok { background: var(--good); } .turn-spine-dot-run { background: var(--accent); } .turn-spine-dot-err { background: var(--danger); }
+.turn-spine-conn { width: 16px; height: 1px; background: var(--line-2); flex: none; }
+
+/* Lighter, Claude-like borders for the agent terminal INSIDE a session turn (the "too thick" fix) — scoped so the
+ * classic run-room keeps its own heavier styling. */
+.turn-tl .agent-terminal { border-color: var(--line); box-shadow: none; }
+
 .lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }

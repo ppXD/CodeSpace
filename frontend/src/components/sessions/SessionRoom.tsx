@@ -57,7 +57,7 @@ export function SessionRoom({ teamSlug, session, onOpenRoom }: { teamSlug: strin
       </div>
 
       <div className="ct-body" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 4 }}>
-        <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", flexDirection: "column", gap: 26, paddingTop: 4 }}>
+        <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 30, paddingTop: 4 }}>
           {session.summary && (
             <div style={{ padding: "11px 15px", background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", fontSize: 13, color: "var(--muted)" }}>
               <div style={{ fontWeight: 500, color: "var(--ink-2)", marginBottom: 4 }}>Earlier work · summary</div>
@@ -100,8 +100,8 @@ function TurnCard({ turn, anchored, nowMs, onOpenRun }: { turn: SessionTurn; anc
         </div>
       )}
 
-      <div style={{ border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", background: "var(--panel)", overflow: "hidden", boxShadow: anchored ? "0 0 0 2px var(--accent-soft)" : "var(--shadow-1)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", flexWrap: "wrap", borderBottom: open ? "1px solid var(--line)" : "none" }}>
+      <div style={{ borderRadius: "var(--radius-lg)", ...(anchored ? { background: "var(--panel-2)", padding: "2px 8px" } : {}) }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px", flexWrap: "wrap" }}>
           <span style={{ fontSize: 11.5, fontWeight: 500, color: "var(--muted)", letterSpacing: ".02em" }}>TURN {turn.turnIndex}</span>
           <RunStatusBadge status={turn.runStatus} />
           {turn.hasPendingDecision && <span className="wf-status-pill wf-status-suspended">Needs you</span>}
@@ -116,10 +116,9 @@ function TurnCard({ turn, anchored, nowMs, onOpenRun }: { turn: SessionTurn; anc
 
         {open && <TurnTimeline runId={turn.runId} onOpenRun={onOpenRun} />}
 
-        {(turn.result || turn.error || turn.producedBranch) && (
-          <div style={{ padding: "12px 16px", borderTop: "1px solid var(--line)", background: "var(--panel-2)" }}>
-            {turn.result && <div style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{turn.result}</div>}
-            {turn.error && <div style={{ color: "var(--danger)", fontSize: 13, marginTop: turn.result ? 6 : 0, whiteSpace: "pre-wrap" }}>{turn.error}</div>}
+        {(turn.result || turn.producedBranch) && (
+          <div style={{ padding: "8px 2px 4px" }}>
+            {turn.result && <div style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{turn.result}</div>}
             {turn.producedBranch && <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>branch <code>{turn.producedBranch}</code></div>}
           </div>
         )}
