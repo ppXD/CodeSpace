@@ -42,6 +42,14 @@ public class SkillsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { skillDefinitionId = id }, new { id });
     }
 
+    /// <summary>Author a new skill directly INTO the Library (a store entry under the team's Custom pack). Returns the new id.</summary>
+    [HttpPost("library")]
+    public async Task<IActionResult> AuthorIntoLibrary([FromBody] AuthorStoreSkillCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return CreatedAtAction(nameof(Get), new { skillDefinitionId = id }, new { id });
+    }
+
     /// <summary>Soft-delete a skill.</summary>
     [HttpDelete("{skillDefinitionId:guid}")]
     public async Task<IActionResult> Delete([FromRoute] Guid skillDefinitionId, CancellationToken cancellationToken)

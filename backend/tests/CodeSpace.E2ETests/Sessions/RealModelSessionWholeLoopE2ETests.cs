@@ -239,6 +239,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         public Task UpdateAsync(Guid teamId, Guid agentDefinitionId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> ImportAsync(Guid teamId, CodeSpace.Messages.Agents.ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> InstantiateFromStoreAsync(Guid teamId, Guid sourceSnapshotId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<Guid> AuthorStoreAgentAsync(Guid teamId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task DeleteAsync(Guid teamId, Guid agentDefinitionId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }

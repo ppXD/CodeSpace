@@ -247,6 +247,32 @@ public class SkillDefinitionServiceFlowTests
             await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, foreignSnapshot, userId, default));
     }
 
+    [Fact]
+    public async Task Author_into_library_creates_a_store_skill_under_the_custom_pack_off_the_bench()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        Guid id;
+        using (var scope = _fixture.BeginScope())
+            id = await scope.Resolve<ISkillDefinitionService>().AuthorStoreSkillAsync(teamId, new SkillDefinitionInput { Name = "Threat Modeling", Body = "STRIDE.", Category = "security" }, userId, default);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var customPack = await db.Pack.AsNoTracking().SingleAsync(p => p.TeamId == teamId && p.Kind == PackKind.Custom && p.DeletedDate == null);
+        customPack.Name.ShouldBe("Custom");
+
+        var skill = await db.SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == id);
+        skill.Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+        skill.Scope.ShouldBe(DefinitionScope.Store, "an authored Library skill lives in the store, not on the bindable bench");
+        skill.PackId.ShouldBe(customPack.Id);
+        skill.Body.ShouldBe("STRIDE.");
+
+        // Off the bindable bench list (you instantiate a working copy to bind it).
+        var list = await verify.Resolve<ISkillDefinitionService>().ListAsync(teamId, default);
+        list.Select(s => s.Id).ShouldNotContain(id);
+    }
+
     private async Task<Guid> CreateSkillAsync(Guid teamId, Guid userId, string name, string body)
     {
         using var scope = _fixture.BeginScope();

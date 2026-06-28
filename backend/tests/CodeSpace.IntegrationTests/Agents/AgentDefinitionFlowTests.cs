@@ -345,6 +345,45 @@ public class AgentDefinitionFlowTests
             await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<IMediator>().Send(new InstantiateAgentFromStoreCommand { SourceDefinitionId = foreignSnapshot }));
     }
 
+    [Fact]
+    public async Task Author_into_library_creates_a_store_entry_under_a_reused_custom_pack_off_the_bench()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        Guid firstId, secondId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            var m = scope.Resolve<IMediator>();
+            firstId = await m.Send(new AuthorStoreAgentCommand { Name = "Security Reviewer", SystemPrompt = "Audit for vulns.", Model = "claude-opus-4-8" });
+            secondId = await m.Send(new AuthorStoreAgentCommand { Name = "Perf Profiler" });
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // Exactly ONE Custom pack, reused across both authors.
+        var customPacks = await db.Pack.AsNoTracking().Where(p => p.TeamId == teamId && p.Kind == PackKind.Custom && p.DeletedDate == null).ToListAsync();
+        customPacks.Count.ShouldBe(1, "the Custom pack is created once and reused");
+        customPacks[0].Name.ShouldBe("Custom");
+        customPacks[0].Url.ShouldBeNull();
+
+        var first = await db.AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == firstId);
+        first.Origin.ShouldBe(AgentDefinitionOrigin.Authored, "the operator authored it");
+        first.Scope.ShouldBe(DefinitionScope.Store, "but it lives in the Library, not on the bench");
+        first.PackId.ShouldBe(customPacks[0].Id);
+        first.SystemPrompt.ShouldBe("Audit for vulns.");
+        (await db.AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == secondId)).PackId.ShouldBe(customPacks[0].Id);
+
+        // Off the bench…
+        using var benchScope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var bench = await benchScope.Resolve<IMediator>().Send(new ListAgentDefinitionsQuery());
+        bench.Select(a => a.Id).ShouldNotContain(firstId, "an authored Library entry does not land on the bench");
+
+        // …but visible in the Library under the Custom pack.
+        var detail = await benchScope.Resolve<IMediator>().Send(new GetPackQuery { PackId = customPacks[0].Id });
+        detail!.Artifacts.Select(a => a.Id).ShouldContain(firstId);
+    }
+
     /// <summary>Inserts a STORE snapshot (Origin=Imported, Scope=Store) with real content directly — the Library shape that must never surface on the bench list. Returns its id.</summary>
     private async Task<Guid> SeedStoreSnapshotAsync(Guid teamId, Guid userId, string slug)
     {

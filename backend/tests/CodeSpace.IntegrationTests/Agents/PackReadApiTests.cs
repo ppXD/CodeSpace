@@ -7,6 +7,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -128,6 +129,18 @@ public class PackReadApiTests
         var b = attacker.Resolve<IMediator>();
         (await b.Send(new GetPackQuery { PackId = packInA })).ShouldBeNull("a foreign team's pack MUST resolve null, never confirm existence");
         (await b.Send(new ListPacksQuery())).Select(p => p.Id).ShouldNotContain(packInA);
+    }
+
+    [Fact]
+    public async Task A_team_can_hold_only_one_custom_pack()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        await SeedPackAsync(teamId, userId, "Custom", PackKind.Custom, url: null, reference: null, sha: null, synced: null);
+
+        // The uq_pack_team_custom singleton index (migration 0089) — a second url-less Custom pack for the team is
+        // rejected, so EnsureCustomPack's find-or-create can never silently fork two Custom packs.
+        await Should.ThrowAsync<DbUpdateException>(() => SeedPackAsync(teamId, userId, "Custom", PackKind.Custom, url: null, reference: null, sha: null, synced: null));
     }
 
     private async Task<Guid> SeedPackAsync(Guid teamId, Guid userId, string name, PackKind kind, string? url, string? reference, string? sha, DateTimeOffset? synced)

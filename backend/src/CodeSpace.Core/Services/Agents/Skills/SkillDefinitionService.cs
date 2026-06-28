@@ -18,11 +18,13 @@ namespace CodeSpace.Core.Services.Agents.Skills;
 public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ICustomPackProvider _customPacks;
     private readonly ILogger<SkillDefinitionService> _logger;
 
-    public SkillDefinitionService(CodeSpaceDbContext db, ILogger<SkillDefinitionService> logger)
+    public SkillDefinitionService(CodeSpaceDbContext db, ICustomPackProvider customPacks, ILogger<SkillDefinitionService> logger)
     {
         _db = db;
+        _customPacks = customPacks;
         _logger = logger;
     }
 
@@ -90,6 +92,37 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
         await SaveCreateAsync(skill, slug, input.Name, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Skill created: team={TeamId} skill={SkillId} slug={Slug}", teamId, skill.Id, slug);
+        return skill.Id;
+    }
+
+    public async Task<Guid> AuthorStoreSkillAsync(Guid teamId, SkillDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        // A hand-authored Library entry: Authored but Scope=Store (it lives in the Library, not the bindable bench)
+        // under the team's Custom pack — symmetric with an imported snapshot. No slug-uniqueness check (store handles
+        // aren't unique). You instantiate a working copy (InstantiateFromStoreAsync) to bind it to an agent.
+        var slug = DeriveValidSlug(input.Name);
+        var packId = await _customPacks.EnsureForTeamAsync(teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        var skill = new SkillDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Origin = SkillDefinitionOrigin.Authored,
+            Scope = DefinitionScope.Store,
+            PackId = packId,
+            CreatedDate = now,
+            CreatedBy = actorUserId,
+            LastModifiedDate = now,
+            LastModifiedBy = actorUserId,
+        };
+        ApplyEditableFields(skill, input);
+
+        _db.SkillDefinition.Add(skill);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);   // flushes the Custom pack (if new) + the store skill atomically
+
+        _logger.LogInformation("Skill authored into Library: team={TeamId} skill={SkillId} slug={Slug} pack={PackId}", teamId, skill.Id, slug, packId);
         return skill.Id;
     }
 

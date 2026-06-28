@@ -28,6 +28,13 @@ public interface IAgentDefinitionService
     Task<Guid> CreateAsync(Guid teamId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Author a new agent directly INTO the Library — a store entry (<c>Origin=Authored</c>, <c>Scope=Store</c>) under
+    /// the team's synthetic Custom pack (created on first use). Symmetric with an imported snapshot: it doesn't land on
+    /// the bench, you instantiate a working copy to run it. No slug-uniqueness check (store handles aren't unique).
+    /// </summary>
+    Task<Guid> AuthorStoreAgentAsync(Guid teamId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Replace the editable surface of an existing persona (full-replace semantics). The slug, origin,
     /// and import-owned fields (skills / MCP / verbatim frontmatter / provenance) are left untouched.
     /// Throws <see cref="KeyNotFoundException"/> when the persona isn't found in this team.

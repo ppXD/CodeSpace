@@ -104,6 +104,14 @@ public class AgentsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { agentDefinitionId = id }, new { id });
     }
 
+    /// <summary>Author a new agent directly INTO the Library (a store entry under the team's Custom pack), not onto the bench. Returns the new id.</summary>
+    [HttpPost("library")]
+    public async Task<IActionResult> AuthorIntoLibrary([FromBody] AuthorStoreAgentCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return CreatedAtAction(nameof(Get), new { agentDefinitionId = id }, new { id });
+    }
+
     [HttpPut("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Update([FromRoute] Guid agentDefinitionId, [FromBody] UpdateAgentDefinitionCommand command, CancellationToken cancellationToken)
     {
