@@ -46,6 +46,8 @@ export interface AgentDefinitionSummary {
   defaultAutonomy: string | null;
   tools: string[] | null;
   origin: AgentDefinitionOrigin;
+  /** The source pack's owner/repo for an imported persona (null for authored, or imported whose pack was removed). */
+  packName: string | null;
   boundSkills: AgentBoundSkill[];
   createdDate: string;
 }

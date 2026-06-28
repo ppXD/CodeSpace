@@ -36,7 +36,7 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
         </div>
         <div className="ab-origin">
           {agent.origin === "Imported"
-            ? <><Ic.Box size={12} /> Imported</>
+            ? <><Ic.Box size={12} /> <span className="ab-origin-pack" title={agent.packName ?? undefined}>{agent.packName ?? "Imported"}</span></>
             : <><span className="ab-dot" style={{ background: "var(--good)" }} /> Authored</>}
         </div>
       </div>
