@@ -73,6 +73,13 @@ export interface WorkflowNodeData extends Record<string, unknown> {
    */
   runStatus?: NodeStatus;
   /**
+   * Run view only: whether a from-node rerun would be ACCEPTED with this node as the target (the server's
+   * `rerunnableFromHere` gate — no suspendable/container node in the closure, and every kept upstream cell settled
+   * reusably). Drives whether the "Rerun from here" control renders — so a button that would 422 is never shown.
+   * Absent in the editor.
+   */
+  rerunnableFromHere?: boolean;
+  /**
    * When this card renders inside a run view: the run's row(s) for this node — one for a plain node, N
    * for a map/loop fan-out. Drives the coze-style result footer (status · duration, click to expand the
    * node's output / error). Absent in the editor, so no footer renders there.
@@ -404,7 +411,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
             ))}
           </ul>
         )}
-        {runStatus === "Failure" && <RerunMenu target={{ kind: "node", nodeId: id }} className="wf-rerun-node-row nodrag nopan" />}
+        {runStatus === "Failure" && d.rerunnableFromHere && <RerunMenu target={{ kind: "node", nodeId: id }} className="wf-rerun-node-row nodrag nopan" />}
       </div>
       {d.kind !== "Terminal" && <Handle type="source" position={Position.Right} className="wf-rf-handle" />}
       {/* Error output — connect it to a handler node to catch this node's failure (route the run

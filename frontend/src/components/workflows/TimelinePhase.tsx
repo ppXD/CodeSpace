@@ -19,11 +19,12 @@ import { RerunMenu } from "./RerunMenu";
  * keyed off `selectedAgentRunId` (lifted to the route) so the outline + timeline share one selection. Scrolls into view
  * when the outline selects this phase.
  */
-function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
+function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelectAgent, rerunnableNodeIds }: {
   wave: AgentWave;
   selectedPhaseId?: string | null;
   selectedAgentRunId?: string | null;
   onSelectAgent?: (agentRunId: string | null) => void;
+  rerunnableNodeIds?: ReadonlySet<string>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const breakdown = waveBreakdown(wave.agents);
@@ -47,9 +48,9 @@ function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelect
   // EVERY phase box carries its rerun on its own bottom row, right below the status dots — a map fan-out gets the bulk
   // "Rerun N failed items", a single-agent / node phase gets "Rerun from here". phaseRerunTarget returns null for a
   // clean phase, so the row only appears where there's something to rerun. The expanded terminal keeps its own copy.
-  const headerTarget = phaseRerunTarget(wave);
+  const headerTarget = phaseRerunTarget(wave, rerunnableNodeIds);
   const terminalRerun = (agent: PhaseAgentRef) => {
-    const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : phaseRerunTarget(wave);
+    const t = wave.kind === "map" ? itemRerunTarget(agent, wave) : phaseRerunTarget(wave, rerunnableNodeIds);
     return t ? <RerunMenu target={t} className="run-tl-rerun-term" /> : null;
   };
   // A per-tile compact rerun on each fanned-out item, so the small terminals carry their own "Rerun item" too.

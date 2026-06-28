@@ -77,6 +77,10 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   // Per-map element-branch rollups parsed from the engine iteration keys. Empty for a non-map run
   // (every row has an empty iteration key) — so a non-map run renders exactly as before.
   const mapRollups = groupMapBranches(r.nodes);
+  // The server-gated set of nodes a from-node rerun would ACCEPT — drives the timeline's "Rerun from here" so a
+  // button that would 422 is never offered (the canvas reads the same flag straight off its run-node rows). A plain
+  // derivation (this sits after the loading guard, so it can't be a hook); the filter is cheap over the node rows.
+  const rerunnableNodeIds = new Set(r.nodes.filter((n) => n.rerunnableFromHere).map((n) => n.nodeId));
 
   // Whether the run has any agents decides the layout below: an agent / supervisor run folds the raw node trace away
   // (the Activity timeline is the heart), a structural workflow with no agents keeps the node trace primary.
@@ -195,7 +199,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
           {!nested && (
             <RunActionsContext.Provider value={runActions}>
               <RunOpenContext.Provider value={onOpenRun ?? null}>
-                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
+                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} rerunnableNodeIds={rerunnableNodeIds} />
               </RunOpenContext.Provider>
             </RunActionsContext.Provider>
           )}
