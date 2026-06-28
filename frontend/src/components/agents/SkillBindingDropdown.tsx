@@ -22,7 +22,7 @@ const SKILL_PAGE_SIZE = 8;
  * lives on THIS component, which stays mounted across open/close — only the panel below unmounts — so re-opening the
  * dropdown still knows which skills it minted this session (no duplicate copies, correct check state).
  */
-export function SkillBindingDropdown({ selected, onChange }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>> }) {
+export function SkillBindingDropdown({ selected, onChange, labelFor }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; labelFor: (id: string) => string }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -77,10 +77,30 @@ export function SkillBindingDropdown({ selected, onChange }: { selected: string[
 
   return (
     <div className="skb" ref={wrapRef}>
-      <button type="button" className="btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <Ic.Plus size={13} /> Add skills
-        <Ic.ChevronDown size={13} className="skb-caret" data-open={open} />
-      </button>
+      {/* A token-input control: the bound skills sit INSIDE the field as removable labels; clicking the field opens
+          the picker. role=button (not a real button) so the per-chip remove buttons can nest validly. */}
+      <div
+        className="skb-control"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        aria-label="Bound skills"
+        data-open={open}
+        onClick={() => setOpen((o) => !o)}
+        // Only the field itself toggles on Enter/Space — a key on a nested remove button (e.target !== the field)
+        // must not also toggle the picker, and must keep its own native activation (no preventDefault stealing it).
+        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setOpen((o) => !o); } }}
+      >
+        {selected.length === 0
+          ? <span className="skb-placeholder">Add skills…</span>
+          : selected.map((id) => (
+              <span key={id} className="wf-trigger-chip skb-chip">
+                {labelFor(id)}
+                <button type="button" className="ed-tok-x" aria-label={`Remove ${labelFor(id)}`} onClick={(e) => { e.stopPropagation(); onChange((prev) => prev.filter((x) => x !== id)); }}><Ic.X size={11} /></button>
+              </span>
+            ))}
+        <Ic.ChevronDown size={14} className="skb-caret" data-open={open} />
+      </div>
 
       {open && (
         packs.isLoading ? <div className="skb-panel skb-panel-msg"><div className="wf-form-help">Loading your Library…</div></div>

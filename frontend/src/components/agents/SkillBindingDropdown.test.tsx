@@ -33,12 +33,13 @@ function lastQuery() {
   return h.useListPackArtifacts.mock.calls.at(-1) as [string, string, string, number, number];
 }
 
-/** Controlled harness so onChange updates `selected` and the dropdown's check state reflects the new binding. */
+/** Controlled harness so onChange updates `selected` and the dropdown's check state reflects the new binding.
+ *  labelFor is id-passthrough so a bound chip ("ws1") never collides with a panel skill name ("TDD") in queries. */
 function Harness() {
   const [sel, setSel] = useState<string[]>([]);
   return (
     <>
-      <SkillBindingDropdown selected={sel} onChange={setSel} />
+      <SkillBindingDropdown selected={sel} onChange={setSel} labelFor={(id) => id} />
       <div data-testid="sel">{sel.join(",")}</div>
     </>
   );
@@ -59,7 +60,7 @@ describe("SkillBindingDropdown", () => {
 
   it("opens the left-right panel and queries the first pack's skills", () => {
     setup({ packs: [pack({ id: "p1", name: "Superpowers", skillCount: 2 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 2 }) });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
 
     expect(screen.getByText("TDD")).toBeInTheDocument();
     expect(lastQuery()).toEqual(["p1", "Skill", "", 0, 8]);
@@ -67,7 +68,7 @@ describe("SkillBindingDropdown", () => {
 
   it("instantiates a working copy and binds it on first pick, then checks the row", async () => {
     setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }) });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
     fireEvent.click(screen.getByRole("button", { name: /TDD/ }));
 
     await waitFor(() => expect(h.mutateAsync).toHaveBeenCalledWith("store-tdd"));
@@ -77,7 +78,7 @@ describe("SkillBindingDropdown", () => {
 
   it("toggles a bound skill off (unbind) without re-instantiating, then rebinds the SAME copy on re-pick", async () => {
     setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }) });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
 
     fireEvent.click(screen.getByRole("button", { name: /TDD/ }));        // bind
     await waitFor(() => expect(sel()).toBe("ws1"));
@@ -94,14 +95,14 @@ describe("SkillBindingDropdown", () => {
   it("remembers a skill it minted after the dropdown is closed and reopened (no duplicate copy)", async () => {
     setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }) });
 
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
     fireEvent.click(screen.getByRole("button", { name: /TDD/ }));        // mint + bind
     await waitFor(() => expect(sel()).toBe("ws1"));
 
     fireEvent.mouseDown(document.body);                                  // close (panel unmounts)
     expect(screen.queryByText("TDD")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ })); // reopen
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ })); // reopen
     // bySource survived (it lives on the always-mounted dropdown), so the row is still CHECKED and a re-pick unbinds
     // — it does NOT mint a second copy.
     expect(screen.getByRole("button", { name: /TDD/ })).toHaveAttribute("aria-pressed", "true");
@@ -112,7 +113,7 @@ describe("SkillBindingDropdown", () => {
 
   it("loads another pack's skills when a rail item is selected", () => {
     setup({ packs: [pack({ id: "p1", name: "Pack One", skillCount: 1 }), pack({ id: "p2", name: "Pack Two", skillCount: 1 })], skills: page({ items: [skill({})], total: 1 }) });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
     expect(lastQuery()[0]).toBe("p1");
 
     fireEvent.click(screen.getByRole("option", { name: /Pack Two/ }));
@@ -121,7 +122,7 @@ describe("SkillBindingDropdown", () => {
 
   it("closes the panel on an outside click", () => {
     setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ name: "TDD" })], total: 1 }) });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
     expect(screen.getByText("TDD")).toBeInTheDocument();
 
     fireEvent.mouseDown(document.body);
@@ -130,7 +131,43 @@ describe("SkillBindingDropdown", () => {
 
   it("shows an empty-Library message when no pack has skills", () => {
     setup({ packs: [pack({ id: "agents-only", agentCount: 3, skillCount: 0 })] });
-    fireEvent.click(screen.getByRole("button", { name: /Add skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
     expect(screen.getByText(/No skills in your Library yet/)).toBeInTheDocument();
+  });
+
+  it("renders bound skills as removable labels inside the field (placeholder when empty)", async () => {
+    setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }) });
+
+    expect(screen.getByText(/Add skills/)).toBeInTheDocument();   // placeholder while nothing is bound
+
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /TDD/ }));
+    await waitFor(() => expect(sel()).toBe("ws1"));
+
+    fireEvent.mouseDown(document.body);                           // close the panel; the label stays in the field
+    expect(screen.queryByText("TDD")).not.toBeInTheDocument();    // (panel content gone)
+
+    const remove = screen.getByRole("button", { name: /Remove ws1/ });
+    fireEvent.click(remove);                                      // removing the label unbinds — and must NOT reopen the panel
+    await waitFor(() => expect(sel()).toBe(""));
+    expect(screen.queryByText("TDD")).not.toBeInTheDocument();
+  });
+
+  it("keyboard: Enter on the field opens the picker, but a key on a chip's remove button does not toggle it", async () => {
+    setup({ packs: [pack({ id: "p1", skillCount: 1 })], skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }) });
+
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /TDD/ }));
+    await waitFor(() => expect(sel()).toBe("ws1"));
+    fireEvent.mouseDown(document.body);                           // close
+    expect(screen.queryByText("TDD")).not.toBeInTheDocument();
+
+    // A key on the nested remove button must NOT bubble up and toggle the picker open.
+    fireEvent.keyDown(screen.getByRole("button", { name: /Remove ws1/ }), { key: "Enter" });
+    expect(screen.queryByText("TDD")).not.toBeInTheDocument();
+
+    // Enter on the field itself DOES open it (target === the field).
+    fireEvent.keyDown(screen.getByRole("button", { name: /Bound skills/ }), { key: "Enter" });
+    expect(screen.getByText("TDD")).toBeInTheDocument();
   });
 });
