@@ -188,6 +188,9 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         await InsertAsync(runId, WorkflowRunRecordTypes.Log, nodeId, iterationKey: string.Empty, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken) =>
+        await InsertAsync(runId, recordType, nodeId, iterationKey, payload.GetRawText(), correlationId, parentRecordId, cancellationToken).ConfigureAwait(false);
+
     /// <summary>
     /// Single insertion point; lets the public methods stay shape-only and centralises the
     /// "insert + save + return id" flow. SaveChanges is the per-write commit (matches the

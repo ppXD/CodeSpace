@@ -240,6 +240,11 @@ public class CodeSpaceModule : Autofac.Module
     {
         builder.RegisterDecorator<Services.Workflows.Planning.Planners.CriticPlannerDecorator, Services.Workflows.Planning.IWorkflowPlanner>();
         builder.RegisterDecorator<Services.Supervisor.Deciders.CriticSupervisorDeciderDecorator, Services.Supervisor.ISupervisorDecider>();
+
+        // Side-channel: record every in-process model call (prompt/completion/usage) onto the run ledger as
+        // interaction.* — captures the supervisor brain's reasoning that was discarded, generically at the client seam.
+        // Over ILLMClient (the interface the registry holds + the decider casts to IStructuredLLMClient), so the cast lands here.
+        builder.RegisterDecorator<Services.Workflows.Llm.RecordingLLMClientDecorator, Services.Workflows.Llm.ILLMClient>();
     }
 
     private void RegisterDependency(ContainerBuilder builder)

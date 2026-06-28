@@ -41,6 +41,9 @@ public class WorkflowRunRecordTypesTests
     [InlineData("external_call.started", nameof(WorkflowRunRecordTypes.ExternalCallStarted))]
     [InlineData("external_call.completed", nameof(WorkflowRunRecordTypes.ExternalCallCompleted))]
     [InlineData("external_call.failed",  nameof(WorkflowRunRecordTypes.ExternalCallFailed))]
+    [InlineData("interaction.started",   nameof(WorkflowRunRecordTypes.InteractionStarted))]
+    [InlineData("interaction.completed", nameof(WorkflowRunRecordTypes.InteractionCompleted))]
+    [InlineData("interaction.failed",    nameof(WorkflowRunRecordTypes.InteractionFailed))]
     [InlineData("log",                   nameof(WorkflowRunRecordTypes.Log))]
     public void Wire_value_pinned(string expectedWireValue, string constantName)
     {

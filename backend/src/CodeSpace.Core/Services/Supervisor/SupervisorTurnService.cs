@@ -25,9 +25,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly IDecisionQueueService _decisionQueue;
     private readonly IDecisionArbiter _arbiter;
     private readonly IDecisionAnswerService _decisionAnswer;
+    private readonly Workflows.Lifecycle.IRunRecordLogger _recordLogger;
+    private readonly Workflows.Artifacts.IArtifactOffloader _offloader;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
@@ -37,6 +39,8 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _decisionQueue = decisionQueue;
         _arbiter = arbiter;
         _decisionAnswer = decisionAnswer;
+        _recordLogger = recordLogger;
+        _offloader = offloader;
         _logger = logger;
     }
 
@@ -109,7 +113,14 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // falls through to the decider; skipped on a force-stopping run (it runs only past the pre-bound guard).
         await ArbitratePendingChildDecisionsAsync(context, cancellationToken).ConfigureAwait(false);
 
-        var decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+        // Push the run-correlation around the brain call (spans the critic decorator's re-decide too) so the
+        // recording LLM-client decorator binds this turn's interaction.* rows + reaches the scoped logger/offloader.
+        SupervisorDecision decision;
+        var iterationKey = SupervisorOutcome.SelfAdvanceWaitKey(context.NodeId, context.TurnNumber);
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, "supervisor.decision", _recordLogger, _offloader)))
+        {
+            decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+        }
 
         decision = ClampSpawnToDependencyFrontier(context, decision);
 
