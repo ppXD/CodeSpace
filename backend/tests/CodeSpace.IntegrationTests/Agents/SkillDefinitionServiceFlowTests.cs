@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -179,26 +180,98 @@ public class SkillDefinitionServiceFlowTests
         await Should.NotThrowAsync(() => CreateSkillAsync(teamId, userId, "Code Review", body: "bench body"));
     }
 
+    [Fact]
+    public async Task Instantiate_from_store_copies_content_into_a_new_working_bindable_skill_linked_to_the_snapshot()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var snapshotId = await SeedStoreSkillSnapshotAsync(teamId, "tdd");
+
+        Guid newId;
+        using (var scope = _fixture.BeginScope())
+            newId = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        newId.ShouldNotBe(snapshotId, "instantiate creates a NEW row, not a reference to the snapshot");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var copy = await db.SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == newId);
+        var snapshot = await db.SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == snapshotId);
+
+        copy.Scope.ShouldBe(DefinitionScope.Working);
+        copy.Origin.ShouldBe(SkillDefinitionOrigin.Imported);
+        copy.Slug.ShouldBe("tdd", "the snapshot's handle is free on the bench, so the copy keeps it");
+        copy.Body.ShouldBe(snapshot.Body);
+        copy.Description.ShouldBe(snapshot.Description);
+        copy.Category.ShouldBe(snapshot.Category);
+        copy.RawFrontmatterJson.ShouldContain("custom_future_key");
+        copy.SourceDefinitionId.ShouldBe(snapshotId);
+        copy.SourceVersion.ShouldBe("v-tdd", "the copy captures the snapshot's content version as the LHS of a future sync");
+        copy.PackId.ShouldBeNull();
+
+        // It's bindable — it appears on the Working skill list (the editor picker), while the snapshot stays in the Library.
+        var list = await verify.Resolve<ISkillDefinitionService>().ListAsync(teamId, default);
+        list.Select(s => s.Id).ShouldContain(newId);
+        list.Select(s => s.Id).ShouldNotContain(snapshotId);
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_auto_disambiguates_a_handle_a_bench_skill_owns()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        await CreateSkillAsync(teamId, userId, "TDD", body: "bench");   // bench already owns "tdd"
+        var snapshotId = await SeedStoreSkillSnapshotAsync(teamId, "tdd");
+
+        Guid newId;
+        using (var scope = _fixture.BeginScope())
+            newId = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        using var verify = _fixture.BeginScope();
+        var copy = await verify.Resolve<CodeSpaceDbContext>().SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == newId);
+        copy.Slug.ShouldBe("tdd-2", "the handle is taken on the bench, so instantiate suffixes rather than dead-ending");
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_rejects_a_non_store_or_foreign_id()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var (otherTeam, otherUser) = await SeedTeamAsync();
+
+        // A WORKING bench skill is not a store snapshot → not instantiable.
+        var workingId = await CreateSkillAsync(teamId, userId, "Bench Skill", body: "x");
+        using (var scope = _fixture.BeginScope())
+            await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, workingId, userId, default));
+
+        // A foreign team's store snapshot → not accessible (no cross-team read).
+        var foreignSnapshot = await SeedStoreSkillSnapshotAsync(otherTeam, "foreign-skill");
+        using (var scope = _fixture.BeginScope())
+            await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, foreignSnapshot, userId, default));
+    }
+
     private async Task<Guid> CreateSkillAsync(Guid teamId, Guid userId, string name, string body)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<ISkillDefinitionService>().CreateAsync(teamId, new SkillDefinitionInput { Name = name, Body = body }, userId, default);
     }
 
-    /// <summary>Inserts a STORE snapshot skill (Origin=Imported, Scope=Store) directly — the Library shape that must never surface on the bindable bench list.</summary>
-    private async Task SeedStoreSkillSnapshotAsync(Guid teamId, string slug)
+    /// <summary>Inserts a STORE snapshot skill (Origin=Imported, Scope=Store) with real content directly — the Library shape that must never surface on the bindable bench list. Returns its id.</summary>
+    private async Task<Guid> SeedStoreSkillSnapshotAsync(Guid teamId, string slug)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
         db.SkillDefinition.Add(new SkillDefinition
         {
-            Id = Guid.NewGuid(),
+            Id = id,
             TeamId = teamId,
             Slug = slug,
             Name = slug,
-            Body = "snapshot body",
+            Description = $"{slug} description",
+            Body = $"# {slug}\nDo the thing.",
+            Category = "testing",
+            RawFrontmatterJson = "{\"name\":\"" + slug + "\",\"custom_future_key\":7}",
             Origin = SkillDefinitionOrigin.Imported,
             Scope = DefinitionScope.Store,
+            ContentVersion = "v-" + slug,
             PackId = null,   // pack provenance is irrelevant to the scope filter under test (and skill_definition has a real pack FK)
             SourcePath = $"skills/{slug}/SKILL.md",
             CreatedDate = DateTimeOffset.UtcNow,
@@ -207,6 +280,7 @@ public class SkillDefinitionServiceFlowTests
             LastModifiedBy = Guid.NewGuid(),
         });
         await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task<Guid> InsertPackAsync(Guid teamId)

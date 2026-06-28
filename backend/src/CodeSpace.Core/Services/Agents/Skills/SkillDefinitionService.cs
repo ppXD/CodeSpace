@@ -93,6 +93,43 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
         return skill.Id;
     }
 
+    public async Task<Guid> InstantiateFromStoreAsync(Guid teamId, Guid sourceSnapshotId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var snapshot = await _db.SkillDefinition.AsNoTracking()
+            .SingleOrDefaultAsync(s => s.Id == sourceSnapshotId && s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Store snapshot {sourceSnapshotId} not found or not accessible.");
+
+        var slug = await DeriveAvailableSlugAsync(teamId, snapshot.Name, cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        var copy = new SkillDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Origin = SkillDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Working,
+            SourceDefinitionId = snapshot.Id,        // provenance: which snapshot this copy came from
+            SourceVersion = snapshot.ContentVersion, // the snapshot version captured at copy time = LHS of a future per-copy sync compare
+            // PackId stays NULL — provenance is the source link, so a from-store copy never re-appears in the Library.
+            Name = snapshot.Name,
+            Description = snapshot.Description,
+            Body = snapshot.Body,
+            Category = snapshot.Category,
+            RawFrontmatterJson = snapshot.RawFrontmatterJson,
+            CreatedDate = now,
+            CreatedBy = actorUserId,
+            LastModifiedDate = now,
+            LastModifiedBy = actorUserId,
+        };
+
+        _db.SkillDefinition.Add(copy);
+        await SaveCreateAsync(copy, slug, snapshot.Name, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Skill instantiated from store: team={TeamId} skill={SkillId} slug={Slug} source={SourceId}", teamId, copy.Id, slug, snapshot.Id);
+        return copy.Id;
+    }
+
     public async Task UpdateAsync(Guid teamId, Guid skillDefinitionId, SkillDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(input.Name)) throw new ArgumentException("Skill name is required", nameof(input));
@@ -147,6 +184,37 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
             .ConfigureAwait(false);
 
         if (exists) throw SlugTakenError(slug, requestedName, null);
+    }
+
+    /// <summary>
+    /// The team-unique WORKING handle for a name: the derived slug if free, else the first <c>-2</c>, <c>-3</c>… variant.
+    /// Used when instantiating a store skill — picking a library item must not dead-end on a handle a bench skill already
+    /// owns. A 50-char probe prefix covers baseSlug AND every trimmed numeric variant (DeriveSlug emits no consecutive
+    /// hyphens, so a trim drops at most one char); the exact <c>taken</c> check keeps it precise. Mirrors the agent service.
+    /// </summary>
+    private async Task<string> DeriveAvailableSlugAsync(Guid teamId, string name, CancellationToken cancellationToken)
+    {
+        var baseSlug = DeriveValidSlug(name);
+        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
+
+        var taken = (await _db.SkillDefinition.AsNoTracking()
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null && s.Slug.StartsWith(probe))
+            .Select(s => s.Slug)
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToHashSet(StringComparer.Ordinal);
+
+        if (!taken.Contains(baseSlug)) return baseSlug;
+
+        for (var n = 2; n < 10000; n++)
+        {
+            var suffix = $"-{n}";
+            var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
+            var candidate = trimmed + suffix;
+
+            if (!taken.Contains(candidate)) return candidate;
+        }
+
+        throw new InvalidOperationException($"Could not derive a free handle from '{name}' — too many existing variants of '{baseSlug}'.");
     }
 
     private async Task SaveCreateAsync(SkillDefinition skill, string slug, string requestedName, CancellationToken cancellationToken)

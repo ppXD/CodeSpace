@@ -34,6 +34,14 @@ public class SkillsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Instantiate a new working (bindable) skill by copying a Library store snapshot — how binding a Library skill works. Returns the new skill id.</summary>
+    [HttpPost("from-store")]
+    public async Task<IActionResult> InstantiateFromStore([FromBody] InstantiateSkillFromStoreCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return CreatedAtAction(nameof(Get), new { skillDefinitionId = id }, new { id });
+    }
+
     /// <summary>Soft-delete a skill.</summary>
     [HttpDelete("{skillDefinitionId:guid}")]
     public async Task<IActionResult> Delete([FromRoute] Guid skillDefinitionId, CancellationToken cancellationToken)
