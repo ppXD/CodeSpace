@@ -740,19 +740,26 @@ public class RerunFromNodeFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = false;   // park agent.code(a) cleanly; never run the binary-less harness
 
-        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentThenSuspendProbeDef(probeKey));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-        await RunEngineAsync(originalRunId);   // suspends parked on agent.code(a)'s AgentRun wait
-        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
+        try
+        {
+            var workflowId = await CreateWorkflowAsync(teamId, userId, AgentThenSuspendProbeDef(probeKey));
+            var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+            await RunEngineAsync(originalRunId);   // suspends parked on agent.code(a)'s AgentRun wait
+            await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
 
-        var before = await RunCountAsync(teamId);
-        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
-            await RerunAsync(originalRunId, "a", teamId, userId));   // "a" = the admitted agent.code root
+            var before = await RunCountAsync(teamId);
+            var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
+                await RerunAsync(originalRunId, "a", teamId, userId));   // "a" = the admitted agent.code root
 
-        ex.BlockedNodeIds.ShouldContain("b", "the unsupported suspendprobe DOWNSTREAM of the admitted agent.code root still refuses the rerun");
-        ex.BlockedNodeIds.ShouldNotContain("a", "the agent.code root is ADMITTED (P2.2) — revert the flip and it would be blocked here too: the load-bearing control");
+            ex.BlockedNodeIds.ShouldContain("b", "the unsupported suspendprobe DOWNSTREAM of the admitted agent.code root still refuses the rerun");
+            ex.BlockedNodeIds.ShouldNotContain("a", "the agent.code root is ADMITTED (P2.2) — revert the flip and it would be blocked here too: the load-bearing control");
 
-        (await RunCountAsync(teamId)).ShouldBe(before, "a downstream-blocked rerun must write nothing");
+            (await RunCountAsync(teamId)).ShouldBe(before, "a downstream-blocked rerun must write nothing");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;   // restore the shared fixture's default — never poison later tests in the collection
+        }
     }
 
     [Fact]
