@@ -433,13 +433,17 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .ct-empty-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 
 /* Library / store — packs-as-categories rail (left) + the selected pack's artifacts (right). */
-/* Library tab strip: the underline tabs on the left, the Import action lifted off the row's bottom rule. */
-.acs-root .lib-tabrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 8px; border-bottom: 1px solid var(--line); }
+/* Library tab strip. No own border-bottom: the enclosing .ct-head already draws the rule directly beneath this
+   row (it's ct-head's last child and ct-head's padding-bottom is 0), so a second border here stacked a visible
+   double line under the tabs. */
+.acs-root .lib-tabrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 8px; }
 /* The lone section label looks like an active tab but isn't clickable — suppress the pointer + hover shift. */
 .acs-root .ct-tab.lib-tab-static { cursor: default; }
 .acs-root .ct-tab.lib-tab-static:hover { color: var(--ink); }
 .acs-root .lib-tabrow > .btn { margin-bottom: 7px; }
-.acs-root .lib { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding-top: 16px; align-items: start; }
+/* align-items: stretch (default) so the rail panel matches the detail panel's height instead of sizing to its
+   own short content — the two boxes stay level. */
+.acs-root .lib { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding-top: 16px; }
 /* The source rail sits in its own panel (the "big box" wrapping the pack cards). */
 .acs-root .lib-railbox { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px; }
 .acs-root .lib-rail { display: flex; flex-direction: column; gap: 4px; }
