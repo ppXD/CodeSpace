@@ -14,7 +14,7 @@ const PAGE = 8;
  * hold hundreds), and on pick instantiate a working copy of the store skill and hand its id back so the editor binds
  * it. This is the "instantiate to use" model for skills, mirroring the New-agent "from Library" picker. `.mdl` portal.
  */
-export function SkillLibraryPickerModal({ onPicked, onClose }: { onPicked: (workingSkillId: string) => void; onClose: () => void }) {
+export function SkillLibraryPickerModal({ pickedSourceIds, onPicked, onClose }: { pickedSourceIds: ReadonlySet<string>; onPicked: (workingSkillId: string, sourceSkillId: string) => void; onClose: () => void }) {
   const [packId, setPackId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -33,10 +33,12 @@ export function SkillLibraryPickerModal({ onPicked, onClose }: { onPicked: (work
   function back() { instantiate.reset(); setPackId(null); setQuery(""); setPage(0); }
 
   async function pick(storeSkillId: string) {
-    if (pending) return;
+    // Dedupe by SOURCE: each instantiate mints a fresh working copy, so the only meaningful "already added" key is
+    // the store skill it came from — re-picking the same one this session would just bind a redundant second copy.
+    if (pending || pickedSourceIds.has(storeSkillId)) return;
     try {
       const { id } = await instantiate.mutateAsync(storeSkillId);
-      onPicked(id);
+      onPicked(id, storeSkillId);
     } catch {
       /* surfaced via the error line below */
     }
@@ -89,14 +91,17 @@ export function SkillLibraryPickerModal({ onPicked, onClose }: { onPicked: (work
               : paged.items.length === 0 ? <div className="wf-form-help">No skill matches your search.</div>
               : (
                 <div className="wf-add-choices">
-                  {paged.items.map((a) => (
-                    <button type="button" key={a.id} className="wf-add-choice" disabled={pending} onClick={() => pick(a.id)}>
-                      <span className="wf-add-choice-ic"><Ic.Book size={20} /></span>
-                      <span className="wf-add-choice-name">{a.name}</span>
-                      <span className="wf-add-choice-desc">{a.description ?? `@${a.slug}`}</span>
-                      <span className="wf-add-choice-arrow"><Ic.Plus size={16} /></span>
-                    </button>
-                  ))}
+                  {paged.items.map((a) => {
+                    const added = pickedSourceIds.has(a.id);
+                    return (
+                      <button type="button" key={a.id} className="wf-add-choice" disabled={pending || added} onClick={() => pick(a.id)}>
+                        <span className="wf-add-choice-ic"><Ic.Book size={20} /></span>
+                        <span className="wf-add-choice-name">{a.name}</span>
+                        <span className="wf-add-choice-desc">{added ? "Added" : a.description ?? `@${a.slug}`}</span>
+                        <span className="wf-add-choice-arrow">{added ? <Ic.Check size={16} /> : <Ic.Plus size={16} />}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               {paged.pageCount > 1 && (

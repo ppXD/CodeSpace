@@ -262,6 +262,9 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
   const [picking, setPicking] = useState(false);
+  // The store skills instantiated this editor session — keyed by SOURCE id (each instantiate is a fresh working
+  // copy, so a working id can't dedupe). The picker disables an already-added source so the same skill isn't bound twice.
+  const [pickedSources, setPickedSources] = useState<Set<string>>(() => new Set());
 
   const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
 
@@ -282,7 +285,12 @@ function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; 
 
       {picking && (
         <SkillLibraryPickerModal
-          onPicked={(id) => { if (!selected.includes(id)) onChange([...selected, id]); setPicking(false); }}
+          pickedSourceIds={pickedSources}
+          onPicked={(workingId, sourceId) => {
+            onChange([...selected, workingId]);
+            setPickedSources((s) => new Set(s).add(sourceId));
+            setPicking(false);
+          }}
           onClose={() => setPicking(false)}
         />
       )}
