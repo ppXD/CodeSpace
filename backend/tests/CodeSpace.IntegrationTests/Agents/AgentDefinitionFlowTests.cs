@@ -106,6 +106,21 @@ public class AgentDefinitionFlowTests
         ex.Message.ShouldContain("Code Reviewer", customMessage: "the error must name the original input so the operator knows which create collided");
     }
 
+    [Fact]
+    public async Task Create_succeeds_when_only_a_store_snapshot_owns_the_handle()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        // A Library STORE snapshot owns "code-reviewer". Team-slug uniqueness is Working-only, so authoring a
+        // runnable persona of the same name must NOT be refused — the snapshot and the bench persona coexist.
+        await SeedStoreSnapshotAsync(teamId, userId, "code-reviewer");
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var id = await scope.Resolve<IMediator>().Send(new CreateAgentDefinitionCommand { Name = "Code Reviewer" });
+
+        id.ShouldNotBe(Guid.Empty, "a store snapshot's handle must not block authoring a working persona of the same name");
+    }
+
     [Theory]
     [InlineData("$$$")]
     [InlineData("   ")]
@@ -175,7 +190,7 @@ public class AgentDefinitionFlowTests
     }
 
     [Fact]
-    public async Task List_returns_only_this_teams_active_personas_oldest_first()
+    public async Task List_returns_only_this_teams_active_working_personas_oldest_first_excluding_store_snapshots()
     {
         var (teamId, userId) = await SeedTeamAsync();
         var (otherTeam, otherUser) = await SeedTeamAsync();
@@ -194,11 +209,14 @@ public class AgentDefinitionFlowTests
             await scope.Resolve<IMediator>().Send(new CreateAgentDefinitionCommand { Name = "Other Team Agent" });
         }
 
+        // A STORE snapshot in THIS team lives in the Library, not on the bench — the list must exclude it.
+        await SeedStoreSnapshotAsync(teamId, userId, "store-snapshot");
+
         using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         var list = await verify.Resolve<IMediator>().Send(new ListAgentDefinitionsQuery());
 
         list.Select(a => a.Id).ShouldBe(new[] { keep1, keep2 },
-            customMessage: "List must return exactly this team's ACTIVE personas, ordered created-date ASC, excluding the soft-deleted one and the other team's");
+            customMessage: "List must return exactly this team's ACTIVE WORKING personas, ordered created-date ASC, excluding the soft-deleted one, the other team's, and any store snapshot");
     }
 
     [Fact]
@@ -239,6 +257,31 @@ public class AgentDefinitionFlowTests
         row.SourcePath.ShouldBe("agents/imported-reviewer.md");
         row.McpServersJson.ShouldContain("github", customMessage: "imported MCP servers must survive an authored edit");
         row.RawFrontmatterJson.ShouldContain("custom_future_key", customMessage: "the verbatim frontmatter blob must survive untouched — it's the lossless-forward-compat source");
+    }
+
+    /// <summary>Inserts a STORE snapshot (Origin=Imported, Scope=Store) directly — the Library shape that must never surface on the bench list.</summary>
+    private async Task SeedStoreSnapshotAsync(Guid teamId, Guid userId, string slug)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        db.AgentDefinition.Add(new AgentDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Name = slug,
+            Origin = AgentDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Store,
+            PackId = null,   // pack provenance is irrelevant to the scope filter under test
+            SourcePath = $"agents/{slug}.md",
+            CreatedDate = now,
+            CreatedBy = userId,
+            LastModifiedDate = now,
+            LastModifiedBy = userId,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedImportedAgentAsync(Guid teamId, Guid userId, Guid packId)

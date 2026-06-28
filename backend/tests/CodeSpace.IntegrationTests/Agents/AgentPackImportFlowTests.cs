@@ -87,6 +87,25 @@ public class AgentPackImportFlowTests
     }
 
     [Fact]
+    public async Task Preview_does_not_flag_a_handle_owned_only_by_a_store_snapshot()
+    {
+        var teamId = await SeedTeamAsync();
+        await SeedPersonaAsync(teamId, "reviewer", DefinitionScope.Store);   // only a Library STORE snapshot owns the handle
+
+        var svc = BuildService(out var scope);
+        using (scope)
+        {
+            var preview = await svc.PreviewAsync(Guid.NewGuid(), null, null, teamId, CancellationToken.None);
+
+            // A store snapshot carries no unique handle and the import write checks only Working rows, so this must
+            // NOT over-report a conflict — the agent is importable.
+            var reviewer = preview.Items.Single(i => i.SourcePath == "agents/reviewer.md");
+            reviewer.SlugConflict.ShouldBeFalse("a store snapshot does not own a unique handle, so it must not flag a conflict");
+            reviewer.Importable.ShouldBeTrue();
+        }
+    }
+
+    [Fact]
     public async Task Import_persists_the_selected_agents_as_imported_personas()
     {
         var teamId = await SeedTeamAsync();
@@ -164,14 +183,15 @@ public class AgentPackImportFlowTests
         return (await scope.Resolve<CodeSpaceDbContext>().Team.AsNoTracking().SingleAsync(t => t.Id == teamId)).OwnerUserId;
     }
 
-    private async Task SeedPersonaAsync(Guid teamId, string slug)
+    private async Task SeedPersonaAsync(Guid teamId, string slug, DefinitionScope scope = DefinitionScope.Working)
     {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
+        using var s = _fixture.BeginScope();
+        var db = s.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
         db.AgentDefinition.Add(new AgentDefinition
         {
-            Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = AgentDefinitionOrigin.Authored,
+            Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug,
+            Origin = scope == DefinitionScope.Store ? AgentDefinitionOrigin.Imported : AgentDefinitionOrigin.Authored, Scope = scope,
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();

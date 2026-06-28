@@ -44,15 +44,18 @@ public sealed partial class PackImportService
         var agentsByPath = IndexByPath(discovered.Agents, a => a.SourcePath);
         var skillsByPath = IndexByPath(discovered.Skills, s => s.SourcePath);
 
-        // This pack's already-imported rows (tracked, so an Update flushes), keyed by source-path = the sync identity.
-        // A brand-new pack has none yet, so skip the lookup.
-        var existingAgents = packIsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
-        var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
+        // This pack's already-imported STORE snapshots (tracked, so an Update flushes), keyed by source-path = the
+        // sync identity. Scoped to Store so a grandfathered WORKING row sharing this pack's (pack, source_path) is
+        // never picked up here — otherwise the lookup would match that live bench agent and the upsert would take the
+        // UPDATE branch, clobbering its content (and creating no snapshot) instead of adding a fresh Store snapshot
+        // beside it. A brand-new pack has none yet, so skip the lookup.
+        var existingAgents = packIsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.Scope == DefinitionScope.Store && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.Scope == DefinitionScope.Store && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 
-        // The team's active handles, loaded once and EXTENDED in memory as we claim new ones — so an intra-pack
-        // duplicate handle is the 2nd..Nth Skipped here, never a transaction-aborting 23505 at the save. Skills
-        // carry their id too: an imported agent's declared skills resolve against this map (existing + same-batch).
-        var agentSlugs = new HashSet<string>(await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false), StringComparer.Ordinal);
+        // Skill handles → id, loaded once and EXTENDED in memory as new skills are added this batch, so an imported
+        // agent's declared skills resolve against this map (existing + same-batch). Store snapshots are no longer
+        // subject to the team-slug uniqueness (that index is Working-only now), so an import never SKIPS on a handle
+        // collision — a re-imported grandfathered pack must populate the store, not skip itself wholesale.
         var skillSlugToId = await ActiveSkillSlugToIdAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         var items = new List<PackArtifactImportResult>();
@@ -62,7 +65,7 @@ public sealed partial class PackImportService
         {
             if (agentsByPath.TryGetValue(path, out var agent))
             {
-                var result = UpsertAgent(pack, agent, existingAgents, agentSlugs, teamId, actorUserId, now);
+                var result = UpsertAgent(pack, agent, existingAgents, teamId, actorUserId, now);
                 items.Add(result);
 
                 // Seed bindings from the declared skills only on a FRESH import — a re-sync leaves the (possibly
@@ -130,7 +133,7 @@ public sealed partial class PackImportService
         pack.LastModifiedBy = actorUserId;
     }
 
-    private PackArtifactImportResult UpsertAgent(Pack pack, ParsedAgentDefinition parsed, IReadOnlyDictionary<string, AgentDefinition> existingByPath, HashSet<string> claimedSlugs, Guid teamId, Guid actorUserId, DateTimeOffset now)
+    private PackArtifactImportResult UpsertAgent(Pack pack, ParsedAgentDefinition parsed, IReadOnlyDictionary<string, AgentDefinition> existingByPath, Guid teamId, Guid actorUserId, DateTimeOffset now)
     {
         if (existingByPath.TryGetValue(parsed.SourcePath, out var existing))
         {
@@ -143,10 +146,10 @@ public sealed partial class PackImportService
         if (string.IsNullOrWhiteSpace(parsed.Name))
             return AgentResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: "The agent has no name — nothing to import.");
 
+        // A snapshot's handle is NOT unique (team-slug index is Working-only), so two artifacts deriving the same
+        // slug — or a re-imported grandfathered pack whose slug already lives on a Working bench row — both land as
+        // distinct Store rows keyed on (pack, source_path). No in-memory dedup needed.
         var slug = AgentDefinitionService.DeriveSlug(parsed.Name);
-
-        if (!claimedSlugs.Add(slug))
-            return AgentResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"An agent with handle '{slug}' already exists in this team — left untouched.");
 
         var agent = new AgentDefinition
         {
@@ -154,6 +157,7 @@ public sealed partial class PackImportService
             TeamId = teamId,
             Slug = slug,
             Origin = AgentDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Store,
             PackId = pack.Id,
             SourcePath = parsed.SourcePath,
             CreatedDate = now,
@@ -180,10 +184,9 @@ public sealed partial class PackImportService
         if (string.IsNullOrWhiteSpace(parsed.Name))
             return SkillResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: "The SKILL.md has no name — nothing to import.");
 
+        // No handle-collision skip: a snapshot's slug is non-unique (team-slug index is Working-only), so a slug
+        // already mapped — by a same-batch skill or a grandfathered Working row — still creates its own Store row.
         var slug = AgentDefinitionService.DeriveSlug(parsed.Name);
-
-        if (claimedSlugToId.ContainsKey(slug))
-            return SkillResult(parsed.SourcePath, PackImportOutcome.Skipped, reason: $"A skill with handle '{slug}' already exists in this team — left untouched.");
 
         var skill = new SkillDefinition
         {
@@ -191,6 +194,7 @@ public sealed partial class PackImportService
             TeamId = teamId,
             Slug = slug,
             Origin = SkillDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Store,
             PackId = pack.Id,
             SourcePath = parsed.SourcePath,
             CreatedDate = now,
@@ -201,20 +205,26 @@ public sealed partial class PackImportService
         ApplySkillContent(skill, parsed);
 
         _db.SkillDefinition.Add(skill);
-        claimedSlugToId[slug] = skill.Id;   // claim the handle AND make it resolvable for an agent's declared skills this batch
+        claimedSlugToId[slug] = skill.Id;   // make this handle resolvable for an agent's declared skills this batch (last-wins on a dup slug)
         return SkillResult(parsed.SourcePath, PackImportOutcome.Imported, skill.Id);
     }
 
-    /// <summary>The team's active skills as a handle→id map — the dedup set for skill imports AND the resolver for an imported agent's declared <c>skills:</c>, extended in memory as new skills are claimed this batch.</summary>
+    /// <summary>The team's active STORE skills as a handle→id map — the resolver for a freshly-imported (store-snapshot)
+    /// agent's declared <c>skills:</c>, extended in memory as new store skills are added this batch. A store agent's
+    /// declared skills bind to store skills (its own pack's snapshots), never to a Working bench skill, so this is
+    /// Store-scoped. A snapshot handle is NOT unique, so two store skills may share a slug; the query orders by
+    /// (created, id) and the map keeps the newest — a deterministic last-wins, so the seed is stable across identical
+    /// imports (the unscoped/unordered map would clobber by arbitrary DB row order once Working/Store coexist).</summary>
     private async Task<Dictionary<string, Guid>> ActiveSkillSlugToIdAsync(Guid teamId, CancellationToken cancellationToken)
     {
         var rows = await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.TeamId == teamId && s.DeletedDate == null)
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null)
+            .OrderBy(s => s.CreatedDate).ThenBy(s => s.Id)
             .Select(s => new { s.Slug, s.Id })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var map = new Dictionary<string, Guid>(StringComparer.Ordinal);
-        foreach (var row in rows) map[row.Slug] = row.Id;   // slug is unique per active team, so no clobber
+        foreach (var row in rows) map[row.Slug] = row.Id;   // Store-scoped; on a dup handle the newest (ordered) row wins — deterministic
         return map;
     }
 

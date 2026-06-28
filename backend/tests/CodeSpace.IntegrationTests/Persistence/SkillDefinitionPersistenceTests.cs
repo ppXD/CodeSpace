@@ -139,20 +139,24 @@ public class SkillDefinitionPersistenceTests
     }
 
     [Fact]
-    public async Task Pack_and_source_path_are_unique_among_active_so_a_resync_cannot_duplicate()
+    public async Task Pack_and_source_path_are_unique_among_active_store_snapshots_so_a_resync_cannot_duplicate()
     {
         var teamId = await SeedTeamAsync();
         var packId = await InsertPackAsync(teamId, "github-pack");
 
-        var first = NewSkill(Guid.NewGuid(), teamId, "tdd", packId);
+        var first = NewSkill(Guid.NewGuid(), teamId, "tdd", packId, DefinitionScope.Store);
         await InsertAsync(first);
 
-        // The SAME (pack, source_path) imported again as a NEW active row violates the sync identity index —
-        // forcing the importer to UPSERT the existing row instead of duplicating it.
-        var dup = NewSkill(Guid.NewGuid(), teamId, "tdd-2", packId);   // different slug, SAME source path
+        // The SAME (pack, source_path) imported again as a NEW active STORE row violates the sync identity index —
+        // forcing the importer to UPSERT the existing snapshot instead of duplicating it.
+        var dup = NewSkill(Guid.NewGuid(), teamId, "tdd-2", packId, DefinitionScope.Store);   // different slug, SAME source path
         await Should.ThrowAsync<DbUpdateException>(() => InsertAsync(dup));
 
-        // Once the original is soft-deleted, the (pack, source_path) is free to re-import.
+        // The index is STORE-scoped, so a grandfathered WORKING row sharing the same (pack, source_path) coexists —
+        // that's what lets a re-import add a snapshot beside a live bench skill rather than collide with it.
+        await Should.NotThrowAsync(() => InsertAsync(NewSkill(Guid.NewGuid(), teamId, "tdd-grandfathered", packId, DefinitionScope.Working)));
+
+        // Once the original snapshot is soft-deleted, the (pack, source_path) is free to re-import.
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
@@ -161,10 +165,10 @@ public class SkillDefinitionPersistenceTests
             await db.SaveChangesAsync();
         }
 
-        await Should.NotThrowAsync(() => InsertAsync(NewSkill(Guid.NewGuid(), teamId, "tdd-2", packId)));
+        await Should.NotThrowAsync(() => InsertAsync(NewSkill(Guid.NewGuid(), teamId, "tdd-2", packId, DefinitionScope.Store)));
     }
 
-    private static SkillDefinition NewSkill(Guid id, Guid teamId, string slug, Guid? packId) => new()
+    private static SkillDefinition NewSkill(Guid id, Guid teamId, string slug, Guid? packId, DefinitionScope scope = DefinitionScope.Working) => new()
     {
         Id = id,
         TeamId = teamId,
@@ -175,6 +179,7 @@ public class SkillDefinitionPersistenceTests
         Category = "testing",
         RawFrontmatterJson = "{\"name\":\"test-driven-development\",\"custom_future_key\":42}",
         Origin = packId is null ? SkillDefinitionOrigin.Authored : SkillDefinitionOrigin.Imported,
+        Scope = scope,
         PackId = packId,
         SourcePath = packId is null ? null : "skills/test-driven-development/SKILL.md",
         CreatedDate = DateTimeOffset.UtcNow,

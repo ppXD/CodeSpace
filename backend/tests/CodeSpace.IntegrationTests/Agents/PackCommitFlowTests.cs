@@ -21,10 +21,11 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// The COMMIT half of the URL pack flow, driven through the REAL mediator (so <c>TransactionalBehavior</c>'s
 /// single ambient transaction wraps it — the production path) + a real git clone of a LOCAL repo (no network).
 /// The transient <c>IPackSourceFetcher</c> is overridden per-scope with an allowlist-bypassing clone so a local
-/// path is reachable; everything else (walker, DB, transaction) is real. Proves: a mixed commit
-/// (Imported/Skipped/Failed) is atomic + persists; a re-sync UPSERTS the row CONTENT while keeping the handle;
-/// a handle that collides with a DIFFERENT active definition is Skipped (agents AND skills); and a soft-deleted
-/// prior import re-imports as a fresh row rather than colliding.
+/// path is reachable; everything else (walker, DB, transaction) is real. Proves: an import lands every named
+/// artifact as a STORE snapshot — a handle already owned on the bench no longer skips it, the two coexist; a
+/// re-sync UPSERTS the snapshot CONTENT while keeping the handle; two same-handle files in one commit both land as
+/// distinct snapshots (keyed on source-path) without a 23505 abort; and a soft-deleted prior snapshot re-imports
+/// as a fresh row rather than colliding.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -35,7 +36,7 @@ public class PackCommitFlowTests
     public PackCommitFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task A_mixed_commit_imports_skips_conflicts_and_fails_unknowns_atomically_through_the_mediator()
+    public async Task A_mixed_commit_imports_named_artifacts_as_store_snapshots_coexisting_with_the_bench_atomically()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -43,24 +44,25 @@ public class PackCommitFlowTests
         if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
 
         var (teamId, userId) = await SeedTeamAsync();
-        await SeedAgentAsync(teamId, userId, "backend-architect");   // an authored persona the pack agent collides with
-        await SeedSkillAsync(teamId, userId, "tdd");                 // an authored skill the pack skill collides with
+        await SeedAgentAsync(teamId, userId, "backend-architect");   // an authored bench persona sharing the pack agent's handle
+        await SeedSkillAsync(teamId, userId, "tdd");                 // an authored bench skill sharing the pack skill's handle
         var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
 
         try
         {
             var result = await CommitViaMediatorAsync(src, new[]
             {
-                "agents/backend-architect.md",        // conflict -> Skipped
-                "agents/code-reviewer.md",            // new       -> Imported
-                "skills/tdd/SKILL.md",                // conflict -> Skipped
-                "skills/systematic-debugging/SKILL.md", // new     -> Imported
-                "agents/ghost.md",                    // unknown   -> Failed
+                "agents/backend-architect.md",        // handle on the bench -> a coexisting store snapshot, Imported
+                "agents/code-reviewer.md",            // new                 -> Imported
+                "skills/tdd/SKILL.md",                // handle on the bench -> a coexisting store snapshot, Imported
+                "skills/systematic-debugging/SKILL.md", // new               -> Imported
+                "agents/ghost.md",                    // unknown             -> Failed
             }, teamId, userId);
 
-            Outcome(result, "agents/backend-architect.md").ShouldBe(PackImportOutcome.Skipped);
+            // A store snapshot has no unique handle, so a bench handle never suppresses it — every named artifact lands.
+            Outcome(result, "agents/backend-architect.md").ShouldBe(PackImportOutcome.Imported);
             Outcome(result, "agents/code-reviewer.md").ShouldBe(PackImportOutcome.Imported);
-            Outcome(result, "skills/tdd/SKILL.md").ShouldBe(PackImportOutcome.Skipped);
+            Outcome(result, "skills/tdd/SKILL.md").ShouldBe(PackImportOutcome.Imported);
             Outcome(result, "skills/systematic-debugging/SKILL.md").ShouldBe(PackImportOutcome.Imported);
 
             var ghost = result.Items.Single(i => i.SourcePath == "agents/ghost.md");
@@ -71,16 +73,23 @@ public class PackCommitFlowTests
             {
                 (await db.Pack.CountAsync(p => p.TeamId == teamId && p.DeletedDate == null)).ShouldBe(1);
 
-                // The two NEW artifacts landed atomically, pack-rooted, in one committed transaction.
+                // The fresh artifacts landed atomically as pack-rooted STORE snapshots in one committed transaction.
                 var imported = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "code-reviewer" && a.DeletedDate == null);
                 imported.Origin.ShouldBe(AgentDefinitionOrigin.Imported);
+                imported.Scope.ShouldBe(DefinitionScope.Store);
                 imported.PackId.ShouldBe(result.PackId);
 
-                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "systematic-debugging" && s.PackId == result.PackId && s.DeletedDate == null)).ShouldBeTrue();
+                (await db.SkillDefinition.AnyAsync(s => s.TeamId == teamId && s.Slug == "systematic-debugging" && s.Scope == DefinitionScope.Store && s.PackId == result.PackId && s.DeletedDate == null)).ShouldBeTrue();
 
-                // The pre-existing authored definitions are untouched (still authored, no pack), not overwritten.
-                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.DeletedDate == null)).Origin.ShouldBe(AgentDefinitionOrigin.Authored);
-                (await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.DeletedDate == null)).Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+                // The bench handle now has BOTH rows: the untouched authored Working persona AND a new store snapshot.
+                var benchArchitect = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.Scope == DefinitionScope.Working && a.DeletedDate == null);
+                benchArchitect.Origin.ShouldBe(AgentDefinitionOrigin.Authored);
+                benchArchitect.PackId.ShouldBeNull();
+                (await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "backend-architect" && a.Scope == DefinitionScope.Store && a.DeletedDate == null)).PackId.ShouldBe(result.PackId);
+
+                var benchTdd = await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.Scope == DefinitionScope.Working && s.DeletedDate == null);
+                benchTdd.Origin.ShouldBe(SkillDefinitionOrigin.Authored);
+                (await db.SkillDefinition.SingleAsync(s => s.TeamId == teamId && s.Slug == "tdd" && s.Scope == DefinitionScope.Store && s.DeletedDate == null)).PackId.ShouldBe(result.PackId);
             });
         }
         finally
@@ -182,7 +191,7 @@ public class PackCommitFlowTests
     }
 
     [Fact]
-    public async Task An_intra_pack_duplicate_handle_skips_the_second_in_one_commit()
+    public async Task Two_intra_pack_files_with_the_same_handle_both_land_as_distinct_snapshots()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -194,16 +203,17 @@ public class PackCommitFlowTests
 
         try
         {
-            // Two files in ONE commit derive the same handle. The fix decides this in memory (claimedSlugs), so one
-            // is Imported and the other Skipped — NOT two INSERTs that 23505 and abort the whole transaction.
+            // Two files in ONE commit derive the same handle. A store snapshot's handle is non-unique (keyed on
+            // source-path), so BOTH import as distinct snapshots — never a 23505 that aborts the whole transaction.
             var result = await CommitViaMediatorAsync(src, new[] { "agents/dup-a.md", "agents/dup-b.md" }, teamId, userId);
 
-            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(1);
-            result.Items.Count(i => i.Outcome == PackImportOutcome.Skipped).ShouldBe(1);
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Imported).ShouldBe(2);
+            result.Items.Count(i => i.Outcome == PackImportOutcome.Skipped).ShouldBe(0);
 
-            // Atomic + correct: the committed transaction left exactly one active agent for the shared handle.
+            // Atomic + correct: the committed transaction left two active store snapshots for the shared handle,
+            // one per source file.
             await AssertStateAsync(async db =>
-                (await db.AgentDefinition.CountAsync(a => a.TeamId == teamId && a.Slug == "duplicate-agent" && a.DeletedDate == null)).ShouldBe(1));
+                (await db.AgentDefinition.CountAsync(a => a.TeamId == teamId && a.Slug == "duplicate-agent" && a.Scope == DefinitionScope.Store && a.DeletedDate == null)).ShouldBe(2));
         }
         finally
         {
@@ -333,6 +343,89 @@ public class PackCommitFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_store_agents_declared_skill_binds_to_the_store_snapshot_not_a_same_handle_bench_skill()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        await SeedSkillAsync(teamId, userId, "tdd");   // an authored WORKING bench skill sharing the pack skill's handle
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        try
+        {
+            // First import tdd alone → a STORE snapshot 'tdd' now coexists with the Working bench 'tdd'.
+            await CommitViaMediatorAsync(src, new[] { "skills/tdd/SKILL.md" }, teamId, userId);
+
+            // Then import the agent that declares tdd (NOT in this batch, so it resolves via the pre-seeded
+            // store-scoped map). Its binding must point at the STORE snapshot, never the Working bench skill — and
+            // deterministically so, which the unscoped/unordered map could not guarantee once the two coexist.
+            var second = await CommitViaMediatorAsync(src, new[] { "agents/skilled.md" }, teamId, userId);
+            var agentId = second.Items.Single(i => i.SourcePath == "agents/skilled.md").DefinitionId!.Value;
+
+            await AssertStateAsync(async db =>
+            {
+                var bound = await (from b in db.AgentSkillBinding
+                                   join s in db.SkillDefinition on b.SkillDefinitionId equals s.Id
+                                   where b.AgentDefinitionId == agentId
+                                   select s).ToListAsync();
+
+                bound.Select(s => s.Slug).ShouldBe(new[] { "tdd" });
+                bound[0].Scope.ShouldBe(DefinitionScope.Store, "a store agent's declared skill binds to the STORE snapshot of that handle");
+                bound[0].PackId.ShouldNotBeNull("…the imported snapshot, not the authored Working bench skill (which has no pack)");
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task A_reimport_of_a_grandfathered_pack_adds_a_store_snapshot_without_clobbering_the_bench_row()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        // A grandfathered import: a pack rooted at this url + a WORKING bench agent carrying its (PackId, SourcePath).
+        // The repo's agents/code-reviewer.md has a DIFFERENT body ("You review."), so a clobber would be visible.
+        var (packId, benchId) = await SeedGrandfatheredPackAgentAsync(teamId, userId, src, "agents/code-reviewer.md", "code-reviewer", "OLD GRANDFATHERED PROMPT");
+
+        try
+        {
+            var result = await CommitViaMediatorAsync(src, new[] { "agents/code-reviewer.md" }, teamId, userId);
+
+            result.PackId.ShouldBe(packId, "the re-import resolves the SAME pack by url, not a new one");
+            // The existing-row lookup is Store-scoped, so it ignores the grandfathered Working row → a fresh snapshot
+            // is IMPORTED, never an UPDATE that would clobber the live bench agent.
+            Outcome(result, "agents/code-reviewer.md").ShouldBe(PackImportOutcome.Imported);
+
+            await AssertStateAsync(async db =>
+            {
+                var bench = await db.AgentDefinition.SingleAsync(a => a.Id == benchId);
+                bench.Scope.ShouldBe(DefinitionScope.Working);
+                bench.SystemPrompt.ShouldBe("OLD GRANDFATHERED PROMPT", "the re-import must NOT clobber the live bench agent's content");
+
+                var snapshot = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "code-reviewer" && a.Scope == DefinitionScope.Store && a.DeletedDate == null);
+                snapshot.PackId.ShouldBe(packId);
+                snapshot.SourcePath.ShouldBe("agents/code-reviewer.md");
+                snapshot.SystemPrompt.ShouldContain("You review", customMessage: "the store snapshot carries the freshly-walked pack content");
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static PackImportOutcome Outcome(PackImportResult result, string sourcePath) =>
         result.Items.Single(i => i.SourcePath == sourcePath).Outcome;
 
@@ -416,6 +509,23 @@ public class PackCommitFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.AgentDefinition.Add(new AgentDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = AgentDefinitionOrigin.Authored, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stages a PRE-store-model import: a Pack rooted at <paramref name="url"/> plus a grandfathered WORKING bench agent carrying that pack's (PackId, SourcePath). Returns the pack + agent ids.</summary>
+    private async Task<(Guid PackId, Guid AgentId)> SeedGrandfatheredPackAgentAsync(Guid teamId, Guid userId, string url, string sourcePath, string slug, string systemPrompt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var packId = Guid.NewGuid();
+        db.Pack.Add(new Pack { Id = packId, TeamId = teamId, Kind = PackKind.GitUrl, Name = "grandfathered", Url = url, LastSyncedDate = now, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        var agentId = Guid.NewGuid();
+        db.AgentDefinition.Add(new AgentDefinition { Id = agentId, TeamId = teamId, Slug = slug, Name = slug, SystemPrompt = systemPrompt, Origin = AgentDefinitionOrigin.Imported, Scope = DefinitionScope.Working, PackId = packId, SourcePath = sourcePath, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        await db.SaveChangesAsync();
+        return (packId, agentId);
     }
 
     private async Task SeedSkillAsync(Guid teamId, Guid userId, string slug)

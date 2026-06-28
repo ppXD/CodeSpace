@@ -222,6 +222,36 @@ public class AgentDefinitionResolverFlowTests
             .ShouldBeNull("no bindings → null skills, so the task_json stays byte-identical to a skill-less run");
     }
 
+    [Fact]
+    public async Task A_store_snapshot_persona_id_is_not_runnable()
+    {
+        var teamId = await SeedTeamAsync();
+
+        // A Library STORE snapshot id is reachable to a client and could be threaded into a run via AgentDefinitionId;
+        // resolving it must fail closed (never freeze a non-runnable snapshot's prompt/model into a live run).
+        var storeId = await SeedPersonaAsync(teamId, "Library snapshot prompt.", model: null, scope: DefinitionScope.Store);
+
+        await Should.ThrowAsync<AgentDefinitionResolutionException>(() => ResolveAsync(InlineTask(goal: "x", model: null, agentDefinitionId: storeId), teamId));
+    }
+
+    [Fact]
+    public async Task Bound_skills_resolve_drops_a_store_scoped_skill()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null);
+        var working = await SeedSkillAsync(teamId, "tdd", "Use when implementing.", "Write the test first.");
+        var store = await SeedStoreSkillAsync(teamId, "debugging");
+
+        // Bind BOTH directly (bypassing the Working-only write guard) so the run-time join is what's under test:
+        // a Store-scoped skill must drop out of the resolved task — defense-in-depth even if a bad binding exists.
+        await InsertBindingAsync(id, working);
+        await InsertBindingAsync(id, store);
+
+        var resolved = await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId);
+
+        resolved.Skills!.Select(sk => sk.Slug).ShouldBe(new[] { "tdd" }, customMessage: "the run-time skill join is Working-scoped, so the Store snapshot skill never reaches the task");
+    }
+
     private async Task<Guid> SeedSkillAsync(Guid teamId, string slug, string description, string body)
     {
         using var scope = _fixture.BeginScope();
@@ -238,6 +268,25 @@ public class AgentDefinitionResolverFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IAgentSkillBindingService>().SetForAgentAsync(teamId, agentId, skillIds, SystemUsers.SeederId, CancellationToken.None);
+    }
+
+    private async Task<Guid> SeedStoreSkillAsync(Guid teamId, string slug)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.SkillDefinition.Add(new SkillDefinition { Id = id, TeamId = teamId, Slug = slug, Name = slug, Description = "snapshot", Body = "snapshot body", Origin = SkillDefinitionOrigin.Imported, Scope = DefinitionScope.Store, PackId = null, SourcePath = $"skills/{slug}/SKILL.md", CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task InsertBindingAsync(Guid agentId, Guid skillId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentSkillBinding.Add(new AgentSkillBinding { Id = Guid.NewGuid(), AgentDefinitionId = agentId, SkillDefinitionId = skillId, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = SystemUsers.SeederId });
+        await db.SaveChangesAsync();
     }
 
     private static AgentTask InlineTask(string goal, string? model, Guid? agentDefinitionId = null) => new()
@@ -293,16 +342,38 @@ public class AgentDefinitionResolverFlowTests
         (await ResolveSlugAsync("shared-slug", teamA)).ShouldBeNull("a soft-deleted persona's slug no longer resolves");
     }
 
+    [Fact]
+    public async Task ResolveSlugAsync_resolves_to_the_working_persona_ignoring_a_store_snapshot_of_the_same_handle()
+    {
+        var teamId = await SeedTeamAsync();
+
+        // A STORE snapshot and a WORKING persona legally share a handle (team-slug uniqueness is Working-only).
+        // The @-mention must resolve to the runnable bench persona — and must NOT throw on the two-row match.
+        var workingId = await SeedPersonaAsync(teamId, "Bench reviewer.", model: null, slug: "code-reviewer", scope: DefinitionScope.Working);
+        await SeedPersonaAsync(teamId, "Library snapshot.", model: null, slug: "code-reviewer", scope: DefinitionScope.Store);
+
+        (await ResolveSlugAsync("code-reviewer", teamId)).ShouldBe(workingId, "a @-mention resolves to the WORKING persona, never the Library store snapshot");
+    }
+
+    [Fact]
+    public async Task ResolveSlugAsync_returns_null_when_only_a_store_snapshot_owns_the_handle()
+    {
+        var teamId = await SeedTeamAsync();
+        await SeedPersonaAsync(teamId, "Library snapshot only.", model: null, slug: "snapshot-only", scope: DefinitionScope.Store);
+
+        (await ResolveSlugAsync("snapshot-only", teamId)).ShouldBeNull("a store snapshot is not runnable — its handle must not resolve for an @-mention");
+    }
+
     private async Task<Guid?> ResolveSlugAsync(string slug, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IAgentDefinitionResolver>().ResolveSlugAsync(slug, teamId, CancellationToken.None);
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null, string? slug = null)
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null, string? slug = null, DefinitionScope scope = DefinitionScope.Working)
     {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
+        using var s = _fixture.BeginScope();
+        var db = s.Resolve<CodeSpaceDbContext>();
 
         var now = DateTimeOffset.UtcNow;
         var agent = new AgentDefinition
@@ -315,7 +386,8 @@ public class AgentDefinitionResolverFlowTests
             Model = model,
             ModelCredentialId = modelCredentialId,
             ToolsJson = toolsJson,
-            Origin = AgentDefinitionOrigin.Authored,
+            Origin = scope == DefinitionScope.Store ? AgentDefinitionOrigin.Imported : AgentDefinitionOrigin.Authored,
+            Scope = scope,
             CreatedDate = now,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedDate = now,

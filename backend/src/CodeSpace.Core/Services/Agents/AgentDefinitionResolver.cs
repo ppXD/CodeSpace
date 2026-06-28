@@ -70,7 +70,7 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
     {
         var skills = await _db.AgentSkillBinding.AsNoTracking()
             .Where(b => b.AgentDefinitionId == agentId)
-            .Join(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null),
+            .Join(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null),
                 b => b.SkillDefinitionId, s => s.Id, (b, s) => new { b.CreatedDate, s })
             .OrderBy(x => x.CreatedDate).ThenBy(x => x.s.Slug)
             .Select(x => new AgentSkill { Slug = x.s.Slug, Description = x.s.Description, Body = x.s.Body })
@@ -106,20 +106,25 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         // Normalize the handle the SAME way authoring derives a slug from a name, so a brain that authored a display
         // name ("Security Reviewer") or the exact handle ("security-reviewer") both resolve. A handle that yields no
         // slug → no match (null). Team-scoped + non-deleted, mirroring LoadPersonaAsync so a foreign / soft-deleted
-        // slug never resolves.
+        // slug never resolves. Scoped to WORKING: a @-mention resolves only to a runnable bench persona, never to a
+        // Library STORE snapshot — and a snapshot may legally share a Working row's handle (the team-slug uniqueness
+        // is Working-only), so without this filter SingleOrDefault could match two rows and throw.
         var normalized = AgentDefinitionService.DeriveSlug(slug);
 
         if (normalized.Length == 0) return null;
 
         return await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Slug == normalized && a.DeletedDate == null)
+            .Where(a => a.TeamId == teamId && a.Slug == normalized && a.Scope == DefinitionScope.Working && a.DeletedDate == null)
             .Select(a => (Guid?)a.Id)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>
         await _db.AgentDefinition.AsNoTracking()
-            .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            // Scoped to WORKING: a run only ever materializes a runnable bench persona. A Library STORE snapshot id —
+            // reachable to a client through the Library read API and threadable into a run via AgentDefinitionId — must
+            // fail closed here, never freeze a non-runnable snapshot's prompt/model/tools into a live run.
+            .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)
         ?? throw new AgentDefinitionResolutionException($"Agent persona {id} not found for this team.");
 
     /// <summary>Persona system prompt PREPENDED to the node goal (blank-line separated); either side alone passes through.</summary>

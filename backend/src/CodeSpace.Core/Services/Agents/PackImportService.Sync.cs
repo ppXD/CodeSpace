@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -38,9 +39,11 @@ public sealed partial class PackImportService
 
         var now = DateTimeOffset.UtcNow;
 
-        // Already-imported artifacts (tracked, so a refresh flushes), keyed by source-path = the sync identity.
-        var existingAgents = await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == packId && a.TeamId == teamId && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
-        var existingSkills = await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == packId && s.TeamId == teamId && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
+        // Already-imported STORE snapshots (tracked, so a refresh flushes), keyed by source-path = the sync identity.
+        // Scoped to Store so sync refreshes the library snapshots, never a grandfathered Working bench row that
+        // happens to share this pack's (pack, source_path).
+        var existingAgents = await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == packId && a.TeamId == teamId && a.Scope == DefinitionScope.Store && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingSkills = await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == packId && s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 
         var upToDate = 0;
         var updated = 0;
@@ -69,12 +72,10 @@ public sealed partial class PackImportService
             updated++;
         }
 
-        // Discovered but not yet imported → a preview to select + add (conflict-checked against the team).
-        var agentSlugs = await ActiveSlugsAsync(_db.AgentDefinition.AsNoTracking().Where(a => a.TeamId == teamId && a.DeletedDate == null).Select(a => a.Slug), cancellationToken).ConfigureAwait(false);
-        var skillSlugs = await ActiveSlugsAsync(_db.SkillDefinition.AsNoTracking().Where(s => s.TeamId == teamId && s.DeletedDate == null).Select(s => s.Slug), cancellationToken).ConfigureAwait(false);
-
-        var newAgents = discovered.Agents.Where(a => !existingAgents.ContainsKey(a.SourcePath)).Select(a => BuildAgentItem(a, agentSlugs)).ToList();
-        var newSkills = discovered.Skills.Where(s => !existingSkills.ContainsKey(s.SourcePath)).Select(s => BuildSkillItem(s, skillSlugs)).ToList();
+        // Discovered but not yet imported → a preview to select + add. A new artifact lands as a Store snapshot, so
+        // (like the URL preview) it carries no unique handle and never conflicts — importability is parseable + named.
+        var newAgents = discovered.Agents.Where(a => !existingAgents.ContainsKey(a.SourcePath)).Select(BuildAgentItem).ToList();
+        var newSkills = discovered.Skills.Where(s => !existingSkills.ContainsKey(s.SourcePath)).Select(BuildSkillItem).ToList();
 
         pack.LastSyncedDate = now;
         pack.LastModifiedDate = now;

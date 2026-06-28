@@ -152,10 +152,61 @@ public class SkillDefinitionServiceFlowTests
         (await scope.Resolve<ISkillDefinitionService>().GetAsync(teamB, id, default)).ShouldBeNull();
     }
 
+    [Fact]
+    public async Task List_excludes_store_snapshots()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var workingId = await CreateSkillAsync(teamId, userId, "Brainstorming", body: "bench body");
+
+        // A Library STORE snapshot lives in the store, not on the bindable bench picker — the list must exclude it.
+        await SeedStoreSkillSnapshotAsync(teamId, "store-snapshot");
+
+        using var scope = _fixture.BeginScope();
+        var list = await scope.Resolve<ISkillDefinitionService>().ListAsync(teamId, default);
+
+        list.Select(s => s.Id).ShouldBe(new[] { workingId }, "ListAsync returns only Working skills; the store snapshot is excluded");
+    }
+
+    [Fact]
+    public async Task Create_succeeds_when_only_a_store_snapshot_owns_the_handle()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        // A Library STORE snapshot owns "code-review". Team-slug uniqueness is Working-only, so authoring a runnable
+        // skill of the same name must NOT be refused — the snapshot and the bench skill coexist.
+        await SeedStoreSkillSnapshotAsync(teamId, "code-review");
+
+        await Should.NotThrowAsync(() => CreateSkillAsync(teamId, userId, "Code Review", body: "bench body"));
+    }
+
     private async Task<Guid> CreateSkillAsync(Guid teamId, Guid userId, string name, string body)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<ISkillDefinitionService>().CreateAsync(teamId, new SkillDefinitionInput { Name = name, Body = body }, userId, default);
+    }
+
+    /// <summary>Inserts a STORE snapshot skill (Origin=Imported, Scope=Store) directly — the Library shape that must never surface on the bindable bench list.</summary>
+    private async Task SeedStoreSkillSnapshotAsync(Guid teamId, string slug)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.SkillDefinition.Add(new SkillDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Name = slug,
+            Body = "snapshot body",
+            Origin = SkillDefinitionOrigin.Imported,
+            Scope = DefinitionScope.Store,
+            PackId = null,   // pack provenance is irrelevant to the scope filter under test (and skill_definition has a real pack FK)
+            SourcePath = $"skills/{slug}/SKILL.md",
+            CreatedDate = DateTimeOffset.UtcNow,
+            CreatedBy = Guid.NewGuid(),
+            LastModifiedDate = DateTimeOffset.UtcNow,
+            LastModifiedBy = Guid.NewGuid(),
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> InsertPackAsync(Guid teamId)
