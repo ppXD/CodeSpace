@@ -1406,6 +1406,9 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
    because the editor portals to document.body, like .mdl. */
 .ed-sec-h { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 10px; }
 .ed-sec-h svg { color: var(--ink-2); }
+/* Remove (×) affordance on an editable bound-skill chip in the agent editor. */
+.ed-tok-x { appearance: none; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; padding: 0 0 0 5px; display: inline-flex; align-items: center; vertical-align: -1px; }
+.ed-tok-x:hover { color: var(--danger); }
 
 /* Connected identities (Model B) — per-user provider-identity management list. */
 .acs-identities { padding: 20px 24px; max-width: 720px; }

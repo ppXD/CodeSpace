@@ -110,6 +110,14 @@ public class AgentsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Replace the skills bound to a persona (full-replace). The route id is authoritative (Rule 17).</summary>
+    [HttpPut("{agentDefinitionId:guid}/skills")]
+    public async Task<IActionResult> SetSkills([FromRoute] Guid agentDefinitionId, [FromBody] SetAgentSkillsCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command with { AgentDefinitionId = agentDefinitionId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
     /// <summary>Dry-run: discover + parse the agents in a bound repository's pack (no persistence) so the operator can inspect + select before importing.</summary>
     [HttpPost("import-preview")]
     public async Task<IActionResult> ImportPreview([FromBody] PreviewAgentPackQuery query, CancellationToken cancellationToken)
