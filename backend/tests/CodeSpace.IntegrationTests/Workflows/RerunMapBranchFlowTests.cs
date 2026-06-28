@@ -1054,14 +1054,15 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
-    public void RerunDispositions_over_the_real_registry_match_the_frozen_from_node_gate_and_classify_agentcode_distinctly()
+    public void RerunDispositions_over_the_real_registry_match_the_post_P2_2_from_node_gate_and_classify_agentcode_distinctly()
     {
         // DRIFT-DETECTOR over the REAL registry for the FROM-NODE gate seam (the companion to the branch-policy one
-        // above): every live node's disposition-based from-node admit equals the FROZEN pre-refactor IsRerunUnsupported
-        // negation, AND agent.code is the SOLE node earning ReStageExternalRun — the one node P2.2's single from-node
-        // arm will admit — while every other suspendable node is fail-closed RefuseSuspendable.
-        static bool OldUnsupported(NodeManifest m, string nodeId, string? exemptMapId) =>
-            m.CanSuspend || (m.Kind == NodeKind.Map && nodeId != exemptMapId) || m.Kind is NodeKind.Loop or NodeKind.Try;
+        // above): every live node's disposition-based from-node admit equals the POST-P2.2 IsRerunUnsupported negation,
+        // AND agent.code is the SOLE node earning ReStageExternalRun — the one node P2.2's from-node arm now admits —
+        // while every other suspendable node is fail-closed RefuseSuspendable.
+        static bool PostP2_2Unsupported(NodeManifest m, string nodeId, string? exemptMapId) =>
+            (m.CanSuspend && !(m.IsRerunnableWhenSuspendable && !m.IsSideEffecting))   // suspendable EXCEPT the agent.code re-stage opt-in
+            || (m.Kind == NodeKind.Map && nodeId != exemptMapId) || m.Kind is NodeKind.Loop or NodeKind.Try;
 
         using var scope = _fixture.BeginScope();
         var registry = scope.Resolve<INodeRegistry>();
@@ -1071,13 +1072,21 @@ public class RerunMapBranchFlowTests
         foreach (var n in registry.All)
         foreach (var exemptMapId in new[] { (string?)null, n.TypeKey, "__some_other_map__" })
             RerunDispositions.Admits(n.Manifest, RerunContext.FromNodeRoot, n.TypeKey, exemptMapId)
-                .ShouldBe(!OldUnsupported(n.Manifest, n.TypeKey, exemptMapId), $"from-node gate drifted for {n.TypeKey} exempt={exemptMapId ?? "null"}");
+                .ShouldBe(!PostP2_2Unsupported(n.Manifest, n.TypeKey, exemptMapId), $"from-node gate drifted for {n.TypeKey} exempt={exemptMapId ?? "null"}");
 
         var reStage = registry.All.Where(n => RerunDispositions.For(n.Manifest) == RerunDisposition.ReStageExternalRun).Select(n => n.TypeKey).OrderBy(k => k).ToList();
-        reStage.ShouldHaveSingleItem().ShouldBe("agent.code", "agent.code is the SOLE ReStageExternalRun — the node P2.2's one-line from-node flip will open");
+        reStage.ShouldHaveSingleItem().ShouldBe("agent.code", "agent.code is the SOLE ReStageExternalRun — the node P2.2's from-node arm opened");
 
-        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code")
-            .ShouldAllBe(n => RerunDispositions.For(n.Manifest) == RerunDisposition.RefuseSuspendable, "every other suspendable node is fail-closed RefuseSuspendable");
+        // The headline P2.2 behaviour over the LIVE registry: agent.code IS admitted as a from-node root, every other
+        // suspendable node is NOT (fail-closed). This is the live counterpart of the unit cube's surgical-change proof.
+        var agentCode = registry.All.Single(n => n.TypeKey == "agent.code");
+        RerunDispositions.Admits(agentCode.Manifest, RerunContext.FromNodeRoot, "agent.code", exemptMapId: null)
+            .ShouldBeTrue("agent.code re-stages a fresh AgentRun on the forked run id — admitted as a from-node root (P2.2)");
+
+        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code").ToList()
+            .ShouldAllBe(n => RerunDispositions.For(n.Manifest) == RerunDisposition.RefuseSuspendable
+                && !RerunDispositions.Admits(n.Manifest, RerunContext.FromNodeRoot, n.TypeKey, null),
+                "every other suspendable node stays fail-closed RefuseSuspendable + refused as a from-node root");
 
         registry.All.Select(n => RerunDispositions.For(n.Manifest)).Distinct().Count().ShouldBeGreaterThan(1, "the live registry spans multiple dispositions (non-vacuous)");
     }
