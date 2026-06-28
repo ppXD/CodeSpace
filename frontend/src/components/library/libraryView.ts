@@ -23,6 +23,40 @@ export function splitArtifacts(artifacts: PackArtifactSummary[]): { agents: Pack
 }
 
 /**
+ * Which kind-tab the detail shows: the explicit pick, UNLESS that kind is now empty while the other has rows — then
+ * fall back to the populated kind (mirrors resolveSelectedPackId reconciling a stale pack pick), so a sync that drops
+ * every artifact of the pinned kind never strands the user on an empty tab. No pick yet ⇒ the populated kind (a
+ * skill-only pack opens on Skills).
+ */
+export function resolveDetailTab(picked: "agents" | "skills" | null, agentCount: number, skillCount: number): "agents" | "skills" {
+  if (picked === "agents" && agentCount === 0 && skillCount > 0) return "skills";
+  if (picked === "skills" && skillCount === 0 && agentCount > 0) return "agents";
+
+  return picked ?? (agentCount > 0 ? "agents" : "skills");
+}
+
+/** One page of a list. <c>page</c> is the CLAMPED 0-based index actually used (so a now-shorter list never strands the view past its end). */
+export interface Page<T> {
+  items: T[];
+  page: number;
+  pageCount: number;
+  total: number;
+}
+
+/**
+ * Pure client-side pagination for the Library detail lists — a big pack can hold hundreds of agents/skills, so each
+ * tab shows one page. <paramref name="page"/> is clamped into range, so when the active list shrinks (a tab switch,
+ * a sync that drops rows) the caller's stored page can't point past the end. An empty list is one empty page.
+ */
+export function paginate<T>(all: T[], page: number, size: number): Page<T> {
+  const total = all.length;
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const clamped = Math.min(Math.max(page, 0), pageCount - 1);
+
+  return { items: all.slice(clamped * size, clamped * size + size), page: clamped, pageCount, total };
+}
+
+/**
  * Resolve which pack the detail pane shows: an explicit pick wins, but only while it still exists in the
  * current list; otherwise fall back to the first pack. This reconciles a stale pick (the picked pack was
  * removed/renamed server-side, so a later refetch dropped it) instead of leaving the rail with no active row
