@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef, PhaseStatus, RunPhase } from "@/api/workflows";
@@ -6,6 +6,10 @@ import type { PhaseAgentRef, PhaseStatus, RunPhase } from "@/api/workflows";
 import { buildWaves, formatDuration, tileState } from "./runActivity";
 
 const NODE_SOURCE = "node-summary";
+
+// One shared empty array for agentless rows, so a node with no agents passes a STABLE `agents` prop (a fresh `[]`
+// each render would defeat PhaseRow's memo).
+const NO_AGENTS: PhaseAgentRef[] = [];
 
 /**
  * The run's navigation skeleton — answers WHERE the run is + WHO's running. It renders the structural node spine
@@ -22,37 +26,47 @@ export function RunOutline({ phases, selectedPhaseId, onSelectPhase, selectedAge
   selectedAgentRunId?: string | null;
   onSelectAgent?: (agentRunId: string | null) => void;
 }) {
-  if (phases.length === 0) {
+  // The phase-derived layout depends ONLY on `phases` (which React Query keeps referentially stable across a poll that
+  // brought no change), so memoize the whole derivation — buildWaves + the Map/Set + the spine/work/terminal split — so
+  // the 2s poll-driven re-render doesn't rebuild it every tick. Returns null for the empty run (the hook still runs).
+  const layout = useMemo(() => {
+    if (phases.length === 0) return null;
+
+    // buildWaves assigns each agent to exactly ONE phase (an authored phase wins over the node / decision that also
+    // lists it), so a supervisor agent shows under its semantic phase, never doubled — and EVERY agent lands in a wave.
+    const waves = buildWaves(phases);
+    const agentsByPhase = new Map(waves.map((w) => [w.id, w.agents]));
+    const waveIds = new Set(waves.map((w) => w.id));
+
+    const nodes = phases.filter((p) => p.sourceKey === NODE_SOURCE);
+    // The supervisor's WORK phases — the agent-owning supervisor-ledger phases (the model-authored ones when the plan
+    // grouped its subtasks, else the spawn/retry waves for a flat plan). Decision rows that own no agent (plan / stop)
+    // are excluded, so the block stays the phases-with-work, never the raw decision tape.
+    const workPhases = phases.filter((p) => p.sourceKey !== NODE_SOURCE && waveIds.has(p.id));
+
+    // Slot the "Phases" block before the terminal (the agentless last node), so it reads manual / code / Phases / end.
+    const terminal = nodes.length > 1 && (agentsByPhase.get(nodes.at(-1)!.id)?.length ?? 0) === 0 ? nodes.at(-1)! : null;
+    const spine = terminal ? nodes.slice(0, -1) : nodes;
+
+    return { agentsByPhase, workPhases, terminal, spine };
+  }, [phases]);
+
+  if (!layout) {
     return <div className="run-outline-empty">No phases yet — the run hasn’t reached a step.</div>;
   }
 
-  // buildWaves assigns each agent to exactly ONE phase (an authored phase wins over the node / decision that also lists
-  // it), so a supervisor agent shows under its semantic phase, never doubled under the node — and EVERY agent lands in
-  // some wave, so none is dropped.
-  const waves = buildWaves(phases);
-  const agentsByPhase = new Map(waves.map((w) => [w.id, w.agents]));
-  const waveIds = new Set(waves.map((w) => w.id));
-
-  const nodes = phases.filter((p) => p.sourceKey === NODE_SOURCE);
-  // The supervisor's WORK phases — the agent-owning supervisor-ledger phases (the model-authored ones when the plan
-  // grouped its subtasks, else the spawn/retry waves for a flat plan). Decision rows that own no agent (plan / stop)
-  // are excluded, so the block stays the phases-with-work, never the raw decision tape.
-  const workPhases = phases.filter((p) => p.sourceKey !== NODE_SOURCE && waveIds.has(p.id));
-
-  // Slot the "Phases" block before the terminal (the agentless last node), so it reads manual / code / Phases / end.
-  const terminal = nodes.length > 1 && (agentsByPhase.get(nodes.at(-1)!.id)?.length ?? 0) === 0 ? nodes.at(-1)! : null;
-  const spine = terminal ? nodes.slice(0, -1) : nodes;
+  const { agentsByPhase, workPhases, terminal, spine } = layout;
 
   const sel = { selectedPhaseId, onSelectPhase, selectedAgentRunId, onSelectAgent };
 
   return (
     <nav className="run-outline" aria-label="Run outline">
-      {spine.map((node) => <PhaseRow key={node.id} phase={node} agents={agentsByPhase.get(node.id) ?? []} {...sel} />)}
+      {spine.map((node) => <PhaseRow key={node.id} phase={node} agents={agentsByPhase.get(node.id) ?? NO_AGENTS} {...sel} />)}
 
       {workPhases.length > 0 && (
         <div className="run-outline-phases">
           <div className="run-outline-phases-label">Phases</div>
-          {workPhases.map((p) => <PhaseRow key={p.id} phase={p} agents={agentsByPhase.get(p.id) ?? []} {...sel} />)}
+          {workPhases.map((p) => <PhaseRow key={p.id} phase={p} agents={agentsByPhase.get(p.id) ?? NO_AGENTS} {...sel} />)}
         </div>
       )}
 
@@ -61,7 +75,10 @@ export function RunOutline({ phases, selectedPhaseId, onSelectPhase, selectedAge
   );
 }
 
-function PhaseRow({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
+// Memoized: with the layout + agent arrays referentially stable across a no-change poll (see useMemo above + the shared
+// NO_AGENTS), a phase row only re-renders when ITS phase/agents change or the selection moves — so the 2s poll no longer
+// re-renders every row in the outline.
+const PhaseRow = memo(function PhaseRow({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
   phase: RunPhase;
   agents: PhaseAgentRef[];
   onSelectPhase?: (phaseId: string | null) => void;
@@ -81,7 +98,7 @@ function PhaseRow({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAg
   }
 
   return <PhaseBox phase={phase} agents={agents} onSelectPhase={onSelectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />;
-}
+});
 
 /**
  * An agent-bearing phase as a CLAUDE-style framed box — the header toggles its agent list (name top-left, chevron
