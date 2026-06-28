@@ -1,130 +1,28 @@
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { AgentBoundSkill, AgentDefinitionInput, AgentDefinitionSummary } from "@/api/agents";
+import type { AgentBoundSkill, AgentDefinitionInput } from "@/api/agents";
 import { ApiError } from "@/api/request";
 import { Combo, type Option } from "@/components/common/Combo";
 import { useConfirm } from "@/components/dialog";
-import { useAgentDefinition, useCreateAgent, useDeleteAgent, useUpdateAgent } from "@/hooks/use-agents";
+import { useCreateAgent, useDeleteAgent, useUpdateAgent } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
 
+import { AUTONOMY, type FormState, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
-
-/** The autonomy tiers the run path recognizes (AgentAutonomyLevel, parsed case-insensitively). Stored by name. */
-const AUTONOMY: Option[] = [
-  { value: "Confined", label: "Confined", desc: "Analysis only — no writes, no network." },
-  { value: "Standard", label: "Standard", desc: "Writes inside its workspace, no network. The safe default." },
-  { value: "Trusted", label: "Trusted", desc: "Workspace write + network — for runs that fetch dependencies." },
-  { value: "Unleashed", label: "Unleashed", desc: "Highest capability — admin / controlled runners only." },
-];
-const DEFAULT_AUTONOMY = "Standard";
-const TOOLS_MODES: Option[] = [
-  { value: "inherit", label: "Inherit the harness default" },
-  { value: "custom", label: "Custom allow-list" },
-];
-
-function normalizeAutonomy(stored: string | null | undefined): string {
-  const match = AUTONOMY.find((t) => t.value.toLowerCase() === (stored ?? "").toLowerCase());
-  return match ? match.value : DEFAULT_AUTONOMY;
-}
-
-function parseTools(text: string): string[] {
-  return text.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
-}
-
-interface FormState {
-  name: string;
-  description: string;
-  systemPrompt: string;
-  model: string;
-  autonomy: string;
-  toolsMode: "inherit" | "custom";
-  toolsText: string;
-}
-
-const EMPTY_FORM: FormState = { name: "", description: "", systemPrompt: "", model: "", autonomy: DEFAULT_AUTONOMY, toolsMode: "inherit", toolsText: "" };
-
-function formFromPersona(a: AgentDefinitionSummary): FormState {
-  return {
-    name: a.name,
-    description: a.description ?? "",
-    systemPrompt: a.systemPrompt ?? "",
-    model: a.model ?? "",
-    autonomy: normalizeAutonomy(a.defaultAutonomy),
-    toolsMode: a.tools === null ? "inherit" : "custom",
-    toolsText: a.tools ? a.tools.join(", ") : "",
-  };
-}
+import { DrawerClose, DrawerFrame } from "./DrawerFrame";
 
 /**
- * Create / edit an Agent persona — a warm-theme MODAL over the authorable surface (name → derived @handle,
- * description, system prompt, model, default autonomy, tools). All dropdowns are the in-house warm {@link Combo}
- * (no native selects); the model picker loads the team's REAL credentialed models. A persona is
- * harness-AGNOSTIC (no harness field); skills are bound via import (shown read-only) — in-app binding is a follow-up.
+ * The agent editor — the edit mode of the detail drawer. Renders the authorable surface (name → derived @handle,
+ * description, system prompt, model, default autonomy, tools) grouped into the same three sections as the inspect
+ * view: Identity, Runtime, Capabilities. All dropdowns are the in-house warm {@link Combo}; the model picker loads
+ * the team's REAL credentialed models. A persona is harness-AGNOSTIC (no harness field); skills are bound via
+ * import (shown read-only) — in-app binding is a follow-up.
  *
- * <p>The async edit-load is lifted here so the form mounts (and inits its state from props) only once data is
- * ready — no populate-from-query effect.</p>
+ * Callbacks: onCancel (dismiss without saving — back to inspect, or close on create), onSaved (a create/update
+ * landed), onDeleted (the persona was removed). The host (AgentDrawer) decides what each means.
  */
-export function AgentEditorModal({ mode, agentId, onClose }: { mode: "create" | "edit"; agentId?: string; onClose: () => void }) {
-  const existing = useAgentDefinition(mode === "edit" ? agentId : undefined);
-
-  if (mode === "edit" && existing.isLoading) {
-    return <ModalFrame title="Edit agent" onClose={onClose}><div className="wf-form-empty">Loading…</div></ModalFrame>;
-  }
-  if (mode === "edit" && (existing.error || !existing.data)) {
-    return (
-      <ModalFrame title="Edit agent" onClose={onClose}>
-        <div className="cn-banner cn-banner-err">
-          <div className="cn-banner-h">Couldn't load this agent</div>
-          <div className="cn-banner-p">{existing.error instanceof ApiError ? existing.error.message : "The agent may not exist in this team."}</div>
-        </div>
-      </ModalFrame>
-    );
-  }
-
-  return (
-    <AgentEditorForm
-      mode={mode}
-      agentId={agentId}
-      initial={mode === "edit" ? formFromPersona(existing.data!) : EMPTY_FORM}
-      boundSkills={existing.data?.boundSkills}
-      immutableSlug={existing.data?.slug}
-      onClose={onClose}
-    />
-  );
-}
-
-/** The warm `.mdl` portal shell (mask + dialog + head + body + optional foot), reused for loading / error / form. */
-function ModalFrame({ title, sub, onClose, foot, escapeDisabled, children }: { title: string; sub?: string; onClose: () => void; foot?: React.ReactNode; escapeDisabled?: boolean; children: React.ReactNode }) {
-  useEffect(() => {
-    // Suspend Escape while a layered dialog (the delete-confirm) is open, so one Escape cancels only that
-    // dialog rather than also tearing down the editor underneath it.
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !escapeDisabled) onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, escapeDisabled]);
-
-  return createPortal(
-    <>
-      <div className="mdl-mask" onClick={onClose} />
-      <div className="mdl" role="dialog" aria-modal="true" style={{ width: 680, maxWidth: "94vw" }}>
-        <div className="mdl-head">
-          <div className="mdl-title-wrap">
-            <div className="mdl-title">{title}</div>
-            {sub && <div className="mdl-sub">{sub}</div>}
-          </div>
-          <button type="button" className="mdl-x" onClick={onClose} title="Close" aria-label="Close"><Ic.X size={14} /></button>
-        </div>
-        <div className="mdl-body">{children}</div>
-        {foot}
-      </div>
-    </>,
-    document.body,
-  );
-}
-
-function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, onClose }: { mode: "create" | "edit"; agentId?: string; initial: FormState; boundSkills?: AgentBoundSkill[]; immutableSlug?: string; onClose: () => void }) {
+export function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, onCancel, onSaved, onDeleted }: { mode: "create" | "edit"; agentId?: string; initial: FormState; boundSkills?: AgentBoundSkill[]; immutableSlug?: string; onCancel: () => void; onSaved: () => void; onDeleted: () => void }) {
   const confirm = useConfirm();
   const credModels = useCredentialedModels();
   const createAgent = useCreateAgent();
@@ -170,7 +68,7 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
     try {
       if (mode === "create") await createAgent.mutateAsync(input);
       else await updateAgent.mutateAsync({ id: agentId!, input });
-      onClose();
+      onSaved();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't save the agent.");
     }
@@ -190,11 +88,21 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 
     try {
       await deleteAgent.mutateAsync(agentId);
-      onClose();
+      onDeleted();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Couldn't delete the agent.");
     }
   }
+
+  const head = (
+    <div className="mdl-head">
+      <div className="mdl-title-wrap">
+        <div className="mdl-title">{mode === "create" ? "New agent" : "Edit agent"}</div>
+        <div className="mdl-sub">{mode === "create" ? "A reusable unit you can @-mention from a workflow." : <>@{immutableSlug}</>}</div>
+      </div>
+      <DrawerClose onClose={onCancel} />
+    </div>
+  );
 
   const foot = (
     <div className="mdl-foot">
@@ -204,14 +112,14 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
         )}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" onClick={onCancel}>{mode === "create" ? "Cancel" : "Back"}</button>
         <button type="button" className="btn btn-primary" onClick={handleSave} disabled={!canSave}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </div>
   );
 
   return (
-    <ModalFrame title={mode === "create" ? "New agent" : "Edit agent"} sub={mode === "create" ? "A reusable persona you can @-mention from a workflow." : `@${immutableSlug}`} onClose={onClose} escapeDisabled={confirming} foot={foot}>
+    <DrawerFrame label={mode === "create" ? "New agent" : "Edit agent"} onClose={onCancel} escapeDisabled={confirming} head={head} foot={foot}>
       {error && (
         <div className="cn-banner cn-banner-err" style={{ marginBottom: 14 }}>
           <div className="cn-banner-h">Couldn't save</div>
@@ -220,6 +128,8 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
       )}
 
       <div className="wf-form">
+        <div className="drw-sec-h"><Ic.Bot size={13} /> Identity</div>
+
         <div className="wf-form-row">
           <label className="wf-form-label" htmlFor="ag-name">Name<span className="wf-form-required">*</span></label>
           <input id="ag-name" className="wf-form-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Backend Architect" autoFocus={mode === "create"} />
@@ -241,6 +151,8 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
           <label className="wf-form-label" htmlFor="ag-prompt">System prompt</label>
           <textarea id="ag-prompt" className="wf-form-textarea" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={7} placeholder="You are a senior backend architect. Before writing code, lay out the data model and the API surface…" />
         </div>
+
+        <div className="drw-sec-h" style={{ marginTop: 6 }}><Ic.Sparkles size={13} /> Runtime</div>
 
         <div className="wf-form-row">
           <span className="wf-form-label">Model</span>
@@ -266,15 +178,18 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
         </div>
 
         {mode === "edit" && (
-          <div className="wf-form-row">
-            <span className="wf-form-label">Bound skills</span>
-            {boundSkills && boundSkills.length > 0
-              ? <div className="wf-triggers">{boundSkills.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}</div>
-              : <span className="wf-trigger-muted">none</span>}
-            <span className="wf-form-help">Skills are bound when importing a pack; in-app binding is coming soon.</span>
-          </div>
+          <>
+            <div className="drw-sec-h" style={{ marginTop: 6 }}><Ic.Puzzle size={13} /> Capabilities</div>
+            <div className="wf-form-row">
+              <span className="wf-form-label">Bound skills</span>
+              {boundSkills && boundSkills.length > 0
+                ? <div className="wf-triggers">{boundSkills.map((s) => <span key={s.skillDefinitionId} className="wf-trigger-chip" title={s.name}>{s.slug}</span>)}</div>
+                : <span className="wf-trigger-muted">none</span>}
+              <span className="wf-form-help">Skills are bound when importing a pack; in-app binding is coming soon.</span>
+            </div>
+          </>
         )}
       </div>
-    </ModalFrame>
+    </DrawerFrame>
   );
 }

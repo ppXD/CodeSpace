@@ -38,10 +38,13 @@ export function useUpdateAgent() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, input }: { id: string; input: AgentDefinitionInput }) => agentsApi.updateAgentDefinition(id, input),
-    onSuccess: (_data, { id }) => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      queryClient.invalidateQueries({ queryKey: ["agent", id] });
-    },
+    // Return the refetch promise so mutateAsync resolves only once this persona's detail is fresh — the drawer's
+    // Edit→Save returns to the inspect view with the new values already loaded (no stale frame), and Save stays
+    // in its pending state through the refetch. The PUT returns void, so we re-read rather than seed the cache.
+    onSuccess: (_data, { id }) => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["agents"] }),
+      queryClient.invalidateQueries({ queryKey: ["agent", id] }),
+    ]),
   });
 }
 
