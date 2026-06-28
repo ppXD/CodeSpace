@@ -70,6 +70,8 @@ export interface AgentRunSummary {
   id: string;
   status: AgentRunStatus;
   harness: string;
+  /** The goal the agent was given — its instruction/prompt (a supervisor-spawned agent's per-subtask instruction, or an agent.code node's configured goal). null/absent when the task blob is missing. */
+  goal?: string | null;
   error: string | null;
   startedAt: string | null;
   heartbeatAt: string | null;

@@ -140,6 +140,20 @@ describe("AgentTerminal", () => {
     expect(screen.queryByTestId("tool-calls")).toBeNull();
   });
 
+  it("shows the agent's goal/instruction (its prompt) in a collapsible disclosure when present", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code", goal: "Trace the DI registration of nodes and plugins, then report the seam." } });
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText("Instruction")).toBeInTheDocument();
+    expect(screen.getByText(/Trace the DI registration of nodes and plugins/)).toBeInTheDocument();
+  });
+
+  it("omits the instruction disclosure when the agent run carries no goal", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+    expect(screen.queryByText("Instruction")).toBeNull();
+  });
+
   it("leads with the agent name and carries the full identity strip (harness · model · tools · time) + the cost/files facts", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
     // Five FileChanged events, but the footer count comes from the REF's git-truth filesChanged (3), not the event tally.

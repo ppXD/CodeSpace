@@ -13,6 +13,10 @@ public sealed record AgentRunSummary
     public required Guid Id { get; init; }
     public required AgentRunStatus Status { get; init; }
     public required string Harness { get; init; }
+
+    /// <summary>The GOAL the agent was given — its instruction / prompt (for a supervisor-spawned agent, the per-subtask instruction the model authored; for an agent.code node, the node's configured goal). Read from the durable task envelope; null only when the task blob is absent/malformed. Display only.</summary>
+    public string? Goal { get; init; }
+
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? HeartbeatAt { get; init; }

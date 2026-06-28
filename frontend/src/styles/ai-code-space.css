@@ -2571,6 +2571,10 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-alloc { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); min-width: 0; }
 .acs-root .agent-terminal-role { flex: none; font-size: 11px; font-weight: 550; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 .acs-root .agent-terminal-subtask { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.acs-root .agent-terminal-goal { background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.acs-root .agent-terminal-goal > summary { padding: 7px 12px; font-size: 11px; font-weight: 550; color: var(--muted); cursor: pointer; user-select: none; list-style-position: inside; }
+.acs-root .agent-terminal-goal > summary:hover { color: var(--ink-2); }
+.acs-root .agent-terminal-goal-body { padding: 0 12px 10px 12px; font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
 /* Per-cell rerun history — pick an earlier attempt of THIS node/branch to read that run's record. */
 .acs-root .agent-terminal-attempts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-terminal-attempts-label { font-size: 11px; color: var(--muted); margin-right: 1px; }
