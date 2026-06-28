@@ -259,21 +259,115 @@ public class AgentDefinitionFlowTests
         row.RawFrontmatterJson.ShouldContain("custom_future_key", customMessage: "the verbatim frontmatter blob must survive untouched — it's the lossless-forward-compat source");
     }
 
-    /// <summary>Inserts a STORE snapshot (Origin=Imported, Scope=Store) directly — the Library shape that must never surface on the bench list.</summary>
-    private async Task SeedStoreSnapshotAsync(Guid teamId, Guid userId, string slug)
+    [Fact]
+    public async Task Instantiate_from_store_copies_content_into_a_new_working_unbound_persona_linked_to_the_snapshot()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var snapshotId = await SeedStoreSnapshotAsync(teamId, userId, "code-reviewer");
+
+        Guid newId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            newId = await scope.Resolve<IMediator>().Send(new InstantiateAgentFromStoreCommand { SourceDefinitionId = snapshotId });
+
+        newId.ShouldNotBe(snapshotId, "instantiate creates a NEW row, not a reference to the snapshot");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var copy = await db.AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == newId);
+
+        // A runnable bench copy…
+        copy.Scope.ShouldBe(DefinitionScope.Working);
+        copy.Origin.ShouldBe(AgentDefinitionOrigin.Imported);
+        copy.Slug.ShouldBe("code-reviewer", "the snapshot's handle is free on the bench, so the copy keeps it");
+
+        // …carrying the snapshot's content verbatim (compare the tool list against the snapshot's STORED value, since
+        // the jsonb column canonicalizes whitespace on round-trip — what matters is the copy matches the snapshot)…
+        var snapshot = await db.AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == snapshotId);
+        copy.SystemPrompt.ShouldBe("You are code-reviewer.");
+        copy.Model.ShouldBe("claude-opus-4-8");
+        copy.Description.ShouldBe(snapshot.Description);
+        copy.ToolsJson.ShouldBe(snapshot.ToolsJson, "the tool allow-list is copied — it governs what the instantiated agent may run");
+        copy.ToolsJson.ShouldContain("Read");
+        copy.McpServersJson.ShouldContain("github");
+        copy.RawFrontmatterJson.ShouldContain("custom_future_key");
+
+        // …with provenance back to the snapshot, but no pack (so it never re-appears in the Library)…
+        copy.SourceDefinitionId.ShouldBe(snapshotId);
+        copy.SourceVersion.ShouldBe("v-code-reviewer", "the copy captures the snapshot's content version as the LHS of a future sync");
+        copy.PackId.ShouldBeNull();
+
+        // …unbound…
+        (await db.AgentSkillBinding.CountAsync(b => b.AgentDefinitionId == newId)).ShouldBe(0, "a from-store copy starts with no skill bindings");
+
+        // …and it lands on the bench while the snapshot stays in the Library.
+        using var benchScope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var bench = await benchScope.Resolve<IMediator>().Send(new ListAgentDefinitionsQuery());
+        bench.Select(a => a.Id).ShouldContain(newId);
+        bench.Select(a => a.Id).ShouldNotContain(snapshotId, "the snapshot stays in the Library, off the bench");
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_auto_disambiguates_a_handle_a_bench_persona_already_owns()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            await scope.Resolve<IMediator>().Send(new CreateAgentDefinitionCommand { Name = "Code Reviewer" });   // bench already owns "code-reviewer"
+
+        var snapshotId = await SeedStoreSnapshotAsync(teamId, userId, "code-reviewer");
+
+        Guid newId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            newId = await scope.Resolve<IMediator>().Send(new InstantiateAgentFromStoreCommand { SourceDefinitionId = snapshotId });
+
+        using var verify = _fixture.BeginScope();
+        var copy = await verify.Resolve<CodeSpaceDbContext>().AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == newId);
+        copy.Slug.ShouldBe("code-reviewer-2", "the handle is taken on the bench, so instantiate suffixes rather than dead-ending");
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_rejects_a_non_store_or_foreign_id()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var (otherTeam, otherUser) = await SeedTeamAsync();
+
+        // A WORKING bench persona is not a store snapshot → not instantiable.
+        Guid workingId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            workingId = await scope.Resolve<IMediator>().Send(new CreateAgentDefinitionCommand { Name = "Bench Agent" });
+
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<IMediator>().Send(new InstantiateAgentFromStoreCommand { SourceDefinitionId = workingId }));
+
+        // A foreign team's store snapshot → not accessible (no cross-team read).
+        var foreignSnapshot = await SeedStoreSnapshotAsync(otherTeam, otherUser, "foreign-snap");
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            await Should.ThrowAsync<KeyNotFoundException>(() => scope.Resolve<IMediator>().Send(new InstantiateAgentFromStoreCommand { SourceDefinitionId = foreignSnapshot }));
+    }
+
+    /// <summary>Inserts a STORE snapshot (Origin=Imported, Scope=Store) with real content directly — the Library shape that must never surface on the bench list. Returns its id.</summary>
+    private async Task<Guid> SeedStoreSnapshotAsync(Guid teamId, Guid userId, string slug)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
         db.AgentDefinition.Add(new AgentDefinition
         {
-            Id = Guid.NewGuid(),
+            Id = id,
             TeamId = teamId,
             Slug = slug,
             Name = slug,
+            Description = $"{slug} description",
+            SystemPrompt = $"You are {slug}.",
+            Model = "claude-opus-4-8",
+            ToolsJson = "[\"Read\",\"Grep\"]",
+            McpServersJson = "[{\"name\":\"github\"}]",
+            RawFrontmatterJson = "{\"name\":\"" + slug + "\",\"custom_future_key\":7}",
             Origin = AgentDefinitionOrigin.Imported,
             Scope = DefinitionScope.Store,
+            ContentVersion = "v-" + slug,
             PackId = null,   // pack provenance is irrelevant to the scope filter under test
             SourcePath = $"agents/{slug}.md",
             CreatedDate = now,
@@ -282,6 +376,7 @@ public class AgentDefinitionFlowTests
             LastModifiedBy = userId,
         });
         await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task<Guid> SeedImportedAgentAsync(Guid teamId, Guid userId, Guid packId)

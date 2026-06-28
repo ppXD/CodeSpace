@@ -33,6 +33,19 @@ export function useCreateAgent() {
   });
 }
 
+/** Instantiate a working bench persona by copying a Library store snapshot; invalidates the bench list and the Library (its state may shift). Returns the new id. */
+export function useInstantiateAgentFromStore() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (sourceDefinitionId: string) => agentsApi.instantiateAgentFromStore(sourceDefinitionId),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["agents"] }),
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
+    ]),
+  });
+}
+
 /** Replace a persona's editable surface (PUT); invalidates the list + that persona's detail. */
 export function useUpdateAgent() {
   const queryClient = useQueryClient();

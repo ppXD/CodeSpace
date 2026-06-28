@@ -96,6 +96,14 @@ public class AgentsController : ControllerBase
         return CreatedAtAction(nameof(Get), new { agentDefinitionId = id }, new { id });
     }
 
+    /// <summary>Instantiate a new working bench persona by copying a Library store snapshot (the New-agent "from Library" path). Returns the new persona id.</summary>
+    [HttpPost("from-store")]
+    public async Task<IActionResult> InstantiateFromStore([FromBody] InstantiateAgentFromStoreCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return CreatedAtAction(nameof(Get), new { agentDefinitionId = id }, new { id });
+    }
+
     [HttpPut("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Update([FromRoute] Guid agentDefinitionId, [FromBody] UpdateAgentDefinitionCommand command, CancellationToken cancellationToken)
     {
