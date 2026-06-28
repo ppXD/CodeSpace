@@ -16,6 +16,9 @@ export interface LaunchWorkspaceRepo {
 export interface LaunchFormState {
   taskText: string;
   surface: TaskSurfaceKind;
+  /** When set, the launch CONTINUES this work session as its next turn (binds to `LaunchTaskCommand.SessionId`). The
+   *  session-room composer passes it; the Launch modal leaves it unset (a fresh session is opened). */
+  sessionId?: string;
   workspace: LaunchWorkspaceRepo[];
   effort: string;
   autonomy: string;
@@ -102,6 +105,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     modelCredentialId: state.modelCredentialId || null,
     modelCredentialModelId: state.modelCredentialModelId || null,
   };
+
+  // Continue an existing session as its next turn (the session-room composer sets it); unset ⇒ a fresh session opens.
+  if (state.sessionId) input.sessionId = state.sessionId;
 
   const relatedRepositories = buildRelatedRepositories(state.workspace, primary);
   if (relatedRepositories) input.relatedRepositories = relatedRepositories;

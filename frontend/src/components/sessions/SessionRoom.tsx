@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import { ApiError } from "@/api/request";
+import type { NodeManifestDto } from "@/api/workflows";
 import type { SessionDetail, SessionTurn } from "@/api/sessions";
-import { tasksApi } from "@/api/tasks";
+import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { compactAge } from "@/components/workflows/cockpit";
 import { RunCanvas } from "@/components/workflows/RunCanvas";
 import { RunStatusBadge } from "@/components/workflows/RunStatusBadge";
@@ -15,11 +14,11 @@ import { isRunActive, useNodeManifests, useWorkflowRun } from "@/hooks/use-workf
  * The Session room — the run-detail experience for a run that belongs to a work session. Renders the session as a
  * conversation of turns (each turn = a run: the user's message + the run's outcome), where each turn's box embeds the
  * live RunCanvas (real-time progress while running, the final graph once done). Entered from the Runs list → a run →
- * here, anchored at that run's turn. A composer at the bottom continues the thread as the next turn.
+ * here, anchored at that run's turn. The composer is the generic Launch Task composer, docked + floating, continuing
+ * the thread as the next turn.
  */
-export function SessionRoom({ teamSlug, session, anchorRunId, onOpenRoom }: { teamSlug: string; session: SessionDetail; anchorRunId: string; onOpenRoom: () => void }) {
+export function SessionRoom({ teamSlug, session, onOpenRoom }: { teamSlug: string; session: SessionDetail; onOpenRoom: () => void }) {
   const navigate = useNavigate();
-  const qc = useQueryClient();
 
   const manifests = useNodeManifests();
   const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
@@ -30,30 +29,13 @@ export function SessionRoom({ teamSlug, session, anchorRunId, onOpenRoom }: { te
     return () => clearInterval(t);
   }, []);
 
-  const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-
   const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
 
-  const send = async () => {
-    const text = draft.trim();
-    if (!text || sending) return;
-
-    setSending(true);
-    setSendError(null);
-    try {
-      await tasksApi.launch({ taskText: text, surfaceKind: "chat", sessionId: session.id, effort: "quick" });
-      setDraft("");
-      // The continue starts the next turn — refetch the thread (the by-run resolver feeds this view) so it appears.
-      await qc.invalidateQueries({ queryKey: ["run-session", anchorRunId] });
-      await qc.invalidateQueries({ queryKey: ["session", session.id] });
-    } catch (e) {
-      setSendError(e instanceof ApiError ? e.message : "Couldn't continue the session.");
-    } finally {
-      setSending(false);
-    }
-  };
+  // Carry the thread's working depth into the composer: the next turn defaults to the same effort tier the latest turn
+  // ran as (the composer's other settings are the operator's to confirm). A continue navigates to the new run, which
+  // re-resolves to this session anchored at the new turn.
+  const latest = session.turns[session.turns.length - 1];
+  const effort = inferEffort(latest?.projectionKind);
 
   return (
     <section className="ct" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -64,9 +46,9 @@ export function SessionRoom({ teamSlug, session, anchorRunId, onOpenRoom }: { te
           <span className="cur">{session.title}</span>
         </div>
         <div className="ct-title-row">
-          <div>
-            <h1 className="ct-title">{session.title}</h1>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+          <div style={{ minWidth: 0 }}>
+            <h1 className="ct-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.title}</h1>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
               {session.kind} · {session.status} · {session.turns.length} turn{session.turns.length === 1 ? "" : "s"}
             </div>
           </div>
@@ -78,12 +60,12 @@ export function SessionRoom({ teamSlug, session, anchorRunId, onOpenRoom }: { te
         </div>
       </div>
 
-      <div className="ct-body" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        <div style={{ maxWidth: 920, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="ct-body" style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 4 }}>
+        <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", flexDirection: "column", gap: 26, paddingTop: 4 }}>
           {session.summary && (
-            <div style={{ padding: "10px 14px", background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "var(--radius)", fontSize: 13, color: "var(--muted)" }}>
-              <div style={{ fontWeight: 500, color: "var(--ink-2)", marginBottom: 4 }}>Earlier work (summary)</div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{session.summary}</div>
+            <div style={{ padding: "11px 15px", background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", fontSize: 13, color: "var(--muted)" }}>
+              <div style={{ fontWeight: 500, color: "var(--ink-2)", marginBottom: 4 }}>Earlier work · summary</div>
+              <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{session.summary}</div>
             </div>
           )}
 
@@ -102,60 +84,62 @@ export function SessionRoom({ teamSlug, session, anchorRunId, onOpenRoom }: { te
         </div>
       </div>
 
-      <div style={{ borderTop: "1px solid var(--line)", padding: "12px 16px", background: "var(--panel)" }}>
-        <div style={{ maxWidth: 920, margin: "0 auto", display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }}
-            placeholder={session.status === "Archived" ? "This session is archived." : "Continue this session — describe the next turn…"}
-            rows={2}
-            disabled={sending || session.status === "Archived"}
-            style={{ flex: 1, resize: "none", padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--line-2)", borderRadius: "var(--radius)", color: "var(--ink)", font: "inherit" }}
-          />
-          <button className="btn btn-primary" disabled={sending || !draft.trim() || session.status === "Archived"} onClick={() => void send()}>
-            {sending ? "Sending…" : "Send"}
-          </button>
-        </div>
-        {sendError && <div style={{ maxWidth: 920, margin: "6px auto 0", color: "var(--danger)", fontSize: 12 }}>{sendError}</div>}
+      {/* Composer — the generic Launch Task composer, docked + floating (no hard divider). Continues the thread as the
+          next turn (sessionId injected); the effort defaults to the thread's depth. */}
+      <div className="session-composer">
+        <LaunchTaskModal
+          inline
+          surface="chat"
+          sessionId={session.id}
+          autofill={{ effort }}
+          onClose={() => {}}
+          onLaunched={(runId) => openRun(runId)}
+        />
       </div>
     </section>
   );
 }
 
-function TurnCard({ turn, manifestByType, anchored, nowMs, onOpenRun }: { turn: SessionTurn; manifestByType: Map<string, import("@/api/workflows").NodeManifestDto>; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void }) {
-  // The canvas (a React Flow instance) is rendered for the anchored + still-running turns by default; older finished
-  // turns collapse to a one-line header you can expand — keeps a long thread from mounting many graphs at once.
+function inferEffort(projectionKind?: string | null): string {
+  if (projectionKind === "supervisor") return "deep";
+  if (projectionKind === "single-agent") return "quick";
+  if (projectionKind && (projectionKind.startsWith("plan-map") || projectionKind === "coordinated-loop")) return "standard";
+  return "auto";
+}
+
+function TurnCard({ turn, manifestByType, anchored, nowMs, onOpenRun }: { turn: SessionTurn; manifestByType: Map<string, NodeManifestDto>; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void }) {
+  // The canvas (a React Flow instance) renders for the anchored + still-running turns by default; older finished turns
+  // collapse to a one-line header you can expand — so a long thread never mounts many graphs at once.
   const [open, setOpen] = useState(anchored || isRunActive(turn.runStatus));
 
   return (
-    <div style={anchored ? { outline: "2px solid var(--accent)", borderRadius: "var(--radius-lg)", padding: 10, margin: -10 } : undefined}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {turn.userMessage && (
-        <div style={{ alignSelf: "flex-end", marginLeft: "auto", maxWidth: "80%", padding: "10px 14px", background: "var(--accent-soft)", color: "var(--ink)", borderRadius: "var(--radius-lg)", whiteSpace: "pre-wrap", marginBottom: 10 }}>
+        <div style={{ alignSelf: "flex-end", maxWidth: "82%", padding: "10px 14px", background: "var(--accent-soft)", color: "var(--ink)", borderRadius: 14, fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
           {turn.userMessage}
         </div>
       )}
 
-      <div style={{ border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", background: "var(--panel)", overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", flexWrap: "wrap", borderBottom: open ? "1px solid var(--line)" : "none" }}>
-          <span style={{ fontSize: 12, color: "var(--muted)" }}>Turn {turn.turnIndex}</span>
+      <div style={{ border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", background: "var(--panel)", overflow: "hidden", boxShadow: anchored ? "0 0 0 2px var(--accent-soft)" : "var(--shadow-1)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", flexWrap: "wrap", borderBottom: open ? "1px solid var(--line)" : "none" }}>
+          <span style={{ fontSize: 11.5, fontWeight: 500, color: "var(--muted)", letterSpacing: ".02em" }}>TURN {turn.turnIndex}</span>
           <RunStatusBadge status={turn.runStatus} />
           {turn.projectionKind && <span style={{ fontSize: 12, color: "var(--muted-2)" }}>{turn.projectionKind}</span>}
           {turn.hasPendingDecision && <span className="wf-status-pill wf-status-suspended">Needs you</span>}
           {turn.attemptCount > 1 && <span style={{ fontSize: 12, color: "var(--muted)" }}>· {turn.attemptCount} attempts</span>}
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 12, color: "var(--muted-2)" }}>{compactAge(turn.createdDate, nowMs)}</span>
-          <button className="btn btn-ghost" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => setOpen((o) => !o)}>
+          <button className="btn btn-ghost" style={{ padding: "3px 8px", fontSize: 12 }} onClick={() => setOpen((o) => !o)}>
             {open ? "Hide canvas" : "Show canvas"}
           </button>
-          <button className="btn btn-ghost" style={{ padding: "2px 8px", fontSize: 12 }} onClick={() => onOpenRun(turn.runId)}>Open full detail →</button>
+          <button className="btn btn-ghost" style={{ padding: "3px 8px", fontSize: 12 }} onClick={() => onOpenRun(turn.runId)}>Open detail →</button>
         </div>
 
         {open && <TurnCanvas runId={turn.runId} manifestByType={manifestByType} onOpenRun={onOpenRun} />}
 
         {(turn.result || turn.error || turn.producedBranch) && (
-          <div style={{ padding: "10px 14px", borderTop: open ? "1px solid var(--line)" : "none" }}>
-            {turn.result && <div style={{ color: "var(--ink-2)", fontSize: 14, whiteSpace: "pre-wrap" }}>{turn.result}</div>}
+          <div style={{ padding: "11px 14px", borderTop: open ? "1px solid var(--line)" : "none" }}>
+            {turn.result && <div style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{turn.result}</div>}
             {turn.error && <div style={{ color: "var(--danger)", fontSize: 13, marginTop: turn.result ? 6 : 0, whiteSpace: "pre-wrap" }}>{turn.error}</div>}
             {turn.producedBranch && <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>branch <code>{turn.producedBranch}</code></div>}
           </div>
@@ -165,7 +149,7 @@ function TurnCard({ turn, manifestByType, anchored, nowMs, onOpenRun }: { turn: 
   );
 }
 
-function TurnCanvas({ runId, manifestByType, onOpenRun }: { runId: string; manifestByType: Map<string, import("@/api/workflows").NodeManifestDto>; onOpenRun: (runId: string) => void }) {
+function TurnCanvas({ runId, manifestByType, onOpenRun }: { runId: string; manifestByType: Map<string, NodeManifestDto>; onOpenRun: (runId: string) => void }) {
   const run = useWorkflowRun(runId);
   const r = run.data;
 

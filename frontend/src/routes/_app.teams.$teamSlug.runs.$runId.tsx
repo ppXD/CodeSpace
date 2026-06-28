@@ -89,7 +89,7 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   // A run that belongs to a session opens AS the Session room (the conversation), unless the user flipped to the
   // classic Run Room. The resolver returns the whole thread anchored at this run's turn.
   if (!forceRoom && session.data) {
-    return <SessionRoom teamSlug={teamSlug} session={session.data} anchorRunId={effectiveRunId} onOpenRoom={() => setForceRoom(true)} />;
+    return <SessionRoom teamSlug={teamSlug} session={session.data} onOpenRoom={() => setForceRoom(true)} />;
   }
 
   return (

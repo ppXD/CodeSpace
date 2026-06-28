@@ -5185,6 +5185,16 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* Card holds NO horizontal padding — tab/row boxes go full-bleed so their dividers meet the
    border cleanly; overflow:hidden clips full-width rows to the rounded corners. */
 .lt3-cust { margin: 10px 0 2px; background: #fbfaf7; border: 1px solid #e8e1d7; border-radius: 12px; padding: 0; overflow: hidden; }
+
+/* Session room: the SAME Launch Task composer DOCKED inline (no portal / modal chrome) — the .lt3-box floats on its
+ * own border + shadow. A compact input (the modal's is 140px); the container fades content into the page bg above it,
+ * so there is no hard white divider line. */
+.lt3-inline { width: 100%; max-width: 820px; margin: 0 auto; }
+.lt3-inline .lt3-box { padding: 12px 12px 10px; border-radius: 14px; box-shadow: var(--shadow-2); }
+.lt3-inline .lt3-input { min-height: 56px; font-size: 15px; }
+.lt3-inline .lt3-cust { margin-top: 8px; }
+.session-composer { padding: 6px 16px 16px; background: linear-gradient(to top, var(--bg) 72%, transparent); }
+
 .lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }
