@@ -170,6 +170,40 @@ public class RealHarnessExecutionTests
         };
 
     [Theory]
+    [InlineData("codex-cli", "resume")]
+    [InlineData("claude-code", "--resume")]
+    public async Task Real_executor_carries_the_resume_flag_and_prior_session_to_the_spawned_process(string harnessKind, string expectedFlag)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // P3.2 end-to-end: a task carrying ResumeFromSessionId flows through the REAL harness BuildInvocation → the
+        // REAL runner → a REAL OS process whose argv the fake CLI dumps. Proves the built resume flag (and the prior
+        // id) actually reach the spawned process — not just the in-memory SandboxSpec. No producer sets the field in
+        // production yet (a later slice does); this pins the plumbing the CONTINUE decision will rely on.
+        var (commandEnvVar, fixture) = SessionCase(harnessKind);
+        using var cli = new FakeCli(commandEnvVar, fixture);
+
+        var argvDump = Path.Combine(Path.GetTempPath(), "cs-argv-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_ARGV_OUT"] = argvDump };
+            var runId = await CreateRunAsync(teamId, harnessKind, env, resumeFromSessionId: "prior-session-7c3");
+
+            await ExecuteRealAsync(runId);
+
+            File.Exists(argvDump).ShouldBeTrue($"{harnessKind}: the fake CLI was spawned (argv dump written)");
+            var argv = File.ReadAllText(argvDump);
+            argv.ShouldContain(expectedFlag, customMessage: $"{harnessKind}: the real executor → runner carried the resume flag to the spawned process argv");
+            argv.ShouldContain("prior-session-7c3", customMessage: $"{harnessKind}: the prior session id reached the process so the CLI resumes the right conversation");
+        }
+        finally
+        {
+            if (File.Exists(argvDump)) File.Delete(argvDump);
+        }
+    }
+
+    [Theory]
     [InlineData("codex-cli")]
     [InlineData("claude-code")]
     public async Task Real_harness_streams_parses_persists_and_completes_a_session(string harnessKind)
@@ -289,11 +323,11 @@ public class RealHarnessExecutionTests
         await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(runId, cancellationToken);
     }
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, string harnessKind, IReadOnlyDictionary<string, string> env, int timeoutSeconds = 1800)
+    private async Task<Guid> CreateRunAsync(Guid teamId, string harnessKind, IReadOnlyDictionary<string, string> env, int timeoutSeconds = 1800, string? resumeFromSessionId = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "fix the billing tests", Harness = harnessKind, Model = null, Environment = env, TimeoutSeconds = timeoutSeconds },
+            new AgentTask { Goal = "fix the billing tests", Harness = harnessKind, Model = null, Environment = env, TimeoutSeconds = timeoutSeconds, ResumeFromSessionId = resumeFromSessionId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
@@ -352,7 +386,9 @@ public class RealHarnessExecutionTests
             File.WriteAllText(FixturePath, fixtureContent);
 
             var script = Path.Combine(_dir, "fake-cli.sh");
-            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
+            // When FAKE_ARGV_OUT is set, dump the spawned process's args ($@) there first — lets a test prove the REAL
+            // executor→runner carried a built flag (e.g. --resume) all the way to the process argv. Inert otherwise.
+            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             _original = Environment.GetEnvironmentVariable(commandEnvVar);

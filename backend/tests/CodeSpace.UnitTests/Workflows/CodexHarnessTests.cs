@@ -87,6 +87,43 @@ public class CodexHarnessTests
         spec.TimeoutSeconds.ShouldBe(900);
     }
 
+    [Fact]
+    public void Builds_a_resume_invocation_when_a_prior_session_is_set()
+    {
+        // P3.2: a CONTINUE re-stage rewrites the `exec --json` seed to `exec resume <id> --json` so Codex picks up
+        // the prior thread. CRUCIAL: the sandbox rides as `-c sandbox_mode=<mode>`, NOT `--sandbox` — the resume
+        // SUBCOMMAND rejects --sandbox (clap "unexpected argument", exit 2; verified against the real codex 0.142.2),
+        // while -c is accepted on it and sandbox_mode is the config key the flag maps to. The Goal stays last.
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
+
+        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "Fix the failing billing tests" });
+    }
+
+    [Fact]
+    public void Resume_path_never_emits_the_exec_only_sandbox_flag()
+    {
+        // Regression guard for the real-binary defect a permissive fake-CLI test masked: `codex exec resume` rejects
+        // `--sandbox` (it's an `exec`-only flag). A resume invocation must carry the confinement as `-c sandbox_mode=…`
+        // and NEVER the bare flag — across read-only + workspace-write — or the run dies at clap before it starts.
+        foreach (var scope in new[] { AgentWriteScope.Workspace, AgentWriteScope.ReadOnly })
+        {
+            var args = Harness.BuildInvocation(Task(scope: scope) with { ResumeFromSessionId = "thr-x" }).Args;
+
+            args.ShouldNotContain("--sandbox", customMessage: $"a resume invocation (scope={scope}) must not carry the exec-only --sandbox flag");
+            args.ShouldContain($"sandbox_mode={(scope == AgentWriteScope.ReadOnly ? "read-only" : "workspace-write")}", customMessage: "the confinement must still be applied via the resume-accepted -c override");
+        }
+    }
+
+    [Fact]
+    public void Omits_the_resume_subcommand_when_no_prior_session()
+    {
+        // Null prior session (a fresh run) → the plain `exec --json` seed, byte-identical to today.
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
+
+        spec.Args.ShouldNotContain("resume");
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" });
+    }
+
     [Theory]
     [InlineData(null)]   // persona Model=empty rule: blank model → let Codex pick its own default
     [InlineData("")]

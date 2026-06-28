@@ -13,6 +13,7 @@ namespace CodeSpace.UnitTests.Agents;
 /// lenient env override (operator-correctable drift + Codex prices; a malformed entry is skipped, not fatal).
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("ModelPriceEnvMutation")]   // serialize the price-env mutator against the parallel suite — it mutates a process-global env var live price-readers consult
 public sealed class AgentCostPricingTests
 {
     [Fact]

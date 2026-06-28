@@ -24,6 +24,16 @@ public sealed record AgentTask
     public string? Model { get; init; }
 
     /// <summary>
+    /// P3.2: the prior CLI session/thread id this run CONTINUES — the harness threads it back as <c>--resume &lt;id&gt;</c>
+    /// (Claude) / <c>exec resume &lt;id&gt;</c> (Codex) so a re-staged agent picks up its earlier conversation instead of
+    /// cold-starting. Null (the default) ⇒ a fresh run, argv byte-identical to a pre-field envelope. The re-stage
+    /// decision that SETS this (from the prior run's captured <see cref="AgentRunResult.SessionId"/>) is a later slice;
+    /// <c>[JsonIgnore(WhenWritingNull)]</c> so an unset hint adds nothing to the persisted task_json.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ResumeFromSessionId { get; init; }
+
+    /// <summary>
     /// Optional Agent persona (<c>AgentDefinition</c>) this run resolves from — null = a pure-inline run (no persona).
     /// When set, the dispatch-time <c>IAgentDefinitionResolver</c> merges the persona's system prompt + model into this
     /// task before the run is persisted; the id is preserved here as run provenance.
