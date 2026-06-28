@@ -73,6 +73,22 @@ describe("buildWaves", () => {
   });
 });
 
+describe("phaseRerunTarget honest gating", () => {
+  const failedNodeWave = (id: string): AgentWave => ({ id, kind: "node", label: id, startedAt: null, agents: [agentWith("Failure")] });
+
+  it("offers 'Rerun from here' for a failed node when no gate set is given (the endpoint 422 stays the backstop)", () => {
+    expect(phaseRerunTarget(failedNodeWave("build"))).toEqual({ kind: "node", nodeId: "build" });
+  });
+
+  it("offers it when the node IS in the server's rerunnable set", () => {
+    expect(phaseRerunTarget(failedNodeWave("build"), new Set(["build"]))).toEqual({ kind: "node", nodeId: "build" });
+  });
+
+  it("HIDES it when the node is NOT rerunnable per the server (a suspendable / container node that would 422)", () => {
+    expect(phaseRerunTarget(failedNodeWave("supervisor"), new Set(["other"]))).toBeNull();
+  });
+});
+
 describe("formatDuration", () => {
   it("renders sub-minute as seconds, minutes as 'Nm Ns', hours as 'Nh Nm'", () => {
     expect(formatDuration(45_000)).toBe("45s");

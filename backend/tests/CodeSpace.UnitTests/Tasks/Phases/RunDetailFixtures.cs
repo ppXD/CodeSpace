@@ -30,6 +30,7 @@ internal static class RunDetailFixtures
         Outputs = outputs ?? EmptyObject,
         StartedAt = startedAt,
         AgentRunId = agentRunId,
+        RerunnableFromHere = false,
     };
 
     public static WorkflowRunNodeSummary MapBranch(string mapNodeId, int index, string bodyNodeId, NodeStatus status, string agentRunId) => new()
@@ -41,6 +42,7 @@ internal static class RunDetailFixtures
         Inputs = EmptyObject,
         Outputs = EmptyObject,
         AgentRunId = agentRunId,
+        RerunnableFromHere = false,
     };
 
     /// <summary>A grandchild branch row of a NESTED map: its iteration key is the engine's composed "&lt;outerKey&gt;/&lt;innerSegment&gt;" shape (e.g. "outerMap#0/innerMap#0"). The outer fan-out must NOT fold this — only its DIRECT elements.</summary>
@@ -53,6 +55,7 @@ internal static class RunDetailFixtures
         Inputs = EmptyObject,
         Outputs = EmptyObject,
         AgentRunId = agentRunId,
+        RerunnableFromHere = false,
     };
 
     public static JsonElement MapOutputs(int count, int failed) =>

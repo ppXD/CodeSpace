@@ -15,11 +15,12 @@ import { buildWaves, composeActivity } from "./runActivity";
  * selecting a phase / agent scrolls the rail to it. The full raw audit lives in the Trace tab; both queries poll in
  * lockstep while the run is live.
  */
-export function RunActivityTimeline({ runId, selectedPhaseId, selectedAgentRunId, onSelectAgent }: {
+export function RunActivityTimeline({ runId, selectedPhaseId, selectedAgentRunId, onSelectAgent, rerunnableNodeIds }: {
   runId: string;
   selectedPhaseId?: string | null;
   selectedAgentRunId?: string | null;
   onSelectAgent?: (agentRunId: string | null) => void;
+  rerunnableNodeIds?: ReadonlySet<string>;
 }) {
   const timeline = useRunTimeline(runId);
   const phases = useRunPhases(runId);
@@ -44,7 +45,7 @@ export function RunActivityTimeline({ runId, selectedPhaseId, selectedAgentRunId
               <span className="run-activity-time">{item.at ? new Date(item.at).toLocaleTimeString() : ""}</span>
               <span className="run-activity-ring" aria-hidden="true"></span>
               <div className="run-activity-wavewrap">
-                <TimelinePhase wave={item.wave} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />
+                <TimelinePhase wave={item.wave} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} rerunnableNodeIds={rerunnableNodeIds} />
               </div>
             </li>
           );

@@ -54,6 +54,9 @@ export function RunCanvas({ definition, runNodes, runStatus, manifestByType, run
 function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: RunCanvasProps) {
   const statuses = useMemo(() => statusByNodeId(runNodes), [runNodes]);
   const rowsByNodeId = useMemo(() => rowsByNode(runNodes), [runNodes]);
+  // The server-gated set of nodes a from-node rerun would ACCEPT (only a top-level row carries the flag) — drives
+  // whether each node's "Rerun from here" control renders, so a button that would 422 is never shown.
+  const rerunnable = useMemo(() => new Set(runNodes.filter((r) => r.rerunnableFromHere).map((r) => r.nodeId)), [runNodes]);
   // A fanned-out map collapses to ONE auto-sized fan-out card: its worker body's branch rows ride on the map
   // node, and the marker + worker body nodes (and their intra-edges) are hidden.
   const collapse = useMemo(() => runFanoutCollapse(definition, manifestByType, rowsByNodeId), [definition, manifestByType, rowsByNodeId]);
@@ -64,7 +67,7 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
   const nodes = useMemo<Node<WorkflowNodeData>[]>(
     () => definitionToRfNodes(definition, manifestByType).map((n) => {
       const fanout = collapse.fanoutRowsByMapId.get(n.id);
-      const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), runRows: rowsByNodeId.get(n.id), fanout };
+      const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), rerunnableFromHere: rerunnable.has(n.id), runRows: rowsByNodeId.get(n.id), fanout };
 
       // A collapsed map → an auto-sized fan-out card: keep its structure (incl. parentId for a nested map), drop
       // only the container sizing. See collapsedMapNode.
@@ -79,7 +82,7 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
         ...(collapse.hiddenNodeIds.has(n.id) ? { hidden: true } : {}),
       };
     }),
-    [definition, manifestByType, statuses, rowsByNodeId, collapse],
+    [definition, manifestByType, statuses, rerunnable, rowsByNodeId, collapse],
   );
 
   // Drop the intra-body edges of a collapsed map (both endpoints are now hidden) so no dangling connector remains.

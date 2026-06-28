@@ -124,4 +124,15 @@ public sealed record WorkflowRunNodeSummary
     /// from the <c>workflow_run_wait</c> row, which persists post-resolution.
     /// </summary>
     public string? AgentRunId { get; init; }
+
+    /// <summary>
+    /// Whether a from-node rerun (<c>POST /runs/{id}/rerun-from-node</c>) would be ACCEPTED with this node as the
+    /// target — computed by the SAME three gates the rerun endpoint enforces: the forward closure holds no suspendable
+    /// / container node, AND every kept upstream cell that ran settled reusably (Success / Skipped / Failure-with-error
+    /// -edge). Lets the UI offer "Rerun from here" ONLY where the backend will actually accept it, instead of surfacing
+    /// a button that 422s on click. Run-state dependent (the reusability gate), so a node can flip rerunnable once a
+    /// failed sibling settles. Always <c>false</c> for an iterated (container-body) row — only a top-level node is a
+    /// from-node rerun target.
+    /// </summary>
+    public required bool RerunnableFromHere { get; init; }
 }

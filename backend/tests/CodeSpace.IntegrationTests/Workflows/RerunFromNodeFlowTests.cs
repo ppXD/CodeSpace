@@ -722,9 +722,127 @@ public class RerunFromNodeFlowTests
         (await RunCountAsync(teamId)).ShouldBe(before, "a suspend-blocked rerun must write nothing");
     }
 
+    [Fact]
+    public async Task The_run_detail_RerunnableFromHere_flag_matches_what_the_endpoint_accepts_per_node()
+    {
+        // P1.1 honest gating: the run-detail RerunnableFromHere flag is computed by the SAME gate the rerun endpoint
+        // enforces, so flag==true ⇔ POST /rerun-from-node ACCEPTS, flag==false ⇔ it refuses (422). Proven WIRE-HONEST
+        // on PureBodiedLoopDef (start → loop(container) → end): the loop is rerun-unsupported by Kind, so its closure
+        // poisons start + loop (false), while a from-"end" rerun (closure = {end}) is clean (true). The UI gates the
+        // "Rerun from here" button on this flag, so it can never offer a button that 422s.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PureBodiedLoopDef());
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var detail = await scope.Resolve<IWorkflowService>().GetRunAsync(originalRunId, teamId, CancellationToken.None);
+            detail.ShouldNotBeNull();
+
+            bool Flag(string nodeId) => detail!.Nodes.Single(n => n.NodeId == nodeId && n.IterationKey == WorkflowIterationKeys.TopLevel).RerunnableFromHere;
+
+            Flag("end").ShouldBeTrue("a from-node rerun of the terminal (closure = {end}) is accepted");
+            Flag("start").ShouldBeFalse("start's closure includes the loop container → the endpoint would refuse");
+            Flag("loop").ShouldBeFalse("the loop container itself is rerun-unsupported by Kind");
+
+            detail!.Nodes.Where(n => n.IterationKey != WorkflowIterationKeys.TopLevel)
+                .ShouldAllBe(n => !n.RerunnableFromHere, "an iterated (container-body) row is never a from-node rerun target");
+        }
+
+        // Correlate the flag with the REAL endpoint per node — the wire-honest proof the UI can trust the flag.
+        var rerunId = await RerunAsync(originalRunId, "end", teamId, userId);   // flag==true → ACCEPTED
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+
+        var blocked = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
+            await RerunAsync(originalRunId, "start", teamId, userId));          // flag==false → refused
+        blocked.BlockedNodeIds.ShouldContain("loop", "the flag==false node is exactly the one the endpoint blocks on");
+    }
+
+    [Fact]
+    public async Task The_flag_is_false_for_a_suspendable_node_and_its_upstream_matching_the_endpoint_refusal()
+    {
+        // The CanSuspend ARM — the agent.code / agent.supervisor class. A suspendable node (here a SuspendProbe; a
+        // supervisor / agent node is the same CanSuspend manifest) and ANYTHING upstream of it are not from-node
+        // rerunnable, so the flag is false for both — matching the endpoint's RerunBlockedByUnsupportedNodeException.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-flag-cansuspend-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendInlineDef(probeKey));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
+
+        using var scope = _fixture.BeginScope();
+        var detail = await scope.Resolve<IWorkflowService>().GetRunAsync(originalRunId, teamId, CancellationToken.None);
+        detail.ShouldNotBeNull();
+
+        bool Flag(string nodeId) => detail!.Nodes.Single(n => n.NodeId == nodeId && n.IterationKey == WorkflowIterationKeys.TopLevel).RerunnableFromHere;
+
+        Flag("suspendprobe").ShouldBeFalse("a CanSuspend node is never a from-node rerun target (the supervisor / agent.code class)");
+        Flag("start").ShouldBeFalse("start's closure includes the suspendable node → the endpoint would refuse");
+    }
+
+    [Fact]
+    public async Task The_flag_is_false_when_a_kept_upstream_sibling_did_not_settle_reusably_matching_the_endpoint_422()
+    {
+        // Gate (c) — the run-STATE-dependent kept-upstream-reusability refusal (RerunUpstreamNotReusableException), the
+        // 3rd of the endpoint's 3 fail-closed gates. A failing diamond start → {flakyA, flakyB} → end: both siblings
+        // fail in one ready wave. flakyB's CLOSURE {flakyB, end} is structurally clean (gate b passes), but a
+        // rerun-from-flakyB KEEPS flakyA, which is Failure-without-error-edge → not reusable → the endpoint 422s. The
+        // flag must model this and read FALSE, so the UI never offers a button that 422s. (Rerun-from-start keeps
+        // nothing → accepted, so start stays true.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var keyA = "diamond-A-" + Guid.NewGuid().ToString("N");
+        var keyB = "diamond-B-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FailingDiamondDef(keyA, keyB));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var detail = await scope.Resolve<IWorkflowService>().GetRunAsync(originalRunId, teamId, CancellationToken.None);
+            detail.ShouldNotBeNull();
+
+            bool Flag(string nodeId) => detail!.Nodes.Single(n => n.NodeId == nodeId && n.IterationKey == WorkflowIterationKeys.TopLevel).RerunnableFromHere;
+
+            Flag("flakyB").ShouldBeFalse("rerun-from-flakyB keeps flakyA (Failure, no error edge) → not reusable, the endpoint would 422 — the flag must model gate (c), not just the closure");
+            Flag("flakyA").ShouldBeFalse("symmetric: rerun-from-flakyA keeps flakyB, also non-reusable");
+            Flag("start").ShouldBeTrue("rerun-from-start keeps nothing (a full replay) → accepted");
+        }
+
+        // The wire-honest correlation for gate (c): the flag==false node is exactly the one the endpoint 422s on.
+        var blocked = await Should.ThrowAsync<RerunUpstreamNotReusableException>(async () =>
+            await RerunAsync(originalRunId, "flakyB", teamId, userId));
+        blocked.Message.ShouldContain("flakyA", Case.Insensitive);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  Workflow definition builders
     // ─────────────────────────────────────────────────────────────────────────────
+
+    // start → {flakyA, flakyB}(both always fail, no error edge) → end. A failing diamond: rerunning from one failed
+    // sibling KEEPS the other (non-reusable) → the endpoint's kept-upstream-reusability gate refuses it.
+    private static WorkflowDefinition FailingDiamondDef(string keyA, string keyB) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flakyA", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyA}}","failTimes":99}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flakyB", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyB}}","failTimes":99}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "flakyA" },
+            new() { From = "start", To = "flakyB" },
+            new() { From = "flakyA", To = "end" },
+            new() { From = "flakyB", To = "end" },
+        },
+    };
 
     // start(manual) → mutator(side-effecting, counts) → transform(json_emit echoes mutator.n) → end(terminal).
     private static WorkflowDefinition MutatorTransformDef(string probeKey) => new()

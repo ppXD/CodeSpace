@@ -18,12 +18,16 @@ export function failedMapIndices(wave: AgentWave): number[] {
 }
 
 /** A wave's PHASE-LEVEL rerun target: a map fan-out → bulk "Rerun N failed items"; a failed agent step → "Rerun from here"; otherwise none (supervisor / authored / plain phases are model-owned or non-rerunnable here). */
-export function phaseRerunTarget(wave: AgentWave): RerunTarget | null {
+export function phaseRerunTarget(wave: AgentWave, rerunnableNodeIds?: ReadonlySet<string>): RerunTarget | null {
   if (wave.kind === "map") {
     const failed = failedMapIndices(wave);
     return failed.length > 0 ? { kind: "mapItem", mapNodeId: wave.id, failedIndices: failed, totalCount: wave.agents.length } : null;
   }
   if ((wave.kind === "agent" || wave.kind === "node") && wave.agents.some((a) => FAILED_STATUSES.has(a.status))) {
+    // Offer "Rerun from here" only where the server's gate would ACCEPT a from-node rerun for this node (its closure
+    // has no suspendable/container node). When the gate set is absent (no run-detail in scope), fall back to offering
+    // — the endpoint's 422 stays the honest backstop.
+    if (rerunnableNodeIds && !rerunnableNodeIds.has(wave.id)) return null;
     return { kind: "node", nodeId: wave.id };
   }
   return null;

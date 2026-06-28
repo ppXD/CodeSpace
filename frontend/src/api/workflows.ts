@@ -334,6 +334,13 @@ export interface WorkflowRunNodeSummary {
    * embed the run's live status + event timeline inline for this step. `null`/absent otherwise.
    */
   agentRunId?: string | null;
+  /**
+   * Whether a from-node rerun (`POST /runs/{id}/rerun-from-node`) would be ACCEPTED with this node as the
+   * target — computed server-side by the SAME gate the rerun endpoint enforces. The UI offers "Rerun from
+   * here" ONLY when true, instead of surfacing a button that 422s on click. Always `false`/absent for an
+   * iterated (container-body) row.
+   */
+  rerunnableFromHere?: boolean;
 }
 
 /** The outstanding wait a Suspended run is parked on — drives the resume affordance. */

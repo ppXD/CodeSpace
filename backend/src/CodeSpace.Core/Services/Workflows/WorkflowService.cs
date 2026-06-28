@@ -1331,6 +1331,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var typeKeyByNodeId = definition?.Nodes.ToDictionary(node => node.Id, node => node.TypeKey)
             ?? new Dictionary<string, string>();
 
+        // This run's settled top-level cell statuses feed the rerun gate's kept-upstream-reusability check (gate c).
+        var topLevelStatusByNodeId = nodes
+            .Where(n => n.IterationKey == WorkflowIterationKeys.TopLevel)
+            .ToDictionary(n => n.NodeId, n => n.Status);
+
+        var rerunnableNodeIds = ComputeRerunnableTopLevelNodeIds(definition, topLevelStatusByNodeId);
+
         return new WorkflowRunDetail
         {
             Id = run.Id,
@@ -1344,7 +1351,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
             CreatedDate = run.CreatedDate,
-            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId, resolvedOutputsByNode)).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId, resolvedOutputsByNode, rerunnableNodeIds)).ToList(),
             Definition = definition,
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
@@ -1480,7 +1487,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode,
         IReadOnlyDictionary<string, string> typeKeyByNodeId,
-        IReadOnlyDictionary<(string NodeId, string IterationKey), JsonElement> resolvedOutputsByNode) => new()
+        IReadOnlyDictionary<(string NodeId, string IterationKey), JsonElement> resolvedOutputsByNode,
+        IReadOnlySet<string> rerunnableTopLevelNodeIds) => new()
     {
         NodeId = n.NodeId,
         IterationKey = n.IterationKey,
@@ -1492,8 +1500,56 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         StartedAt = n.StartedAt,
         CompletedAt = n.CompletedAt,
         ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey)),
-        AgentRunId = agentRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
+        AgentRunId = agentRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey)),
+        // Only a TOP-LEVEL node is a from-node rerun target; an iterated (container-body) row is never one.
+        RerunnableFromHere = n.IterationKey == WorkflowIterationKeys.TopLevel && rerunnableTopLevelNodeIds.Contains(n.NodeId),
     };
+
+    /// <summary>
+    /// The top-level node ids a from-node rerun would ACCEPT as a target — computed via the EXACT three gates the rerun
+    /// endpoint enforces: (a) <see cref="RerunFromNodePlanner.Plan"/>'s forward closure, (b) the same
+    /// <c>IsRerunUnsupported</c> predicate <see cref="EnsureNoUnsupportedNodeInClosure"/> throws on (no suspendable /
+    /// container node in the re-run closure), AND (c) the kept-upstream-reusability check
+    /// <see cref="ResolveReusableKeptCellsAsync"/> throws on (every KEPT top-level cell that ran must have settled
+    /// reusably). So the run-detail flag NEVER diverges from what <c>POST /rerun-from-node</c> accepts. Gate (c) is
+    /// run-STATE dependent (a node can become rerunnable once a failed sibling settles reusably), so the flag reflects
+    /// THIS run's top-level cell statuses. Empty when the run has no pinned definition.
+    /// </summary>
+    private IReadOnlySet<string> ComputeRerunnableTopLevelNodeIds(WorkflowDefinition? definition, IReadOnlyDictionary<string, NodeStatus> topLevelStatusByNodeId)
+    {
+        if (definition is null) return new HashSet<string>();
+
+        var typeByNode = definition.Nodes.ToDictionary(node => node.Id, node => node.TypeKey);
+
+        return definition.Nodes
+            .Where(node => node.ParentId == null)
+            .Select(node => node.Id)
+            .Where(id => IsRerunnableFromNode(definition, typeByNode, topLevelStatusByNodeId, id))
+            .ToHashSet();
+    }
+
+    /// <summary>Whether the from-node rerun gate would ACCEPT this node — its forward closure holds no suspendable / container node (gate b) AND every kept upstream cell that ran settled reusably (gate c). A container-internal / unknown id (the planner rejects) is not a target. Pure reuse of the gate predicates; never a re-implementation.</summary>
+    private bool IsRerunnableFromNode(WorkflowDefinition definition, IReadOnlyDictionary<string, string> typeByNode, IReadOnlyDictionary<string, NodeStatus> topLevelStatusByNodeId, string nodeId)
+    {
+        RerunPlan plan;
+        try { plan = Rerun.RerunFromNodePlanner.Plan(definition, nodeId); }
+        catch (RerunTargetNotFoundException) { return false; }
+
+        // Gate (b): no suspendable / container node in the re-run closure. A closure node whose type is no longer
+        // loaded (deregistered since the run) conservatively blocks — the run-detail poll must never throw on it (the
+        // endpoint's Resolve would; the flag stays false so the UI hides the would-fail button).
+        if (plan.ReRunNodeIds.Any(id => !typeByNode.TryGetValue(id, out var typeKey) || !_nodeRegistry.Contains(typeKey) || IsRerunUnsupported(_nodeRegistry.Resolve(typeKey).Manifest, id, exemptMapId: null)))
+            return false;
+
+        // Gate (c): a kept upstream cell that RAN (has a status) must have settled reusably — else the endpoint throws
+        // RerunUpstreamNotReusableException. A kept node with no cell never ran (a dead branch) and is fine.
+        return plan.KeptNodeIds.All(keptId => !topLevelStatusByNodeId.TryGetValue(keptId, out var status) || IsKeptCellReusable(definition, keptId, status));
+    }
+
+    /// <summary>The EXACT reusability predicate <see cref="ResolveReusableKeptCellsAsync"/> applies to a kept top-level cell: it settled Success / Skipped, or it Failed but routes an error edge.</summary>
+    private static bool IsKeptCellReusable(WorkflowDefinition definition, string nodeId, NodeStatus status) =>
+        status is NodeStatus.Success or NodeStatus.Skipped
+        || (status == NodeStatus.Failure && definition.Edges.Any(e => e.From == nodeId && e.SourceHandle == WorkflowHandles.Error));
 
     /// <summary>Re-inflate offloaded-value refs in each node's outputs for the run-detail display. Cheap when no refs are present (ResolveAsync only fetches a value that IS a ref); keyed by (nodeId, iterationKey) to match the per-cell rows.</summary>
     private async Task<Dictionary<(string NodeId, string IterationKey), JsonElement>> ResolveNodeOutputsForDisplayAsync(IReadOnlyList<WorkflowRunNode> nodes, Guid teamId, CancellationToken cancellationToken)
