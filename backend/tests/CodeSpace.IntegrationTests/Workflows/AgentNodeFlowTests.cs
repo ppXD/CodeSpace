@@ -467,7 +467,9 @@ public class AgentNodeFlowTests
 
             var svc = verify.Resolve<IAgentRunService>();
 
-            (await svc.GetSummaryForTeamAsync(agentRunId, teamId, CancellationToken.None))!.Status.ShouldBe(AgentRunStatus.Running);
+            var summary = (await svc.GetSummaryForTeamAsync(agentRunId, teamId, CancellationToken.None))!;
+            summary.Status.ShouldBe(AgentRunStatus.Running);
+            summary.Goal.ShouldNotBeNullOrWhiteSpace("the agent's goal/instruction is projected from the durable TaskJson so the terminal can show WHAT it was told to do");
             (await svc.GetEventsAsync(agentRunId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.Text == "Analyzing the repo…");
 
             // A foreign team leaks neither status nor events.

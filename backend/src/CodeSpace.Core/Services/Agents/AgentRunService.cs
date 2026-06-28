@@ -544,6 +544,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             Id = run.Id,
             Status = run.Status,
             Harness = run.Harness,
+            Goal = ReadGoal(run.TaskJson),
             Error = run.Error,
             StartedAt = run.StartedAt,
             HeartbeatAt = run.HeartbeatAt,
@@ -551,6 +552,24 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             CreatedDate = run.CreatedDate,
         };
     }
+
+    /// <summary>The agent's GOAL (its instruction / prompt) off the durable task envelope — a NARROW projection of the one leaf, so the heavy task fields (workspace / permissions / repos) never materialize; null on an absent/malformed blob (best-effort, never throws).</summary>
+    private static string? ReadGoal(string? taskJson)
+    {
+        if (string.IsNullOrEmpty(taskJson)) return null;
+
+        try
+        {
+            var goal = JsonSerializer.Deserialize<GoalSlice>(taskJson, AgentJson.Options)?.Goal;
+            return string.IsNullOrWhiteSpace(goal) ? null : goal;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record GoalSlice(string? Goal);
 
     public async Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken)
     {

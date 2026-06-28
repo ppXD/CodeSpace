@@ -80,6 +80,15 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         </div>
       )}
 
+      {/* The exact GOAL / instruction this agent was given (its prompt) — collapsible since it can be long. Lets you
+          see WHAT the supervisor told this agent to do, not just its output. Absent when the task blob is unavailable. */}
+      {run.data?.goal && (
+        <details className="agent-terminal-goal">
+          <summary>Instruction</summary>
+          <div className="agent-terminal-goal-body">{run.data.goal}</div>
+        </details>
+      )}
+
       {attemptRuns.length > 1 && (
         <div className="agent-terminal-attempts" role="tablist" aria-label="This node's rerun history">
           <span className="agent-terminal-attempts-label">Ran</span>
