@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Agents;
 
@@ -118,6 +119,20 @@ public sealed record AgentTask
     /// toward the operator's intent, exactly like the MCP gate.
     /// </summary>
     public bool? PushProducedBranch { get; init; }
+
+    /// <summary>
+    /// Per-run opt-in to reviewing the agent's OUTPUT (its produced change) with an INDEPENDENT critic at completion.
+    /// <see cref="ReviewMode.None"/> (the default) ⇒ no review (byte-identical). v1 supports the GATE shape only: a
+    /// disapproved change re-grades a would-be <c>Succeeded</c> run to <see cref="AgentRunStatus.NeedsReview"/> so a human
+    /// looks before the downstream PR-open (which only proceeds on Succeeded) consumes it — the captured work is preserved.
+    /// <c>[JsonIgnore(WhenWritingDefault)]</c> so an unconfigured task's persisted task_json is byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? ReviewerModelId { get; init; }
 }
 
 /// <summary>What the agent may do — the declarative half of the sandbox policy a harness maps to its flags.</summary>

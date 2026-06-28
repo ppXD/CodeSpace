@@ -567,6 +567,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ReattachAsync(runId, CancellationToken.None);

@@ -978,6 +978,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, cancellationToken);
@@ -1108,6 +1109,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
@@ -1135,6 +1137,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);

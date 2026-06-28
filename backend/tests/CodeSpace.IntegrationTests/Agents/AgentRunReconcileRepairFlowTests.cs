@@ -54,6 +54,7 @@ public class AgentRunReconcileRepairFlowTests
                 scope.Resolve<ISandboxRunnerRegistry>(), scope.Resolve<IAgentWorkspaceResolver>(),
                 scope.Resolve<IModelCredentialResolver>(), scope.Resolve<IWorkspaceProviderRegistry>(),
                 scope.Resolve<IAgentRunCompletionNotifier>(), scope.Resolve<IServiceScopeFactory>(), db,
+                scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
                 NullLogger<AgentRunExecutor>.Instance);
 
             await executor.ExecuteAsync(runId, CancellationToken.None);
