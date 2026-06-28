@@ -1,8 +1,11 @@
+using System.Text;
 using System.Text.Json;
 using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Review;
+using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -10,6 +13,7 @@ using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -95,9 +99,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IServiceScopeFactory _scopeFactory;
     // Reads the parent WorkflowRun's status at the claim point — the authoritative no-sandbox-under-terminal-parent guard.
     private readonly CodeSpaceDbContext _db;
+    // The generic adversarial-review critic — runs over the produced change at completion when output-review is opted in.
+    private readonly IStructuredCritic _critic;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -109,6 +115,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _notifier = notifier;
         _scopeFactory = scopeFactory;
         _db = db;
+        _critic = critic;
         _logger = logger;
     }
 
@@ -232,6 +239,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, effectiveTask, result, workspace, cancellationToken).ConfigureAwait(false);
 
             result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+            result = await ReviewOutputIfEnabledAsync(agentRunId, effectiveTask, result, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -666,6 +675,70 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the branch-push failure warning event", runId);
+        }
+    }
+
+    /// <summary>
+    /// v1 GATE: review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical
+    /// (no per-run <c>OutputReviewMode</c> baked, OR the shared <see cref="CriticToggle"/> kill-switch is off). Self-skips
+    /// when there's nothing to gate — a non-success, or a no-op / re-attach run with no captured diff. A DISAPPROVED change
+    /// re-grades the would-be <see cref="AgentRunStatus.Succeeded"/> run to <see cref="AgentRunStatus.NeedsReview"/>
+    /// (<see cref="CompletionDisposition.NeedsReview"/>) so a human looks before the downstream PR-open (Succeeded-gated)
+    /// consumes it; the captured work is preserved. FAILS OPEN — a failed review keeps the original result. Improve is
+    /// treated as Gate in v1 (a produced diff is not cheaply re-derivable; the agent re-run loop is a later arc).
+    /// </summary>
+    internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (task.OutputReviewMode == ReviewMode.None || !CriticToggle.Enabled) return result;
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
+
+        // Defer to the A1 completion gate: a run that left a decision.request unanswered will be re-graded to
+        // NeedsReview(NeedsDecision) at the completion choke point WITH the specific decision linkage (the stronger
+        // signal). Don't pre-empt it by flipping to output-flagged here — A1 always takes precedence (the same ordering
+        // FinalOutputReview/A2 respects). Resolve the ledger from a fresh scope (the heartbeat-loop pattern), not a ctor dep.
+        using (var ledgerScope = _scopeFactory.CreateScope())
+        {
+            var ledger = ledgerScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
+            if (await ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false) is not null) return result;
+        }
+
+        var verdict = await _critic.ReviewAsync(
+            new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
+            teamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+
+        if (verdict.Failed || verdict.Approved) return result;   // fail-open, or a clean pass ⇒ byte-identical
+
+        await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
+
+        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged" };
+    }
+
+    /// <summary>Render the produced change for the critic — the git unified diff (already capped), with the agent's summary + the changed-file list as context.</summary>
+    private static string RenderChange(AgentRunResult result)
+    {
+        var builder = new StringBuilder();
+
+        if (!string.IsNullOrWhiteSpace(result.Summary)) builder.AppendLine($"Agent summary: {result.Summary}").AppendLine();
+
+        builder.AppendLine($"Changed files ({result.ChangedFiles.Count}): {string.Join(", ", result.ChangedFiles)}").AppendLine();
+        builder.AppendLine("Diff:").AppendLine(string.IsNullOrEmpty(result.Patch) ? "(no unified diff captured)" : result.Patch);
+
+        return builder.ToString();
+    }
+
+    /// <summary>Append a Warning event so the operator sees on the timeline WHY the run was flagged for review. Best-effort: a failure to record it never masks the run's terminal write.</summary>
+    private async Task AppendOutputFlaggedWarningAsync(Guid runId, CriticVerdict verdict, CancellationToken cancellationToken)
+    {
+        var issues = verdict.Issues.Count > 0 ? $" Issues: {string.Join("; ", verdict.Issues)}." : "";
+
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Output flagged by the reviewer — a human should look before this is consumed: {verdict.Rationale}{issues}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-flagged warning event", runId);
         }
     }
 
