@@ -248,6 +248,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             EnableMcp = request.Overrides.EnableMcp,
             AllowedTools = request.Overrides.AllowedTools is { Count: > 0 } tools ? tools : null,
             PushBranch = request.Overrides.PushBranch,
+            OutputReviewMode = request.Overrides.OutputReviewMode,
+            ReviewerModelId = request.Overrides.ReviewerModelId,
         };
     }
 

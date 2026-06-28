@@ -371,6 +371,8 @@ public sealed partial class RealSupervisorActionExecutor
             ApprovalConversationId = context.ConversationId,
             EnableMcpEndpoint = profile?.EnableMcp,
             PushProducedBranch = forcePushBranch ? true : profile?.PushBranch,
+            OutputReviewMode = profile?.OutputReviewMode ?? ReviewMode.None,
+            ReviewerModelId = profile?.ReviewerModelId,
         };
     }
 

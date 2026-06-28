@@ -136,6 +136,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         AddIfPresent(map, "integrateBranches", profile.IntegrateBranches);
         AddIfPresent(map, "autonomyLevel", NullIfBlank(profile.AutonomyLevel));
         AddIfPresent(map, "cwdMode", profile.CwdMode?.ToString());
+        // The output-review critic for each spawned agent — None ⇒ omitted (the enum int) ⇒ byte-identical.
+        AddIfPresent(map, "outputReviewMode", profile.OutputReviewMode == ReviewMode.None ? (object?)null : (int)profile.OutputReviewMode);
+        AddIfPresent(map, "reviewerModelId", profile.ReviewerModelId?.ToString());
 
         return map.Count > 0 ? map : null;
     }

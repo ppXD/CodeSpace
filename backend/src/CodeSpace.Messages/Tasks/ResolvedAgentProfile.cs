@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks;
 
@@ -45,6 +46,12 @@ public sealed record ResolvedAgentProfile
 
     /// <summary>Per-run opt-in to PUBLISHING the agent's diff as its own branch (<c>codespace/agent/&lt;runId&gt;</c>) even when the deployment-wide push flag is off. Null → defer to the ambient flag (byte-identical). OR-gate: this forces publish ON, it cannot force it OFF; the diff is captured for review either way.</summary>
     public bool? PushBranch { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews the agent's OUTPUT at completion — the projection writes it onto the agent.code node's <c>outputReviewMode</c>. <see cref="ReviewMode.None"/> (the default) → no review (byte-identical). v1 = Gate.</summary>
+    public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the output critic runs on (written onto the node's <c>reviewerModelId</c>). Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 
     /// <summary>Deep/supervisor only: per-run opt-in to integrating the spawned agents' diffs into one reviewable branch at merge. Null → defer to the ambient flag. Inert on a single-agent run.</summary>
     public bool? IntegrateBranches { get; init; }

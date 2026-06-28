@@ -51,6 +51,12 @@ export interface LaunchFormState {
   acceptanceCriteria: string[];
   /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
   timeLimit: string;
+  /** Review "Decisions" — how an independent critic reviews each supervisor DECISION: `"None"` (default) / `"Gate"` / `"Improve"`. Deep only. Sent (as the enum name) only when not None. */
+  decisionReview: string;
+  /** Review "Agent output" — how an independent critic reviews each agent's produced change: `"None"` (default) / `"Gate"`. All tiers. Sent only when not None. */
+  outputReview: string;
+  /** Review "Reviewer model" — the credentialed-model ROW id the critic(s) run on, or `""` (Auto). Sent only when a review mode is active. */
+  reviewerModel: string;
 }
 
 /** The canonical default acceptance chips — shared by the modal seed/reset and the omit-check, so an UNMODIFIED set is
@@ -141,6 +147,15 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
       && JSON.stringify(state.acceptanceCriteria) !== JSON.stringify(DEFAULT_ACCEPTANCE)) {
     input.acceptanceCriteria = [...state.acceptanceCriteria];
   }
+
+  // The critic review modes (the enum NAME — the API has a string-enum converter). Decision review is a supervisor
+  // concern (deep/auto only); output review applies to any agent run. "None" (the default) ⇒ omitted ⇒ byte-identical.
+  // The reviewer model rides along only when a review is actually active (else baking it would not be byte-identical).
+  const decisionOn = tierExposesCaps(state.effort) && state.decisionReview !== "None";
+  const outputOn = state.outputReview !== "None";
+  if (decisionOn) input.decisionReviewMode = state.decisionReview;
+  if (outputOn) input.outputReviewMode = state.outputReview;
+  if (state.reviewerModel && (decisionOn || outputOn)) input.reviewerModelId = state.reviewerModel;
 
   return input;
 }

@@ -723,6 +723,62 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_single_agent_launch_bakes_the_operator_output_review_into_the_agent_config()
+    {
+        // The operator's agent-output review mode + reviewer model bind through the command path → ResolvedAgentProfile →
+        // the projected agent.code node's outputReviewMode (the enum int) + reviewerModelId, where the executor runs the
+        // critic at completion. Unset ⇒ omitted ⇒ None ⇒ no review (byte-identical).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+        var reviewerRow = await FirstTeamPoolRowAsync(teamId);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Touch the bound repo", RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick,
+            Overrides = new TaskExecutionOverrides { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRow },
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+        ReadAgentOutputReviewMode(run.DefinitionSnapshotJson!).ShouldBe((int)ReviewMode.Gate,
+            "the operator's output-review mode binds into the single-agent agent.code config as the enum int");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_bakes_the_operator_output_review_into_the_supervisor_snapshot()
+    {
+        // The same output-review mode on a Deep launch binds into the supervisor agentProfile's outputReviewMode, where
+        // each spawned agent reads it (Spawn → AgentTask.OutputReviewMode). Unset ⇒ omitted ⇒ None (byte-identical).
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Overrides = new TaskExecutionOverrides { OutputReviewMode = ReviewMode.Gate },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorOutputReviewMode(run.DefinitionSnapshotJson!).ShouldBe((int)ReviewMode.Gate,
+                "the operator's output-review mode binds into the supervisor agentProfile config");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1282,6 +1338,25 @@ public class TaskLaunchFlowTests
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
 
         return agent.GetProperty("config").TryGetProperty("pushBranch", out var v) ? v.GetBoolean() : null;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>outputReviewMode</c> (the baked int) out of the frozen snapshot. Null when absent (None ⇒ no review, byte-identical).</summary>
+    private static int? ReadAgentOutputReviewMode(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        return agent.GetProperty("config").TryGetProperty("outputReviewMode", out var v) ? v.GetInt32() : null;
+    }
+
+    /// <summary>Reads the supervisor node's agentProfile.outputReviewMode (the baked int) out of the frozen snapshot. Null when absent (None).</summary>
+    private static int? ReadSupervisorOutputReviewMode(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("outputReviewMode", out var v)
+            ? v.GetInt32() : null;
     }
 
     /// <summary>Reads the supervisor node's agentProfile.pushBranch out of the frozen snapshot. Null when the key is absent (defers to the ambient flag).</summary>
