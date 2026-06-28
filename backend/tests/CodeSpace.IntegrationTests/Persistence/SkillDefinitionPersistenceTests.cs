@@ -93,7 +93,7 @@ public class SkillDefinitionPersistenceTests
     }
 
     [Fact]
-    public async Task Pack_is_unique_per_team_source_but_allows_multiple_custom_and_reuse_after_soft_delete()
+    public async Task Pack_is_unique_per_team_source_and_holds_one_custom_singleton_with_reuse_after_soft_delete()
     {
         var teamId = await SeedTeamAsync();
 
@@ -106,9 +106,10 @@ public class SkillDefinitionPersistenceTests
         // Same url, DIFFERENT subpath → distinct source, no collision (two packs from different subdirs of one repo).
         await Should.NotThrowAsync(() => InsertPackEntityAsync(NewPack(teamId, PackKind.Github, "sub", "wshobson/agents", subpath: "plugins")));
 
-        // The Custom pack has url=null; the `url IS NOT NULL` partial clause excludes it, so a team may hold many.
+        // The Custom pack (url=null) is excluded from uq_pack_team_source, but uq_pack_team_custom (0089) makes it a
+        // per-team SINGLETON — the Library-authoring home: one succeeds, a second collides.
         await Should.NotThrowAsync(() => InsertPackEntityAsync(NewPack(teamId, PackKind.Custom, "custom-a", url: null, subpath: null)));
-        await Should.NotThrowAsync(() => InsertPackEntityAsync(NewPack(teamId, PackKind.Custom, "custom-b", url: null, subpath: null)));
+        await Should.ThrowAsync<DbUpdateException>(() => InsertPackEntityAsync(NewPack(teamId, PackKind.Custom, "custom-b", url: null, subpath: null)));
 
         // Soft-delete the first github pack, then the same source is free to re-add (partial index excludes deleted).
         using (var scope = _fixture.BeginScope())
