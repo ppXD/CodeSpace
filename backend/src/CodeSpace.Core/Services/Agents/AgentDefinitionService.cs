@@ -268,8 +268,15 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
     {
         var baseSlug = DeriveValidSlug(name);
 
+        // Prefetch every Working slug that could be a candidate. A candidate is baseSlug or a `-N` variant whose base
+        // is baseSlug TRIMMED to keep the suffix under the 64-char cap; the shortest such trim is ~58 chars (DeriveSlug
+        // never emits consecutive hyphens, so TrimEnd drops at most one), so a 50-char prefix is a prefix of baseSlug
+        // AND of every trimmed variant. Probing on it (vs the full baseSlug) covers the truncation case too; the exact
+        // `taken.Contains(candidate)` check below keeps it precise (any over-matched unrelated slug is simply ignored).
+        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
+
         var taken = (await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null && (a.Slug == baseSlug || a.Slug.StartsWith(baseSlug + "-")))
+            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null && a.Slug.StartsWith(probe))
             .Select(a => a.Slug)
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);

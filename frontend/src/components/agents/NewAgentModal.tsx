@@ -39,14 +39,19 @@ export function NewAgentModal({ onCustom, onCreated, onClose }: NewAgentModalPro
   }, [onClose, pending]);
 
   function back() {
+    instantiate.reset();   // drop any failed-attempt banner so it doesn't follow us into another pack
     if (packId) { setPackId(null); setQuery(""); }
     else setStep("choose");
   }
 
   async function pick(sourceDefinitionId: string) {
     if (pending) return;
-    const { id } = await instantiate.mutateAsync(sourceDefinitionId);
-    onCreated(id);
+    try {
+      const { id } = await instantiate.mutateAsync(sourceDefinitionId);
+      onCreated(id);
+    } catch {
+      /* failure surfaced via the instantiate.isError banner below */
+    }
   }
 
   const sub = step === "choose"
@@ -54,7 +59,10 @@ export function NewAgentModal({ onCustom, onCreated, onClose }: NewAgentModalPro
     : packId ? "Pick an agent to copy into a new working agent." : "Choose a Library pack.";
 
   const eligiblePacks = packsWithAgents(packs.data ?? []);
-  const agents = agentArtifacts(pack.data?.artifacts ?? [], query);
+  // Trust the detail ONLY when it's for the SELECTED pack — usePack keeps the previous pack's data as a placeholder
+  // during a switch (isLoading stays false), which would otherwise let a fast click instantiate the wrong pack's agent.
+  const packReady = !!packId && pack.data?.pack.id === packId;
+  const agents = packReady ? agentArtifacts(pack.data!.artifacts, query) : [];
 
   return createPortal(
     <>
@@ -90,6 +98,7 @@ export function NewAgentModal({ onCustom, onCreated, onClose }: NewAgentModalPro
 
           {step === "library" && !packId && (
             packs.isLoading ? <div className="wf-form-help">Loading your Library…</div>
+            : packs.isError ? <div className="wf-form-help">Couldn't load your Library — try again.</div>
             : eligiblePacks.length === 0 ? <div className="wf-form-help">No agents in your Library yet — import a pack first.</div>
             : (
               <div className="wf-add-choices">
@@ -111,7 +120,7 @@ export function NewAgentModal({ onCustom, onCreated, onClose }: NewAgentModalPro
                 <Ic.Search size={14} />
                 <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search agents…" aria-label="Search agents" autoFocus />
               </div>
-              {pack.isLoading ? <div className="wf-form-help">Loading…</div>
+              {!packReady ? <div className="wf-form-help">Loading…</div>
               : agents.length === 0 ? <div className="wf-form-help">No agent matches your search.</div>
               : (
                 <div className="wf-add-choices">

@@ -280,9 +280,14 @@ public class AgentDefinitionFlowTests
         copy.Origin.ShouldBe(AgentDefinitionOrigin.Imported);
         copy.Slug.ShouldBe("code-reviewer", "the snapshot's handle is free on the bench, so the copy keeps it");
 
-        // …carrying the snapshot's content verbatim…
+        // …carrying the snapshot's content verbatim (compare the tool list against the snapshot's STORED value, since
+        // the jsonb column canonicalizes whitespace on round-trip — what matters is the copy matches the snapshot)…
+        var snapshot = await db.AgentDefinition.AsNoTracking().SingleAsync(a => a.Id == snapshotId);
         copy.SystemPrompt.ShouldBe("You are code-reviewer.");
         copy.Model.ShouldBe("claude-opus-4-8");
+        copy.Description.ShouldBe(snapshot.Description);
+        copy.ToolsJson.ShouldBe(snapshot.ToolsJson, "the tool allow-list is copied — it governs what the instantiated agent may run");
+        copy.ToolsJson.ShouldContain("Read");
         copy.McpServersJson.ShouldContain("github");
         copy.RawFrontmatterJson.ShouldContain("custom_future_key");
 
