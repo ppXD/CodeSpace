@@ -6,7 +6,7 @@ import type { SkillSummary } from "@/api/skills";
 import { skillLabels } from "./skillPicker";
 
 const skill = (id: string, slug: string, name: string): SkillSummary => ({
-  id, teamId: "t", slug, name, description: null, category: null, origin: "Authored", packId: null, createdDate: "2026-01-01T00:00:00Z",
+  id, teamId: "t", slug, name, description: null, category: null, origin: "Authored", packId: null, sourceDefinitionId: null, createdDate: "2026-01-01T00:00:00Z",
 });
 const bound = (id: string, slug: string): AgentBoundSkill => ({ skillDefinitionId: id, slug, name: slug });
 

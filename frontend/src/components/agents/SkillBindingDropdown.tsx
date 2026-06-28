@@ -18,11 +18,16 @@ const SKILL_PAGE_SIZE = 8;
  *
  * `onChange` is the parent's state setter — it accepts a functional updater, which is load-bearing: an awaited mint
  * must append to the CURRENT bound set, not a snapshot captured before the await (else a skill the user removed mid-
- * flight would be resurrected). All the binding bookkeeping (`bySource`, the instantiate mutation, the picked pack)
- * lives on THIS component, which stays mounted across open/close — only the panel below unmounts — so re-opening the
- * dropdown still knows which skills it minted this session (no duplicate copies, correct check state).
+ * flight would be resurrected).
+ *
+ * Whether a store skill is already bound is derived from the agent's `selected` working ids cross-referenced with
+ * each working skill's provenance (`sourceByWorking`: workingId → the store snapshot it was instantiated from) — so
+ * a bound skill shows as bound EVERY time the editor re-opens, not just the session it was minted in. `bySource`
+ * (this session's mints, store → working) only covers the brief window after a mint, before the skills list refetch
+ * lands the new copy in `sourceByWorking`. Re-picking an already-existing copy rebinds it instead of minting a
+ * duplicate — the cause of the "re-open adds a duplicate skill" bug.
  */
-export function SkillBindingDropdown({ selected, onChange, labelFor }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; labelFor: (id: string) => string }) {
+export function SkillBindingDropdown({ selected, onChange, labelFor, sourceByWorking }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; labelFor: (id: string) => string; sourceByWorking: ReadonlyMap<string, string> }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -47,9 +52,16 @@ export function SkillBindingDropdown({ selected, onChange, labelFor }: { selecte
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  // The working copy of `sourceId` that is currently BOUND to this agent (this-session mint preferred, else any
+  // persisted copy whose provenance points at this store skill), or undefined when none is bound.
+  function boundWorkingFor(sourceId: string): string | undefined {
+    const minted = bySource.get(sourceId);
+    if (minted && selected.includes(minted)) return minted;
+    return selected.find((wid) => sourceByWorking.get(wid) === sourceId);
+  }
+
   function isChecked(sourceId: string): boolean {
-    const working = bySource.get(sourceId);
-    return !!working && selected.includes(working);
+    return boundWorkingFor(sourceId) !== undefined;
   }
 
   function selectPack(id: string) {
@@ -58,12 +70,15 @@ export function SkillBindingDropdown({ selected, onChange, labelFor }: { selecte
   }
 
   async function toggle(sourceId: string) {
-    const working = bySource.get(sourceId);
+    const bound = boundWorkingFor(sourceId);
+    if (bound) { onChange((prev) => prev.filter((x) => x !== bound)); return; }                                       // unbind
 
-    if (working && selected.includes(working)) { onChange((prev) => prev.filter((x) => x !== working)); return; }                 // unbind
-    if (working) { onChange((prev) => (prev.includes(working) ? prev : [...prev, working])); return; }                            // rebind the reused copy
+    // Reuse ONLY this session's own mint (toggle off→on without re-minting). A copy from a prior session / another
+    // agent is NOT silently rebound — binding mints a fresh private copy, preserving the instantiate-to-use isolation.
+    const sessionCopy = bySource.get(sourceId);
+    if (sessionCopy) { onChange((prev) => (prev.includes(sessionCopy) ? prev : [...prev, sessionCopy])); return; }
 
-    if (instantiate.isPending) return;                                                                                            // new source → mint + bind
+    if (instantiate.isPending) return;                                                                               // no copy yet → mint + bind
     try {
       const { id } = await instantiate.mutateAsync(sourceId);
       setBySource((m) => new Map(m).set(sourceId, id));

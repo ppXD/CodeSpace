@@ -34,23 +34,24 @@ function lastQuery() {
 }
 
 /** Controlled harness so onChange updates `selected` and the dropdown's check state reflects the new binding.
- *  labelFor is id-passthrough so a bound chip ("ws1") never collides with a panel skill name ("TDD") in queries. */
-function Harness() {
-  const [sel, setSel] = useState<string[]>([]);
+ *  labelFor is id-passthrough so a bound chip ("ws1") never collides with a panel skill name ("TDD") in queries.
+ *  initialSelected + sourceByWorking model an agent re-opened with skills already bound (persisted provenance). */
+function Harness({ initialSelected = [], sourceByWorking = new Map<string, string>() }: { initialSelected?: string[]; sourceByWorking?: Map<string, string> }) {
+  const [sel, setSel] = useState<string[]>(initialSelected);
   return (
     <>
-      <SkillBindingDropdown selected={sel} onChange={setSel} labelFor={(id) => id} />
+      <SkillBindingDropdown selected={sel} onChange={setSel} labelFor={(id) => id} sourceByWorking={sourceByWorking} />
       <div data-testid="sel">{sel.join(",")}</div>
     </>
   );
 }
 
-function setup(opts: { packs?: PackSummary[]; skills?: PagedArtifacts } = {}) {
+function setup(opts: { packs?: PackSummary[]; skills?: PagedArtifacts; initialSelected?: string[]; sourceByWorking?: Map<string, string> } = {}) {
   h.usePacks.mockReturnValue({ data: opts.packs ?? [], isLoading: false, isError: false });
   h.useListPackArtifacts.mockReturnValue({ data: opts.skills, isFetching: false, isError: false });
   h.mutateAsync.mockResolvedValue({ id: "ws1" });
   h.useInstantiate.mockReturnValue({ mutateAsync: h.mutateAsync, isPending: false, isError: false, variables: undefined, reset: vi.fn() });
-  render(<Harness />);
+  render(<Harness initialSelected={opts.initialSelected} sourceByWorking={opts.sourceByWorking} />);
 }
 
 const sel = () => screen.getByTestId("sel").textContent;
@@ -169,5 +170,49 @@ describe("SkillBindingDropdown", () => {
     // Enter on the field itself DOES open it (target === the field).
     fireEvent.keyDown(screen.getByRole("button", { name: /Bound skills/ }), { key: "Enter" });
     expect(screen.getByText("TDD")).toBeInTheDocument();
+  });
+
+  it("shows a skill bound in a PRIOR session as already-bound, via the working copy's provenance", () => {
+    // The agent re-opens with working copy "wsX" bound; wsX was instantiated from store skill "store-tdd".
+    setup({
+      packs: [pack({ id: "p1", skillCount: 1 })],
+      skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }),
+      initialSelected: ["wsX"],
+      sourceByWorking: new Map([["wsX", "store-tdd"]]),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
+    // Derived from selected + provenance — checked even though this session never minted it.
+    expect(screen.getByRole("button", { name: /TDD/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("unbinds the prior-session copy on toggle-off (it was shown bound), without minting anything", async () => {
+    setup({
+      packs: [pack({ id: "p1", skillCount: 1 })],
+      skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }),
+      initialSelected: ["wsX"],
+      sourceByWorking: new Map([["wsX", "store-tdd"]]),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
+    fireEvent.click(screen.getByRole("button", { name: /TDD/ }));        // toggle off → unbind the right (prior-session) copy
+    await waitFor(() => expect(sel()).toBe(""));
+    expect(h.mutateAsync).not.toHaveBeenCalled();                       // unbinding never instantiates
+  });
+
+  it("re-picking a prior-session skill mints a FRESH private copy (does not silently reuse another copy)", async () => {
+    setup({
+      packs: [pack({ id: "p1", skillCount: 1 })],
+      skills: page({ items: [skill({ id: "store-tdd", name: "TDD" })], total: 1 }),
+      // wsX exists in the team (e.g. another agent's copy) but is NOT bound to THIS agent.
+      sourceByWorking: new Map([["wsX", "store-tdd"]]),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Bound skills/ }));
+    expect(screen.getByRole("button", { name: /TDD/ })).toHaveAttribute("aria-pressed", "false");   // not bound here
+
+    fireEvent.click(screen.getByRole("button", { name: /TDD/ }));        // bind → mints a fresh copy, not wsX
+    await waitFor(() => expect(h.mutateAsync).toHaveBeenCalledWith("store-tdd"));
+    await waitFor(() => expect(sel()).toBe("ws1"));
   });
 });

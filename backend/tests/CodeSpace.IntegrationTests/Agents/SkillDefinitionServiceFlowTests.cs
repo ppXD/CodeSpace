@@ -215,6 +215,10 @@ public class SkillDefinitionServiceFlowTests
         var list = await verify.Resolve<ISkillDefinitionService>().ListAsync(teamId, default);
         list.Select(s => s.Id).ShouldContain(newId);
         list.Select(s => s.Id).ShouldNotContain(snapshotId);
+
+        // The list summary carries the provenance link, so the binding picker can recognise this working skill as a
+        // copy of its store snapshot across editor re-opens (and not mint a duplicate).
+        list.Single(s => s.Id == newId).SourceDefinitionId.ShouldBe(snapshotId);
     }
 
     [Fact]

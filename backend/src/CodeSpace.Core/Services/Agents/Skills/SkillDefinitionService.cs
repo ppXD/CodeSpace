@@ -44,6 +44,7 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
                 Category = s.Category,
                 Origin = s.Origin,
                 PackId = s.PackId,
+                SourceDefinitionId = s.SourceDefinitionId,
                 CreatedDate = s.CreatedDate,
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -63,6 +64,7 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
                 RawFrontmatterJson = s.RawFrontmatterJson,
                 Origin = s.Origin,
                 PackId = s.PackId,
+                SourceDefinitionId = s.SourceDefinitionId,
                 SourcePath = s.SourcePath,
                 CreatedDate = s.CreatedDate,
             })
