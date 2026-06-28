@@ -122,6 +122,27 @@ public class ClaudeCodeHarnessTests
         Harness.BuildInvocation(Task()).Args.ShouldContain("--verbose");
     }
 
+    [Fact]
+    public void Builds_a_resume_invocation_when_a_prior_session_is_set()
+    {
+        // P3.2: a CONTINUE re-stage carries the prior session id → `--resume <id>` to pick up the conversation. It
+        // sits right after the seed (before the variadic --allowed-tools / --permission-mode) so the Goal stays the
+        // trailing positional and the prompt is never swallowed.
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-resume-1" });
+
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+    }
+
+    [Fact]
+    public void Omits_the_resume_flag_when_no_prior_session()
+    {
+        // Null prior session (a fresh run) → argv byte-identical to today, never a stray `--resume`.
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
+
+        spec.Args.ShouldNotContain("--resume");
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

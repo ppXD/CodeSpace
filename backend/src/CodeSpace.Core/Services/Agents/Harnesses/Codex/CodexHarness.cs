@@ -74,7 +74,13 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
     public SandboxSpec BuildInvocation(AgentTask task)
     {
-        var args = new List<string> { "exec", "--json" };
+        // P3.2: a CONTINUE re-stage rewrites the `exec --json` seed to `exec resume <id> --json` so Codex picks up the
+        // prior thread. The subcommand must follow `exec` directly; --model, the `-c` overrides (incl. the sandbox on
+        // the resume path — see AppendSandbox), and the Goal positional follow. Null (a fresh run) → the plain seed,
+        // argv byte-identical.
+        var args = task.ResumeFromSessionId is { Length: > 0 } resumeThreadId
+            ? new List<string> { "exec", "resume", resumeThreadId, "--json" }
+            : new List<string> { "exec", "--json" };
 
         // task.Tools is intentionally NOT projected here: Codex has no global tool allow-list (it restricts via
         // --sandbox + per-MCP-server enabled_tools), so a Claude-Code-style tool list has no faithful Codex flag.
@@ -89,8 +95,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
             args.Add(task.Model);
         }
 
-        args.Add("--sandbox");
-        args.Add(SandboxMode(task.Permissions));
+        AppendSandbox(args, task);
 
         // Point Codex at a custom gateway (when one was projected) BEFORE the prompt positional — Codex parses `-c`
         // overrides as flags, so they must precede the goal.
@@ -268,6 +273,28 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
     private static string SandboxMode(AgentPermissions permissions) =>
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "read-only" : "workspace-write";
+
+    /// <summary>
+    /// Apply the sandbox confinement. On a plain <c>exec</c> run it's the <c>--sandbox &lt;mode&gt;</c> flag; on an
+    /// <c>exec resume &lt;id&gt;</c> run it must instead ride as a <c>-c sandbox_mode=&lt;mode&gt;</c> config override —
+    /// because <c>--sandbox</c> is an <c>exec</c>-only flag the <c>resume</c> subcommand REJECTS (clap "unexpected
+    /// argument", exit 2, verified against the pinned codex 0.142.2). <c>-c</c> is accepted on both, and
+    /// <c>sandbox_mode</c> is the recognized config key the flag maps to, so a resumed run keeps the same confinement.
+    /// </summary>
+    private static void AppendSandbox(List<string> args, AgentTask task)
+    {
+        var mode = SandboxMode(task.Permissions);
+
+        if (task.ResumeFromSessionId is { Length: > 0 })
+        {
+            args.Add("-c");
+            args.Add($"sandbox_mode={mode}");
+            return;
+        }
+
+        args.Add("--sandbox");
+        args.Add(mode);
+    }
 
     private static JsonDocument? TryParse(string s)
     {

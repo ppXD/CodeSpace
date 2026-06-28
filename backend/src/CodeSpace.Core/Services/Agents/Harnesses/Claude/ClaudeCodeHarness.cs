@@ -96,6 +96,15 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // --output-format stream-json REQUIRES --verbose in --print mode (the CLI rejects it otherwise).
         var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose" };
 
+        // P3.2: a CONTINUE re-stage threads the prior session id as `--resume <id>` to pick up the conversation.
+        // Placed right after the seed — before the variadic --allowed-tools / --permission-mode — so the trailing
+        // positional Goal is never swallowed. Null (a fresh run) → omitted, argv byte-identical.
+        if (task.ResumeFromSessionId is { Length: > 0 } resumeSessionId)
+        {
+            args.Add("--resume");
+            args.Add(resumeSessionId);
+        }
+
         // B1: the unattended operating contract as a system-prompt append (composes with any persona/goal prompt) — tell
         // the model not to wait on stdin, to raise a genuine blocker via the decision tool, and not to end by asking.
         args.Add("--append-system-prompt");
