@@ -6,10 +6,11 @@ import { toolsLabel } from "./agentRuntime";
 import { RoleAvatar, RoleBadge } from "./roleBadge";
 
 /**
- * One agent on the bench — a role-tinted card that reads as a schedulable unit: identity (avatar + role badge +
- * name + @handle + description), loadout (model / autonomy / tools chips + skill tokens), and a recent-performance
- * micro-row. The role is a display-only heuristic (see deriveRole). Per-agent performance isn't aggregated yet, so
- * the micro-row shows "No recent runs" until that backend slice lands. Click / Enter opens the detail.
+ * One agent on the bench — a role-tinted card that reads like a character sheet: identity (avatar + role badge +
+ * name + @handle + description), a one-line runtime spec (model · autonomy · tools), then a divider and the
+ * skills it carries as tokens, with a recent-performance footer. The role is a display-only heuristic (see
+ * deriveRole). Per-agent performance isn't aggregated yet, so the footer shows "No recent runs" until that
+ * backend slice lands. Click / Enter opens the detail.
  */
 export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; onOpen: () => void }) {
   const role = deriveRole(agent);
@@ -39,10 +40,17 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
         </div>
       </div>
 
-      <div className="ab-chips">
-        <span className="ab-chip"><Ic.Sparkles size={12} /> {agent.model ?? "Auto"}</span>
-        <span className="ab-chip"><Ic.Zap size={12} /> {agent.defaultAutonomy ?? "Standard"}</span>
-        <span className="ab-chip"><Ic.Wrench size={12} /> {toolsLabel(agent.tools)}</span>
+      <div className="ab-meta">
+        <span className="ab-meta-item"><Ic.Sparkles size={12} /> {agent.model ?? "Auto"}</span>
+        <span className="ab-meta-dot">·</span>
+        <span className="ab-meta-item"><Ic.Zap size={12} /> {agent.defaultAutonomy ?? "Standard"}</span>
+        <span className="ab-meta-dot">·</span>
+        <span className="ab-meta-item"><Ic.Wrench size={12} /> {toolsLabel(agent.tools)}</span>
+      </div>
+
+      <div className="ab-divide" />
+
+      <div className="ab-skills">
         <SkillTokens skills={agent.boundSkills} />
       </div>
 
@@ -55,15 +63,15 @@ export function AgentCard({ agent, onOpen }: { agent: AgentDefinitionSummary; on
 
 /** Bound-skill tokens (the AgentSkillBinding join), capped so a heavy persona doesn't blow out the row; empty → a muted hint. */
 function SkillTokens({ skills }: { skills: AgentDefinitionSummary["boundSkills"] }) {
-  if (!skills || skills.length === 0) return <span className="ab-chip ab-chip-muted"><Ic.Puzzle size={12} /> no skills yet</span>;
+  if (!skills || skills.length === 0) return <span className="ab-skills-empty"><Ic.Puzzle size={12} /> No skills bound</span>;
 
-  const shown = skills.slice(0, 4);
+  const shown = skills.slice(0, 5);
   const extra = skills.length - shown.length;
 
   return (
     <>
       {shown.map((s) => <span key={s.skillDefinitionId} className="ab-tok" title={s.name}>@{s.slug}</span>)}
-      {extra > 0 && <span className="ab-chip ab-chip-muted">+{extra}</span>}
+      {extra > 0 && <span className="ab-tok-more">+{extra}</span>}
     </>
   );
 }
