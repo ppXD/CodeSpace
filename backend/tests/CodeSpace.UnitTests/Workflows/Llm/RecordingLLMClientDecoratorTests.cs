@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -60,12 +61,14 @@ public class RecordingLLMClientDecoratorTests
         started.RunId.ShouldBe(Run);
         started.IterationKey.ShouldBe("sup#turn1");
         started.Payload.GetProperty("kind").GetString().ShouldBe("supervisor.decision");
+        started.Payload.GetProperty("provider").GetString().ShouldBe("anthropic", "the serving provider is captured so the record is self-describing under multiple providers");
         started.Payload.GetProperty("model").GetString().ShouldBe("claude-x");
         started.Payload.GetProperty("prompt").GetProperty("system").GetString().ShouldBe("SYS");
         started.Payload.GetProperty("prompt").GetProperty("user").GetString().ShouldBe("USR");
 
         var completed = logger.Calls[1];
         completed.Payload.GetProperty("kind").GetString().ShouldBe("supervisor.decision");
+        completed.Payload.GetProperty("provider").GetString().ShouldBe("anthropic");
         completed.Payload.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(10);
         completed.Payload.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(5);
         completed.Payload.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("stop");
@@ -95,7 +98,32 @@ public class RecordingLLMClientDecoratorTests
         }
 
         logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionFailed });
+        logger.Calls[1].Payload.GetProperty("provider").GetString().ShouldBe("anthropic");
         logger.Calls[1].Payload.GetProperty("error").GetString().ShouldBe("gateway boom");
+    }
+
+    [Fact]
+    public async Task A_large_prompt_and_completion_offload_to_an_artifact_ref_not_inline()
+    {
+        var inner = new FakeClient(Completion());
+        var logger = new CapturingLogger();
+        var decorator = new RecordingLLMClientDecorator(inner);
+
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new OffloadingOffloader())))
+        {
+            await decorator.CompleteStructuredAsync(Request(), CancellationToken.None);
+        }
+
+        // The text prompt field rode as a content-addressed $artifact_id ref, not inline — with the byte size + type.
+        var system = logger.Calls[0].Payload.GetProperty("prompt").GetProperty("system");
+        system.GetProperty("$artifact_id").GetString().ShouldBe(OffloadingOffloader.ArtifactId.ToString());
+        system.GetProperty("content_type").GetString().ShouldBe("text/plain");
+        system.GetProperty("size_bytes").GetInt32().ShouldBe(Encoding.UTF8.GetByteCount("SYS"));
+
+        // The structured completion offloaded as a JSON artifact ref.
+        var output = logger.Calls[1].Payload.GetProperty("output");
+        output.GetProperty("$artifact_id").GetString().ShouldBe(OffloadingOffloader.ArtifactId.ToString());
+        output.GetProperty("content_type").GetString().ShouldBe("application/json");
     }
 
     [Fact]
@@ -154,6 +182,14 @@ public class RecordingLLMClientDecoratorTests
     private sealed class NoopOffloader : IArtifactOffloader
     {
         public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken ct) => Task.FromResult(new OffloadedText(text ?? "", null));
+        public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken ct) => Task.FromResult(inline ?? "");
+    }
+
+    /// <summary>Forces every non-empty field to "offload" to a fixed artifact id, so the decorator's $artifact_id ref-shaping path is exercised.</summary>
+    private sealed class OffloadingOffloader : IArtifactOffloader
+    {
+        public static readonly Guid ArtifactId = Guid.NewGuid();
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken ct) => Task.FromResult(new OffloadedText("", ArtifactId));
         public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken ct) => Task.FromResult(inline ?? "");
     }
 
