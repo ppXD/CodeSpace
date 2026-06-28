@@ -23,23 +23,25 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
     if (selected) tileRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [selected]);
 
-  const run = useAgentRun(agent.agentRunId);
-  const status = run.data?.status ?? agent.status;
+  // Status comes off the phase ref — the shared phases query already refreshes it every 2s — so a wave of running tiles
+  // makes ZERO redundant per-agent status polls. Only a FAILED tile fetches its run, ONCE (it's terminal, so this never
+  // polls), for the specific error message the ref doesn't carry.
+  const status = agent.status;
+  const state = tileState(status);
   const active = isAgentBusy(status);
-  // 2s preview cadence (the expanded terminal streams at 1s) — a wave of M tiles each polling 1s is the steady-state
-  // jank; the preview's latest-line + file count don't need second-by-second freshness. Opening this agent's terminal
-  // adds a 1s observer on the shared query, so the open one speeds back up.
+  // 2s preview cadence (the expanded terminal streams at 1s). Tiles + terminal share one events query per agent, so
+  // opening this agent's terminal speeds it back to 1s; collapsed previews stay at 2s.
   const events = useAgentRunEvents(agent.agentRunId, active, 2000);
+  const failedRun = useAgentRun(state === "failed" ? agent.agentRunId : undefined);
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
-  const state = tileState(status);
 
   const evts = events.data ?? [];
   const latest = evts.length > 0 ? evts[evts.length - 1].text : undefined;
   const files = evts.filter((e) => e.kind === "FileChanged").length;
   const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
   const summary = metricLine(files, tokens);
-  const failReason = run.data?.error || undefined;   // a fail-before-events run has no `latest`; its reason lives on the run (|| so an empty error falls through to "stopped")
+  const failReason = failedRun.data?.error || undefined;   // the failed tile's one-shot run fetch carries the specific reason; absent (e.g. fail-before-events) → falls through to "stopped"
 
   return (
     <div

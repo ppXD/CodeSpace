@@ -8,7 +8,7 @@ const { useAgentRunMock, useAgentRunEventsMock } = vi.hoisted(() => ({
   useAgentRunEventsMock: vi.fn(),
 }));
 vi.mock("@/hooks/use-agents", () => ({
-  useAgentRun: () => useAgentRunMock(),
+  useAgentRun: (id: string | undefined) => useAgentRunMock(id),
   useAgentRunEvents: (id: string | undefined, active: boolean, intervalMs?: number) => useAgentRunEventsMock(id, active, intervalMs),
 }));
 
@@ -59,10 +59,9 @@ describe("AgentTile", () => {
   });
 
   it("dims a done tile and keeps its output summary (files · tokens)", () => {
-    useAgentRunMock.mockReturnValue({ data: { status: "Succeeded", harness: "claude-code" } });
     useAgentRunEventsMock.mockReturnValue({ data: [evt("FileChanged", "x"), evt("FileChanged", "y")] });
 
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "frontend-fix", inputTokens: 9000, outputTokens: 2300 })} />);
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "frontend-fix", status: "Succeeded", inputTokens: 9000, outputTokens: 2300 })} />);
 
     expect(tile(container)?.dataset.state).toBe("done");
     expect(screen.getByText("2 files · 11.3k tokens")).toBeInTheDocument();
@@ -70,35 +69,30 @@ describe("AgentTile", () => {
   });
 
   it("renders a queued agent as amber 'waiting', not failure", () => {
-    useAgentRunMock.mockReturnValue({ data: { status: "Queued" } });
-
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "deploy" })} />);
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "deploy", status: "Queued" })} />);
 
     expect(tile(container)?.dataset.state).toBe("waiting");
     expect(screen.getByText("waiting")).toBeInTheDocument();
   });
 
-  it("marks a failed / cancelled agent as a failed tile", () => {
-    useAgentRunMock.mockReturnValue({ data: { status: "Failed" } });
-
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+  it("marks a failed / cancelled agent as a failed tile and fetches its run once for the reason", () => {
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Failed" })} />);
 
     expect(tile(container)?.dataset.state).toBe("failed");
+    expect(useAgentRunMock).toHaveBeenLastCalledWith("a1");   // a failed tile fetches its run (terminal → one shot) for the specific error
   });
 
   it("still shows the token / file spend on a FAILED tile (a failure consumed budget too)", () => {
-    useAgentRunMock.mockReturnValue({ data: { status: "Failed" } });
-
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", inputTokens: 300000, outputTokens: 73100 })} />);
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Failed", inputTokens: 300000, outputTokens: 73100 })} />);
 
     expect(container.querySelector(".agent-tile-fail")?.textContent).toBe("failed · 373.1k tokens");
   });
 
   it("shows the run's failure reason on a failed tile that emitted no event (instead of bare 'stopped')", () => {
-    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "no drivable credential for codex-cli" } });
+    useAgentRunMock.mockReturnValue({ data: { error: "no drivable credential for codex-cli" } });
     useAgentRunEventsMock.mockReturnValue({ data: [] });
 
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Failed" })} />);
 
     expect(tile(container)?.dataset.state).toBe("failed");
     expect(screen.getByText("no drivable credential for codex-cli")).toBeInTheDocument();
@@ -109,22 +103,21 @@ describe("AgentTile", () => {
     useAgentRunEventsMock.mockReturnValue({ data: [] });
 
     // null error → "stopped"
-    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: null } });
-    const { rerender } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+    useAgentRunMock.mockReturnValue({ data: { error: null } });
+    const { rerender } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Failed" })} />);
     expect(screen.getByText("stopped")).toBeInTheDocument();
 
     // an EMPTY-STRING error must also fall through to "stopped" (|| not ??), never render a blank line
-    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "" } });
-    rerender(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+    useAgentRunMock.mockReturnValue({ data: { error: "" } });
+    rerender(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Failed" })} />);
     expect(screen.getByText("stopped")).toBeInTheDocument();
   });
 
-  it("falls back from the phase ref status when the agent row hasn't loaded", () => {
-    useAgentRunMock.mockReturnValue({ data: undefined });
-
+  it("reads its status off the phase ref and makes NO per-agent status fetch unless it failed", () => {
     const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x", status: "Succeeded" })} />);
 
     expect(tile(container)?.dataset.state).toBe("done");
+    expect(useAgentRunMock).toHaveBeenLastCalledWith(undefined);   // a non-failed tile disables the run query — no redundant per-agent status poll
   });
 
   it("names the tile from label, then nodeId, then a short id", () => {

@@ -1,4 +1,4 @@
-import { useContext, useState, type ReactNode } from "react";
+import { memo, useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { AgentRunEventDto } from "@/api/agents";
@@ -126,7 +126,10 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
   );
 }
 
-function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
+// Memoized: the open terminal re-renders on its status / attempt / cell polls, but the scrollback only needs to repaint
+// when the event list actually changes — and mergeRunEvents returns the SAME array reference on a quiet tick, so this
+// bails on every poll that brought no new line (the common case for a long-running agent between bursts).
+const Scrollback = memo(function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
   if (events.length === 0) {
     // A run that failed BEFORE emitting any event (a dispatch / harness error) carries its reason on the run's `error`,
     // not in the empty stream — surface it as an error line so a failed terminal always says WHY, never "No output yet.".
@@ -143,7 +146,7 @@ function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; lo
       ))}
     </ol>
   );
-}
+});
 
 /** A cell-attempt's outcome glyph — tick when it succeeded, cross when it failed, clock while live/pending. */
 function AttemptGlyph({ status }: { status: NodeStatus }) {

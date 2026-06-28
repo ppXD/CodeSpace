@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -58,8 +58,10 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   // decisions key off the agent run id, so we pass the run's fanned-out agent ids (from the phase projection).
   const pendingPoll = run.data ? isRunActive(run.data.status) : true;
   const decisions = usePendingDecisions(pendingPoll);
-  const runAgentIds = new Set((phases.data?.phases ?? []).flatMap((p) => p.agents).map((a) => a.agentRunId));
-  const runDecisions = decisions.data ? decisionsForRun(decisions.data, effectiveRunId, runAgentIds) : [];
+  // Memoized so the 2s phases/decisions polls don't reallocate these (and cascade a DecisionInbox re-render) when the
+  // underlying data didn't change — React Query keeps phases.data / decisions.data referentially stable across a no-op poll.
+  const runAgentIds = useMemo(() => new Set((phases.data?.phases ?? []).flatMap((p) => p.agents).map((a) => a.agentRunId)), [phases.data?.phases]);
+  const runDecisions = useMemo(() => (decisions.data ? decisionsForRun(decisions.data, effectiveRunId, runAgentIds) : []), [decisions.data, effectiveRunId, runAgentIds]);
   const workflowId = run.data?.workflowId ?? null;
   const replay = useReplayRun();
   // The outline drives the center: a selected PHASE filters the Activity tiles to it; a selected AGENT opens its terminal.
@@ -67,7 +69,8 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   const [selectedPhaseId, setSelectedPhaseId] = useState<string | null>(null);
   // Selecting a phase is a fresh focus — clear any open agent so its terminal can't linger after the tiles filter away
   // from it. (Selecting an AGENT sets its phase then itself, in that order, so the agent still wins.)
-  const selectPhase = (phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); };
+  // Stable identity (both setters are stable) so the spread into every PhaseRow doesn't defeat its React.memo each poll.
+  const selectPhase = useCallback((phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); }, []);
 
   const onReplay = async () => {
     const result = await replay.mutateAsync(effectiveRunId);

@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PendingDecision } from "@/api/workflows";
 
@@ -8,7 +10,9 @@ import { DecisionCard } from "./DecisionCard";
  * decisions (already narrowed to the run tree by the caller) as answerable cards. When nothing is parked it shows a
  * calm all-clear, so the rail reads intentional rather than empty. Loading is the caller's concern (it owns the query).
  */
-export function DecisionInbox({ decisions }: { decisions: readonly PendingDecision[] }) {
+// Memoized: the route now passes a referentially-stable `decisions` array (useMemo), so the 2s/3s run + decision polls
+// don't re-render the inbox (and every DecisionCard) when the pending set didn't change.
+export const DecisionInbox = memo(function DecisionInbox({ decisions }: { decisions: readonly PendingDecision[] }) {
   return (
     <section className="decision-inbox rail-card" aria-label="Decisions">
       <div className="decision-inbox-head">
@@ -28,4 +32,4 @@ export function DecisionInbox({ decisions }: { decisions: readonly PendingDecisi
       )}
     </section>
   );
-}
+});
