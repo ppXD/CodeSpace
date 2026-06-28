@@ -33,6 +33,9 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   integrateBranches: false,
   acceptanceCriteria: [...DEFAULT_ACCEPTANCE],
   timeLimit: "3600",
+  decisionReview: "None",
+  outputReview: "None",
+  reviewerModel: "",
   ...over,
 });
 
@@ -185,6 +188,32 @@ describe("buildLaunchInput — base fields", () => {
     expect(buildLaunchInput(form({ pushBranch: true })).pushBranch).toBe(true);
     expect(buildLaunchInput(form({ effort: "quick", pushBranch: true })).pushBranch).toBe(true);
     expect(buildLaunchInput(form({ effort: "deep", pushBranch: true })).pushBranch).toBe(true);
+  });
+
+  it("omits all review fields when off (the default ⇒ byte-identical)", () => {
+    const input = buildLaunchInput(form({ effort: "deep" }));
+    expect(input).not.toHaveProperty("decisionReviewMode");
+    expect(input).not.toHaveProperty("outputReviewMode");
+    expect(input).not.toHaveProperty("reviewerModelId");
+  });
+
+  it("sends decisionReviewMode (the enum name) only on a Deep tier", () => {
+    expect(buildLaunchInput(form({ effort: "deep", decisionReview: "Gate" })).decisionReviewMode).toBe("Gate");
+    expect(buildLaunchInput(form({ effort: "deep", decisionReview: "Improve" })).decisionReviewMode).toBe("Improve");
+    expect(buildLaunchInput(form({ effort: "quick", decisionReview: "Gate" }))).not.toHaveProperty("decisionReviewMode", "decisions are a supervisor concern — inert on single-agent");
+  });
+
+  it("sends outputReviewMode on ANY tier (agent output review applies to every run)", () => {
+    expect(buildLaunchInput(form({ outputReview: "Gate" })).outputReviewMode).toBe("Gate");
+    expect(buildLaunchInput(form({ effort: "quick", outputReview: "Gate" })).outputReviewMode).toBe("Gate");
+  });
+
+  it("sends reviewerModelId only when a review is active, never on its own", () => {
+    // a reviewer model with NO active review is inert ⇒ omitted (byte-identical)
+    expect(buildLaunchInput(form({ reviewerModel: "row-1" }))).not.toHaveProperty("reviewerModelId");
+    // active output review ⇒ the reviewer rides along
+    expect(buildLaunchInput(form({ outputReview: "Gate", reviewerModel: "row-1" })).reviewerModelId).toBe("row-1");
+    expect(buildLaunchInput(form({ effort: "deep", decisionReview: "Gate", reviewerModel: "row-2" })).reviewerModelId).toBe("row-2");
   });
 });
 

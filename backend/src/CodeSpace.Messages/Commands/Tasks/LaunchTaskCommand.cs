@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 using CodeSpace.Messages.Tasks;
 
@@ -141,6 +142,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// Flows to both the single-agent <c>agent.code</c> node and each supervisor-spawned agent.
     /// </summary>
     public bool? PushBranch { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each supervisor DECISION (Deep only) before its side effect — baked into the supervisor node. <see cref="ReviewMode.None"/> (the default) ⇒ no critic ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
+    public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT (its produced change) at completion. <see cref="ReviewMode.None"/> (the default) ⇒ no review ⇒ byte-identical. v1 supports Gate (a flagged change → NeedsReview). Flows to the single-agent <c>agent.code</c> node + each supervisor-spawned agent.</summary>
+    public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the review critic(s) run on — the shared reviewer for both the decision + output critics. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when a review mode is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;

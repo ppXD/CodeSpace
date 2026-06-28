@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Messages.Tasks;
 
 /// <summary>
@@ -48,4 +50,10 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>Per-run opt-in to PUBLISHING the agent's diff as its own branch even when the deployment push flag is off. Null / false → defer to the ambient flag (byte-identical). OR-gate: forces publish ON, cannot force OFF.</summary>
     public bool? PushBranch { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT at completion. <c>None</c> (the default) → no review (byte-identical). v1 = Gate. Flows to the single-agent node + each supervisor-spawned agent.</summary>
+    public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW the output critic runs on. Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 }

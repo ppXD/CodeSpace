@@ -45,6 +45,8 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),
             AllowedModelIds = request.AllowedModelIds,
             AcceptanceCriteria = request.AcceptanceCriteria,
+            DecisionReviewMode = request.DecisionReviewMode,
+            ReviewerModelId = request.ReviewerModelId,
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
 
@@ -76,6 +78,8 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
         EnableMcp = request.EnableMcp,
         AllowedTools = request.AllowedTools,
         PushBranch = request.PushBranch,
+        OutputReviewMode = request.OutputReviewMode,
+        ReviewerModelId = request.ReviewerModelId,
     };
 
     /// <summary>Carries the opaque <c>LaunchContext.Raw</c> through under its surface-kind key for the resolved seed provider to read — the handler never interprets it. Absent context ⇒ an empty payload.</summary>

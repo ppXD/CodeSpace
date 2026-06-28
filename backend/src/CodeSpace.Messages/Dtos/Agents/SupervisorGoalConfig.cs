@@ -149,6 +149,12 @@ public sealed record SupervisorAgentProfile
 
     /// <summary>Where each spawned agent's working directory points in a MULTI-repo workspace, in wire vocabulary (a <c>WorkspaceCwdMode</c> name, e.g. <c>"WorkspaceRoot"</c> / <c>"PrimaryRepo"</c>). Null / <c>"Auto"</c> → the Auto default (byte-identical). Parsed via <c>WorkspaceCwdModeWire.FromWire</c> at spawn. Inert on a single-repo spawn.</summary>
     public string? CwdMode { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews each spawned agent's OUTPUT at completion (the executor runs it). <c>None</c> (the default) → no review (byte-identical). v1 = Gate. The model analogue of the supervisor's own decision critic, applied to the agents it dispatches.</summary>
+    public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The credentialed-model ROW each spawned agent's output critic runs on. Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>
+    public Guid? ReviewerModelId { get; init; }
 }
 
 /// <summary>

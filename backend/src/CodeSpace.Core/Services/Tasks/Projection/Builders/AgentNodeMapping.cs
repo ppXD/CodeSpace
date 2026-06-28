@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders;
@@ -51,6 +52,10 @@ internal static class AgentNodeMapping
         // Per-run opt-in to publishing the diff as a branch; null ⇒ omitted ⇒ the node's mode-derived default / ambient
         // flag (ResolvePushBranch) ⇒ byte-identical. OR-gate: forces publish ON, never OFF.
         AddIfPresent(config, "pushBranch", profile?.PushBranch);
+        // The output-review critic mode + reviewer model — the node reads these into AgentTask, where the executor runs
+        // the critic at completion. None ⇒ omitted (the enum int) ⇒ no review ⇒ byte-identical.
+        AddIfPresent(config, "outputReviewMode", profile?.OutputReviewMode is { } orm && orm != ReviewMode.None ? (int)orm : (int?)null);
+        AddIfPresent(config, "reviewerModelId", profile?.ReviewerModelId?.ToString());
         // Multi-repo working-dir mode — the enum NAME ("WorkspaceRoot"/"PrimaryRepo"); null (Auto) ⇒ omitted ⇒ the
         // node's Auto default ⇒ byte-identical. AgentCodeNode reads it back via WorkspaceCwdModeWire.FromWire.
         AddIfPresent(config, "cwdMode", profile?.CwdMode?.ToString());
