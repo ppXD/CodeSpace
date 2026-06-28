@@ -124,6 +124,9 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
+    /// <summary>The operator's ALLOWED AGENT (persona) POOL for spawned agents — a list of <c>AgentDefinition</c> ROW ids. Every dispatched agent's effective persona (model-authored slug OR profile default) must be in this pool, else fail closed. Null / empty = ALL the team's personas. Threaded from <c>SupervisorGoalConfig.AllowedAgentDefinitionIds</c>.</summary>
+    public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
+
     /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModelIds"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
     public Guid? SupervisorModelId { get; init; }
 

@@ -94,6 +94,15 @@ public sealed record SupervisorGoalConfig
     /// dispatched model must still be a credentialed row — just not narrowed to a subset).
     /// </summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
+
+    /// <summary>
+    /// The operator's ALLOWED AGENT (persona) POOL for the agents this supervisor dispatches — a multi-select of
+    /// <c>AgentDefinition</c> ROW ids, the persona analogue of <see cref="AllowedModelIds"/>. Every dispatched agent's
+    /// effective persona (a model-authored slug OR the run-level profile default) must be in this pool, else FAILS
+    /// CLOSED at dispatch. Null / empty = the pool is ALL the team's personas. Distinct from the wrong-typed reserved
+    /// <see cref="AllowedAgents"/> (harness/agent KIND strings, no enforcement) — this is persona Guids, enforced.
+    /// </summary>
+    public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
 }
 
 /// <summary>

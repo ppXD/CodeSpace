@@ -55,6 +55,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches — validated TEAM-SCOPED (fail-closed) + baked into the supervisor node's <c>allowedModelIds</c>. Null / empty ⇒ all the team's models (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
+    /// <summary>The operator's allowed AGENT (persona) pool (<c>AgentDefinition</c> ROW ids) for the agents a Deep run dispatches — validated TEAM-SCOPED (fail-closed) + baked into the supervisor node's <c>allowedAgentDefinitionIds</c>. Null / empty ⇒ all the team's personas (byte-identical). Inert on a non-supervisor projection.</summary>
+    public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
+
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — rendered into the supervisor decider prompt as the definition of done (NOT executed; distinct from the <c>acceptanceChecks</c> argv floor). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 

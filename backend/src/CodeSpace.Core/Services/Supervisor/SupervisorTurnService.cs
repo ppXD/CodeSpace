@@ -292,7 +292,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         {
             return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is AgentDefinitionResolutionException or SupervisorRepoAccessException or SupervisorModelAccessException)
+        catch (Exception ex) when (ex is AgentDefinitionResolutionException or SupervisorRepoAccessException or SupervisorModelAccessException or SupervisorAgentAccessException)
         {
             await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Failed, outcomeJson: null, error: ex.Message, cancellationToken).ConfigureAwait(false);
 

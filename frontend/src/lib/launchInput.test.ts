@@ -29,6 +29,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   maxAgents: "20",
   budget: "none",
   agentModels: [],
+  agentPool: [],
   autonomyCeiling: "",
   integrateBranches: false,
   acceptanceCriteria: [...DEFAULT_ACCEPTANCE],
@@ -312,6 +313,30 @@ describe("buildLaunchInput — agent model pool (allowedModelIds)", () => {
     const input = buildLaunchInput(form({ effort: "deep", agentModels }));
     expect(input.allowedModelIds).not.toBe(agentModels);
     expect(input.allowedModelIds).toEqual(["row-a"]);
+  });
+});
+
+describe("buildLaunchInput — agent (persona) pool (allowedAgentDefinitionIds)", () => {
+  it("omits allowedAgentDefinitionIds when the pool is empty", () => {
+    expect(buildLaunchInput(form({ effort: "deep", agentPool: [] }))).not.toHaveProperty("allowedAgentDefinitionIds");
+    expect(buildLaunchInput(form({ effort: "deep" }))).not.toHaveProperty("allowedAgentDefinitionIds");
+  });
+
+  it("sends the persona pool ids on a deep + auto run", () => {
+    expect(buildLaunchInput(form({ effort: "deep", agentPool: ["p-a", "p-b"] })).allowedAgentDefinitionIds).toEqual(["p-a", "p-b"]);
+    expect(buildLaunchInput(form({ effort: "auto", agentPool: ["p-a"] })).allowedAgentDefinitionIds).toEqual(["p-a"]);
+  });
+
+  it("omits the persona pool on quick and standard (supervisor-only)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", agentPool: ["p-a"] }))).not.toHaveProperty("allowedAgentDefinitionIds");
+    expect(buildLaunchInput(form({ effort: "standard", agentPool: ["p-a"] }))).not.toHaveProperty("allowedAgentDefinitionIds");
+  });
+
+  it("copies the persona pool array (no shared reference to the form state)", () => {
+    const agentPool = ["p-a"];
+    const input = buildLaunchInput(form({ effort: "deep", agentPool }));
+    expect(input.allowedAgentDefinitionIds).not.toBe(agentPool);
+    expect(input.allowedAgentDefinitionIds).toEqual(["p-a"]);
   });
 });
 

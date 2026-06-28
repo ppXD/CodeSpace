@@ -226,6 +226,117 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the persona clamp rejected the unknown slug");
     }
 
+    [Fact]
+    public async Task A_spawn_authoring_a_persona_outside_the_allowed_pool_fails_closed_without_stranding()
+    {
+        // The persona pool is the persona analogue of the model pool: a model-authored slug whose persona is REAL +
+        // team-owned but NOT in the operator's allowedAgentDefinitionIds must FAIL CLOSED at dispatch (a clean terminal,
+        // like an out-of-pool model) — the pool is not bypassable via a model-authored slug. The dispatch gate is the
+        // security floor (the catalog clamp is the UX half; the scripted decider bypasses the catalog on purpose).
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnPersonaStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var dispatchPersonaId = await SeedPersonaAsync(teamId, "You are a security reviewer.", model: null, toolsJson: null, slug: ScriptedSupervisorDecider.DispatchPersonaSlug);
+        var inPoolPersonaId = await SeedPersonaAsync(teamId, "An allowed persona.", model: null, toolsJson: null);
+
+        // Pool = ONLY the other persona → the dispatched persona is out of pool.
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, $$"""{ "goal": "ship it", "allowedAgentDefinitionIds": ["{{inPoolPersonaId}}"] }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        try { await RunEngineAsync(runId); } catch { /* the pool gate surfaces through the node; asserted below */ }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "an out-of-pool persona terminalized the spawn — a clean Failed, not a stranded Running");
+        spawn.Error.ShouldNotBeNull();
+        spawn.Error!.ShouldContain("allowed agent pool", Case.Insensitive);
+
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the persona pool gate rejected the out-of-pool persona");
+    }
+
+    [Fact]
+    public async Task A_spawn_with_the_dispatched_persona_IN_the_allowed_pool_dispatches_normally()
+    {
+        // The positive path: the same model-authored persona slug, but the pool INCLUDES its id → the gate passes and the
+        // agent stages normally (proving the gate doesn't false-reject an in-pool persona).
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnPersonaStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var dispatchPersonaId = await SeedPersonaAsync(teamId, "You are a security reviewer.", model: null, toolsJson: null, slug: ScriptedSupervisorDecider.DispatchPersonaSlug);
+
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, $$"""{ "goal": "ship it", "allowedAgentDefinitionIds": ["{{dispatchPersonaId}}"] }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawned = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            spawned.Count.ShouldBe(1, "an in-pool persona dispatches normally — the gate passes");
+
+            var task = JsonSerializer.Deserialize<AgentTask>(spawned[0].TaskJson, AgentJson.Options)!;
+            task.AgentDefinitionId.ShouldBe(dispatchPersonaId, "the in-pool dispatched persona is stamped on the spawned agent");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_spawn_with_a_profile_default_persona_outside_the_allowed_pool_fails_closed()
+    {
+        // Defense-in-depth: the single post-resolution gate bounds the RESOLVED persona, so even the run-level PROFILE
+        // DEFAULT persona (NO model-authored slug) must be in the pool. An operator who sets a profile persona outside
+        // their own pool is rejected SERVER-side (the frontend keeps it in-pool, but the server is the floor) — proving
+        // the gate is not just for model-authored slugs.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var profilePersonaId = await SeedPersonaAsync(teamId, "Profile persona.", model: null, toolsJson: null);
+        var inPoolPersonaId = await SeedPersonaAsync(teamId, "An allowed persona.", model: null, toolsJson: null);
+
+        // Profile default = profilePersonaId; pool = ONLY the other persona → the profile default is out of pool.
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, $$"""{ "goal": "ship it", "allowedAgentDefinitionIds": ["{{inPoolPersonaId}}"], "agentProfile": { "agentDefinitionId": "{{profilePersonaId}}" } }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        try { await RunEngineAsync(runId); } catch { /* the pool gate surfaces through the node; asserted below */ }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "the out-of-pool PROFILE DEFAULT persona terminalized the spawn — the gate bounds the profile default, not just model-authored slugs");
+        spawn.Error.ShouldNotBeNull();
+        spawn.Error!.ShouldContain("allowed agent pool", Case.Insensitive);
+
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the profile-default persona was out of pool");
+    }
+
     private async Task<Guid> CreateConfigWorkflowAsync(Guid teamId, Guid userId, string config)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
