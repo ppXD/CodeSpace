@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -12,7 +12,7 @@ import { useSkills } from "@/hooks/use-skills";
 
 import { AUTONOMY, EMPTY_FORM, type FormState, formFromPersona, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
-import { SkillLibraryPickerModal } from "./SkillLibraryPickerModal";
+import { SkillBindingDropdown } from "./SkillBindingDropdown";
 import { skillLabels } from "./skillPicker";
 
 /**
@@ -259,13 +259,8 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
  * instantiates a working copy of the chosen store skill and hands back its id (the "instantiate to use" model). The
  * parent persists the bound set on Save. Labels resolve from the team's working skills once the new copy lands.
  */
-function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
+function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
-  const [picking, setPicking] = useState(false);
-  // The store skills instantiated this editor session — keyed by SOURCE id (each instantiate is a fresh working
-  // copy, so a working id can't dedupe). The picker disables an already-added source so the same skill isn't bound twice.
-  const [pickedSources, setPickedSources] = useState<Set<string>>(() => new Set());
-
   const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
 
   return (
@@ -281,19 +276,7 @@ function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; 
         </div>
       )}
 
-      <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => setPicking(true)}><Ic.Plus size={13} /> Add skill</button>
-
-      {picking && (
-        <SkillLibraryPickerModal
-          pickedSourceIds={pickedSources}
-          onPicked={(workingId, sourceId) => {
-            onChange([...selected, workingId]);
-            setPickedSources((s) => new Set(s).add(sourceId));
-            setPicking(false);
-          }}
-          onClose={() => setPicking(false)}
-        />
-      )}
+      <SkillBindingDropdown selected={selected} onChange={onChange} />
     </div>
   );
 }
