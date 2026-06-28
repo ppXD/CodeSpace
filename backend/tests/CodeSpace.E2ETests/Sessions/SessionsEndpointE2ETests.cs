@@ -11,6 +11,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
@@ -91,6 +92,46 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
 
         var byRun = await SendAsync(userId, teamId, $"/api/workflows/runs/{foreign.RunId}/session");
         byRun.StatusCode.ShouldBe(HttpStatusCode.NotFound, "a cross-team run resolves to no thread");
+    }
+
+    [Fact]
+    public async Task The_room_reads_back_over_http_focused_on_the_runs_turn()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        var turn1 = await LaunchAsync(userId, teamId, "Add login", continueSessionId: null);
+        var turn2 = await LaunchAsync(userId, teamId, "Now add logout", continueSessionId: turn1.SessionId);
+
+        // Entering by a run resolves the thread + focuses that run's turn.
+        var byRun = await GetAsync<RoomView>(userId, teamId, $"/api/sessions/by-run/{turn2.RunId}/room");
+        byRun.SessionId.ShouldBe(turn1.SessionId);
+        byRun.Title.ShouldBe("Add login", "the room title is the opening turn's goal");
+        byRun.AnchorBlockId.ShouldBe("turn-2", "the run-anchored entry focuses that run's turn");
+
+        byRun.Blocks.OfType<UserMessageBlock>().Select(b => b.Text).ShouldBe(new[] { "Add login", "Now add logout" });
+
+        var turns = byRun.Blocks.OfType<AssistantTurnBlock>().OrderBy(t => t.TurnIndex).ToList();
+        turns.Select(t => t.TurnIndex).ShouldBe(new[] { 1, 2 });
+        turns[^1].Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "every turn exposes its capability-aware actions");
+
+        // The by-session room focuses the latest turn when no focus is given.
+        var bySession = await GetAsync<RoomView>(userId, teamId, $"/api/sessions/{turn1.SessionId}/room");
+        bySession.AnchorBlockId.ShouldBe("turn-2", "the session room defaults to the latest turn");
+    }
+
+    [Fact]
+    public async Task A_foreign_runs_room_is_404_never_leaked()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var (otherUser, otherTeam) = await SeedTeamMembershipAsync();
+
+        var foreign = await LaunchAsync(otherUser, otherTeam, "Their work", continueSessionId: null);
+
+        var byRun = await SendAsync(userId, teamId, $"/api/sessions/by-run/{foreign.RunId}/room");
+        byRun.StatusCode.ShouldBe(HttpStatusCode.NotFound, "a cross-team run's room is an indistinguishable not-found");
+
+        var bySession = await SendAsync(userId, teamId, $"/api/sessions/{foreign.SessionId}/room");
+        bySession.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
