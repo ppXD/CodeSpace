@@ -46,19 +46,53 @@ public sealed class PackService : IPackService, IScopedDependency
 
         if (pack == null) return null;
 
-        var agents = await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.PackId == packId && a.TeamId == teamId && a.Scope == DefinitionScope.Store && a.DeletedDate == null)
-            .Select(a => new PackArtifactSummary { Kind = PackArtifactKind.Agent, Id = a.Id, Slug = a.Slug, Name = a.Name, Description = a.Description, SourcePath = a.SourcePath })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        // Reuse ArtifactQuery so the full detail orders each kind exactly as the paged tab does (slug + Id tie-break,
+        // DB collation). agents-before-skills falls out of the concat order — the unified list stays kind-grouped.
+        var agents = await ArtifactQuery(teamId, packId, PackArtifactKind.Agent, "").ToListAsync(cancellationToken).ConfigureAwait(false);
+        var skills = await ArtifactQuery(teamId, packId, PackArtifactKind.Skill, "").ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var skills = await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.PackId == packId && s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null)
-            .Select(s => new PackArtifactSummary { Kind = PackArtifactKind.Skill, Id = s.Id, Slug = s.Slug, Name = s.Name, Description = s.Description, SourcePath = s.SourcePath })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        var artifacts = agents.Concat(skills).OrderBy(a => a.Kind).ThenBy(a => a.Slug, StringComparer.Ordinal).ToList();
+        var artifacts = agents.Concat(skills).ToList();
 
         return new PackDetail { Pack = ToSummary(pack, agents.Count, skills.Count), Artifacts = artifacts };
+    }
+
+    public async Task<PagedArtifacts> ListArtifactsAsync(Guid teamId, Guid packId, PackArtifactKind kind, string? search, int page, int pageSize, CancellationToken cancellationToken)
+    {
+        var size = Math.Clamp(pageSize, 1, 100);
+        var query = ArtifactQuery(teamId, packId, kind, (search ?? "").Trim().ToLower());
+
+        var total = await query.CountAsync(cancellationToken).ConfigureAwait(false);
+        var pageCount = Math.Max(1, (int)Math.Ceiling(total / (double)size));
+        var clampedPage = Math.Clamp(page, 0, pageCount - 1);
+
+        var items = await query.Skip(clampedPage * size).Take(size).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return new PagedArtifacts { Items = items, Total = total, Page = clampedPage, PageCount = pageCount };
+    }
+
+    // The single source of artifact ordering + filtering — both GetAsync (full detail) and ListArtifactsAsync (paged)
+    // build on this, so the detail pane and the paged tab present the same store list in the same order. The
+    // ThenBy(Id) tie-break is load-bearing: Store snapshots carry NO unique handle (the team-slug index is
+    // Working-only; a re-import / grandfathered pack lands duplicate slugs as distinct rows keyed on
+    // (pack, source_path)), so OrderBy(Slug) alone is non-deterministic and Skip/Take would drop or repeat tied
+    // rows across pages. search is already trimmed + lowercased; slugs are stored lowercase (DeriveSlug), so the
+    // slug operand matches case-insensitively without a ToLower.
+    private IQueryable<PackArtifactSummary> ArtifactQuery(Guid teamId, Guid packId, PackArtifactKind kind, string search)
+    {
+        if (kind == PackArtifactKind.Agent)
+        {
+            var agents = _db.AgentDefinition.AsNoTracking().Where(a => a.PackId == packId && a.TeamId == teamId && a.Scope == DefinitionScope.Store && a.DeletedDate == null);
+
+            if (search != "") agents = agents.Where(a => a.Name.ToLower().Contains(search) || a.Slug.Contains(search));
+
+            return agents.OrderBy(a => a.Slug).ThenBy(a => a.Id).Select(a => new PackArtifactSummary { Kind = PackArtifactKind.Agent, Id = a.Id, Slug = a.Slug, Name = a.Name, Description = a.Description, SourcePath = a.SourcePath });
+        }
+
+        var skills = _db.SkillDefinition.AsNoTracking().Where(s => s.PackId == packId && s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null);
+
+        if (search != "") skills = skills.Where(s => s.Name.ToLower().Contains(search) || s.Slug.Contains(search));
+
+        return skills.OrderBy(s => s.Slug).ThenBy(s => s.Id).Select(s => new PackArtifactSummary { Kind = PackArtifactKind.Skill, Id = s.Id, Slug = s.Slug, Name = s.Name, Description = s.Description, SourcePath = s.SourcePath });
     }
 
     private static async Task<Dictionary<Guid, int>> CountByPackAsync(IQueryable<Guid> packIds, CancellationToken cancellationToken)
