@@ -80,7 +80,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
     acceptance: [...DEFAULT_ACCEPTANCE],
-    askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true,
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
     decisionReview: "None", outputReview: "None", reviewerModel: "",
   });
@@ -89,7 +88,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
     else if (customizeTab === "review") setC({ decisionReview: "None", outputReview: "None", reviewerModel: "" });
-    else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
+    else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
 
   const repos = useRepositories();
@@ -449,9 +448,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
               {customizeTab === "safety" && <>
                 <div className="lt3-cnote">What agents can do alone, and when they must ask.</div>
                 <Combo label="Permissions" value={autonomy} options={PERMS.map(p => ({ value: p.v, label: p.v, desc: p.d }))} onChange={setAutonomy} />
-                <SToggleRow label="Ask when uncertain" on={cfg.askWhenUncertain} onToggle={() => setC({ askWhenUncertain: !cfg.askWhenUncertain })} />
-                <SToggleRow label="Approve irreversible actions" on={cfg.requireApproval} onToggle={() => setC({ requireApproval: !cfg.requireApproval })} />
-                <SToggleRow label="Stop before merge / push" on={cfg.stopBeforeMerge} onToggle={() => setC({ stopBeforeMerge: !cfg.stopBeforeMerge })} />
+                <SToggleRow label="Ask when uncertain" on locked />
+                <SToggleRow label="Approve irreversible actions" on locked />
+                <SToggleRow label="Stop before merge / push" on locked />
                 <Combo label="Decision surface" value={cfg.decisionSurface} options={[{ value: "run-activity", label: "Run activity" }]} onChange={v => setC({ decisionSurface: v })} />
                 <Combo label="Notify in chat" value={cfg.notifyChat} options={[{ value: "off", label: "Off" }, { value: "channel", label: "Current channel" }]} onChange={v => setC({ notifyChat: v })} />
                 <Combo label="Timeout" value={cfg.timeout} options={[{ value: "safe-default", label: "Safe default" }, { value: "pause", label: "Pause and wait" }, { value: "reject", label: "Safe reject" }]} onChange={v => setC({ timeout: v })} />
@@ -515,7 +514,18 @@ function Pop({ align, wide, children }: { align: "left" | "right"; wide?: boolea
 }
 
 /** Settings toggle row: label · On/Off · switch. */
-function SToggleRow({ label, on, onToggle }: { label: string; on: boolean; onToggle: () => void }) {
+function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolean; onToggle?: () => void; locked?: boolean }) {
+  // A `locked` row is an HONEST display of an always-enforced safety floor (the irreversible-HITL gate + the decision
+  // substrate) — not a real toggle. Showing it as a switch would be a lie: there is no per-run way to turn these off,
+  // so we render a non-interactive "Always on" indicator instead of a fake switch.
+  if (locked) {
+    return (
+      <div className="lt3-srow lt3-srow-ro">
+        <span className="lt3-srow-l">{label}</span>
+        <span className="lt3-combo-v">Always on</span>
+      </div>
+    );
+  }
   return (
     <button type="button" className="lt3-srow" onClick={onToggle} aria-pressed={on}>
       <span className="lt3-srow-l">{label}</span>
