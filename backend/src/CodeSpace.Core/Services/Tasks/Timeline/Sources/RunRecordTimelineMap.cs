@@ -16,6 +16,36 @@ public static class RunRecordTimelineMap
     /// <summary>The lifecycle source's provenance key — stamped on every event this mapper emits.</summary>
     public const string Key = "run-record";
 
+    /// <summary>
+    /// Map an ORDERED record stream to events, folding the durable-RESUME mechanics. The engine writes a
+    /// <c>RunStarted</c> on EVERY dispatch — the first run AND every resume — and a <c>RunReplayed</c> on every resume
+    /// (it rebuilds scope from the snapshot). A node that suspends/resumes per step (the supervisor decides once per
+    /// turn; a long sleep / sub-workflow / HITL wait parks + wakes) therefore emits these N times. Only the FIRST
+    /// <c>RunStarted</c> is a story milestone; every later <c>RunStarted</c> + ALL <c>RunReplayed</c> are resume DETAIL
+    /// the UI folds into a "N steps" disclosure. Generic — keyed on the record type + first-seen, never on a node id.
+    /// </summary>
+    public static IReadOnlyList<RunTimelineEvent> Project(IEnumerable<WorkflowRunRecord> orderedRecords)
+    {
+        var events = new List<RunTimelineEvent>();
+        var firstRunStartSeen = false;
+
+        foreach (var r in orderedRecords)
+        {
+            var e = ToEvent(r);
+            if (e == null) continue;
+
+            if (r.RecordType == WorkflowRunRecordTypes.RunStarted)
+            {
+                if (firstRunStartSeen) e = e with { Level = TimelineLevel.Detail };
+                firstRunStartSeen = true;
+            }
+
+            events.Add(e);
+        }
+
+        return events;
+    }
+
     public static RunTimelineEvent? ToEvent(WorkflowRunRecord r)
     {
         var node = r.NodeId ?? "node";
@@ -23,14 +53,15 @@ public static class RunRecordTimelineMap
         // Run-level lifecycle, a TOP-LEVEL node FAILURE, and a retry are story MILESTONES; the per-node started/
         // completed/waiting/skipped churn — and a fanned-out BRANCH / loop-iteration / try-body failure — is DETAIL the
         // UI folds away (the wave already shows the agent's progress, the branch's own terminal carries its error, Trace
-        // has the rest). See NodeFailureLevel.
+        // has the rest). See NodeFailureLevel. A RESUME's RunStarted is demoted to Detail by Project (the first stays a
+        // milestone); RunReplayed is ALWAYS a resume mechanic, never a milestone.
         return r.RecordType switch
         {
             WorkflowRunRecordTypes.RunStarted    => Event(r, "Run started", TimelineSeverity.Info, TimelineLevel.Milestone),
             WorkflowRunRecordTypes.RunCompleted  => Event(r, "Run completed", TimelineSeverity.Success, TimelineLevel.Milestone),
             WorkflowRunRecordTypes.RunFailed     => Event(r, "Run failed", TimelineSeverity.Error, TimelineLevel.Milestone, ReadString(r, "error")),
             WorkflowRunRecordTypes.RunCancelled  => Event(r, "Run cancelled", TimelineSeverity.Warning, TimelineLevel.Milestone),
-            WorkflowRunRecordTypes.RunReplayed   => Event(r, "Run replayed", TimelineSeverity.Info, TimelineLevel.Milestone),
+            WorkflowRunRecordTypes.RunReplayed   => Event(r, "Run replayed", TimelineSeverity.Info, TimelineLevel.Detail),
             WorkflowRunRecordTypes.NodeStarted   => Event(r, $"{node} started", TimelineSeverity.Info, TimelineLevel.Detail),
             WorkflowRunRecordTypes.NodeCompleted => Event(r, $"{node} completed", TimelineSeverity.Success, TimelineLevel.Detail),
             WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, NodeFailureLevel(r), ReadString(r, "error")),
