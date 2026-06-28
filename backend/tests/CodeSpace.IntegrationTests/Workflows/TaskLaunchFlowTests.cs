@@ -455,6 +455,30 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_store_snapshot_allowed_agent_persona_is_rejected_fail_closed()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // A SAME-TEAM, non-deleted AgentDefinition — but a Library STORE snapshot, which is not runnable. The launch
+        // pool gate is Working-scoped, so it must reject the snapshot id with the same generic not-found a foreign id
+        // gets, BEFORE any run is created — a snapshot must never enter the dispatch pool.
+        var snapshotId = await SeedStoreSnapshotPersonaAsync(teamId);
+
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Pin a store snapshot", RequestedEffort = TaskEffortModes.Deep,
+            AllowedAgentDefinitionIds = new[] { snapshotId },
+        };
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("not found or not accessible", customMessage: "a non-runnable store snapshot is rejected like any non-bindable persona");
+
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the launch must reject BEFORE starting any run");
+    }
+
+    [Fact]
     public async Task A_deep_launch_bakes_the_operator_integrate_branches_opt_in_into_the_supervisor_snapshot()
     {
         // The operator's "Integrate branches" opt-in must bind through the command path → TaskBuildContext → the
@@ -1353,6 +1377,23 @@ public class TaskLaunchFlowTests
         {
             Id = Guid.NewGuid(), TeamId = teamId, Slug = "persona-" + Guid.NewGuid().ToString("N")[..8], Name = "Pool persona",
             SystemPrompt = "You are a pool persona.", Origin = AgentDefinitionOrigin.Authored,
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        db.AgentDefinition.Add(agent);
+        await db.SaveChangesAsync();
+        return agent.Id;
+    }
+
+    private async Task<Guid> SeedStoreSnapshotPersonaAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Slug = "snapshot-" + Guid.NewGuid().ToString("N")[..8], Name = "Library snapshot",
+            SystemPrompt = "Library snapshot prompt.", Origin = AgentDefinitionOrigin.Imported, Scope = DefinitionScope.Store,
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         };
         db.AgentDefinition.Add(agent);

@@ -46,9 +46,9 @@ public sealed partial class PackImportService
 
         // This pack's already-imported STORE snapshots (tracked, so an Update flushes), keyed by source-path = the
         // sync identity. Scoped to Store so a grandfathered WORKING row sharing this pack's (pack, source_path) is
-        // never picked up here — otherwise ExistingByPathAsync would build a SourcePath-keyed dict with a duplicate
-        // key (one Working + one Store) and throw, and a re-import would clobber a live bench agent instead of
-        // refreshing the snapshot. A brand-new pack has none yet, so skip the lookup.
+        // never picked up here — otherwise the lookup would match that live bench agent and the upsert would take the
+        // UPDATE branch, clobbering its content (and creating no snapshot) instead of adding a fresh Store snapshot
+        // beside it. A brand-new pack has none yet, so skip the lookup.
         var existingAgents = packIsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.Scope == DefinitionScope.Store && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
         var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.Scope == DefinitionScope.Store && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 

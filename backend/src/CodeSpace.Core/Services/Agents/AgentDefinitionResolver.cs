@@ -121,7 +121,10 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>
         await _db.AgentDefinition.AsNoTracking()
-            .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            // Scoped to WORKING: a run only ever materializes a runnable bench persona. A Library STORE snapshot id —
+            // reachable to a client through the Library read API and threadable into a run via AgentDefinitionId — must
+            // fail closed here, never freeze a non-runnable snapshot's prompt/model/tools into a live run.
+            .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)
         ?? throw new AgentDefinitionResolutionException($"Agent persona {id} not found for this team.");
 
     /// <summary>Persona system prompt PREPENDED to the node goal (blank-line separated); either side alone passes through.</summary>

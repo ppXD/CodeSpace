@@ -384,6 +384,48 @@ public class PackCommitFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_reimport_of_a_grandfathered_pack_adds_a_store_snapshot_without_clobbering_the_bench_row()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var seedScope = _fixture.BeginScope();
+        if (!await GitReadyAsync(seedScope.Resolve<ISandboxRunnerRegistry>())) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var src = await CreateSourceRepoAsync(seedScope.Resolve<ISandboxRunnerRegistry>());
+
+        // A grandfathered import: a pack rooted at this url + a WORKING bench agent carrying its (PackId, SourcePath).
+        // The repo's agents/code-reviewer.md has a DIFFERENT body ("You review."), so a clobber would be visible.
+        var (packId, benchId) = await SeedGrandfatheredPackAgentAsync(teamId, userId, src, "agents/code-reviewer.md", "code-reviewer", "OLD GRANDFATHERED PROMPT");
+
+        try
+        {
+            var result = await CommitViaMediatorAsync(src, new[] { "agents/code-reviewer.md" }, teamId, userId);
+
+            result.PackId.ShouldBe(packId, "the re-import resolves the SAME pack by url, not a new one");
+            // The existing-row lookup is Store-scoped, so it ignores the grandfathered Working row → a fresh snapshot
+            // is IMPORTED, never an UPDATE that would clobber the live bench agent.
+            Outcome(result, "agents/code-reviewer.md").ShouldBe(PackImportOutcome.Imported);
+
+            await AssertStateAsync(async db =>
+            {
+                var bench = await db.AgentDefinition.SingleAsync(a => a.Id == benchId);
+                bench.Scope.ShouldBe(DefinitionScope.Working);
+                bench.SystemPrompt.ShouldBe("OLD GRANDFATHERED PROMPT", "the re-import must NOT clobber the live bench agent's content");
+
+                var snapshot = await db.AgentDefinition.SingleAsync(a => a.TeamId == teamId && a.Slug == "code-reviewer" && a.Scope == DefinitionScope.Store && a.DeletedDate == null);
+                snapshot.PackId.ShouldBe(packId);
+                snapshot.SourcePath.ShouldBe("agents/code-reviewer.md");
+                snapshot.SystemPrompt.ShouldContain("You review", customMessage: "the store snapshot carries the freshly-walked pack content");
+            });
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static PackImportOutcome Outcome(PackImportResult result, string sourcePath) =>
         result.Items.Single(i => i.SourcePath == sourcePath).Outcome;
 
@@ -467,6 +509,23 @@ public class PackCommitFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.AgentDefinition.Add(new AgentDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = AgentDefinitionOrigin.Authored, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stages a PRE-store-model import: a Pack rooted at <paramref name="url"/> plus a grandfathered WORKING bench agent carrying that pack's (PackId, SourcePath). Returns the pack + agent ids.</summary>
+    private async Task<(Guid PackId, Guid AgentId)> SeedGrandfatheredPackAgentAsync(Guid teamId, Guid userId, string url, string sourcePath, string slug, string systemPrompt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var packId = Guid.NewGuid();
+        db.Pack.Add(new Pack { Id = packId, TeamId = teamId, Kind = PackKind.GitUrl, Name = "grandfathered", Url = url, LastSyncedDate = now, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        var agentId = Guid.NewGuid();
+        db.AgentDefinition.Add(new AgentDefinition { Id = agentId, TeamId = teamId, Slug = slug, Name = slug, SystemPrompt = systemPrompt, Origin = AgentDefinitionOrigin.Imported, Scope = DefinitionScope.Working, PackId = packId, SourcePath = sourcePath, CreatedDate = now, CreatedBy = userId, LastModifiedDate = now, LastModifiedBy = userId });
+
+        await db.SaveChangesAsync();
+        return (packId, agentId);
     }
 
     private async Task SeedSkillAsync(Guid teamId, Guid userId, string slug)

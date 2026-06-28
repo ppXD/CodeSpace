@@ -221,7 +221,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// is an indistinguishable not-found (existence never leaks), and ANY bad id fails the whole launch fail-closed
     /// BEFORE the session opens (no orphan). An empty pool ⇒ skip (all the team's personas — byte-identical). The
     /// dispatch-time pool gate still fails closed too; this turns a silent "can't dispatch" into a clear launch rejection.
-    /// (Persona has no enabled/active flag — team + non-deleted is the whole predicate, matching <c>AgentDefinitionResolver</c>.)
+    /// (Persona has no enabled/active flag — team + non-deleted + WORKING is the whole predicate, matching
+    /// <c>AgentDefinitionResolver</c>: a Library STORE snapshot is not runnable, so it must never enter the dispatch pool.)
     /// </summary>
     private async Task EnsureAgentDefinitionsInTeamAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
     {
@@ -230,7 +231,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         var ids = pool.ToHashSet();
 
         var inTeam = await _db.AgentDefinition.AsNoTracking()
-            .Where(a => ids.Contains(a.Id) && a.TeamId == request.TeamId && a.DeletedDate == null)
+            .Where(a => ids.Contains(a.Id) && a.TeamId == request.TeamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null)
             .Select(a => a.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 

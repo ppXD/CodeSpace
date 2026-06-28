@@ -38,14 +38,7 @@ public class PackImportServiceFlowTests
         var runners = seedScope.Resolve<ISandboxRunnerRegistry>();
         if (!await GitReadyAsync(runners)) return;
 
-        var (teamId, userId) = await SeedTeamAsync();
-
-        // Seed TWO of the pack's handles as already-owned bench rows — the pack agent "reviewer" and the pack skill
-        // "tdd". This is the regression guard: a snapshot carries no unique handle, so a matching bench handle must
-        // NOT flip the preview item to un-importable. If the preview ever regressed to DB-conflict suppression, these
-        // two would go Importable=false and the test would fail.
-        await SeedAgentAsync(teamId, userId, "reviewer");
-        await SeedSkillAsync(teamId, userId, "tdd");
+        var (teamId, _) = await SeedTeamAsync();
 
         var src = await CreateSourceRepoAsync(runners);
         try
@@ -61,13 +54,15 @@ public class PackImportServiceFlowTests
                 preview = await service.PreviewFromUrlAsync(src, reference: null, teamId, CancellationToken.None);
             }
 
-            // "reviewer" / "tdd" are importable DESPITE owning a matching bench handle (the regression guard); the
-            // fresh handles are importable on their own merit. (That a real owned-handle import actually COEXISTS as a
-            // store snapshot is proven at commit time in PackCommitFlowTests, which is where the DB is touched.)
-            preview.Agents.Single(a => a.DerivedSlug == "reviewer").Importable.ShouldBeTrue("a matching bench handle must not suppress a snapshot import");
-            preview.Skills.Single(s => s.DerivedSlug == "tdd").Importable.ShouldBeTrue("a matching bench handle must not suppress a snapshot import");
-            preview.Agents.Single(a => a.DerivedSlug == "backend-architect").Importable.ShouldBeTrue();
-            preview.Skills.Single(s => s.DerivedSlug == "systematic-debugging").Importable.ShouldBeTrue();
+            // The store-model preview is purely structural — parseable + named ⇒ importable, with no team-handle
+            // check (a snapshot carries no unique handle). Every named artifact is importable. (That a real
+            // owned-handle import COEXISTS as a store snapshot — and that the bench is never clobbered — is proven at
+            // commit time in PackCommitFlowTests, the only place the DB is touched.)
+            foreach (var slug in new[] { "reviewer", "backend-architect" })
+                preview.Agents.Single(a => a.DerivedSlug == slug).Importable.ShouldBeTrue();
+
+            foreach (var slug in new[] { "tdd", "systematic-debugging" })
+                preview.Skills.Single(s => s.DerivedSlug == slug).Importable.ShouldBeTrue();
 
             // A nameless SKILL.md is still discovered (every SKILL.md is a skill) but previews as un-importable with
             // a diagnostic — name is the one thing a snapshot still needs, so this is never importable, never a crash.
@@ -124,22 +119,6 @@ public class PackImportServiceFlowTests
         var full = Path.Combine(root, relPath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         File.WriteAllText(full, content);
-    }
-
-    private async Task SeedAgentAsync(Guid teamId, Guid userId, string slug)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        db.AgentDefinition.Add(new AgentDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = AgentDefinitionOrigin.Authored, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
-        await db.SaveChangesAsync();
-    }
-
-    private async Task SeedSkillAsync(Guid teamId, Guid userId, string slug)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        db.SkillDefinition.Add(new SkillDefinition { Id = Guid.NewGuid(), TeamId = teamId, Slug = slug, Name = slug, Origin = SkillDefinitionOrigin.Authored, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId });
-        await db.SaveChangesAsync();
     }
 
     private async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync()

@@ -144,8 +144,11 @@ public sealed class AgentPackImportService : IAgentPackImportService, IScopedDep
 
     private async Task<IReadOnlySet<string>> ActiveSlugsAsync(Guid teamId, CancellationToken cancellationToken)
     {
+        // Only WORKING handles can actually conflict — the import write enforces uniqueness against Working rows only
+        // (the team-slug index is Working-scoped). A Library STORE snapshot may legally share a handle, so it must not
+        // make this preview over-report a conflict and block a legitimately importable agent.
         var slugs = await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.DeletedDate == null)
+            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null)
             .Select(a => a.Slug)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
