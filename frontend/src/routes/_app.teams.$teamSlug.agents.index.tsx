@@ -6,6 +6,7 @@ import { ApiError } from "@/api/request";
 import { AgentCard } from "@/components/agents/AgentCard";
 import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
+import { NewAgentModal } from "@/components/agents/NewAgentModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
 import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
 import { useAgentDefinitions } from "@/hooks/use-agents";
@@ -32,8 +33,9 @@ function AgentsListPage() {
   const [origin, setOrigin] = useState<OriginFilter>("all");
   const [editor, setEditor] = useState<EditorState>(null);
   const [importing, setImporting] = useState(false);
+  const [choosing, setChoosing] = useState(false);
 
-  const openNew = () => setEditor({ mode: "create" });
+  const openNew = () => setChoosing(true);
   const openAgent = (id: string) => setEditor({ mode: "edit", id });
 
   const importedCount = rows.filter((a) => a.origin === "Imported").length;
@@ -139,6 +141,14 @@ function AgentsListPage() {
       )}
 
       {importing && <ImportPackModal onClose={() => setImporting(false)} />}
+
+      {choosing && (
+        <NewAgentModal
+          onCustom={() => { setChoosing(false); setEditor({ mode: "create" }); }}
+          onCreated={(id) => { setChoosing(false); setEditor({ mode: "edit", id }); }}
+          onClose={() => setChoosing(false)}
+        />
+      )}
     </section>
   );
 }

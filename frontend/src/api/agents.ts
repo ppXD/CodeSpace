@@ -201,6 +201,9 @@ export const agentsApi = {
   getAgentDefinition: (id: string) => fetchJson<AgentDefinitionSummary>(`/api/agents/${id}`),
   createAgentDefinition: (input: AgentDefinitionInput) =>
     fetchJson<{ id: string }>("/api/agents", { method: "POST", body: JSON.stringify(input) }),
+  // Copy a Library store snapshot into a new working bench persona (the New-agent "from Library" path).
+  instantiateAgentFromStore: (sourceDefinitionId: string) =>
+    fetchJson<{ id: string }>("/api/agents/from-store", { method: "POST", body: JSON.stringify({ sourceDefinitionId }) }),
   // agentDefinitionId is duplicated in the URL + body: the body must carry it so the command's `required
   // AgentDefinitionId` deserialization succeeds, and the controller then overrides it with the URL value via
   // `command with { AgentDefinitionId = id }` (the URL is authoritative). Same pattern as the variables PUTs.

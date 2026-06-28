@@ -43,6 +43,15 @@ public interface IAgentDefinitionService
     Task<Guid> ImportAsync(Guid teamId, ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Instantiate a new WORKING bench persona by COPYING a Library STORE snapshot's content. The copy is
+    /// <c>Origin=Imported</c>, <c>Scope=Working</c>, carries <c>SourceDefinitionId</c> + <c>SourceVersion</c>
+    /// provenance (no <c>PackId</c>, so it doesn't re-appear in the Library), and is UNBOUND. The handle is the
+    /// snapshot's derived handle, auto-suffixed only on a bench collision — so this never throws on a taken handle.
+    /// Throws <see cref="KeyNotFoundException"/> when the snapshot isn't a store row in this team.
+    /// </summary>
+    Task<Guid> InstantiateFromStoreAsync(Guid teamId, Guid sourceSnapshotId, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Soft-delete a persona (the slug becomes reusable). Throws <see cref="KeyNotFoundException"/>
     /// when not found in this team.
     /// </summary>
