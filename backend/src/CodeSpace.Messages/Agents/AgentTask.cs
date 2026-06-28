@@ -34,6 +34,17 @@ public sealed record AgentTask
     public string? ResumeFromSessionId { get; init; }
 
     /// <summary>
+    /// P3.3a: the prior session's captured transcript bytes (the raw CLI JSONL) this run RESTORES so the agent's
+    /// <c>--resume</c> finds its earlier conversation. The harness lays it down as a config-home file where the CLI
+    /// reads it (Claude: <c>projects/&lt;sanitized-cwd&gt;/&lt;ResumeFromSessionId&gt;.jsonl</c>). Null (the default) ⇒
+    /// no transcript restored, byte-identical. Set together with <see cref="ResumeFromSessionId"/> by the CONTINUE
+    /// re-stage (a later slice). <c>[JsonIgnore(WhenWritingNull)]</c>; a large transcript should be offloaded to the
+    /// artifact store rather than inlined into task_jsonb — a producer-slice concern.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RestoredTranscript { get; init; }
+
+    /// <summary>
     /// Optional Agent persona (<c>AgentDefinition</c>) this run resolves from — null = a pure-inline run (no persona).
     /// When set, the dispatch-time <c>IAgentDefinitionResolver</c> merges the persona's system prompt + model into this
     /// task before the run is persisted; the id is preserved here as run provenance.

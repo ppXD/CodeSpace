@@ -14,6 +14,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// process). The clone tests skip where git isn't installed, so cross-host <c>dotnet test</c> stays clean.
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("WorkspaceProvisioning")]   // the cleanup-leak test counts the process-global WorkspacesRoot — serialize it against parallel workspace-creators
 public sealed class LocalGitWorkspaceProviderTests
 {
     // ─── Pure auth-URL builder ───────────────────────────────────────────────

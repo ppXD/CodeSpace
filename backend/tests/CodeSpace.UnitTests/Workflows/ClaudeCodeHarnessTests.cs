@@ -54,6 +54,67 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Restores_the_prior_transcript_as_a_config_home_file_on_a_continue()
+    {
+        // P3.3a: a CONTINUE carries the prior session id + its captured transcript → the harness lays the JSONL at
+        // projects/<sanitized-cwd>/<id>.jsonl under the per-run config home, exactly where `claude --resume <id>` reads it.
+        var task = Task() with { ResumeFromSessionId = "sess-r1", RestoredTranscript = "{\"type\":\"summary\"}\n{\"type\":\"user\"}\n" };
+
+        var transcript = Harness.BuildInvocation(task).ConfigHomeFiles.SingleOrDefault(f => f.RelativePath.StartsWith("projects/", StringComparison.Ordinal));
+
+        transcript.ShouldNotBeNull("a CONTINUE restores the prior session JSONL where --resume looks");
+        transcript!.RelativePath.ShouldBe("projects/-tmp-ws/sess-r1.jsonl", "projects/<sanitized-cwd>/<session-id>.jsonl (cwd /tmp/ws → -tmp-ws)");
+        transcript.Content.ShouldBe("{\"type\":\"summary\"}\n{\"type\":\"user\"}\n", "the transcript bytes are restored verbatim");
+    }
+
+    [Fact]
+    public void Restored_transcript_is_added_alongside_projected_skills_not_instead_of_them()
+    {
+        var task = Task() with
+        {
+            ResumeFromSessionId = "sess-r2",
+            RestoredTranscript = "x\n",
+            Skills = new[] { new AgentSkill { Slug = "tdd", Description = "d", Body = "b" } },
+        };
+
+        var paths = Harness.BuildInvocation(task).ConfigHomeFiles.Select(f => f.RelativePath).ToList();
+
+        paths.ShouldContain("skills/tdd/SKILL.md");
+        paths.ShouldContain("projects/-tmp-ws/sess-r2.jsonl");
+    }
+
+    [Fact]
+    public void No_transcript_file_unless_both_a_session_id_and_restored_bytes_are_present()
+    {
+        // A fresh run, a resume WITHOUT captured bytes, and bytes WITHOUT an id each skip the transcript → byte-identical.
+        Harness.BuildInvocation(Task() with { ResumeFromSessionId = "s" }).ConfigHomeFiles.ShouldBeEmpty("a resume with no captured transcript restores nothing");
+        Harness.BuildInvocation(Task() with { RestoredTranscript = "x\n" }).ConfigHomeFiles.ShouldBeEmpty("transcript bytes with no session id can't be addressed → skipped");
+    }
+
+    [Fact]
+    public void A_restored_transcript_round_trips_through_materialization_to_the_encoded_cwd_path_on_disk()
+    {
+        // The whole-chain proof (no CLI binary): harness BuildInvocation → runner materialization → the file is on disk
+        // at projects/<sanitized-cwd>/<id>.jsonl — where a real `claude --resume` process would look. Mirrors the skill
+        // round-trip test; would catch an encoding drift or a runner path-escape that the per-stage tests miss.
+        var task = Task() with { ResumeFromSessionId = "sess-rt", RestoredTranscript = "{\"line\":1}\n{\"line\":2}\n" };
+        var spec = Harness.BuildInvocation(task);
+
+        var configHome = Path.Combine(Path.GetTempPath(), "cs-transcript-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configHome);
+
+            File.ReadAllText(Path.Combine(configHome, "projects", "-tmp-ws", "sess-rt.jsonl"))
+                .ShouldBe("{\"line\":1}\n{\"line\":2}\n", "the runner materialized the transcript exactly where --resume reads it");
+        }
+        finally
+        {
+            if (Directory.Exists(configHome)) Directory.Delete(configHome, recursive: true);
+        }
+    }
+
+    [Fact]
     public void A_bound_skill_round_trips_from_build_invocation_through_materialization_to_a_parseable_skill_md()
     {
         // The end-to-end production chain in-process (no CLI binary): a resolved task carrying skills →
