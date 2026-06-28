@@ -46,6 +46,18 @@ export function useInstantiateAgentFromStore() {
   });
 }
 
+/** Author a new agent INTO the Library (a Custom-pack store entry, off the bench); invalidates the Library packs/detail. Returns the new id. */
+export function useAuthorStoreAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; description?: string | null; systemPrompt?: string | null }) => agentsApi.authorStoreAgent(input),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
+    ]),
+  });
+}
+
 /** Replace a persona's editable surface (PUT); invalidates the list + that persona's detail. */
 export function useUpdateAgent() {
   const queryClient = useQueryClient();

@@ -19,6 +19,18 @@ export function useSkill(skillId: string | null) {
   });
 }
 
+/** Author a new skill INTO the Library (a Custom-pack store entry); invalidates the Library packs/detail. Returns the new id. */
+export function useAuthorStoreSkill() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; description?: string | null; body?: string | null; category?: string | null }) => skillsApi.authorStore(input),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["packs"] }),
+      queryClient.invalidateQueries({ queryKey: ["pack"] }),
+    ]),
+  });
+}
+
 /**
  * Soft-delete a skill. Refreshes everything the deletion touches: the skill list + picker, the Library packs/
  * detail (the skill drops from its pack), and the agents (a deleted skill drops from any persona's bound set).

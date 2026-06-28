@@ -30,6 +30,10 @@ export const skillsApi = {
   /** One skill with its SKILL.md body — the Library detail modal. */
   get: (id: string) => fetchJson<SkillDetail>(`/api/skills/${id}`),
 
+  /** Author a new skill directly INTO the Library (a store entry under the team's Custom pack). */
+  authorStore: (input: { name: string; description?: string | null; body?: string | null; category?: string | null }) =>
+    fetchJson<{ id: string }>("/api/skills/library", { method: "POST", body: JSON.stringify(input) }),
+
   /** Soft-delete a skill. */
   remove: (id: string) => fetchJson<void>(`/api/skills/${id}`, { method: "DELETE" }),
 };
