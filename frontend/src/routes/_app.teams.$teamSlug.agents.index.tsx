@@ -17,9 +17,8 @@ type EditorState = { mode: "create" } | { mode: "edit"; id: string } | null;
  * working unit: a role-tinted avatar + role badge (a display heuristic), its @handle, and its loadout (model /
  * autonomy / tools chips + the skills it carries from the AgentSkillBinding join). A persona is harness-AGNOSTIC,
  * so there's deliberately no per-card harness field — the per-harness split lives in the Fleet-health scorecard,
- * which sits BELOW the bench (measurement second, the units first). "New agent" + a card click open the editor;
- * "Import" opens the import-from-URL pack modal. (Per-agent performance isn't aggregated yet — cards show "No
- * recent runs" until that backend slice lands.)
+ * which sits BELOW the bench (measurement second, the units first). "New agent" + a card click open the editor
+ * modal; "Import" opens the import-from-URL pack modal.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
