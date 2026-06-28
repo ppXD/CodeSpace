@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 
@@ -29,6 +30,11 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
 
     public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
+        // A test injects a TRANSIENT (retryable) infra fault on a specific turn — thrown BEFORE any decision is produced,
+        // so the production RetryingSupervisorDeciderDecorator that wraps this scripted decider must retry + recover it.
+        if (_script.TryConsumeTransientFault(context.TurnNumber))
+            throw new LlmApiException("test-gateway", 503, LlmErrorCategory.Transient, $"injected transient brain fault on turn {context.TurnNumber}");
+
         var decision = _script.Mode switch
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
@@ -266,6 +272,26 @@ public sealed class SupervisorDecisionScript
 
     /// <summary>The repo-relative deliverable paths the <see cref="SupervisorScriptMode.PlanSpawnMergeArtifactStop"/> stop authors on its model ArtifactPresent gate.</summary>
     public IReadOnlyList<string> ArtifactPaths { get; set; } = Array.Empty<string>();
+
+    private readonly Dictionary<int, int> _transientFaults = new();
+
+    /// <summary>Inject a transient (retryable) brain-call fault on a specific TURN: the next <paramref name="times"/> decide invocations for that turn throw a Transient <c>LlmApiException</c> before any decision is produced, then it proceeds — driving the production retry decorator that wraps the scripted decider. <paramref name="times"/> must stay under the retry budget for the run to recover.</summary>
+    public void FailTransientlyOnTurn(int turn, int times) => _transientFaults[turn] = times;
+
+    /// <summary>How many injected transient faults REMAIN for a turn (0 once they've all been thrown) — a test asserts this reached 0 to prove the decider actually faulted that many times.</summary>
+    public int RemainingTransientFaults(int turn) => _transientFaults.TryGetValue(turn, out var n) ? n : 0;
+
+    /// <summary>Drop all injected transient faults — a test calls this in cleanup so the shared fixture singleton never leaks a fault into a sibling test.</summary>
+    public void ClearTransientFaults() => _transientFaults.Clear();
+
+    /// <summary>Consume one injected transient fault for the turn if any remain (called by the scripted decider on each decide).</summary>
+    public bool TryConsumeTransientFault(int turn)
+    {
+        if (!_transientFaults.TryGetValue(turn, out var remaining) || remaining <= 0) return false;
+
+        _transientFaults[turn] = remaining - 1;
+        return true;
+    }
 
     public void PlanThenStop() => Mode = SupervisorScriptMode.PlanThenStop;
 

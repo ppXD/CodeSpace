@@ -239,6 +239,11 @@ public class CodeSpaceModule : Autofac.Module
     private static void RegisterDecorators(ContainerBuilder builder)
     {
         builder.RegisterDecorator<Services.Workflows.Planning.Planners.CriticPlannerDecorator, Services.Workflows.Planning.IWorkflowPlanner>();
+
+        // Retry sits INSIDE the critic (registered first ⇒ innermost), so a transient brain-call blip self-heals before
+        // the critic ever reviews a decision and the retry budget covers exactly the brain call (not the critic's review).
+        builder.RegisterInstance(Services.Supervisor.Deciders.SupervisorDecisionRetryOptions.FromEnvironment());
+        builder.RegisterDecorator<Services.Supervisor.Deciders.RetryingSupervisorDeciderDecorator, Services.Supervisor.ISupervisorDecider>();
         builder.RegisterDecorator<Services.Supervisor.Deciders.CriticSupervisorDeciderDecorator, Services.Supervisor.ISupervisorDecider>();
 
         // Side-channel: record every in-process model call (prompt/completion/usage) onto the run ledger as
