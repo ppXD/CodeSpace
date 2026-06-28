@@ -277,6 +277,102 @@ public class StuckRunReconcilerFlowTests
     }
 
     [Fact]
+    public async Task On_demand_continue_redispatches_a_stranded_suspended_run_and_it_reaches_terminal()
+    {
+        // P1.3: the user-triggered twin of the stranded-Suspended sweep — a run stranded Suspended with NO pending
+        // wait is continued NOW (no ≤2-min wait), driving the SAME CAS Suspended→Pending + dispatch, and the engine
+        // walks it to terminal Success. No grace-window backdate needed: continue is on demand, not time-gated.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);   // start(trigger) -> end(terminal)
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(1));
+        await PreRecordNodeCompletedAsync(runId, "start");
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Resolved);   // the stranded signature: a RESOLVED wait, no pending one
+
+        (await ContinueAsync(runId, teamId)).ShouldBeTrue("a stranded Suspended run (no pending wait) continues on demand");
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "after the CAS Suspended→Pending + the dispatcher's Pending→Enqueued");
+
+        await RunEngineAsync(runId);
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "the continued run walks to terminal Success — the same recovery the sweep performs");
+    }
+
+    [Fact]
+    public async Task Continue_is_a_no_op_for_a_suspended_run_that_still_has_a_pending_wait()
+    {
+        // A Suspended run still parked on a Pending wait is legitimately waiting (approval / timer / callback) — it
+        // resumes via /resume or its signal, NOT continue. Continue must no-op (false) and never bypass the wait.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(1));
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Pending);
+
+        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a parked Suspended run with a pending wait must not be force-continued");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "it stays parked on its wait");
+    }
+
+    [Fact]
+    public async Task Continue_is_a_no_op_for_a_terminal_run()
+    {
+        // A terminal Failure can't continue IN PLACE — it is revived by replay / rerun-from-node, never here.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Failure, createdAgo: TimeSpan.FromMinutes(1));
+
+        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a terminal run cannot continue in place");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure, "it stays terminal");
+    }
+
+    [Fact]
+    public async Task Continue_a_foreign_team_run_throws_not_found_and_leaks_nothing()
+    {
+        var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamA, userA);
+
+        var runId = await StageStuckRunAsync(workflowId, teamA, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(1));
+
+        await Should.ThrowAsync<KeyNotFoundException>(async () => await ContinueAsync(runId, teamB));
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the foreign-team continue is a clean 404, leaving the run untouched");
+    }
+
+    [Fact]
+    public async Task Continue_is_a_no_op_for_an_active_running_run()
+    {
+        // A Running run is mid-flight, not stranded — continue must NOT touch it (the guard fences every non-Suspended
+        // status, so a future guard refactor can't silently start re-dispatching an active run).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Running, createdAgo: TimeSpan.FromMinutes(1));
+
+        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a Running run is active, not stranded — continue is a no-op");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running, "it stays Running, untouched");
+    }
+
+    [Fact]
+    public async Task Two_concurrent_continues_drive_exactly_one_redispatch()
+    {
+        // Race-safety: two operators (or a continue racing the reconciler sweep) hit the same stranded run. The CAS
+        // Suspended→Pending serializes them — EXACTLY ONE wins (true), the loser 0-rows to a clean false, and the run
+        // is enqueued ONCE (no double-dispatch; the dispatcher's Pending→Enqueued CAS is the second guard).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(1));
+        await PreRecordNodeCompletedAsync(runId, "start");
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Resolved);
+
+        var results = await Task.WhenAll(ContinueAsync(runId, teamId), ContinueAsync(runId, teamId));
+
+        results.Count(won => won).ShouldBe(1, "exactly one concurrent continue wins the CAS; the other is a clean no-op");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the run is enqueued exactly once — no double-dispatch");
+    }
+
+    [Fact]
     public async Task Stranded_suspended_with_a_resolved_suspending_node_wait_resumes_from_payload_and_reaches_success()
     {
         // The FAITHFUL stranded scenario the sibling recovery test above only approximates: the orphaned wait
@@ -673,5 +769,11 @@ public class StuckRunReconcilerFlowTests
             .Where(r => r.Id == runId)
             .Select(r => r.Status)
             .SingleAsync();
+    }
+
+    private async Task<bool> ContinueAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpace.Core.Services.Workflows.IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
     }
 }

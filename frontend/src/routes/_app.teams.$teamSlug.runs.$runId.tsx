@@ -10,6 +10,7 @@ import { RunDetailView } from "@/components/workflows/RunDetailView";
 import { RunFacts } from "@/components/workflows/RunFacts";
 import { RunOutline } from "@/components/workflows/RunOutline";
 import { RunStateHeader } from "@/components/workflows/RunStateHeader";
+import { ContinueRunButton } from "@/components/workflows/ContinueRunButton";
 import { StopRunButton } from "@/components/workflows/StopRunButton";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { isRunActive, usePendingDecisions, useReplayRun, useRunAttempts, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
@@ -96,6 +97,7 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
           </div>
           <div className="ct-actions">
             {run.data && <StopRunButton runId={effectiveRunId} status={run.data.status} />}
+            {run.data && <ContinueRunButton runId={effectiveRunId} status={run.data.status} hasPendingWait={run.data.pendingWait != null} />}
             <button
               className="btn btn-primary"
               onClick={() => void onReplay()}

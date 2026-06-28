@@ -137,6 +137,14 @@ public class WorkflowRunsController : ControllerBase
         return Ok(new { resumed });
     }
 
+    /// <summary>Continue a STRANDED Suspended run (no pending wait) on demand — the user-triggered twin of the reconciler's re-dispatch. Team-scoped; foreign → 404. Returns <c>{ continued }</c>.</summary>
+    [HttpPost("{runId:guid}/continue")]
+    public async Task<IActionResult> Continue([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var continued = await _mediator.Send(new ContinueRunCommand { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { continued });
+    }
+
     /// <summary>Operator cancel: abort a non-terminal run + tear down its branch agents and staged children. Team-scoped; foreign → 404; already-terminal is an idempotent no-op.</summary>
     [HttpPost("{runId:guid}/cancel")]
     public async Task<IActionResult> Cancel([FromRoute] Guid runId, CancellationToken cancellationToken)

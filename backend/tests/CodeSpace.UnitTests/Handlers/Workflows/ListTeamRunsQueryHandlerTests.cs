@@ -79,6 +79,7 @@ public class ListTeamRunsQueryHandlerTests
         public Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task DeleteAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task SetEnabledAsync(Guid workflowId, Guid teamId, bool enabled, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> RunManuallyAsync(Guid workflowId, Guid teamId, Guid actorUserId, JsonElement? payload, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> ReplayRunAsync(Guid originalRunId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> RerunFromNodeAsync(Guid originalRunId, string fromNodeId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();

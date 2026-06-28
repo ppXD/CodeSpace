@@ -705,6 +705,10 @@ export const workflowsApi = {
       body: JSON.stringify(body),
     }),
 
+  /** Continue a STRANDED Suspended run (no pending wait) on demand — drives the same re-dispatch the reconciler does. Returns whether this call drove it. */
+  continueRun: (runId: string) =>
+    fetchJson<{ continued: boolean }>(`/api/workflows/runs/${runId}/continue`, { method: "POST" }),
+
   /**
    * Cancel (hard-stop) a still-live run — wins the non-terminal → Cancelled flip and kills the run's in-flight
    * agents. Idempotent: an already-terminal run returns `cancelled: false` carrying its existing status.
