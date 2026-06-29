@@ -61,6 +61,9 @@
     <!-- The integration test reaches internal executor helpers (e.g. IsMcpEndpointEnabled) to prove the
          executor-owned MCP endpoint lifecycle through the real ExecuteAsync path. -->
     <InternalsVisibleTo Include="CodeSpace.IntegrationTests" />
+    <!-- The gated real-CLI E2E drives the production harness + runner internals (WriteConfigHomeFiles,
+         ClaudeTranscriptPath) against the real claude binary's filesystem contract. -->
+    <InternalsVisibleTo Include="CodeSpace.E2ETests" />
   </ItemGroup>
 
 </Project>
