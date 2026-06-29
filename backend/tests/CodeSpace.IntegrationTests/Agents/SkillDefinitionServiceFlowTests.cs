@@ -1,6 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -235,6 +236,57 @@ public class SkillDefinitionServiceFlowTests
         using var verify = _fixture.BeginScope();
         var copy = await verify.Resolve<CodeSpaceDbContext>().SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == newId);
         copy.Slug.ShouldBe("tdd-2", "the handle is taken on the bench, so instantiate suffixes rather than dead-ending");
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_reuses_a_free_working_copy_instead_of_piling_up_duplicates()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var snapshotId = await SeedStoreSkillSnapshotAsync(teamId, "tdd");
+
+        Guid first, second;
+        using (var scope = _fixture.BeginScope())
+            first = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        // The first copy is unbound (no agent carries it), so a second instantiate REUSES it rather than minting tdd-2.
+        using (var scope = _fixture.BeginScope())
+            second = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        second.ShouldBe(first, "a free working copy of the snapshot is reused, not duplicated");
+
+        using var verify = _fixture.BeginScope();
+        var copies = await verify.Resolve<CodeSpaceDbContext>().SkillDefinition.AsNoTracking()
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.SourceDefinitionId == snapshotId && s.DeletedDate == null)
+            .CountAsync();
+        copies.ShouldBe(1, "no orphaned -2/-3 duplicate piled up");
+    }
+
+    [Fact]
+    public async Task Instantiate_from_store_mints_a_fresh_copy_when_the_only_existing_one_is_bound()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var snapshotId = await SeedStoreSkillSnapshotAsync(teamId, "tdd");
+
+        Guid first;
+        using (var scope = _fixture.BeginScope())
+            first = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        // Bind the first copy to an agent — it is no longer FREE.
+        Guid agentId;
+        using (var scope = _fixture.BeginScope())
+            agentId = await scope.Resolve<IAgentDefinitionService>().CreateAsync(teamId, new AgentDefinitionInput { Name = "Reviewer" }, userId, default);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentSkillBindingService>().SetForAgentAsync(teamId, agentId, new[] { first }, userId, default);
+
+        Guid second;
+        using (var scope = _fixture.BeginScope())
+            second = await scope.Resolve<ISkillDefinitionService>().InstantiateFromStoreAsync(teamId, snapshotId, userId, default);
+
+        second.ShouldNotBe(first, "the only copy is bound to an agent, so a fresh private copy is minted (per-agent isolation preserved)");
+
+        using var verify = _fixture.BeginScope();
+        var copy = await verify.Resolve<CodeSpaceDbContext>().SkillDefinition.AsNoTracking().SingleAsync(s => s.Id == second);
+        copy.Slug.ShouldBe("tdd-2", "the bound copy owns 'tdd', so the fresh copy disambiguates");
     }
 
     [Fact]
