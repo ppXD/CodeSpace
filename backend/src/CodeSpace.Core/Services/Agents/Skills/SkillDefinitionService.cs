@@ -134,6 +134,27 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
             .SingleOrDefaultAsync(s => s.Id == sourceSnapshotId && s.TeamId == teamId && s.Scope == DefinitionScope.Store && s.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Store snapshot {sourceSnapshotId} not found or not accessible.");
 
+        // Reuse a FREE (unbound by any agent) working copy of this snapshot instead of minting yet another. Binding
+        // then unbinding leaves the copy behind (unbinding hard-deletes only the join row, not the skill), so without
+        // this a bind→unbind→rebind cycle — or binding the same Library skill repeatedly — piles up orphaned copies
+        // with climbing -2/-3 handles. A copy still bound to ANOTHER agent is not free, so per-agent private copies
+        // (the point of the instantiate-to-use model) are preserved.
+        // Known minor race (instantiate + bind are separate transactions, bindings persist on Save): if two agents
+        // bind the SAME snapshot in overlapping unsaved sessions while exactly one free copy exists, both can reuse
+        // it and end up sharing one copy. Tolerable for now (single-writer in practice); revisit if it bites.
+        var reusableId = await _db.SkillDefinition.AsNoTracking()
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null && s.SourceDefinitionId == snapshot.Id)
+            .Where(s => !_db.AgentSkillBinding.Any(b => b.SkillDefinitionId == s.Id))
+            .OrderBy(s => s.CreatedDate)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (reusableId is { } reused)
+        {
+            _logger.LogInformation("Skill bind reused a free working copy: team={TeamId} skill={SkillId} source={SourceId}", teamId, reused, snapshot.Id);
+            return reused;
+        }
+
         var slug = await DeriveAvailableSlugAsync(teamId, snapshot.Name, cancellationToken).ConfigureAwait(false);
 
         var now = DateTimeOffset.UtcNow;
