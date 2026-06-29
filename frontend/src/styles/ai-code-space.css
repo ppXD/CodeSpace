@@ -5273,6 +5273,60 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* Card holds NO horizontal padding — tab/row boxes go full-bleed so their dividers meet the
    border cleanly; overflow:hidden clips full-width rows to the rounded corners. */
 .lt3-cust { margin: 10px 0 2px; background: #fbfaf7; border: 1px solid #e8e1d7; border-radius: 12px; padding: 0; overflow: hidden; }
+
+/* Session room: the SAME Launch Task composer DOCKED inline (no portal / modal chrome) — the .lt3-box floats on its
+ * own border + shadow. A compact input (the modal's is 140px); the container fades content into the page bg above it,
+ * so there is no hard white divider line. */
+.lt3-inline { width: 100%; max-width: 820px; margin: 0 auto; }
+.lt3-inline .lt3-box { padding: 12px 12px 10px; border-radius: 14px; box-shadow: var(--shadow-2); }
+.lt3-inline .lt3-input { min-height: 56px; font-size: 15px; }
+.lt3-inline .lt3-cust { margin-top: 8px; }
+.session-composer { padding: 6px 16px 16px; background: linear-gradient(to top, var(--bg) 72%, transparent); }
+
+/* Session room turn — the streaming step timeline (replaces the per-turn React Flow canvas). A left gutter of status
+ * glyphs joined by a connector line, each step a plain line that expands into the live agent terminal tiles. */
+.turn-tl { padding: 12px 14px 4px; }
+.turn-tl-empty { padding: 16px; color: var(--muted); font-size: 13px; }
+.turn-tl-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 14px; }
+.turn-tl-av { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; flex: none; }
+.turn-tl-head-name { font-weight: 500; font-size: 13px; color: var(--ink); }
+.turn-tl-head-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.turn-tl-head-dot-run { background: #3782c2; } .turn-tl-head-dot-ok { background: var(--good); }
+.turn-tl-head-dot-err { background: var(--danger); } .turn-tl-head-dot-wait { background: var(--warn); }
+.turn-tl-head-phrase { font-size: 13px; color: var(--muted); min-width: 0; }
+.turn-tl-steps { display: flex; flex-direction: column; }
+.turn-tl-step { display: flex; gap: 12px; }
+.turn-tl-gut { display: flex; flex-direction: column; align-items: center; width: 22px; flex: none; }
+.turn-tl-gl { width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 500; }
+.turn-tl-gl-ok { background: #e7f1ea; color: var(--good); }
+.turn-tl-gl-err { background: #f8e7e0; color: var(--danger); }
+.turn-tl-gl-run { background: #e6eef8; color: #3782c2; }
+.turn-tl-gl-wait { background: #f7eddc; color: var(--warn); }
+.turn-tl-gl-pending { border: 1px solid var(--line-2); color: var(--muted-2); }
+.turn-tl-line { width: 1px; flex: 1; background: var(--line); margin: 3px 0; min-height: 10px; }
+.turn-tl-body { flex: 1; min-width: 0; padding-bottom: 16px; }
+.turn-tl-row { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 1px 0; }
+.turn-tl-label { font-size: 14px; color: var(--ink); }
+.turn-tl-meta { font-size: 12px; color: var(--muted-2); }
+.turn-tl-caret { margin-left: auto; color: var(--muted-2); transition: transform .12s; font-size: 15px; }
+.turn-tl-caret[data-open] { transform: rotate(90deg); }
+.turn-tl-rerunrow { margin: 6px 0 2px; }
+.turn-tl-tiles { margin-top: 10px; }
+.turn-tl-termwrap { margin-top: 10px; }
+
+/* Tidy node-graph spine on top of a turn — evenly-spaced phase pills joined by connectors, the active one accented. */
+.turn-spine { display: flex; align-items: center; gap: 6px; padding: 0 2px 18px; flex-wrap: wrap; }
+.turn-spine-node { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 12px; color: var(--muted); max-width: 220px; min-width: 0; }
+.turn-spine-node[data-tone="run"] { border-color: var(--accent); color: var(--ink); font-weight: 500; }
+.turn-spine-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.turn-spine-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.turn-spine-dot-ok { background: var(--good); } .turn-spine-dot-run { background: var(--accent); } .turn-spine-dot-err { background: var(--danger); }
+.turn-spine-conn { width: 16px; height: 1px; background: var(--line-2); flex: none; }
+
+/* Lighter, Claude-like borders for the agent terminal INSIDE a session turn (the "too thick" fix) — scoped so the
+ * classic run-room keeps its own heavier styling. */
+.turn-tl .agent-terminal { border-color: var(--line); box-shadow: none; }
+
 .lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }

@@ -36,6 +36,9 @@ export interface LaunchCaps {
 export interface LaunchTaskInput {
   taskText: string;
   surfaceKind: TaskSurfaceKind;
+  /** Continue an existing work session as its NEXT top-level turn. Binds to `LaunchTaskCommand.SessionId`
+   *  (→ `ContinueSessionId`); omitted ⇒ a fresh session is opened. The session view's composer sets this. */
+  sessionId?: string | null;
   repositoryId?: string | null;
   baseBranch?: string | null;
   effort?: string | null;

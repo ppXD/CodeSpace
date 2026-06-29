@@ -29,6 +29,11 @@ export interface LaunchTaskModalProps {
   onClose: () => void;
   /** Receives the started run's id so the caller can navigate to its phase tree. */
   onLaunched?: (runId: string) => void;
+  /** Render the SAME composer DOCKED inline (no portal / mask / modal chrome) — for the Session room's bottom bar.
+   *  The box floats on its own (its border + shadow); the host provides the surrounding layout. */
+  inline?: boolean;
+  /** When set, the launch CONTINUES this work session as its next turn (threaded into the launch input). */
+  sessionId?: string;
 }
 
 interface WorkspaceRepo { repositoryId: string; branch: string; access: "write" | "read"; alias: string; isPrimary: boolean }
@@ -53,7 +58,7 @@ const PERMS = [
  * selects). "Customize" expands in place into Supervisor (on Deep) + Advanced execution / safety. WIRED
  * fields drive a real `POST /api/workflows/runs`; extra repos, supervisor config and safety toggles are design-ahead.
  */
-export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: LaunchTaskModalProps) {
+export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline = false, sessionId }: LaunchTaskModalProps) {
   const [taskText, setTaskText] = useState(autofill?.taskText ?? "");
   const [workspace, setWorkspace] = useState<WorkspaceRepo[]>(() =>
     autofill?.repositoryId
@@ -177,7 +182,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     // (Deep) / the agent model (single-agent) by row, not guess between two credentials of the same model name.
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
-      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
+      taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
@@ -234,12 +239,10 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   const toolsLabel = cfg.tools.length ? `${cfg.tools.length} tool${cfg.tools.length > 1 ? "s" : ""}` : "Default · all tools";
   const toggleTool = (name: string) => setC({ tools: cfg.tools.includes(name) ? cfg.tools.filter(t => t !== name) : [...cfg.tools, name] });
 
-  return createPortal(
+  const content = (
     <>
-      <div className="mdl-mask" onClick={onClose} />
-      <div className="mdl lt3" role="dialog" aria-modal="true">
-        <div className="lt3-box">
-          <textarea className="lt3-input" rows={3} placeholder={placeholder} value={taskText} onChange={e => setTaskText(e.target.value)} autoFocus />
+      <div className="lt3-box">
+          <textarea className="lt3-input" rows={3} placeholder={placeholder} value={taskText} onChange={e => setTaskText(e.target.value)} autoFocus={!inline} />
 
           <div className="lt3-bar">
             <button type="button" className="lt3-pill lt3-adv" data-open={expanded} aria-expanded={expanded} title="Advanced settings — execution · supervisor · safety" onClick={() => setExpanded(v => !v)}>
@@ -468,7 +471,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
         )}
 
         {launch.isError && <div className="lt3-err">{(launch.error as Error)?.message ?? "Launch failed"}</div>}
-      </div>
+    </>
+  );
+
+  if (inline) return <div className="lt3 lt3-inline">{content}</div>;
+
+  return createPortal(
+    <>
+      <div className="mdl-mask" onClick={onClose} />
+      <div className="mdl lt3" role="dialog" aria-modal="true">{content}</div>
     </>,
     document.body,
   );
