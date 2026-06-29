@@ -174,12 +174,21 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
         var subtasks = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson).Select(s => s.Title).ToList();
 
-        var changedFiles = decisions
+        // The turn's agent results (latest fold per agent) — the one read drives the changed-file list, the per-agent
+        // card summaries, and the lead fallback (no stop summary → compose from these).
+        var agentResults = decisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
             .GroupBy(r => r.AgentRunId).Select(g => g.Last())
+            .ToList();
+
+        var changedFiles = agentResults
             .SelectMany(r => r.ChangedFiles)
             .Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).Take(MaxChangedFiles).ToList();
+
+        var agentSummaries = agentResults
+            .Where(r => !string.IsNullOrWhiteSpace(r.Summary))
+            .ToDictionary(r => r.AgentRunId, r => r.Summary!.Trim());
 
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
@@ -195,12 +204,34 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.Reasoning)
             .CountAsync(cancellationToken).ConfigureAwait(false);
 
+        // The reasoning step texts, bounded to the focused turn (cap the count, so a huge run stays cheap) — surfaced
+        // when the Reasoning row is expanded. Public reasoning narration (the harness emits summaries, not raw CoT).
+        var reasoningSteps = reasoningCount == 0 ? new List<string>() : await _db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.Reasoning && e.Text != null && e.Text != "")
+            .OrderBy(e => e.OccurredAt)
+            .Select(e => e.Text!)
+            .Take(MaxReasoningSteps)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // The per-kind tool histogram (read · edit · test) — one GROUP BY scoped to the turn's agents, side-effecting
+        // rows only (DecisionEnvelopeJson == null), matching the ToolCount semantics. No N+1.
+        var toolHistogram = agentIds.Count == 0 ? new List<ToolKindCount>() : (await _db.ToolCallLedger.AsNoTracking()
+            .Where(t => agentIds.Contains(t.AgentRunId) && t.TeamId == teamId && t.DecisionEnvelopeJson == null)
+            .GroupBy(t => t.ToolKind)
+            .Select(g => new { Kind = g.Key, Count = g.Count() })
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .Select(x => new ToolKindCount(x.Kind, x.Count))
+            .OrderByDescending(x => x.Count).ThenBy(x => x.Kind, StringComparer.Ordinal).ToList();
+
         return new RoomTurnFacts
         {
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ToolCalls = toolCalls,
+            ToolHistogram = toolHistogram,
             ReasoningCount = reasoningCount,
+            ReasoningSteps = reasoningSteps,
+            AgentSummaries = agentSummaries,
             AcceptancePassed = acceptance,
             Delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false),
             RawError = error,
@@ -208,6 +239,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     private const int MaxChangedFiles = 200;
+    private const int MaxReasoningSteps = 40;
 
     /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches). Null when the turn opened none.</summary>
     private async Task<RoomDelivery?> DeliveryAsync(Guid runId, CancellationToken cancellationToken)

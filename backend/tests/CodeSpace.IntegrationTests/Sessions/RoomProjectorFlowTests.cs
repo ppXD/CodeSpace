@@ -155,7 +155,8 @@ public class RoomProjectorFlowTests
         turn.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Work", "Review", "Deliver" }, "a supervisor turn (decision tape present) gets the canonical lifecycle map");
 
         var subtasks = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "subtasks");
-        subtasks.Label.ShouldBe("Planned 2 subtasks");
+        subtasks.Label.ShouldBe("Plan");
+        subtasks.Detail.ShouldBe("2 subtasks");
         subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" }, "the plan's subtask titles are surfaced from the decision tape");
     }
 
@@ -170,25 +171,32 @@ public class RoomProjectorFlowTests
         await SeedSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), new[] { "b.cs", "a.cs" }), (Guid.NewGuid(), new[] { "a.cs", "c.cs" }));
 
         var room = await ProjectByRunAsync(run, teamId);
-        var files = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<StatBlock>().Single(s => s.Kind == "files");
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var files = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "files");
 
-        files.Label.ShouldBe("Changed 3 files");
+        files.Label.ShouldBe("Files changed");
+        files.Detail.ShouldBe("3 files", "no diff line stat captured → just the file count");
         files.Items.Select(i => i.Text).ShouldBe(new[] { "a.cs", "b.cs", "c.cs" }, "the distinct, ordinal-sorted union of the agents' changed files (a.cs shared → counted once)");
+
+        var agents = turn.Blocks.OfType<AgentGroupBlock>().Single();
+        agents.Title.ShouldBe("Agents", "a terminal supervisor turn surfaces its spawned agents as one group");
+        agents.Agents.Count.ShouldBe(2, "one card per spawned agent");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
-    /// <summary>Stamp a supervisor SPAWN decision whose folded agentResults carry per-agent changed-file paths.</summary>
+    /// <summary>Stamp a supervisor SPAWN decision whose folded agentResults carry per-agent changed-file paths, plus the matching AgentRun rows so the phase projection surfaces the agents (the Agents group folds them).</summary>
     private async Task SeedSpawnDecisionAsync(Guid teamId, Guid runId, params (Guid AgentRunId, string[] Files)[] agents)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
 
         var outcome = JsonSerializer.Serialize(new
         {
             agentCount = agents.Length,
             agentRunIds = agents.Select(a => a.AgentRunId).ToArray(),
-            agentResults = agents.Select(a => new { agentRunId = a.AgentRunId, status = "Succeeded", changedFiles = a.Files }).ToArray(),
+            agentResults = agents.Select(a => new { agentRunId = a.AgentRunId, status = "Succeeded", changedFiles = a.Files, summary = $"Edited {a.Files.Length} files" }).ToArray(),
         });
 
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
@@ -198,6 +206,15 @@ public class RoomProjectorFlowTests
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
+
+        foreach (var (agentRunId, _) in agents)
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup",
+                Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+                CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+            });
+
         await db.SaveChangesAsync();
     }
 
