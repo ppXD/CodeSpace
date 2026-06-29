@@ -160,7 +160,25 @@ public class RoomNarrativeTests
             WorkflowRunStatus.Suspended);
 
         n.Blocks.OfType<NarrativeStepBlock>().ShouldHaveSingleItem().Text.ShouldBe("Which database? — Postgres");
-        n.Summary.ShouldBe("Waiting for input.");
+        n.Summary.ShouldBeNull("an in-progress / waiting turn has no headline lead — the status word conveys it");
+    }
+
+    [Fact]
+    public void A_zero_agent_spawn_emits_no_line_and_no_group()
+    {
+        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 0, label: "Spawn") }, WorkflowRunStatus.Running);
+
+        n.Blocks.OfType<NarrativeStepBlock>().Select(b => b.Text).ShouldBe(new[] { "Planned the approach." }, "a 0-agent spawn is a no-op — no 'Dispatched 0 agents' noise");
+        n.Blocks.OfType<AgentGroupBlock>().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void An_agent_card_carries_its_result_summary()
+    {
+        var phase = SpawnWith(new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), Label = "Wire the API", Summary = "Added the login endpoint and tests." });
+
+        Build(new[] { phase }, WorkflowRunStatus.Success).Blocks.OfType<AgentGroupBlock>().Single().Agents.Single()
+            .Summary.ShouldBe("Added the login endpoint and tests.", "the agent's model-authored result takeaway shows on the card");
     }
 
     [Fact]
@@ -192,13 +210,13 @@ public class RoomNarrativeTests
     }
 
     [Fact]
-    public void An_empty_run_has_no_map_and_a_plain_summary()
+    public void An_empty_run_has_no_map_and_no_lead()
     {
         var n = Build(Array.Empty<RunPhase>());
 
         n.Map.ShouldBeNull();
         n.Blocks.ShouldBeEmpty();
-        n.Summary.ShouldBe("Done.");
+        n.Summary.ShouldBeNull("no model summary → no generic 'Done.' lead; the status word conveys completion");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

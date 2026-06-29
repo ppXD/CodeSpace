@@ -121,6 +121,9 @@ public sealed record RoomAgentCard
     public decimal? CostUsd { get; init; }
     public int? FilesChanged { get; init; }
 
+    /// <summary>The agent's own one-line RESULT takeaway (what it concluded) — shown on the collapsed card before any raw log. Null before the result lands / when it produced none.</summary>
+    public string? Summary { get; init; }
+
     /// <summary>The agent's latest PUBLIC activity line (e.g. "running tests · 12 passing", "editing auth.ts") — never reasoning. Null when idle / unknown.</summary>
     public string? LatestLine { get; init; }
 }

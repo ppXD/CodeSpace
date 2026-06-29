@@ -176,6 +176,24 @@ public class SupervisorPhaseSourceTests
     }
 
     [Fact]
+    public void A_spawned_agents_result_summary_surfaces_on_its_ref()
+    {
+        var agentA = Guid.NewGuid();
+
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded,
+            payloadJson: """{"subtasks":[{"id":"sa","title":"Do it","instruction":"..."}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{agentA}}"],"agentResults":[{"agentRunId":"{{agentA}}","status":"Succeeded","summary":"Added the login endpoint."}]}""",
+            payloadJson: """{"subtaskIds":["sa"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Succeeded };
+
+        var a = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn }, statuses).Single(p => p.Kind == SupervisorDecisionKinds.Spawn).Agents.ShouldHaveSingleItem();
+
+        a.Summary.ShouldBe("Added the login endpoint.", "the agent's model-authored result takeaway surfaces on its ref");
+    }
+
+    [Fact]
     public void A_homogeneous_spawn_without_an_agents_array_leaves_role_null_but_still_maps_the_subtask_title()
     {
         var agentA = Guid.NewGuid();

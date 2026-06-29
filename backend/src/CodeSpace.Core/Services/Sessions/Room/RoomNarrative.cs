@@ -74,13 +74,14 @@ public static class RoomNarrative
         return blocks;
     }
 
-    /// <summary>The turn's one-line headline: on success the model's closing summary, on failure the humanized cause, else a status line.</summary>
+    /// <summary>The turn's one-line headline — substantive model text only: the model's closing summary on success, the
+    /// humanized cause on failure. In-progress / waiting return null (the header status word + the flow end cap convey
+    /// that), so the lead line is never a generic status echo.</summary>
     private static string? SummaryFor(WorkflowRunStatus status, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> structural, string? error) => status switch
     {
-        WorkflowRunStatus.Success => StopSummary(tape) ?? "Done.",
+        WorkflowRunStatus.Success => StopSummary(tape),
         WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled => FailureText(status, tape.Count > 0 ? tape : structural, error),
-        WorkflowRunStatus.Suspended => "Waiting for input.",
-        _ => "Working…",
+        _ => null,
     };
 
     /// <summary>The stop decision's recorded summary (the model's "here's what I did") — surfaced on the stop phase's <see cref="RunPhase.Summary"/>.</summary>
@@ -91,7 +92,7 @@ public static class RoomNarrative
     private static string? NarrativeLine(RunPhase phase) => phase.Kind switch
     {
         SupervisorDecisionKinds.Plan => "Planned the approach.",
-        SupervisorDecisionKinds.Spawn => $"Dispatched {AgentWord(phase.Metrics.AgentCount)} to work in parallel.",
+        SupervisorDecisionKinds.Spawn => phase.Metrics.AgentCount > 0 ? $"Dispatched {AgentWord(phase.Metrics.AgentCount)} to work in parallel." : null,   // a 0-agent spawn is a no-op — no line
         SupervisorDecisionKinds.Retry => "Retried a subtask that needed another pass.",
         SupervisorDecisionKinds.AskHuman => phase.Summary is { Length: > 0 } q ? q : "Asked for input.",
         SupervisorDecisionKinds.Merge => phase.Status == PhaseStatus.Succeeded ? "Merged the agents' work." : "Merging the agents' work.",
@@ -113,6 +114,7 @@ public static class RoomNarrative
         Tokens = a.InputTokens is null && a.OutputTokens is null ? null : (a.InputTokens ?? 0) + (a.OutputTokens ?? 0),
         CostUsd = a.CostUsd,
         FilesChanged = a.FilesChanged,
+        Summary = a.Summary,
         LatestLine = null,   // R3 streams the agent's live public activity here
     };
 

@@ -51,4 +51,7 @@ public sealed record PhaseAgentRef
 
     /// <summary>How many files the agent changed — the GIT-TRUTH count off the result's <c>changedFiles</c> (not a live FileChanged-event tally, which can double-count). Null before the result lands / when the agent row is absent; <c>0</c> is a real "touched none". Feeds the terminal's files fact.</summary>
     public int? FilesChanged { get; init; }
+
+    /// <summary>The agent's own one-line RESULT takeaway (its model-authored <c>summary</c> off the folded compact) — the human "what this agent concluded", shown before any raw log. Null before the result lands / when the agent produced none.</summary>
+    public string? Summary { get; init; }
 }
