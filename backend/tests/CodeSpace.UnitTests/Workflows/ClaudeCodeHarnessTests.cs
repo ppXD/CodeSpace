@@ -115,6 +115,32 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void The_session_transcript_capture_path_equals_the_restore_path_for_the_same_cwd_and_id()
+    {
+        // P3 (IAgentSessionTranscript): the path the executor READS to capture the session file must be the SAME path
+        // BuildConfigHomeFiles RESTORES a transcript to — otherwise capture + restore key on different dirs and a
+        // continue cold-starts. This pins that symmetry: SessionTranscriptRelativePath == the restore ConfigHomeFile's
+        // RelativePath, both projects/<sanitized-cwd>/<id>.jsonl.
+        var capturePath = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath("/tmp/ws", "sess-x");
+
+        var restorePath = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-x", RestoredTranscript = "x\n" })
+            .ConfigHomeFiles.Single(f => f.RelativePath.StartsWith("projects/", StringComparison.Ordinal)).RelativePath;
+
+        capturePath.ShouldBe("projects/-tmp-ws/sess-x.jsonl");
+        capturePath.ShouldBe(restorePath, "the executor must read the session file from exactly where the harness restores it");
+    }
+
+    [Fact]
+    public void Session_transcript_path_is_null_without_a_cwd_or_session_id()
+    {
+        var h = (IAgentSessionTranscript)Harness;
+
+        h.SessionTranscriptRelativePath(null, "sess").ShouldBeNull("no cwd → nothing to encode the projects dir on");
+        h.SessionTranscriptRelativePath("/tmp/ws", null).ShouldBeNull("no session id → nothing to name the file");
+        h.SessionTranscriptRelativePath("   ", "sess").ShouldBeNull("a blank cwd is not addressable");
+    }
+
+    [Fact]
     public void A_bound_skill_round_trips_from_build_invocation_through_materialization_to_a_parseable_skill_md()
     {
         // The end-to-end production chain in-process (no CLI binary): a resolved task carrying skills →

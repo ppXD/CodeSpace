@@ -236,6 +236,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, cancellationToken).ConfigureAwait(false);
 
+            result = await CaptureSessionTranscriptAsync(agentRunId, effectiveTask, result, harness, handle: null, cancellationToken).ConfigureAwait(false);
+
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, effectiveTask, result, workspace, cancellationToken).ConfigureAwait(false);
 
             result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
@@ -395,9 +397,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = MapSandboxResult(sandbox, harness, events);
+        var result = MapSandboxResult(sandbox, harness, events) with { Transcript = transcript.ToString() };
 
-        return result with { Transcript = transcript.ToString() };
+        // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
+        // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
+        return await CaptureSessionTranscriptAsync(runId, task, result, harness, handle, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -461,6 +465,69 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// agent's self-report). No-op when the run had no workspace. Best-effort: a capture failure is logged
     /// and the result kept as-is, never flipping an otherwise-successful run to Failed over a git hiccup.
     /// </summary>
+    /// <summary>
+    /// P3: capture the harness's RESUMABLE session transcript (Claude's <c>projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c>) from the
+    /// per-run config home into the result, BEFORE the spool (and its config home) is reaped — so a later CONTINUE can
+    /// restore the conversation. No-op unless the harness declares a session-transcript location
+    /// (<see cref="IAgentSessionTranscript"/>), the run captured a session id, and a durable handle's on-disk config
+    /// home holds the file. Best-effort: any read failure logs + keeps the result unchanged (a continue then cold-starts;
+    /// it NEVER flips an otherwise-successful run to Failed). The live path passes a null <paramref name="handle"/> and
+    /// re-reads the one recorded at launch; the durable RE-ATTACH path passes its in-scope handle (the config home under
+    /// its spool is exactly what re-attach is tailing) so a run that completes after a worker restart stays resumable too.
+    /// </summary>
+    private async Task<AgentRunResult> CaptureSessionTranscriptAsync(Guid runId, AgentTask task, AgentRunResult result, IAgentHarness harness, SandboxHandle? handle, CancellationToken cancellationToken)
+    {
+        if (harness is not IAgentSessionTranscript resumable) return result;
+
+        if (resumable.SessionTranscriptRelativePath(task.WorkspaceDirectory, result.SessionId) is not { } relativePath) return result;
+
+        try
+        {
+            handle ??= DeserializeHandle((await _runs.GetAsync(runId, cancellationToken).ConfigureAwait(false)).RunnerHandleJson);
+
+            if (handle is null) return result;   // a non-durable runner has no on-disk config home to read
+
+            if (ResolveSessionTranscriptPath(LocalProcessRunner.ConfigHomePath(handle.SpoolDirectory), relativePath) is not { } path)
+            {
+                _logger.LogWarning("Agent run {RunId}: the session-transcript path escaped the config home (hostile session id?); skipping capture", runId);
+                return result;
+            }
+
+            if (!File.Exists(path)) return result;   // the CLI wrote its session elsewhere (cwd mismatch) or not at all — cold-start on continue
+
+            return result with { SessionTranscript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false) };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not capture the session transcript for resume; a continue will cold-start", runId);
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// P3 (security): resolve a config-home-relative session-transcript path to an absolute path ONLY when it stays
+    /// within <paramref name="configHome"/>. The session id naming the file is captured from the agent's UNTRUSTED
+    /// stream unescaped, AND the agent has WRITE access to its config home (it is <c>--bind</c>-mounted), so two escapes
+    /// must be blocked: a hostile id (<c>../../etc/passwd</c>) that spells out of bounds — caught lexically — and a
+    /// planted SYMLINK (<c>ln -s /etc/passwd projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c>) that spells in bounds but points
+    /// out — caught by resolving the link's FINAL target and re-clamping (fail-closed, matching ArtifactPresentGrader).
+    /// Capture runs AFTER the agent process exits, so there is no live check-then-read race. Returns null when the path
+    /// escapes (the caller logs + skips); a non-existent in-bounds path is returned as-is (the caller's existence check
+    /// then treats it as a cold-start).
+    /// </summary>
+    internal static string? ResolveSessionTranscriptPath(string configHome, string relativePath)
+    {
+        var boundary = Path.GetFullPath(configHome) + Path.DirectorySeparatorChar;
+        var lexical = Path.GetFullPath(Path.Combine(configHome, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+        if (!lexical.StartsWith(boundary, StringComparison.Ordinal)) return null;   // .. escape / absolute / the home itself
+
+        if (File.Exists(lexical) && new FileInfo(lexical).ResolveLinkTarget(returnFinalTarget: true) is { } target
+            && !Path.GetFullPath(target.FullName).StartsWith(boundary, StringComparison.Ordinal)) return null;   // symlink pointing OUT
+
+        return lexical;
+    }
+
     private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
         if (workspace is null) return result;

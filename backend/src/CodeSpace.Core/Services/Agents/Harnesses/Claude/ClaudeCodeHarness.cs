@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -90,6 +90,15 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     public string Version => System.Environment.GetEnvironmentVariable(VersionEnvVar) is { Length: > 0 } v ? v : DefaultVersion;
 
     public IReadOnlyList<string> Models { get; } = new[] { "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5" };
+
+    /// <summary>
+    /// P3 (IAgentSessionTranscript): Claude persists each session at <c>projects/&lt;sanitized-cwd&gt;/&lt;id&gt;.jsonl</c>
+    /// under <c>CLAUDE_CONFIG_DIR</c> — the file <c>--resume</c> reads. The executor reads it from here to capture for a
+    /// later CONTINUE (the same path <see cref="BuildConfigHomeFiles"/> RESTORES a transcript to). Null when there's no
+    /// resolved cwd or session id to address it.
+    /// </summary>
+    public string? SessionTranscriptRelativePath(string? workspaceDirectory, string? sessionId) =>
+        string.IsNullOrWhiteSpace(workspaceDirectory) || string.IsNullOrEmpty(sessionId) ? null : ClaudeTranscriptPath.For(workspaceDirectory, sessionId);
 
     public SandboxSpec BuildInvocation(AgentTask task)
     {

@@ -35,6 +35,19 @@ public sealed record AgentRunResult
     /// <summary>D3: when the transcript was offloaded (larger than the inline threshold — the common case for a real run), the artifact-store id holding the full raw stream; <see cref="Transcript"/> is then empty. Null when inline (small) or absent.</summary>
     public Guid? TranscriptArtifactId { get; init; }
 
+    /// <summary>
+    /// P3: the agent's RESUMABLE session transcript — the harness-native session file (Claude's
+    /// <c>projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c>) the executor read from the per-run config home before it was reaped, so a
+    /// later CONTINUE can restore the conversation (distinct from <see cref="Transcript"/>, which is the stream-json the
+    /// CLI EMITTED — this is the state the CLI READS on <c>--resume</c>). Inline when small; a larger one is offloaded and
+    /// this is cleared with <see cref="SessionTranscriptArtifactId"/> holding the ref. Empty when the harness has no
+    /// resumable transcript (Codex deferred) or the file wasn't captured.
+    /// </summary>
+    public string SessionTranscript { get; init; } = "";
+
+    /// <summary>When the session transcript was offloaded (larger than the inline threshold), the artifact-store id holding it; <see cref="SessionTranscript"/> is then empty. Null when inline (small) or absent.</summary>
+    public Guid? SessionTranscriptArtifactId { get; init; }
+
     /// <summary>Branch the sandbox pushed, when the run produced one (the output handoff for opening a PR).</summary>
     public string? ProducedBranch { get; init; }
 

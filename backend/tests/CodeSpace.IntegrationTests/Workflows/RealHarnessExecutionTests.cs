@@ -203,6 +203,117 @@ public class RealHarnessExecutionTests
         }
     }
 
+    [Fact]
+    public async Task Real_executor_captures_the_claude_session_transcript_from_the_config_home()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // P3 (capture) end-to-end at the high-fidelity tier: the REAL ClaudeCodeHarness (it IS the IAgentSessionTranscript)
+        // runs a fake claude that WRITES a session jsonl into its per-run CLAUDE_CONFIG_DIR — exactly where --resume reads
+        // it — and the REAL executor reads that file from the config home BEFORE the spool is reaped and persists it on the
+        // result. That is the durable transcript a later CONTINUE restores. The file's path is the PRODUCTION
+        // ClaudeTranscriptPath, computed once in C# and handed to the fake CLI, so the WRITE and the CAPTURE key on the
+        // identical encoding — no $PWD-resolution flakiness. A ScriptedHarness could not exercise this (only the real
+        // Claude harness declares a session-transcript location), so this is the one test that proves the whole capture edge.
+        const string sid = "sess-claude-realexec";
+        const string sessionContent = "{\"type\":\"user\"}\n{\"type\":\"assistant\",\"text\":\"the prior turn the continue restores\"}\n";
+
+        var workspaceDir = Path.Combine(Path.GetTempPath(), "cs-cap-ws-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceDir);
+        var relPath = ClaudeTranscriptPath.For(workspaceDir, sid);
+
+        using var cli = new FakeCli(ClaudeCodeHarness.CommandEnvVar, ClaudeSessionFixture);
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_SESSION_REL"] = relPath, ["FAKE_SESSION_CONTENT"] = sessionContent };
+            var runId = await CreateRunAsync(teamId, "claude-code", env, workspaceDirectory: workspaceDir);
+
+            await ExecuteRealAsync(runId);
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the real harness streamed the fixture and the run folded to Succeeded");
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.SessionTranscript.ShouldBe(sessionContent, "the executor read the session jsonl from the per-run config home (where the fake CLI wrote it) and persisted it for a later continue");
+        }
+        finally
+        {
+            if (Directory.Exists(workspaceDir)) Directory.Delete(workspaceDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Real_executor_captures_the_session_transcript_even_when_the_run_fails()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Failed runs are PRIME continue candidates (the agent hit an error mid-task and a human wants to resume + redirect
+        // it). The capture runs after the harness regardless of exit code, so a non-zero exit still persists the session
+        // transcript — proving a CONTINUE can resume a conversation that ended in failure, not only a clean one.
+        const string sid = "sess-claude-realexec";
+        const string sessionContent = "{\"type\":\"assistant\",\"text\":\"got partway then errored\"}\n";
+
+        var workspaceDir = Path.Combine(Path.GetTempPath(), "cs-cap-ws-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceDir);
+        var relPath = ClaudeTranscriptPath.For(workspaceDir, sid);
+
+        using var cli = new FakeCli(ClaudeCodeHarness.CommandEnvVar, ClaudeSessionFixture);
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env(exitCode: 1)) { ["FAKE_SESSION_REL"] = relPath, ["FAKE_SESSION_CONTENT"] = sessionContent };
+            var runId = await CreateRunAsync(teamId, "claude-code", env, workspaceDirectory: workspaceDir);
+
+            await ExecuteRealAsync(runId);
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Failed, "the non-zero exit folds to Failed");
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.SessionTranscript.ShouldBe(sessionContent, "a FAILED run still captures its session transcript — a continue can resume + redirect it");
+        }
+        finally
+        {
+            if (Directory.Exists(workspaceDir)) Directory.Delete(workspaceDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Real_executor_leaves_the_session_transcript_empty_when_the_cli_wrote_no_session_file()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The cold-start-safe complement: a run whose CLI persists NO session file (the common pre-resume case) captures an
+        // EMPTY session transcript — so the 3.2c producer's both-or-neither guard sees nothing to restore and the continue
+        // cold-starts. Proves the capture never fabricates a transcript and never fails the run when the file is absent.
+        var workspaceDir = Path.Combine(Path.GetTempPath(), "cs-cap-ws-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceDir);
+
+        using var cli = new FakeCli(ClaudeCodeHarness.CommandEnvVar, ClaudeSessionFixture);
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var runId = await CreateRunAsync(teamId, "claude-code", cli.Env(), workspaceDirectory: workspaceDir);
+
+            await ExecuteRealAsync(runId);
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.SessionTranscript.ShouldBe("", "no session file on disk → nothing captured → a continue cold-starts");
+            result.SessionTranscriptArtifactId.ShouldBeNull("nothing to offload when there's no captured transcript");
+        }
+        finally
+        {
+            if (Directory.Exists(workspaceDir)) Directory.Delete(workspaceDir, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("codex-cli")]
     [InlineData("claude-code")]
@@ -323,11 +434,11 @@ public class RealHarnessExecutionTests
         await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(runId, cancellationToken);
     }
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, string harnessKind, IReadOnlyDictionary<string, string> env, int timeoutSeconds = 1800, string? resumeFromSessionId = null)
+    private async Task<Guid> CreateRunAsync(Guid teamId, string harnessKind, IReadOnlyDictionary<string, string> env, int timeoutSeconds = 1800, string? resumeFromSessionId = null, string? workspaceDirectory = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "fix the billing tests", Harness = harnessKind, Model = null, Environment = env, TimeoutSeconds = timeoutSeconds, ResumeFromSessionId = resumeFromSessionId },
+            new AgentTask { Goal = "fix the billing tests", Harness = harnessKind, Model = null, Environment = env, TimeoutSeconds = timeoutSeconds, ResumeFromSessionId = resumeFromSessionId, WorkspaceDirectory = workspaceDirectory },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
@@ -388,7 +499,10 @@ public class RealHarnessExecutionTests
             var script = Path.Combine(_dir, "fake-cli.sh");
             // When FAKE_ARGV_OUT is set, dump the spawned process's args ($@) there first — lets a test prove the REAL
             // executor→runner carried a built flag (e.g. --resume) all the way to the process argv. Inert otherwise.
-            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
+            // When FAKE_SESSION_REL is set, write FAKE_SESSION_CONTENT into the per-run CLAUDE_CONFIG_DIR at that
+            // config-home-relative path — simulates the CLI persisting its resumable session file, so the REAL executor's
+            // P3 capture has a real on-disk file to read. Inert otherwise.
+            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\n[ -n \"$FAKE_SESSION_REL\" ] && { mkdir -p \"$CLAUDE_CONFIG_DIR/$(dirname \"$FAKE_SESSION_REL\")\"; printf '%s' \"$FAKE_SESSION_CONTENT\" > \"$CLAUDE_CONFIG_DIR/$FAKE_SESSION_REL\"; }\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             _original = Environment.GetEnvironmentVariable(commandEnvVar);
