@@ -31,7 +31,7 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
   // adds a 1s observer on the shared query, so the open one speeds back up.
   const events = useAgentRunEvents(agent.agentRunId, active, 2000);
 
-  const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
+  const name = agent.goal || agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const state = tileState(status);
 
   const evts = events.data ?? [];
@@ -56,7 +56,9 @@ export function AgentTile({ agent, selected, open, onOpen, rerun }: { agent: Pha
     >
       <div className="agent-tile-bar">
         <span className="agent-tile-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span className="agent-tile-name" title={name}>{name}</span>
+        {/* No agent id in the title bar — a supervisor agent is named by its role chip below; a plain node / map agent
+            (no role) keeps a name here, its short goal title. The flag stays right-aligned (margin-left:auto) either way. */}
+        {!agent.role && <span className="agent-tile-name" title={name}>{name}</span>}
         <span className="agent-tile-flag" aria-hidden="true">{stateFlag(state)}</span>
       </div>
       {/* The model's allocation for this agent — its authored ROLE + the subtask it was assigned — so a fan-out reads

@@ -65,27 +65,25 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         {onClose && <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>}
       </div>
 
-      {/* The model's allocation for this agent — its authored role + the subtask it was assigned. Absent for a
-          homogeneous spawn / non-supervisor agent (both fields null). */}
-      {(agent.role || agent.assignedSubtask) && (
-        <div className="agent-terminal-alloc">
-          {agent.role && <span className="agent-terminal-role">{agent.role}</span>}
-          {agent.assignedSubtask && <span className="agent-terminal-subtask">{agent.assignedSubtask}</span>}
-        </div>
-      )}
-
+      {/* The role isn't repeated here — the outline on the left already names this agent by its role, so the terminal
+          leads straight into the run's identity (harness · model · tools · time) and what it was told to do. */}
       {identity.length > 0 && (
         <div className="agent-terminal-meta">
           {identity.map((part, i) => <span key={i}>{part}</span>)}
         </div>
       )}
 
-      {/* The exact GOAL / instruction this agent was given (its prompt) — collapsible since it can be long. Lets you
-          see WHAT the supervisor told this agent to do, not just its output. Absent when the task blob is unavailable. */}
+      {/* What this agent was told to do, grouped together: the assigned subtask (its one-line goal) stays glanceable
+          as a strip, and the exact instruction/prompt sits right below it in a collapsible block (it can be long).
+          Together they show WHAT the supervisor told this agent, not just its output. */}
+      {agent.assignedSubtask && (
+        <div className="agent-terminal-goal-task" title={agent.assignedSubtask}>{agent.assignedSubtask}</div>
+      )}
+
       {run.data?.goal && (
         <details className="agent-terminal-goal">
           <summary>Instruction</summary>
-          <div className="agent-terminal-goal-body">{run.data.goal}</div>
+          <div className="agent-terminal-goal-prompt">{run.data.goal}</div>
         </details>
       )}
 

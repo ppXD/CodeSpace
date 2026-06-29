@@ -434,6 +434,8 @@ export interface PhaseAgentRef {
   role?: string | null;
   /** The TITLE of the planned subtask this agent was assigned (the model's decomposition). null/absent when not a supervisor spawn. */
   assignedSubtask?: string | null;
+  /** A concise title from a plain node / map agent's goal — so a fan-out branch reads as its subtask, not a structural `map#N` key. null/absent for a supervisor spawn (uses `role`) or when the goal is empty. */
+  goal?: string | null;
   /** The model the agent ran on, or null/absent when unpinned/unknown. Populated for supervisor-spawned agents. */
   model?: string | null;
   /** Input (prompt) tokens the agent consumed, or null/absent when unknown. Supervisor-spawned agents only. */
