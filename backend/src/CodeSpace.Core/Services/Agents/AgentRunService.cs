@@ -379,6 +379,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         result = await OffloadLargePatchAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
         result = await OffloadLargeRepositoryPatchesAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
         result = await OffloadLargeTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+        result = await OffloadLargeSessionTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
@@ -445,6 +446,20 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Transcript, "text/plain", cancellationToken).ConfigureAwait(false);
 
         return artifactId is null ? result : result with { Transcript = inline, TranscriptArtifactId = artifactId };
+    }
+
+    /// <summary>
+    /// P3: offload the RESUMABLE session transcript (the harness-native session file captured for a later CONTINUE)
+    /// exactly like the stream-json transcript — a larger one moves to the team-scoped artifact store, clearing inline
+    /// <see cref="AgentRunResult.SessionTranscript"/> + setting <see cref="AgentRunResult.SessionTranscriptArtifactId"/>,
+    /// so <c>result_jsonb</c> stays bounded. Empty (no resumable transcript / not captured) → a no-op. Idempotent (the
+    /// store dedups by sha) so a re-completion reuses the same artifact id.
+    /// </summary>
+    private async Task<AgentRunResult> OffloadLargeSessionTranscriptAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.SessionTranscript, "application/x-ndjson", cancellationToken).ConfigureAwait(false);
+
+        return artifactId is null ? result : result with { SessionTranscript = inline, SessionTranscriptArtifactId = artifactId };
     }
 
     public async Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken)

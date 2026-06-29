@@ -44,6 +44,9 @@ public sealed partial class LocalProcessRunner
     /// <summary>Per-run isolated config home (under the spool dir) that <see cref="SandboxSpec.ConfigHomeEnvVars"/> point at — keeps a shelled-out CLI off the operator's personal dotfiles. Reaped with the spool dir.</summary>
     private const string AgentConfigHomeDir = "agent-home";
 
+    /// <summary>The per-run config-home directory for a handle's <paramref name="spoolDirectory"/> — where the CLI wrote its dotfiles (incl. the resumable session transcript). The executor reads the session file here BEFORE the spool is reaped (P3); encapsulates <see cref="AgentConfigHomeDir"/> so the layout stays the runner's.</summary>
+    public static string ConfigHomePath(string spoolDirectory) => Path.Combine(spoolDirectory, AgentConfigHomeDir);
+
     /// <summary>
     /// Operator override for the <c>codespace-mcp</c> proxy binary's ABSOLUTE path (e.g. an air-gapped mirror, a
     /// self-contained publish elsewhere). Default: <c>codespace-mcp</c> next to the running assembly

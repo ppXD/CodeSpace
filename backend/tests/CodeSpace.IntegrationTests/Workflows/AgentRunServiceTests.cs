@@ -767,6 +767,45 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task Completing_with_a_large_session_transcript_offloads_it_to_an_artifact_and_keeps_only_the_ref()
+    {
+        // P3: the RESUMABLE session transcript (the harness-native session file a CONTINUE restores) is offloaded exactly
+        // like the stream-json transcript — a large one moves to the team-scoped artifact store and result_jsonb keeps only
+        // SessionTranscriptArtifactId, recoverable byte-for-byte (the 3.2c producer fetches it to restore the conversation).
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        // ~40 KiB of session jsonl — comfortably over the inline threshold. Distinctive content for fidelity.
+        var bigSession = string.Concat(Enumerable.Range(0, 1000).Select(i => $"{{\"role\":\"assistant\",\"turn\":{i}}}\n"));
+        bigSession.Length.ShouldBeGreaterThan(ArtifactStoreConfig.DefaultInlineThresholdBytes, "the session transcript must exceed the inline threshold to exercise offload");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionTranscript = bigSession },
+                CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.SessionTranscript.ShouldBe("", "the large session transcript was moved out of result_jsonb");
+            stored.SessionTranscriptArtifactId.ShouldNotBeNull("the result keeps a reference to the offloaded session transcript");
+
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, stored.SessionTranscriptArtifactId!.Value, CancellationToken.None);
+            artifact.ShouldNotBeNull();
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigSession, "the offloaded session transcript is recoverable in full — the conversation a continue restores");
+        }
+    }
+
+    [Fact]
     public async Task Completing_with_a_small_transcript_keeps_it_inline_with_no_artifact()
     {
         // A small transcript stays inline in result_jsonb (no offload, no artifact ref).
