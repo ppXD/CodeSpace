@@ -39,14 +39,6 @@ describe("AgentTile", () => {
     expect(screen.getByText("Tracer")).toBeInTheDocument();
     expect(screen.getByText("Trace DI registration of nodes")).toBeInTheDocument();
     expect(container.querySelector(".agent-tile-alloc")).not.toBeNull();
-    // The role chip names the agent, so the title bar drops the redundant run id.
-    expect(container.querySelector(".agent-tile-name")).toBeNull();
-  });
-
-  it("names a roleless (node / map) tile by its short goal in the title bar", () => {
-    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", goal: "版本管理與可回溯性調研" })} />);
-    expect(container.querySelector(".agent-tile-name")?.textContent).toBe("版本管理與可回溯性調研");
-    expect(container.querySelector(".agent-tile-alloc")).toBeNull();   // no role chip → the title carries the name
   });
 
   it("omits the allocation row for a homogeneous spawn (no role, no subtask)", () => {

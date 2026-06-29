@@ -34,6 +34,8 @@ export interface LaunchTaskModalProps {
   inline?: boolean;
   /** When set, the launch CONTINUES this work session as its next turn (threaded into the launch input). */
   sessionId?: string;
+  /** Override the input placeholder — e.g. the Session room's "Reply to continue this session…". */
+  placeholder?: string;
 }
 
 interface WorkspaceRepo { repositoryId: string; branch: string; access: "write" | "read"; alias: string; isPrimary: boolean }
@@ -58,7 +60,7 @@ const PERMS = [
  * selects). "Customize" expands in place into Supervisor (on Deep) + Advanced execution / safety. WIRED
  * fields drive a real `POST /api/workflows/runs`; extra repos, supervisor config and safety toggles are design-ahead.
  */
-export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline = false, sessionId }: LaunchTaskModalProps) {
+export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline = false, sessionId, placeholder: placeholderProp }: LaunchTaskModalProps) {
   const [taskText, setTaskText] = useState(autofill?.taskText ?? "");
   const [workspace, setWorkspace] = useState<WorkspaceRepo[]>(() =>
     autofill?.repositoryId
@@ -140,7 +142,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const effLabel = EFFORT_OPTS.find(e => e.v === effort)?.l ?? "Auto";
   const modelLabel = model || "Auto";
   const comboLabel = (modelLabel === "Auto" && effLabel === "Auto") ? "Auto" : `${modelLabel} · ${effLabel}`;
-  const placeholder = effort === "deep" ? "Describe a goal to coordinate…" : "Describe a task…";
+  const placeholder = placeholderProp ?? (effort === "deep" ? "Describe a goal to coordinate…" : "Describe a task…");
 
   // The single Model chip is the "primary reasoning model"; its role — and so its label/explanation —
   // depends on the effort tier. In Deep it is the supervisor's brain (agents draw from the pool).
@@ -239,10 +241,19 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const toolsLabel = cfg.tools.length ? `${cfg.tools.length} tool${cfg.tools.length > 1 ? "s" : ""}` : "Default · all tools";
   const toggleTool = (name: string) => setC({ tools: cfg.tools.includes(name) ? cfg.tools.filter(t => t !== name) : [...cfg.tools, name] });
 
+  // Inline (Session room) composer: the textarea grows with its content (capped), like the design — modal mode keeps its fixed min-height.
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta || !inline) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+  }, [taskText, inline]);
+
   const content = (
     <>
       <div className="lt3-box">
-          <textarea className="lt3-input" rows={3} placeholder={placeholder} value={taskText} onChange={e => setTaskText(e.target.value)} autoFocus={!inline} />
+          <textarea ref={taRef} className="lt3-input" rows={inline ? 1 : 3} placeholder={placeholder} value={taskText} onChange={e => setTaskText(e.target.value)} autoFocus={!inline} />
 
           <div className="lt3-bar">
             <button type="button" className="lt3-pill lt3-adv" data-open={expanded} aria-expanded={expanded} title="Advanced settings — execution · supervisor · safety" onClick={() => setExpanded(v => !v)}>

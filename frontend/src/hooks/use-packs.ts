@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { packsApi, type PackArtifactKind } from "@/api/packs";
+import { packsApi } from "@/api/packs";
 
 /**
  * Pack data hooks. The Library page reads the team's packs (rail) + a selected pack's artifacts (detail);
@@ -29,23 +29,6 @@ export function usePack(packId: string | null) {
     placeholderData: keepPreviousData,
   });
 }
-
-/**
- * One server-side page of a selected pack's artifacts of a single kind — the paginated Library detail tab.
- * Keyed by (pack, kind, search, page, pageSize); keepPreviousData holds the prior page while the next loads,
- * so paging or typing in the search box doesn't flash the list to a spinner. Enabled only when a pack is
- * selected. The component owns the pack switch (it remounts on a new pack), so the held placeholder is always
- * from the SAME pack — no cross-pack bleed.
- */
-export function useListPackArtifacts(packId: string | null, kind: PackArtifactKind, search: string, page: number, pageSize: number) {
-  return useQuery({
-    queryKey: ["pack-artifacts", packId, kind, search, page, pageSize],
-    queryFn: () => packsApi.listArtifacts(packId!, kind, search, page, pageSize),
-    enabled: !!packId,
-    placeholderData: keepPreviousData,
-  });
-}
-
 export function usePreviewPack() {
   return useMutation({
     mutationFn: ({ url, reference }: { url: string; reference: string }) => packsApi.previewFromUrl(url, reference),
@@ -58,11 +41,9 @@ export function useImportPack() {
     mutationFn: ({ url, reference, sourcePaths }: { url: string; reference: string; sourcePaths: string[] }) => packsApi.importFromUrl(url, reference, sourcePaths),
     onSuccess: () => {
       // An import creates/updates a pack AND its artifacts — refresh the packs rail + every pack detail
-      // (the just-imported pack is on the Library page the user is looking at), the paged artifact lists, and
-      // the agents library.
+      // (the just-imported pack is on the Library page the user is looking at) and the agents library.
       queryClient.invalidateQueries({ queryKey: ["packs"] });
       queryClient.invalidateQueries({ queryKey: ["pack"] });
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] });
       queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
@@ -80,7 +61,6 @@ export function useSyncPack() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["packs"] });
       queryClient.invalidateQueries({ queryKey: ["pack"] });
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] });
       queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
