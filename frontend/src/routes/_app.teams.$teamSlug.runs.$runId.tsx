@@ -14,8 +14,8 @@ import { ContinueRunButton } from "@/components/workflows/ContinueRunButton";
 import { StopRunButton } from "@/components/workflows/StopRunButton";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { isRunActive, usePendingDecisions, useReplayRun, useRunAttempts, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
-import { useRunSession } from "@/hooks/use-sessions";
-import { SessionRoom } from "@/components/sessions/SessionRoom";
+import { useRunRoom } from "@/hooks/use-sessions";
+import { SessionRoomView } from "@/components/sessions/SessionRoomView";
 
 /**
  * The canonical run-detail page — the Run Room. A run is run-neutral (manual, scheduled, webhook, replay, task,
@@ -57,9 +57,9 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
   const run = useWorkflowRun(effectiveRunId);
   // The run-neutral outline (the phase projection) — a separate endpoint, polled on the same cadence.
   const phases = useRunPhases(effectiveRunId);
-  // If this run belongs to a work session, the run-detail experience IS the Session room (the conversation of turns,
-  // each turn's box a live/historical canvas). Null for a session-less run (authored workflow) → the classic Run Room.
-  const session = useRunSession(effectiveRunId);
+  // If this run belongs to a work session, the run-detail experience IS the Session room — the backend-authored
+  // transcript (RoomView). Null for a session-less run (authored workflow) → the classic Run Room.
+  const room = useRunRoom(effectiveRunId);
   // The cross-grain decision queue, narrowed to this run — polled while the run can still park one. Agent-grain
   // decisions key off the agent run id, so we pass the run's fanned-out agent ids (from the phase projection).
   const pendingPoll = run.data ? isRunActive(run.data.status) : true;
@@ -88,8 +88,8 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
 
   // A run that belongs to a session opens AS the Session room (the conversation), unless the user flipped to the
   // classic Run Room. The resolver returns the whole thread anchored at this run's turn.
-  if (!forceRoom && session.data) {
-    return <SessionRoom teamSlug={teamSlug} session={session.data} onOpenRoom={() => setForceRoom(true)} />;
+  if (!forceRoom && room.data) {
+    return <SessionRoomView teamSlug={teamSlug} room={room.data} onOpenRoom={() => setForceRoom(true)} />;
   }
 
   return (
@@ -110,7 +110,7 @@ function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string })
             {attempts.data && <RunAttemptsSummary attempts={attempts.data.attempts} />}
           </div>
           <div className="ct-actions">
-            {session.data && <button className="btn" onClick={() => setForceRoom(false)} title="Back to the Session room (the conversation of turns)."><Ic.Bot size={13} /> Session view</button>}
+            {room.data && <button className="btn" onClick={() => setForceRoom(false)} title="Back to the Session room (the conversation of turns)."><Ic.Bot size={13} /> Session view</button>}
             {run.data && <StopRunButton runId={effectiveRunId} status={run.data.status} />}
             {run.data && <ContinueRunButton runId={effectiveRunId} status={run.data.status} hasPendingWait={run.data.pendingWait != null} />}
             <button

@@ -38,25 +38,10 @@ export function useInstantiateAgentFromStore() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (sourceDefinitionId: string) => agentsApi.instantiateAgentFromStore(sourceDefinitionId),
-    // Instantiate creates a WORKING bench copy (PackId null) — it doesn't touch any pack's Store artifacts, so the
-    // [pack-artifacts] detail lists stay valid; only the bench + the Library's surfacing state can shift.
     onSuccess: () => Promise.all([
       queryClient.invalidateQueries({ queryKey: ["agents"] }),
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
       queryClient.invalidateQueries({ queryKey: ["pack"] }),
-    ]),
-  });
-}
-
-/** Author a new agent INTO the Library (a Custom-pack store entry, off the bench); invalidates the Library packs/detail. Returns the new id. */
-export function useAuthorStoreAgent() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { name: string; description?: string | null; systemPrompt?: string | null }) => agentsApi.authorStoreAgent(input),
-    onSuccess: () => Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["packs"] }),
-      queryClient.invalidateQueries({ queryKey: ["pack"] }),
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] }),
     ]),
   });
 }
@@ -75,7 +60,6 @@ export function useUpdateAgent() {
       // An imported persona's name/description show in the Library pack detail — keep it in sync.
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
       queryClient.invalidateQueries({ queryKey: ["pack"] }),
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] }),
     ]),
   });
 }
@@ -89,7 +73,6 @@ export function useDeleteAgent() {
       queryClient.invalidateQueries({ queryKey: ["agents"] }),
       queryClient.invalidateQueries({ queryKey: ["packs"] }),
       queryClient.invalidateQueries({ queryKey: ["pack"] }),
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] }),
     ]),
   });
 }

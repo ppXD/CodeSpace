@@ -78,18 +78,6 @@ export interface PackDetail {
   artifacts: PackArtifactSummary[];
 }
 
-/**
- * One server-side page of a pack's artifacts of a single kind (mirrors backend PagedArtifacts). `total` is the
- * full count for the (kind + search) query — it drives the pager, not the length of `items`. `page` is the
- * 0-based index actually returned (clamped server-side).
- */
-export interface PagedArtifacts {
-  items: PackArtifactSummary[];
-  total: number;
-  page: number;
-  pageCount: number;
-}
-
 /** Per-selected-path outcome of a commit (mirrors backend PackArtifactImportResult). */
 export interface PackArtifactImportResult {
   sourcePath: string;
@@ -127,10 +115,6 @@ export const packsApi = {
 
   /** One pack with its agents + skills (the Library detail pane). */
   get: (packId: string) => fetchJson<PackDetail>(`/api/packs/${packId}`),
-
-  /** One server-side page of a pack's artifacts of a single kind, optionally name/handle-filtered (the paginated Library detail tab + the pickers). */
-  listArtifacts: (packId: string, kind: PackArtifactKind, search: string, page: number, pageSize: number) =>
-    fetchJson<PagedArtifacts>(`/api/packs/${packId}/artifacts?kind=${kind}&search=${encodeURIComponent(search)}&page=${page}&pageSize=${pageSize}`),
 
   /** Clone + discover a pack at a URL (host-allowlist-guarded, persists nothing). */
   previewFromUrl: (url: string, reference: string) =>

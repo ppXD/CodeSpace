@@ -1,8 +1,8 @@
-import type { PackSummary } from "@/api/packs";
+import type { PackArtifactSummary, PackSummary } from "@/api/packs";
 
 /**
- * Pure view helpers for the Library/store page — kept out of the component so the rail subtitle, the detail-tab
- * reconciliation and the pack-selection are unit-testable without rendering. No React, no fetching.
+ * Pure view helpers for the Library/store page — kept out of the component so the rail subtitle and the
+ * agent/skill split are unit-testable without rendering. No React, no fetching.
  */
 
 /** Compact "N agents · M skills" subtitle for a pack row / detail header. Empty pack ⇒ "empty". */
@@ -14,17 +14,12 @@ export function countLabel(agentCount: number, skillCount: number): string {
   return parts.length === 0 ? "empty" : parts.join(" · ");
 }
 
-/**
- * Which kind-tab the detail shows: the explicit pick, UNLESS that kind is now empty while the other has rows — then
- * fall back to the populated kind (mirrors resolveSelectedPackId reconciling a stale pack pick), so a sync that drops
- * every artifact of the pinned kind never strands the user on an empty tab. No pick yet ⇒ the populated kind (a
- * skill-only pack opens on Skills).
- */
-export function resolveDetailTab(picked: "agents" | "skills" | null, agentCount: number, skillCount: number): "agents" | "skills" {
-  if (picked === "agents" && agentCount === 0 && skillCount > 0) return "skills";
-  if (picked === "skills" && skillCount === 0 && agentCount > 0) return "agents";
-
-  return picked ?? (agentCount > 0 ? "agents" : "skills");
+/** Split a pack's artifacts into its agent + skill sections, preserving the server's display order within each. */
+export function splitArtifacts(artifacts: PackArtifactSummary[]): { agents: PackArtifactSummary[]; skills: PackArtifactSummary[] } {
+  return {
+    agents: artifacts.filter((a) => a.kind === "Agent"),
+    skills: artifacts.filter((a) => a.kind === "Skill"),
+  };
 }
 
 /**

@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { PackSummary } from "@/api/packs";
+import type { PackArtifactSummary, PackSummary } from "@/api/packs";
 
-import { countLabel, resolveDetailTab, resolveSelectedPackId, sourceLabel } from "./libraryView";
+import { countLabel, resolveSelectedPackId, sourceLabel, splitArtifacts } from "./libraryView";
 
 const pack = (over: Partial<PackSummary>): PackSummary => ({
   id: "p1", kind: "Github", name: "agents", url: null, reference: null,
   lastSyncedSha: null, lastSyncedDate: null, agentCount: 0, skillCount: 0, ...over,
+});
+
+const artifact = (kind: "Agent" | "Skill", slug: string): PackArtifactSummary => ({
+  kind, id: slug, slug, name: slug, description: null, sourcePath: `${slug}.md`,
 });
 
 describe("countLabel", () => {
@@ -22,6 +26,21 @@ describe("countLabel", () => {
 
   it("reports an empty pack", () => {
     expect(countLabel(0, 0)).toBe("empty");
+  });
+});
+
+describe("splitArtifacts", () => {
+  it("partitions by kind, preserving order within each section", () => {
+    const { agents, skills } = splitArtifacts([
+      artifact("Agent", "a1"), artifact("Skill", "s1"), artifact("Agent", "a2"), artifact("Skill", "s2"),
+    ]);
+
+    expect(agents.map((a) => a.slug)).toEqual(["a1", "a2"]);
+    expect(skills.map((s) => s.slug)).toEqual(["s1", "s2"]);
+  });
+
+  it("handles an empty pack", () => {
+    expect(splitArtifacts([])).toEqual({ agents: [], skills: [] });
   });
 });
 
@@ -57,26 +76,5 @@ describe("sourceLabel", () => {
 
   it("falls back to the pack name when there is no url", () => {
     expect(sourceLabel(pack({ url: null, name: "Local" }))).toBe("Local");
-  });
-});
-
-describe("resolveDetailTab", () => {
-  it("defaults to the populated kind when there is no pick", () => {
-    expect(resolveDetailTab(null, 3, 0)).toBe("agents");
-    expect(resolveDetailTab(null, 0, 3)).toBe("skills");   // skill-only pack opens on Skills
-  });
-
-  it("honours an explicit pick while that kind has rows", () => {
-    expect(resolveDetailTab("skills", 3, 2)).toBe("skills");
-    expect(resolveDetailTab("agents", 3, 2)).toBe("agents");
-  });
-
-  it("falls back to the populated kind when the pinned kind has emptied (e.g. after a sync)", () => {
-    expect(resolveDetailTab("agents", 0, 4)).toBe("skills");
-    expect(resolveDetailTab("skills", 5, 0)).toBe("agents");
-  });
-
-  it("keeps the pinned kind when BOTH are empty (no better choice to fall back to)", () => {
-    expect(resolveDetailTab("agents", 0, 0)).toBe("agents");
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -12,8 +12,7 @@ import { useSkills } from "@/hooks/use-skills";
 
 import { AUTONOMY, EMPTY_FORM, type FormState, formFromPersona, parseTools, TOOLS_MODES } from "./agentForm";
 import { deriveSlug } from "./deriveSlug";
-import { SkillBindingDropdown } from "./SkillBindingDropdown";
-import { skillLabels } from "./skillPicker";
+import { availableSkillOptions, skillLabels } from "./skillPicker";
 
 /**
  * Create / edit an Agent persona — a warm-theme centered MODAL over the authorable surface, grouped into three
@@ -255,18 +254,32 @@ function AgentEditorForm({ mode, agentId, initial, boundSkills, immutableSlug, o
 }
 
 /**
- * Editable skill-binding control. Bound skills show as removable labels INSIDE a token-input field; clicking the
- * field opens the Library picker, which instantiates a working copy of the chosen store skill and hands back its id
- * (the "instantiate to use" model). The parent persists the bound set on Save. Labels resolve from the team's
- * working skills once the new copy lands.
+ * Editable skill-binding control — the team's skills as selectable tokens. Selected skills show as removable
+ * chips; an "Add a skill" picker appends from the unselected ones. The parent persists the set on Save.
  */
-function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: Dispatch<SetStateAction<string[]>>; boundSkills?: AgentBoundSkill[] }) {
+function SkillPicker({ selected, onChange, boundSkills }: { selected: string[]; onChange: (ids: string[]) => void; boundSkills?: AgentBoundSkill[] }) {
   const skills = useSkills();
-  const list = skills.data ?? [];
-  const labels = skillLabels(list, boundSkills ?? []);
-  // working-skill id → the store snapshot it was instantiated from — lets the picker recognise an already-bound
-  // working skill as a copy of a given store skill, so re-opening shows it bound instead of minting a duplicate.
-  const sourceByWorking = new Map(list.flatMap((s) => (s.sourceDefinitionId ? [[s.id, s.sourceDefinitionId] as const] : [])));
 
-  return <SkillBindingDropdown selected={selected} onChange={onChange} labelFor={(id) => labels.get(id) ?? "skill"} sourceByWorking={sourceByWorking} />;
+  const labels = skillLabels(skills.data ?? [], boundSkills ?? []);
+  const available = availableSkillOptions(skills.data ?? [], selected);
+  const teamHasNoSkills = !skills.isLoading && (skills.data?.length ?? 0) === 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {selected.length > 0 && (
+        <div className="wf-triggers">
+          {selected.map((id) => (
+            <span key={id} className="wf-trigger-chip">
+              {labels.get(id) ?? "skill"}
+              <button type="button" className="ed-tok-x" aria-label={`Remove ${labels.get(id) ?? "skill"}`} onClick={() => onChange(selected.filter((x) => x !== id))}><Ic.X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {teamHasNoSkills && selected.length === 0
+        ? <span className="wf-form-empty">No skills in this team yet — import a pack to add some.</span>
+        : available.length > 0 && <Combo value="" options={available} onChange={(id) => onChange([...selected, id])} placeholder="Add a skill…" searchable />}
+    </div>
+  );
 }
