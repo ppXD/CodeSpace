@@ -21,8 +21,8 @@ public class AgentMetricsReaderTests
     private static string Result(int input, int output) =>
         JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", TokenUsage = new AgentTokenUsage { InputTokens = input, OutputTokens = output } }, AgentJson.Options);
 
-    private static string Task(string? model) =>
-        JsonSerializer.Serialize(new AgentTask { Goal = "do the thing", Harness = "claude-code", Model = model }, AgentJson.Options);
+    private static string Task(string? model, string goal = "do the thing") =>
+        JsonSerializer.Serialize(new AgentTask { Goal = goal, Harness = "claude-code", Model = model }, AgentJson.Options);
 
     [Fact]
     public void Projects_tokens_model_and_a_final_duration_from_the_persisted_blobs()
@@ -38,6 +38,27 @@ public class AgentMetricsReaderTests
         m.OutputTokens.ShouldBe(45);
         m.ToolCount.ShouldBe(6);
         m.Model.ShouldBe("claude-opus-4");
+        m.Goal.ShouldBe("do the thing", "the agent's goal becomes its display name so a plain node/map agent isn't shown as a structural map#N key");
+    }
+
+    [Theory]
+    [InlineData("Refactor the auth module", "Refactor the auth module")]                                  // inline goal → verbatim
+    [InlineData("You are a backend engineer.\n\nImplement the login endpoint", "Implement the login endpoint")]  // persona-composed → the TASK half, not the shared system prompt
+    [InlineData("First line of the task\nsecond line", "First line of the task")]                          // multi-line → first line only
+    [InlineData("   ", null)]                                                                               // blank goal → null, so the row keeps its structural fallback
+    public void Names_the_agent_by_a_concise_title_from_its_goal(string goal, string? expected)
+    {
+        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, goal), 0, Now)
+            .Goal.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_very_long_goal_title_is_capped_with_an_ellipsis()
+    {
+        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, new string('x', 200)), 0, Now);
+
+        m.Goal!.Length.ShouldBe(141);          // 140 chars + the … ellipsis
+        m.Goal.ShouldEndWith("…");
     }
 
     [Fact]

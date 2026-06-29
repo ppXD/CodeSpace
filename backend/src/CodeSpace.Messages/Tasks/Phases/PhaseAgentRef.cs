@@ -31,6 +31,9 @@ public sealed record PhaseAgentRef
     /// <summary>The TITLE of the planned subtask this agent was assigned (the model's decomposition), joined from the plan's subtasks through the spawn's <c>subtaskIds[i]</c> ↔ <c>agentRunIds[i]</c> staging order. Null when the agent isn't a supervisor spawn or the plan carried no matching subtask. Display only.</summary>
     public string? AssignedSubtask { get; init; }
 
+    /// <summary>A concise one-line title derived from a plain node / map agent's GOAL (its instruction) — so a fan-out branch reads as its subtask instead of a structural <c>map#N</c> key, unifying the display name with the supervisor source's <see cref="Role"/>. Null for a supervisor spawn (which carries <see cref="Role"/>/<see cref="AssignedSubtask"/>) or when the agent's goal is empty. Display only.</summary>
+    public string? Goal { get; init; }
+
     /// <summary>The model the agent ran on (e.g. a pinned <c>claude-*</c>), or null when unpinned/unknown. Populated for SUPERVISOR-spawned agents (off the folded <c>agentResults</c> compact); null for a plain node/map agent (a later projection slice). Open string — never switched on.</summary>
     public string? Model { get; init; }
 

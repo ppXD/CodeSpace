@@ -56,6 +56,7 @@ public sealed class AgentMetricsReaderFlowTests
         m.InputTokens.ShouldBe(300);
         m.OutputTokens.ShouldBe(120);
         m.Model.ShouldBe("claude-opus-4");
+        m.Goal.ShouldBe("g", "the agent's goal reads back off the real TaskJson as its display name");
         m.ToolCount.ShouldBe(2, "the decision.request HITL envelope is excluded from the side-effecting tool count");
     }
 

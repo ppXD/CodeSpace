@@ -16,6 +16,9 @@ public sealed record AgentRunMetrics
 {
     public required AgentRunStatus Status { get; init; }
 
+    /// <summary>A concise one-line title derived from the agent's goal (its instruction), for the run-detail display NAME of a plain node / map agent that has no model-authored role. Null when the task carried no goal.</summary>
+    public string? Goal { get; init; }
+
     public long? DurationMs { get; init; }
 
     public int? InputTokens { get; init; }
