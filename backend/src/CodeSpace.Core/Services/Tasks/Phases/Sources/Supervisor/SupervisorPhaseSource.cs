@@ -284,6 +284,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
                 ToolCount = extras?.ToolCount,
                 CostUsd = compact is null ? null : AgentCostPricing.CostUsd(model, compact.InputTokens, compact.OutputTokens),
                 FilesChanged = compact?.ChangedFiles.Count,
+                Summary = string.IsNullOrWhiteSpace(compact?.Summary) ? null : compact!.Summary,
             };
         }
     }
