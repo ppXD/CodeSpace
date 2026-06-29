@@ -133,6 +133,33 @@ public class WorkSessionLaunchFlowTests
     }
 
     [Fact]
+    public async Task Rename_updates_the_title_sanitised_and_is_team_scoped()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var sessionId = Guid.CreateVersion7();
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            db.WorkSession.Add(new WorkSession { Id = sessionId, TeamId = teamId, Title = "Original", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open, LastActivityAt = DateTimeOffset.UtcNow, CreatedBy = userId, LastModifiedBy = userId });
+            await db.SaveChangesAsync();
+        }
+
+        // A foreign team can't rename it — an indistinguishable not-found, and the title is untouched.
+        using (var foreignScope = _fixture.BeginScope())
+            (await foreignScope.Resolve<IWorkSessionService>().RenameAsync(sessionId, "Hacked", otherTeam, CancellationToken.None)).ShouldBeFalse("a cross-team rename is a no-op");
+
+        // The owning team renames it; multiline free text is collapsed to a one-line title.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkSessionService>().RenameAsync(sessionId, "  Rename   the\n session  ", teamId, CancellationToken.None)).ShouldBeTrue();
+
+        using var verify = _fixture.BeginScope();
+        var title = await verify.Resolve<CodeSpaceDbContext>().WorkSession.AsNoTracking().Where(s => s.Id == sessionId).Select(s => s.Title).SingleAsync();
+        title.ShouldBe("Rename the session", "sanitised (whitespace collapsed) + only the owning team could change it");
+    }
+
+    [Fact]
     public async Task Two_launches_open_two_distinct_sessions_each_at_turn_one()
     {
         // S2 always opens a NEW thread per launch; continuing an existing session is a later slice. Two launches ⇒

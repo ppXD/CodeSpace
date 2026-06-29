@@ -126,16 +126,22 @@ public class RoomNarrativeTests
         var stats = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().ToList();
 
         var subtasks = stats.Single(s => s.Kind == "subtasks");
-        subtasks.Label.ShouldBe("Planned 2 subtasks");
+        subtasks.Label.ShouldBe("Plan", "the design splits label · detail");
+        subtasks.Detail.ShouldBe("2 subtasks");
         subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" });
 
         var files = stats.Single(s => s.Kind == "files");
-        files.Label.ShouldBe("Changed 3 files");
-        files.Detail.ShouldBe("+148 −32", "the captured diff line stat, pinned including the U+2212 minus");
+        files.Label.ShouldBe("Files changed");
+        files.Detail.ShouldBe("+148 −32 · 3 files", "the captured diff line stat (U+2212 minus) plus the file count");
         files.Items.Count.ShouldBe(3);
 
-        stats.Single(s => s.Kind == "tools").Label.ShouldBe("14 tool calls");
-        stats.Single(s => s.Kind == "reasoning").Detail.ShouldBe("5 steps");
+        var tools = stats.Single(s => s.Kind == "tools");
+        tools.Label.ShouldBe("Tools");
+        tools.Detail.ShouldBe("14 calls", "no histogram captured → just the count");
+
+        var reasoning = stats.Single(s => s.Kind == "reasoning");
+        reasoning.Label.ShouldBe("Reasoning");
+        reasoning.Detail.ShouldBe("5 steps");
     }
 
     [Fact]
@@ -144,8 +150,8 @@ public class RoomNarrativeTests
         var facts = new RoomTurnFacts { ChangedFiles = new[] { "only.cs" } };   // no Additions/Deletions captured
 
         var files = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().Single(s => s.Kind == "files");
-        files.Label.ShouldBe("Changed 1 file", "singular");
-        files.Detail.ShouldBeNull("the diff +/- is a graceful gap — the row just omits it");
+        files.Label.ShouldBe("Files changed");
+        files.Detail.ShouldBe("1 file", "the diff +/- is a graceful gap — the detail is just the (singular) file count, no +X −Y");
     }
 
     [Fact]
@@ -248,6 +254,122 @@ public class RoomNarrativeTests
         n.Map.ShouldBeNull();
         n.Blocks.ShouldBeEmpty();
         n.Summary.ShouldBeNull("no model summary → no generic lead; the status word conveys completion");
+    }
+
+    [Fact]
+    public void A_supervisor_turn_emits_one_agent_group_with_a_card_per_spawned_agent()
+    {
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var spawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn 2 agents", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = a1, Status = nameof(AgentRunStatus.Succeeded), Role = "CLI command", InputTokens = 100, OutputTokens = 50, Model = "opus", FilesChanged = 3, ToolCount = 6, DurationMs = 41_000 },
+                new PhaseAgentRef { AgentRunId = a2, Status = nameof(AgentRunStatus.Succeeded), Role = "Docs & help", FilesChanged = 2, ToolCount = 3, DurationMs = 29_000 },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2 },
+            StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        var facts = new RoomTurnFacts { AgentSummaries = new Dictionary<Guid, string> { [a1] = "Renamed the command and registered the alias." } };
+
+        var group = Build(new[] { Tape("plan", 1), spawn, Tape("stop", 3, summary: "Done.") }, facts: facts).Blocks.OfType<AgentGroupBlock>().Single();
+
+        group.Title.ShouldBe("Agents", "a terminal turn reads 'Agents'; a live turn reads 'Work'");
+        group.Agents.Count.ShouldBe(2);
+
+        var card = group.Agents.Single(c => c.AgentRunId == a1);
+        card.Label.ShouldBe("CLI command", "the model-authored role is the card name");
+        card.FilesChanged.ShouldBe(3);
+        card.ToolCount.ShouldBe(6);
+        card.DurationMs.ShouldBe(41_000);
+        card.Tokens.ShouldBe(150, "input + output");
+        card.Summary.ShouldBe("Renamed the command and registered the alias.", "the agent's own result takeaway");
+        group.Agents.Single(c => c.AgentRunId == a2).Summary.ShouldBeNull("no summary captured for this agent");
+    }
+
+    [Fact]
+    public void A_map_fanout_run_humanizes_node_labels_and_groups_its_agents()
+    {
+        var n = Build(new[]
+        {
+            Structural("start", "start", 1),
+            Structural("planner", "planner", 2),
+            Structural("fan", "Fan out", 3, agentCount: 3),
+        }, WorkflowRunStatus.Running);
+
+        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Start", "Plan", "Work" }, "technical node labels are humanized for the reader (Fan out → Work)");
+
+        var group = n.Blocks.OfType<AgentGroupBlock>().Single();
+        group.Title.ShouldBe("Work", "a live run reads 'Work'");
+        group.Agents.Count.ShouldBe(3, "the fan-out branch agents surface as cards even though it's not a supervisor spawn");
+    }
+
+    [Fact]
+    public void A_live_turn_labels_the_agent_group_Work()
+    {
+        var spawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Active,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running) },
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Queued) },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2 }, StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        Build(new[] { Tape("plan", 1), spawn }, WorkflowRunStatus.Running).Blocks.OfType<AgentGroupBlock>().Single().Title.ShouldBe("Work");
+    }
+
+    [Fact]
+    public void Without_a_stop_summary_the_lead_is_composed_from_the_agents_result_summaries()
+    {
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var spawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn 2 agents", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = a1, Status = nameof(AgentRunStatus.Succeeded) },
+                new PhaseAgentRef { AgentRunId = a2, Status = nameof(AgentRunStatus.Succeeded) },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2 }, StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        var facts = new RoomTurnFacts { AgentSummaries = new Dictionary<Guid, string> { [a1] = "Renamed the command", [a2] = "Made --repo optional." } };
+
+        // No Stop phase → no stop summary → the reply lead is stitched from the agents' own summaries, in spawn order.
+        Build(new[] { Tape("plan", 1), spawn }, facts: facts).Summary.ShouldBe("Renamed the command. Made --repo optional.");
+    }
+
+    [Fact]
+    public void With_no_summaries_at_all_the_lead_falls_back_to_a_factual_recap()
+    {
+        // No stop summary, no agent summaries (e.g. agents hit provider errors) → the reply still isn't voiceless.
+        var facts = new RoomTurnFacts { Subtasks = new[] { "a", "b", "c", "d", "e" }, ChangedFiles = new[] { "x.cs", "y.cs" } };
+
+        Build(new[] { Tape("plan", 1) }, facts: facts).Summary.ShouldBe("Worked through 5 subtasks and changed 2 files.");
+    }
+
+    [Fact]
+    public void Tools_row_carries_the_histogram_detail_and_items()
+    {
+        var facts = new RoomTurnFacts
+        {
+            ToolCalls = 14,
+            ToolHistogram = new[] { new ToolKindCount("read", 6), new ToolKindCount("edit", 5), new ToolKindCount("test", 3) },
+        };
+
+        var tools = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().Single(s => s.Kind == "tools");
+        tools.Detail.ShouldBe("14 calls · read, edit, test", "count plus the top tool kinds");
+        tools.Items.Select(i => (i.Text, i.Detail)).ShouldBe(new[] { ("read", "6"), ("edit", "5"), ("test", "3") });
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Commands.Sessions;
 using CodeSpace.Messages.Queries.Sessions;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -49,5 +50,13 @@ public class SessionsController : ControllerBase
     {
         var result = await _mediator.Send(query with { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Rename a session's thread title (the body carries the new title; the route is the authoritative id). Team-scoped; foreign / absent → 404.</summary>
+    [HttpPatch("{sessionId:guid}")]
+    public async Task<IActionResult> Rename([FromRoute] Guid sessionId, [FromBody] RenameSessionCommand command, CancellationToken cancellationToken)
+    {
+        var renamed = await _mediator.Send(command with { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        return renamed ? NoContent() : NotFound();
     }
 }

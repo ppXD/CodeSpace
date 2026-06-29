@@ -77,6 +77,19 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
         throw new KeyNotFoundException($"Session {sessionId} not found or not accessible.");
     }
 
+    public async Task<bool> RenameAsync(Guid sessionId, string title, Guid teamId, CancellationToken cancellationToken)
+    {
+        var session = await _db.WorkSession
+            .SingleOrDefaultAsync(s => s.Id == sessionId && s.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+
+        if (session == null) return false;   // foreign / missing — indistinguishable not-found, never a leak
+
+        session.Title = SanitizeTitle(title);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
     /// <summary>
     /// Make any free-text goal a safe one-line session title: collapse every run of whitespace (incl. newlines /
     /// tabs) to a single space + trim, fall back to <see cref="DefaultTitle"/> when nothing is left, and truncate to

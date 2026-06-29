@@ -29,4 +29,11 @@ public interface IWorkSessionService
     /// bumps the ordinal (the "user-visible turns only" rule). Reads only; no row is written here.
     /// </summary>
     Task<SessionAssignment> ContinueAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Rename a session's thread title (team-scoped). Sanitises + truncates the title to the column width (the SAME
+    /// transform as <see cref="OpenAsync"/>). Returns false when the session is foreign / missing (an indistinguishable
+    /// not-found — never a leak), true when a row was renamed.
+    /// </summary>
+    Task<bool> RenameAsync(Guid sessionId, string title, Guid teamId, CancellationToken cancellationToken);
 }

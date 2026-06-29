@@ -126,10 +126,19 @@ public sealed record RoomAgentCard
     /// <summary>The agent's lifecycle status as a stable string (the <c>AgentRunStatus</c> name).</summary>
     public required string Status { get; init; }
 
+    /// <summary>The TITLE of the planned subtask this agent was assigned (the model's decomposition) — display only. Null for a non-supervisor / homogeneous spawn.</summary>
+    public string? AssignedSubtask { get; init; }
+
     public string? Model { get; init; }
     public int? Tokens { get; init; }
     public decimal? CostUsd { get; init; }
     public int? FilesChanged { get; init; }
+
+    /// <summary>Side-effecting tool calls the agent made — the card meta "3 files · 6 tool calls · 41s". Null when the agent row is absent (0 is a real "made none").</summary>
+    public int? ToolCount { get; init; }
+
+    /// <summary>The agent's run wall-clock in milliseconds — final once terminal, else live elapsed at projection time. Null before it starts.</summary>
+    public long? DurationMs { get; init; }
 
     /// <summary>The agent's own one-line RESULT takeaway (what it concluded) — shown on the collapsed card before any raw log. Null before the result lands / when it produced none.</summary>
     public string? Summary { get; init; }
