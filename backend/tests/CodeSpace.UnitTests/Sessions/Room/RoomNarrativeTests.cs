@@ -10,175 +10,206 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Sessions.Room;
 
 /// <summary>
-/// The PURE narrative engine — the place the backend OWNS the room's copy + order. Proves the two hardest things the
-/// frontend used to get wrong: (1) the band SEPARATION — the model-authored semantic phases become the MAP (the plan's
-/// shape) while the decision tape becomes the NARRATIVE (the play-by-play), so "Spawn" never renders before
-/// "Investigate"; (2) the failure HUMANIZATION — a readable cause, never the raw engine "Node 'x' failed". Plus the
-/// per-verb narration, the agent-card mapping, the tones, and the map-status vocabulary.
+/// The PURE narrative engine — where the backend OWNS the Session Room's copy + order. Proves the design's shape: the
+/// canonical Plan→Work→Review→Deliver execution map (folded from the decision tape + run lifecycle + acceptance), the
+/// stat rows (subtasks / files / tools / reasoning) from the projector facts, the delivery (PR) card, and the rich
+/// failure diagnostic (humanized cause + typed remediation + raw-behind-disclosure). No engine jargon ever reaches a block.
 /// </summary>
 [Trait("Category", "Unit")]
 public class RoomNarrativeTests
 {
     [Fact]
-    public void Authored_phases_are_the_map_and_the_decision_tape_is_the_narrative()
-    {
-        var n = Build(new[]
-        {
-            Tape("plan", 1),
-            Tape("spawn", 2, agentCount: 3, label: "Spawn 3 agents"),
-            Authored("Investigate", 0),
-            Authored("Implement", 1),
-            Tape("stop", 3, summary: "Shipped the login flow."),
-        });
-
-        n.Map.ShouldNotBeNull();
-        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Investigate", "Implement" }, "the map is the plan's semantic phases — not the decision tape");
-
-        var lines = n.Blocks.OfType<NarrativeStepBlock>().Select(b => b.Text).ToList();
-        lines.ShouldContain("Planned the approach.");
-        lines.ShouldContain("Dispatched 3 agents to work in parallel.");
-        lines.ShouldNotContain("Shipped the login flow.", "the stop summary is the turn headline, not a duplicated line");
-
-        n.Summary.ShouldBe("Shipped the login flow.");
-
-        // The within-band ORDER is load-bearing — the plan line precedes the spawn line, and a phase's line precedes its
-        // own agent group. (The map band separation is asserted above; this pins the play-by-play sequence.)
-        n.Blocks.Select(Describe).ShouldBe(new[]
-        {
-            "line:Planned the approach.",
-            "line:Dispatched 3 agents to work in parallel.",
-            "group:3 agents",
-        });
-    }
-
-    [Fact]
-    public void An_agent_card_falls_back_through_label_then_subtask_then_role_then_default()
-    {
-        var phase = SpawnWith(
-            new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running), Label = null, AssignedSubtask = "Wire the API", Role = "backend" },
-            new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running), Label = null, AssignedSubtask = null, Role = "frontend" },
-            new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running), Label = null, AssignedSubtask = null, Role = null });
-
-        var cards = Build(new[] { phase }, WorkflowRunStatus.Running).Blocks.OfType<AgentGroupBlock>().Single().Agents;
-
-        cards[0].Label.ShouldBe("Wire the API", "no label → the assigned subtask");
-        cards[1].Label.ShouldBe("frontend", "no label / subtask → the role");
-        cards[2].Label.ShouldBe("Agent", "no label / subtask / role → the default");
-    }
-
-    [Fact]
-    public void Card_tokens_are_null_when_the_agent_reports_no_usage_distinct_from_a_real_zero()
-    {
-        var unknown = SpawnWith(new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running), InputTokens = null, OutputTokens = null });
-        Build(new[] { unknown }, WorkflowRunStatus.Running).Blocks.OfType<AgentGroupBlock>().Single().Agents.Single()
-            .Tokens.ShouldBeNull("unknown usage is null, not 0");
-
-        var zero = SpawnWith(new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), InputTokens = 0, OutputTokens = 0 });
-        Build(new[] { zero }, WorkflowRunStatus.Running).Blocks.OfType<AgentGroupBlock>().Single().Agents.Single()
-            .Tokens.ShouldBe(0, "a real zero is preserved");
-    }
-
-    [Fact]
-    public void A_spawn_emits_an_agent_group_with_mapped_cards()
-    {
-        var n = Build(new[] { Tape("spawn", 1, agentCount: 2, label: "Spawn 2 agents") });
-
-        var group = n.Blocks.OfType<AgentGroupBlock>().ShouldHaveSingleItem();
-        group.Title.ShouldBe("2 agents");
-        group.Agents.Count.ShouldBe(2);
-
-        var card = group.Agents[0];
-        card.Tokens.ShouldBe(150, "input + output tokens are summed");
-        card.Model.ShouldBe("opus");
-        card.FilesChanged.ShouldBe(2);
-        card.Status.ShouldBe(nameof(AgentRunStatus.Succeeded));
-    }
-
-    [Fact]
-    public void A_flat_plan_with_no_authored_phases_uses_the_decision_tape_as_the_map()
+    public void A_supervisor_success_maps_to_the_canonical_lifecycle_with_per_stage_detail()
     {
         var n = Build(new[]
         {
             Tape("plan", 1, label: "Plan"),
-            Tape("spawn", 2, agentCount: 2, label: "Spawn 2 agents"),
-            Tape("stop", 3, summary: "Done deal.", label: "Stop"),
+            Tape("spawn", 2, agentCount: 3, label: "Spawn 3 agents"),
+            Tape("stop", 3, summary: "Shipped the login flow.", label: "Stop"),
         });
 
-        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Spawn 2 agents", "Stop" });
+        n.Map.ShouldNotBeNull();
+        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Work", "Review", "Deliver" }, "a supervisor turn maps to the canonical lifecycle, not the model's phase titles or the decision tape");
+        n.Map!.Steps.Select(s => s.Status).ShouldBe(new[] { ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done });
+        n.Map!.Steps.Single(s => s.Label == "Work").Detail.ShouldBe("3 agents");
+        n.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("passed");
+
+        n.Summary.ShouldBe("Shipped the login flow.", "the stop summary is the turn headline");
     }
 
     [Fact]
-    public void A_single_agent_run_uses_the_structural_node_as_the_map_and_narrates_its_label()
+    public void The_canonical_map_folds_lifecycle_status_for_running_and_failed_turns()
     {
-        var n = Build(new[] { Structural("agent", "Run the agent", order: 1, agentCount: 1) });
+        var runningSpawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn 2 agents", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Active,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded) },
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running) },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2 },
+            StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
 
-        n.Map!.Steps.ShouldHaveSingleItem().Label.ShouldBe("Run the agent");
-        n.Blocks.OfType<NarrativeStepBlock>().ShouldHaveSingleItem().Text.ShouldBe("Run the agent");
-        n.Blocks.OfType<AgentGroupBlock>().ShouldHaveSingleItem().Title.ShouldBe("Agent");
+        var running = Build(new[] { Tape("plan", 1), runningSpawn }, WorkflowRunStatus.Running);
+        var work = running.Map!.Steps.Single(s => s.Label == "Work");
+        work.Status.ShouldBe(ExecutionStepStatus.Running);
+        work.Detail.ShouldBe("1 of 2", "live progress while agents run");
+        running.Map!.Steps.Single(s => s.Label == "Review").Status.ShouldBe(ExecutionStepStatus.Queued);
+
+        var failed = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Failure);
+        failed.Map!.Steps.Single(s => s.Label == "Review").Status.ShouldBe(ExecutionStepStatus.Failed);
+        failed.Map!.Steps.Single(s => s.Label == "Deliver").Status.ShouldBe(ExecutionStepStatus.Skipped);
     }
 
     [Fact]
-    public void A_failure_humanizes_the_engine_error_and_emits_a_diagnostic()
+    public void The_acceptance_verdict_overrides_the_review_stage()
     {
-        var n = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed: the agent could not compile the project");
+        var passed = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { AcceptancePassed = true });
+        passed.Map!.Steps.Single(s => s.Label == "Review").Status.ShouldBe(ExecutionStepStatus.Done, "an explicit passed grade marks review done even mid-run");
 
-        var diag = n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
-        diag.Tone.ShouldBe(NarrativeTone.Error);
+        // Discriminating: a still-RUNNING turn whose work is done would show Review = Running without the grade; an explicit
+        // failed grade overrides it to Failed — isolating the override (not the run status).
+        var rejected = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { AcceptancePassed = false });
+        rejected.Map!.Steps.Single(s => s.Label == "Review").Status.ShouldBe(ExecutionStepStatus.Failed);
+    }
+
+    [Fact]
+    public void The_work_stage_folds_resolve_agents_not_just_spawn_and_retry()
+    {
+        var resolve = new RunPhase
+        {
+            Id = "decision-2", Label = "Resolve conflict", Kind = SupervisorDecisionKinds.Resolve, Status = PhaseStatus.Active,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Running) } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+            StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        var n = Build(new[] { Tape("plan", 1), resolve }, WorkflowRunStatus.Running);
+
+        n.Map!.Steps.Single(s => s.Label == "Work").Status.ShouldBe(ExecutionStepStatus.Running, "a resolver agent folds into Work (StagesAgents = Spawn|Retry|Resolve), not Pending");
+    }
+
+    [Fact]
+    public void A_needs_review_agent_counts_as_terminal_not_active()
+    {
+        var spawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn 1 agent", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Active,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.NeedsReview) } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+            StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        var n = Build(new[] { Tape("plan", 1), spawn }, WorkflowRunStatus.Suspended);
+
+        n.Map!.Steps.Single(s => s.Label == "Work").Status.ShouldBe(ExecutionStepStatus.Done, "NeedsReview is terminal — Work isn't stuck Running");
+    }
+
+    [Fact]
+    public void Stat_rows_surface_subtasks_files_tools_and_reasoning_from_the_facts()
+    {
+        var facts = new RoomTurnFacts
+        {
+            Subtasks = new[] { "Trace DI registration", "Analyze the template store" },
+            ChangedFiles = new[] { "a.cs", "b.cs", "c.cs" },
+            Additions = 148,
+            Deletions = 32,
+            ToolCalls = 14,
+            ReasoningCount = 5,
+        };
+
+        var stats = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().ToList();
+
+        var subtasks = stats.Single(s => s.Kind == "subtasks");
+        subtasks.Label.ShouldBe("Planned 2 subtasks");
+        subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" });
+
+        var files = stats.Single(s => s.Kind == "files");
+        files.Label.ShouldBe("Changed 3 files");
+        files.Detail.ShouldBe("+148 −32", "the captured diff line stat, pinned including the U+2212 minus");
+        files.Items.Count.ShouldBe(3);
+
+        stats.Single(s => s.Kind == "tools").Label.ShouldBe("14 tool calls");
+        stats.Single(s => s.Kind == "reasoning").Detail.ShouldBe("5 steps");
+    }
+
+    [Fact]
+    public void A_files_row_without_a_captured_diff_stat_omits_the_plus_minus()
+    {
+        var facts = new RoomTurnFacts { ChangedFiles = new[] { "only.cs" } };   // no Additions/Deletions captured
+
+        var files = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().Single(s => s.Kind == "files");
+        files.Label.ShouldBe("Changed 1 file", "singular");
+        files.Detail.ShouldBeNull("the diff +/- is a graceful gap — the row just omits it");
+    }
+
+    [Fact]
+    public void A_delivery_card_is_emitted_from_the_facts()
+    {
+        var facts = new RoomTurnFacts { Delivery = new RoomDelivery { Title = "Rename run agent", Reference = "#128", BranchHead = "feat/run-agent", BranchBase = "main", Url = "https://x/pr/128" } };
+
+        var d = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<DeliveryBlock>().ShouldHaveSingleItem();
+        d.Title.ShouldBe("Rename run agent");
+        d.Reference.ShouldBe("#128");
+        d.BranchHead.ShouldBe("feat/run-agent");
+        d.BranchBase.ShouldBe("main");
+        d.Url.ShouldBe("https://x/pr/128");
+    }
+
+    [Fact]
+    public void An_auth_failure_gets_a_titled_diagnostic_with_a_fix_credentials_action()
+    {
+        var facts = new RoomTurnFacts { RawError = "Authentication Error — the API key was rejected (HTTP 401)" };
+
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: facts).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+        diag.Title.ShouldBe("Authentication failed");
+        diag.Actions.ShouldContain(a => a.Kind == RoomActionKind.FixCredentials);
+        diag.RawDetail.ShouldNotBeNull("the raw 401 error is kept behind 'Show raw error'");
+    }
+
+    [Fact]
+    public void A_non_auth_failure_humanizes_the_engine_error()
+    {
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed: the agent could not compile the project")
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.Title.ShouldBeNull();
         diag.Text.ShouldBe("the agent could not compile the project", "the 'Node x failed:' engine prefix is stripped to the real cause");
-        n.Summary.ShouldBe("the agent could not compile the project");
     }
 
     [Fact]
-    public void A_bare_engine_failure_with_no_detail_falls_back_to_a_plain_sentence()
+    public void A_bare_engine_failure_falls_back_to_a_plain_sentence()
     {
-        var n = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed");
-
-        n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn ended with an error.", "never surface bare canvas jargon");
+        Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed")
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn ended with an error.");
     }
 
     [Fact]
     public void A_cancelled_turn_reads_as_cancelled()
     {
-        var n = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Cancelled);
-
-        n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn was cancelled.");
+        Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Cancelled)
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn was cancelled.");
     }
 
     [Fact]
     public void A_failed_phases_own_detail_is_preferred_over_the_run_error()
     {
-        var n = Build(new[] { Tape("merge", 1, status: PhaseStatus.Failed, summary: "merge conflict in auth.ts") },
-            WorkflowRunStatus.Failure, error: "Node 'sup' failed: generic wrapper");
-
-        n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("merge conflict in auth.ts");
+        Build(new[] { Tape("merge", 1, status: PhaseStatus.Failed, summary: "merge conflict in auth.ts") }, WorkflowRunStatus.Failure, error: "Node 'sup' failed: generic wrapper")
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("merge conflict in auth.ts");
     }
 
     [Fact]
-    public void Ask_human_narrates_the_question_and_the_turn_is_waiting()
+    public void A_single_agent_run_uses_the_structural_node_as_the_map()
     {
-        var n = Build(new[] { Tape("ask_human", 1, status: PhaseStatus.Waiting, summary: "Which database? — Postgres") },
-            WorkflowRunStatus.Suspended);
+        var n = Build(new[] { Structural("agent", "Run the agent", order: 1, agentCount: 1) });
 
-        n.Blocks.OfType<NarrativeStepBlock>().ShouldHaveSingleItem().Text.ShouldBe("Which database? — Postgres");
-        n.Summary.ShouldBeNull("an in-progress / waiting turn has no headline lead — the status word conveys it");
-    }
-
-    [Fact]
-    public void A_zero_agent_spawn_emits_no_line_and_no_group()
-    {
-        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 0, label: "Spawn") }, WorkflowRunStatus.Running);
-
-        n.Blocks.OfType<NarrativeStepBlock>().Select(b => b.Text).ShouldBe(new[] { "Planned the approach." }, "a 0-agent spawn is a no-op — no 'Dispatched 0 agents' noise");
-        n.Blocks.OfType<AgentGroupBlock>().ShouldBeEmpty();
-    }
-
-    [Fact]
-    public void An_agent_card_carries_its_result_summary()
-    {
-        var phase = SpawnWith(new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), Label = "Wire the API", Summary = "Added the login endpoint and tests." });
-
-        Build(new[] { phase }, WorkflowRunStatus.Success).Blocks.OfType<AgentGroupBlock>().Single().Agents.Single()
-            .Summary.ShouldBe("Added the login endpoint and tests.", "the agent's model-authored result takeaway shows on the card");
+        n.Map!.Steps.ShouldHaveSingleItem().Label.ShouldBe("Run the agent");
+        n.Blocks.ShouldBeEmpty("no facts → no stat rows; no narrative-line / agent-card chatter in the body");
     }
 
     [Fact]
@@ -204,7 +235,7 @@ public class RoomNarrativeTests
     {
         var decision = new DecisionBlock { Id = "decision-x", Seq = 7, DecisionId = Guid.NewGuid(), Question = "Proceed?", Shape = "confirm" };
 
-        var n = RoomNarrative.Build("turn-1", 7, new[] { Tape("plan", 1) }, WorkflowRunStatus.Suspended, null, new[] { decision });
+        var n = RoomNarrative.Build("turn-1", 7, new[] { Tape("plan", 1) }, WorkflowRunStatus.Suspended, null, new[] { decision }, RoomTurnFacts.Empty);
 
         n.Blocks.OfType<DecisionBlock>().ShouldHaveSingleItem().ShouldBe(decision);
     }
@@ -216,35 +247,13 @@ public class RoomNarrativeTests
 
         n.Map.ShouldBeNull();
         n.Blocks.ShouldBeEmpty();
-        n.Summary.ShouldBeNull("no model summary → no generic 'Done.' lead; the status word conveys completion");
+        n.Summary.ShouldBeNull("no model summary → no generic lead; the status word conveys completion");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
-    private static RoomNarrative.TurnNarrative Build(IReadOnlyList<RunPhase> phases, WorkflowRunStatus status = WorkflowRunStatus.Success, string? error = null) =>
-        RoomNarrative.Build("turn-1", 7, phases, status, error, Array.Empty<DecisionBlock>());
-
-    private static string Describe(RoomBlock b) => b switch
-    {
-        NarrativeStepBlock s => $"line:{s.Text}",
-        AgentGroupBlock g => $"group:{g.Title}",
-        DecisionBlock d => $"decision:{d.Question}",
-        DiagnosticBlock x => $"diag:{x.Text}",
-        _ => b.GetType().Name,
-    };
-
-    private static RunPhase SpawnWith(params PhaseAgentRef[] agents) => new()
-    {
-        Id = "decision-1",
-        Label = $"Spawn {agents.Length} agents",
-        Kind = SupervisorDecisionKinds.Spawn,
-        Status = PhaseStatus.Active,
-        Order = SupervisorPhaseSource.OrderBase + 1,
-        SourceKey = SupervisorPhaseSource.Key,
-        Agents = agents,
-        Metrics = new PhaseMetrics { AgentCount = agents.Length },
-        StartedAt = DateTimeOffset.UnixEpoch,
-    };
+    private static RoomNarrative.TurnNarrative Build(IReadOnlyList<RunPhase> phases, WorkflowRunStatus status = WorkflowRunStatus.Success, string? error = null, RoomTurnFacts? facts = null) =>
+        RoomNarrative.Build("turn-1", 7, phases, status, error, Array.Empty<DecisionBlock>(), facts ?? RoomTurnFacts.Empty);
 
     private static RunPhase Tape(string kind, int seq, PhaseStatus status = PhaseStatus.Succeeded, string? summary = null, int agentCount = 0, string? label = null) => new()
     {
@@ -258,16 +267,6 @@ public class RoomNarrativeTests
         Agents = Agents(agentCount),
         Metrics = new PhaseMetrics { AgentCount = agentCount },
         StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(seq),
-    };
-
-    private static RunPhase Authored(string title, int index) => new()
-    {
-        Id = $"phase-{index}",
-        Label = title,
-        Kind = SupervisorPhaseSource.AuthoredPhaseKind,
-        Status = PhaseStatus.Succeeded,
-        Order = SupervisorPhaseSource.PhaseOrderBase + index,
-        SourceKey = SupervisorPhaseSource.Key,
     };
 
     private static RunPhase Structural(string id, string label, int order, PhaseStatus status = PhaseStatus.Succeeded, int agentCount = 0) => new()

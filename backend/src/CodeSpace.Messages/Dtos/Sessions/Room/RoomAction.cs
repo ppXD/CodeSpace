@@ -33,4 +33,7 @@ public enum RoomActionKind
     AnswerDecision,
     Stop,
     OpenTrace,
+
+    /// <summary>A typed remediation that deep-links to fix a rejected model credential — surfaced on an auth-failure diagnostic.</summary>
+    FixCredentials,
 }
