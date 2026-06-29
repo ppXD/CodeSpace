@@ -139,7 +139,85 @@ public class RoomProjectorFlowTests
         collapsed.Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "a collapsed card still carries its actions");
     }
 
+    [Fact]
+    public async Task A_supervisor_turn_surfaces_the_canonical_map_and_the_planned_subtasks()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Supervised");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Do the thing", resultSummary: "Shipped it.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Trace DI registration", "Analyze the template store");
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        turn.Map.ShouldNotBeNull();
+        turn.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Work", "Review", "Deliver" }, "a supervisor turn (decision tape present) gets the canonical lifecycle map");
+
+        var subtasks = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "subtasks");
+        subtasks.Label.ShouldBe("Planned 2 subtasks");
+        subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" }, "the plan's subtask titles are surfaced from the decision tape");
+    }
+
+    [Fact]
+    public async Task A_supervisor_turn_aggregates_distinct_changed_files_across_its_agents()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Files");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Edit files", resultSummary: "Done.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Sub A");
+        await SeedSpawnDecisionAsync(teamId, run, (Guid.NewGuid(), new[] { "b.cs", "a.cs" }), (Guid.NewGuid(), new[] { "a.cs", "c.cs" }));
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var files = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<StatBlock>().Single(s => s.Kind == "files");
+
+        files.Label.ShouldBe("Changed 3 files");
+        files.Items.Select(i => i.Text).ShouldBe(new[] { "a.cs", "b.cs", "c.cs" }, "the distinct, ordinal-sorted union of the agents' changed files (a.cs shared → counted once)");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>Stamp a supervisor SPAWN decision whose folded agentResults carry per-agent changed-file paths.</summary>
+    private async Task SeedSpawnDecisionAsync(Guid teamId, Guid runId, params (Guid AgentRunId, string[] Files)[] agents)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentCount = agents.Length,
+            agentRunIds = agents.Select(a => a.AgentRunId).ToArray(),
+            agentResults = agents.Select(a => new { agentRunId = a.AgentRunId, status = "Succeeded", changedFiles = a.Files }).ToArray(),
+        });
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stamp a supervisor PLAN decision (its subtask decomposition) onto a run's tape — enough for the canonical map + the subtasks stat row.</summary>
+    private async Task SeedPlanDecisionAsync(Guid teamId, Guid runId, params string[] subtasks)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var payload = JsonSerializer.Serialize(new { subtasks = subtasks.Select((t, i) => new { id = $"s{i}", title = t, instruction = "do it" }).ToArray() });
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"plan:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = "{}",
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+    }
 
     private async Task<RoomView?> ProjectByRunAsync(Guid runId, Guid teamId)
     {

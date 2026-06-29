@@ -1,7 +1,9 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Decisions;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
@@ -23,14 +25,16 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IRunPhaseProjector _phases;
     private readonly IDecisionQueueService _decisions;
     private readonly IRunActionCapabilityResolver _actions;
+    private readonly ISupervisorDecisionLog _decisionLog;
     private readonly CodeSpaceDbContext _db;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, CodeSpaceDbContext db)
     {
         _sessions = sessions;
         _phases = phases;
         _decisions = decisions;
         _actions = actions;
+        _decisionLog = decisionLog;
         _db = db;
     }
 
@@ -101,7 +105,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DecisionBlocksAsync(runId, teamId, watermark, cancellationToken).ConfigureAwait(false)
             : Array.Empty<DecisionBlock>();
 
-        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, turn.RunStatus, turn.Error, decisions);
+        var facts = await GatherFactsAsync(runId, teamId, phases, turn.Error, cancellationToken).ConfigureAwait(false);
+
+        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, turn.RunStatus, turn.Error, decisions, facts);
 
         return new AssistantTurnBlock
         {
@@ -116,6 +122,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             Blocks = narrative.Blocks,
             Actions = _actions.ResolveTurnActions(runId, turn.RunStatus),
             At = turn.CreatedDate,
+            DurationMs = DurationMs(turn),
         };
     }
 
@@ -133,7 +140,18 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         Blocks = Array.Empty<RoomBlock>(),
         Actions = _actions.ResolveTurnActions(turn.RunId, turn.RunStatus),
         At = turn.CreatedDate,
+        DurationMs = DurationMs(turn),
     };
+
+    /// <summary>The turn's wall-clock — final once the run completed, else live elapsed since it started; null before it starts.</summary>
+    private static long? DurationMs(SessionTurn turn)
+    {
+        if (turn.StartedAt is not { } start) return null;
+
+        var ms = (long)((turn.CompletedAt ?? DateTimeOffset.UtcNow) - start).TotalMilliseconds;
+
+        return ms >= 0 ? ms : null;
+    }
 
     private static string CollapsedSummary(Messages.Enums.WorkflowRunStatus status) => status switch
     {
@@ -143,6 +161,64 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         Messages.Enums.WorkflowRunStatus.Suspended => "Waiting for input.",
         _ => "Working…",
     };
+
+    /// <summary>
+    /// Gather the focused turn's facts from the substrate — one decision-tape read (subtasks · changed files ·
+    /// acceptance), one batched tool-count, one reasoning COUNT (never the text), and the PR node-join. All scoped to
+    /// this run / its agents, so the cost scales with the turn, not the database. The pure narrative engine consumes these.
+    /// </summary>
+    private async Task<RoomTurnFacts> GatherFactsAsync(Guid runId, Guid teamId, IReadOnlyList<RunPhase> phases, string? error, CancellationToken cancellationToken)
+    {
+        var decisions = await _decisionLog.GetForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+        var subtasks = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson).Select(s => s.Title).ToList();
+
+        var changedFiles = decisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+            .GroupBy(r => r.AgentRunId).Select(g => g.Last())
+            .SelectMany(r => r.ChangedFiles)
+            .Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).Take(MaxChangedFiles).ToList();
+
+        var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
+        var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
+
+        var agentIds = phases.SelectMany(p => p.Agents).Select(a => a.AgentRunId).Distinct().ToList();
+
+        // Tool total from the already-projected phases (the phase source folded the per-agent count) — no second ledger
+        // query, and the room's "N tool calls" can't diverge from the board. Dedup by agent (an agent appears in both a
+        // decision phase + an authored phase). The reasoning COUNT is a distinct metric, so it stays one bounded query.
+        int? toolCalls = agentIds.Count == 0 ? null : phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).Sum(g => g.First().ToolCount ?? 0);
+
+        var reasoningCount = agentIds.Count == 0 ? 0 : await _db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.Reasoning)
+            .CountAsync(cancellationToken).ConfigureAwait(false);
+
+        return new RoomTurnFacts
+        {
+            Subtasks = subtasks,
+            ChangedFiles = changedFiles,
+            ToolCalls = toolCalls,
+            ReasoningCount = reasoningCount,
+            AcceptancePassed = acceptance,
+            Delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false),
+            RawError = error,
+        };
+    }
+
+    private const int MaxChangedFiles = 200;
+
+    /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches). Null when the turn opened none.</summary>
+    private async Task<RoomDelivery?> DeliveryAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var nodes = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId)
+            .Select(n => new { n.OutputsJson, n.InputsJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return nodes.Select(n => RoomDeliveryParser.Parse(n.OutputsJson, n.InputsJson)).FirstOrDefault(d => d != null);
+    }
 
     /// <summary>The run's append-only change watermark — MAX(Sequence) over its records, 0 before any record. The streaming cursor + the focused turn's block Seq.</summary>
     private async Task<long> WatermarkAsync(Guid runId, CancellationToken cancellationToken) =>
