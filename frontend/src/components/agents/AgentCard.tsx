@@ -67,7 +67,9 @@ function SkillTokens({ skills }: { skills: AgentDefinitionSummary["boundSkills"]
 
   return (
     <>
-      {shown.map((s) => <span key={s.skillDefinitionId} className="ab-tok" title={s.name}>@{s.slug}</span>)}
+      {/* Show the skill NAME, not the slug: a bound skill is a private copy whose handle is auto-disambiguated
+          (tdd, tdd-2…), so the slug would leak -2/-3 onto the card. The handle stays available on hover. */}
+      {shown.map((s) => <span key={s.skillDefinitionId} className="ab-tok" title={`@${s.slug}`}>{s.name}</span>)}
       {extra > 0 && <span className="ab-tok-more">+{extra}</span>}
     </>
   );

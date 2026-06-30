@@ -54,7 +54,10 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
 
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(room.title);
-  useEffect(() => setTitle(room.title), [room.title]);
+  // Reset the editable title when the session's title changes upstream (rename / switching session) — done during
+  // render via the prev-prop pattern, not in an effect, to avoid the cascading re-render the setState-in-effect causes.
+  const [syncedTitle, setSyncedTitle] = useState(room.title);
+  if (room.title !== syncedTitle) { setSyncedTitle(room.title); setTitle(room.title); }
 
   const saveTitle = async () => {
     setEditing(false);
