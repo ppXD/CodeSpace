@@ -192,6 +192,10 @@ export interface AnswerAttachment {
   url?: string | null;
   previewUrl?: string | null;
   downloadUrl?: string | null;
+  /// For a file: the run id of the agent that PRODUCED it — the preview opens THAT agent's exact version.
+  agentRunId?: string | null;
+  /// For a file: a short label of the producing agent (its role / subtask) — the "· from <agent>" provenance cue.
+  producer?: string | null;
 }
 /// The turn's rich final result — closing text + typed attachments (files / PR / images), rendered distinctly.
 export interface FinalAnswerBlock extends RoomBlockBase {

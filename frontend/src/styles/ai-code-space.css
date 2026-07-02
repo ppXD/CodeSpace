@@ -5637,6 +5637,7 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-final-file:hover { border-color: var(--line-2); background: var(--panel-2); }
 .room-final-file-ic { color: var(--muted); flex: none; }
 .room-final-file-name { flex: 1; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.room-final-file-by { flex: none; font-size: 11px; color: var(--muted); }
 .room-final-file-caret { color: var(--muted-2); flex: none; opacity: 0; transition: opacity .12s; }
 .room-final-file:hover .room-final-file-caret { opacity: 1; }
 .room-final-pr { align-self: flex-start; }

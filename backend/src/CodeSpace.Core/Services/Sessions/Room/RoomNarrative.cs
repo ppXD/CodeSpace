@@ -189,7 +189,7 @@ public static class RoomNarrative
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
 
-        if (IsTerminal(status) && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa));
+        if (IsTerminal(status) && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa, FileProducers(facts, agentById)));
 
         if (IsActive(status) && LiveActivity(idPrefix, seq, facts) is { } live) blocks.Add(live);
 
@@ -226,12 +226,40 @@ public static class RoomNarrative
     }
 
     /// <summary>The rich final answer — the closing text + typed attachments (files / PR / images), each rendered distinctly.</summary>
-    private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa) => new()
+    private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers) => new()
     {
         Id = $"{idPrefix}:final", Seq = seq,
         Text = fa.Text,
-        Attachments = fa.Attachments.Select(a => new AnswerAttachment { Kind = a.Kind, Label = a.Label, Url = a.Url, PreviewUrl = a.PreviewUrl, DownloadUrl = a.DownloadUrl }).ToList(),
+        Attachments = fa.Attachments.Select(a => Attach(a, producers)).ToList(),
     };
+
+    /// <summary>Map a fact attachment to the DTO, attributing a FILE to its producing agent (so the RESULT never presents an intermediate agent's file as the final deliverable without saying whose it is).</summary>
+    private static AnswerAttachment Attach(RoomAttachment a, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers)
+    {
+        var producer = a.Kind == AnswerAttachmentKind.FileLink && producers.TryGetValue(a.Label, out var p) ? p : ((Guid, string)?)null;
+
+        return new AnswerAttachment
+        {
+            Kind = a.Kind, Label = a.Label, Url = a.Url, PreviewUrl = a.PreviewUrl, DownloadUrl = a.DownloadUrl,
+            AgentRunId = producer?.Item1,
+            Producer = producer?.Item2,
+        };
+    }
+
+    /// <summary>Reverse the per-agent file map into path → (producing agent run id, its card label) so the final answer can attribute each file. Last writer wins on a shared path (matches the newest-writer preview resolution).</summary>
+    private static IReadOnlyDictionary<string, (Guid, string)> FileProducers(RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
+    {
+        var map = new Dictionary<string, (Guid, string)>(StringComparer.Ordinal);
+
+        foreach (var (agentRunId, files) in facts.AgentFiles)
+            foreach (var path in files)
+                map[path] = (agentRunId, agentById.TryGetValue(agentRunId, out var a) ? CardLabel(a) : "an agent");
+
+        return map;
+    }
+
+    /// <summary>The agent's display label — the same derivation the card uses (role → subtask → goal → label).</summary>
+    private static string CardLabel(PhaseAgentRef a) => a.Role ?? a.AssignedSubtask ?? a.Goal ?? a.Label ?? "Agent";
 
     /// <summary>The live "working…" indicator pinned last on an active turn — the running agents' latest public activity, else the reasoning tail, else a generic "Working…".</summary>
     private static LiveActivityBlock LiveActivity(string idPrefix, long seq, RoomTurnFacts facts)

@@ -366,6 +366,42 @@ public class RoomNarrativeTests
         tools.Items.Select(i => (i.Text, i.Detail)).ShouldBe(new[] { ("read", "6"), ("edit", "5"), ("test", "3") });
     }
 
+    [Fact]
+    public void Agent_cards_carry_their_own_files_and_the_final_answer_attributes_a_file_to_its_producer()
+    {
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+
+        var spawn = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn 2 agents", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = a1, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Research" },
+                new PhaseAgentRef { AgentRunId = a2, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Synthesize" },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2 }, StartedAt = DateTimeOffset.UnixEpoch.AddSeconds(2),
+        };
+
+        // Only the research agent (a1) produced a file; the final answer lists it. The synthesis agent (a2) produced none.
+        var facts = new RoomTurnFacts
+        {
+            AgentFiles = new Dictionary<Guid, IReadOnlyList<string>> { [a1] = new[] { "report.md" } },
+            FinalAnswer = new RoomFinalAnswer { Text = "Done.", Attachments = new[] { new RoomAttachment(AnswerAttachmentKind.FileLink, "report.md", null, null, null) } },
+        };
+
+        var n = Build(new[] { Tape("plan", 1), spawn }, WorkflowRunStatus.Success, facts: facts);
+
+        var cards = n.Blocks.OfType<AgentGroupBlock>().SelectMany(g => g.Agents).ToList();
+        cards.Single(c => c.AgentRunId == a1).ChangedFiles.ShouldBe(new[] { "report.md" }, "each agent carries its OWN files");
+        cards.Single(c => c.AgentRunId == a2).ChangedFiles.ShouldBeEmpty("the agent that produced nothing shows no files");
+
+        var file = n.Blocks.OfType<FinalAnswerBlock>().Single().Attachments!.Single(a => a.Kind == AnswerAttachmentKind.FileLink);
+        file.AgentRunId.ShouldBe(a1, "the RESULT file is attributed to its producing agent, not the final answer wholesale");
+        file.Producer.ShouldBe("Research");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static RoomNarrative.TurnNarrative Build(IReadOnlyList<RunPhase> phases, WorkflowRunStatus status = WorkflowRunStatus.Success, string? error = null, RoomTurnFacts? facts = null) =>
