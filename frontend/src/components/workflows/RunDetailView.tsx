@@ -38,7 +38,7 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-type RunView = "activity" | "canvas" | "changes" | "trace";
+export type RunView = "activity" | "canvas" | "changes" | "trace";
 
 export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   const run = useWorkflowRun(runId);
