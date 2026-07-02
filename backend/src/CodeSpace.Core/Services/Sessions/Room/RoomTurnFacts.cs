@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Dtos.Sessions.Room;
+using CodeSpace.Messages.Plans;
 
 namespace CodeSpace.Core.Services.Sessions.Room;
 
@@ -12,6 +13,9 @@ public sealed record RoomTurnFacts
 {
     /// <summary>The supervisor ROUNDS in tape order — the projector segments the decision tape on each Plan; the narrative renders one Plan / Agents / Operation group PER round (never lumped). Empty for a non-supervisor turn.</summary>
     public IReadOnlyList<RoomRound> Rounds { get; init; } = Array.Empty<RoomRound>();
+
+    /// <summary>The run's durable plan as a live checklist (contract + derived per-item state) — the narrative's plan tracker; when present it REPLACES the per-round plan stat rows. Null when the run persisted no plan (pre-plan runs project exactly as before).</summary>
+    public WorkPlanChecklist? Checklist { get; init; }
 
     /// <summary>The turn's rich final answer (closing text + typed attachments) — emitted last on a terminal turn. Null while in-progress / when there's nothing to deliver.</summary>
     public RoomFinalAnswer? FinalAnswer { get; init; }

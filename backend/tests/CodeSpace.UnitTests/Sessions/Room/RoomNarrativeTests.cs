@@ -3,7 +3,9 @@ using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Plans;
 using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
 
@@ -367,6 +369,156 @@ public class RoomNarrativeTests
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    // ─── the plan checklist (triad S2b) ─────────────────────────────────────────
+
+    [Fact]
+    public void A_checklist_leads_the_turn_and_maps_the_full_contract()
+    {
+        var checklist = Checklist(
+            Item("s1", "First", state: WorkPlanItemStates.Completed, kind: "research"),
+            Item("s2", "Second", state: WorkPlanItemStates.InProgress, dependsOn: new[] { "s1" },
+                acceptance: new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+                criteria: new[] { "covers edge cases" }, agentRunId: Guid.NewGuid(), attempts: 2));
+
+        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 2) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { Checklist = checklist });
+
+        var block = n.Blocks[0].ShouldBeOfType<PlanChecklistBlock>("the checklist LEADS the turn — the whole-plan tracker before the round narrative");
+        block.Label.ShouldBe("Plan");
+        block.Version.ShouldBe(2);
+        block.HasPriorVersions.ShouldBeTrue("v2 implies a superseded v1");
+        block.Detail.ShouldBe("2 items · 1 done · 1 running", "the item count plus every non-zero non-pending state");
+
+        var first = block.Items[0];
+        first.Ordinal.ShouldBe(1);
+        first.Kind.ShouldBe("research");
+        first.State.ShouldBe(WorkPlanItemStates.Completed);
+        first.DependsOn.ShouldBeEmpty();
+        first.AcceptanceLabel.ShouldBeNull("no objective contract → no chip");
+
+        var second = block.Items[1];
+        second.DependsOn.ShouldBe(new[] { 1 }, "dependency IDS become 1-based ordinals — the reader never sees plan-local ids");
+        second.AcceptanceLabel.ShouldBe("sh check.sh");
+        second.AcceptanceKind.ShouldBe(nameof(BenchmarkGradingKind.TestsPass), "an unspecified oracle kind defaults to TestsPass");
+        second.AcceptanceCriteria.ShouldBe(new[] { "covers edge cases" });
+        second.Attempts.ShouldBe(2);
+        second.AgentRunId.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void A_checklist_suppresses_the_per_round_plan_stat_rows()
+    {
+        var facts = new RoomTurnFacts
+        {
+            Checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending)),
+            Rounds = new[] { new RoomRound { Index = 1, Subtasks = new[] { "First" } } },
+        };
+
+        var withChecklist = Build(new[] { Tape("plan", 1) }, WorkflowRunStatus.Running, facts: facts);
+        withChecklist.Blocks.OfType<StatBlock>().Where(b => b.Kind == "subtasks").ShouldBeEmpty("the checklist subsumes the plan rows — titles never render twice");
+        withChecklist.Blocks.OfType<PlanChecklistBlock>().Count().ShouldBe(1);
+
+        // The byte-identity floor: a plan-less run (no work_plan row) projects exactly as before.
+        var without = Build(new[] { Tape("plan", 1) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { Rounds = facts.Rounds });
+        without.Blocks.OfType<StatBlock>().Count(b => b.Kind == "subtasks").ShouldBe(1, "no checklist → the legacy per-round plan row");
+        without.Blocks.OfType<PlanChecklistBlock>().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void A_checklist_suppresses_the_authored_phase_plan_rows_too()
+    {
+        // The L4 model-authored-phase path (the OTHER suppression branch): an authored round's own plan row
+        // must also yield to the checklist, while its agent group still renders.
+        var authored = new RunPhase
+        {
+            Id = "phase-0", Label = "调研与分析", Kind = SupervisorPhaseSource.AuthoredPhaseKind, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 10, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "First" } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+        };
+
+        var facts = new RoomTurnFacts { Checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Completed)) };
+
+        var n = Build(new[] { Tape("plan", 1), authored }, WorkflowRunStatus.Success, facts: facts);
+
+        n.Blocks.OfType<StatBlock>().Where(b => b.Kind == "subtasks").ShouldBeEmpty("the authored round's plan row yields to the checklist");
+        n.Blocks.OfType<PlanChecklistBlock>().Count().ShouldBe(1);
+        n.Blocks.OfType<AgentGroupBlock>().Count().ShouldBe(1, "the phase's agent cards still render");
+    }
+
+    [Fact]
+    public void Checklist_questions_render_with_the_recommended_option_flagged()
+    {
+        var checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending)) with
+        {
+            Status = WorkPlanStatuses.Authored,
+            Questions = new[]
+            {
+                new WorkPlanQuestion
+                {
+                    Id = "q1", Question = "Which direction?", AllowFreeText = true, RecommendedOptionId = "a",
+                    Options = new[] { new WorkPlanQuestionOption { Id = "a", Label = "Fast" }, new WorkPlanQuestionOption { Id = "b", Label = "Thorough" } },
+                },
+            },
+            Assumptions = new[] { "assumed the default branch" },
+        };
+
+        var block = Build(new[] { Tape("plan", 1) }, facts: new RoomTurnFacts { Checklist = checklist }).Blocks.OfType<PlanChecklistBlock>().Single();
+
+        block.Assumptions.ShouldBe(new[] { "assumed the default branch" });
+        var q = block.Questions.Single();
+        q.Question.ShouldBe("Which direction?");
+        q.AllowFreeText.ShouldBeTrue();
+        q.Options.Single(o => o.Id == "a").Recommended.ShouldBeTrue("the planner's default is flagged, not a separate field the frontend must join");
+        q.Options.Single(o => o.Id == "b").Recommended.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_all_pending_checklist_details_just_the_item_count()
+    {
+        var checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending), Item("s2", "Second", state: WorkPlanItemStates.Pending)) with { Version = 1 };
+
+        var block = Build(new[] { Tape("plan", 1) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { Checklist = checklist }).Blocks.OfType<PlanChecklistBlock>().Single();
+
+        block.Detail.ShouldBe("2 items", "nothing started → no state segments");
+        block.HasPriorVersions.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_duplicate_item_id_renders_both_lines_instead_of_killing_the_room()
+    {
+        // The supervisor's plan validator tolerates duplicate subtask ids (a degenerate flat plan) — the room
+        // mapper must survive it: both lines render, and a dependency on the dup id resolves first-wins.
+        var checklist = Checklist(
+            Item("a", "First copy", state: WorkPlanItemStates.Completed),
+            Item("a", "Second copy", state: WorkPlanItemStates.Pending),
+            Item("b", "Dependent", state: WorkPlanItemStates.Pending, dependsOn: new[] { "a" }));
+
+        var block = Build(new[] { Tape("plan", 1) }, facts: new RoomTurnFacts { Checklist = checklist }).Blocks.OfType<PlanChecklistBlock>().Single();
+
+        block.Items.Count.ShouldBe(3);
+        block.Items.Select(i => i.Ordinal).ShouldBe(new[] { 1, 2, 3 });
+        block.Items[2].DependsOn.ShouldBe(new[] { 1 }, "a dependency on a duplicated id resolves to its FIRST occurrence");
+    }
+
+    private static WorkPlanChecklist Checklist(params WorkPlanChecklistItem[] items) => new()
+    {
+        PlanId = Guid.NewGuid(),
+        WorkflowRunId = Guid.NewGuid(),
+        Version = 2,
+        Status = WorkPlanStatuses.Authored,
+        OriginKind = WorkPlanOrigins.Supervisor,
+        Goal = "ship it",
+        Items = items,
+    };
+
+    private static WorkPlanChecklistItem Item(string id, string title, string state, string? kind = null, string[]? dependsOn = null, SupervisorAcceptanceSpec? acceptance = null, string[]? criteria = null, Guid? agentRunId = null, int attempts = 0) => new()
+    {
+        Item = new WorkPlanItem { Id = id, Title = title, Instruction = $"do {id}", Kind = kind, DependsOn = dependsOn, Acceptance = acceptance, AcceptanceCriteria = criteria },
+        State = state,
+        AgentRunId = agentRunId,
+        Attempts = attempts,
+    };
 
     private static RoomNarrative.TurnNarrative Build(IReadOnlyList<RunPhase> phases, WorkflowRunStatus status = WorkflowRunStatus.Success, string? error = null, RoomTurnFacts? facts = null) =>
         RoomNarrative.Build("turn-1", 7, phases, status, error, Array.Empty<DecisionBlock>(), facts ?? RoomTurnFacts.Empty);
