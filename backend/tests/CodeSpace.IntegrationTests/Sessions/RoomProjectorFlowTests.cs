@@ -187,6 +187,67 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_supervisor_turn_with_a_retry_surfaces_the_failed_original_and_a_retry_step()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Retry");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Do the work", resultSummary: "Done.");
+
+        var failedAgent = Guid.NewGuid();
+        var retryAgent = Guid.NewGuid();
+        await SeedPlanDecisionAsync(teamId, run, "Sub 0");
+        await SeedRetryScenarioAsync(teamId, run, failedAgent, retryAgent);
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var cards = turn.Blocks.OfType<AgentGroupBlock>().SelectMany(g => g.Agents).ToList();
+        cards.ShouldContain(c => c.AgentRunId == failedAgent && c.Status == nameof(AgentRunStatus.Failed), "the failed original is a Failed card, not hidden behind its retry");
+        cards.ShouldContain(c => c.AgentRunId == retryAgent, "the retry agent shows too — the full trajectory");
+
+        turn.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor retried a subtask", "the room shows the retry beat as a narrative step");
+    }
+
+    /// <summary>Seed a supervisor turn that FAILED a subtask then RETRIED it: a spawn staging one FAILED agent for subtask "s0", then a retry staging a fresh SUCCEEDED agent — plus both AgentRun rows (ground-truth status). Flat plan (the tape path).</summary>
+    private async Task SeedRetryScenarioAsync(Guid teamId, Guid runId, Guid failedAgent, Guid retryAgent)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new { subtaskIds = new[] { "s0" } }),
+            OutcomeJson = JsonSerializer.Serialize(new { agentCount = 1, agentRunIds = new[] { failedAgent } }),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Retry, IdempotencyKey = $"retry:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new { subtaskId = "s0" }),
+            OutcomeJson = JsonSerializer.Serialize(new { agentCount = 1, agentRunIds = new[] { retryAgent } }),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, failedAgent, AgentRunStatus.Failed, now));
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, retryAgent, AgentRunStatus.Succeeded, now));
+
+        await db.SaveChangesAsync();
+    }
+
+    private static AgentRun RetryAgentRow(Guid teamId, Guid runId, Guid agentId, AgentRunStatus status, DateTimeOffset now) => new()
+    {
+        Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup",
+        Harness = "codex-cli", Status = status, TaskJson = "{}",
+        CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+    };
+
+    [Fact]
     public async Task A_single_agent_run_surfaces_its_result_from_the_agent_output_even_without_a_supervisor()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

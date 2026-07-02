@@ -498,6 +498,43 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A_supervisor_retry_emits_a_retried_step_after_the_agent_group_on_the_authored_path()
+    {
+        // The goal's branch: a phased (authored) round whose Research phase carries a failed original + its retry.
+        var authored = new RunPhase
+        {
+            Id = "phase-0", Label = "Research", Kind = SupervisorPhaseSource.AuthoredPhaseKind, Status = PhaseStatus.Failed,
+            Order = SupervisorPhaseSource.OrderBase + 10, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Failed), AssignedSubtask = "Analyze repos" },
+                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Analyze repos" },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2, FailedCount = 1, SucceededCount = 1 },
+        };
+
+        var facts = new RoomTurnFacts { RetrySteps = new[] { new RoomRetryStep(3, "Supervisor retried a subtask") } };
+
+        var n = Build(new[] { authored }, WorkflowRunStatus.Success, facts: facts);
+        var kinds = n.Blocks.ToList();
+
+        n.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor retried a subtask" && s.Tone == NarrativeTone.Info,
+            "the retry beat renders as a step even on the authored-phase path (the branch the goal hits)");
+
+        var groupIdx = kinds.FindIndex(b => b is AgentGroupBlock);
+        var retryIdx = kinds.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor retried a subtask");
+        retryIdx.ShouldBeGreaterThan(groupIdx, "the retry step reads AFTER the agent cards (the failed original + retry are already visible above)");
+    }
+
+    [Fact]
+    public void No_retry_steps_render_no_retried_narrative_line()
+    {
+        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Success);
+
+        n.Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("retried"), "no retries → no retry step (byte-identity floor)");
+    }
+
+    [Fact]
     public void Checklist_questions_render_with_the_recommended_option_flagged()
     {
         var checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending)) with

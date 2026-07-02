@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
+using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Dtos.Sessions;
@@ -231,6 +232,14 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var finalAnswerText = SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson)
             ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
+        // The retry beats — one narrative step per retry decision, so a failed-then-retried subtask reads as the
+        // trajectory it was (not just its surviving agent). Reuses the shared timeline copy authority for the one line.
+        var retrySteps = decisions
+            .Where(d => d.DecisionKind == SupervisorDecisionKinds.Retry)
+            .OrderBy(d => d.Sequence)
+            .Select(d => new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d)))
+            .ToList();
+
         // The turn's tool-call TOTAL — summed from the already-projected per-agent counts (no extra query; the same
         // figure the agent cards show). Dedup by agent (an agent can appear in both a decision + an authored phase).
         int? toolCalls = agentIds.Count == 0 ? null : phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).Sum(g => g.First().ToolCount ?? 0);
@@ -299,6 +308,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             AcceptancePassed = acceptance,
             Delivery = delivery,
             RawError = error,
+            RetrySteps = retrySteps,
         };
     }
 

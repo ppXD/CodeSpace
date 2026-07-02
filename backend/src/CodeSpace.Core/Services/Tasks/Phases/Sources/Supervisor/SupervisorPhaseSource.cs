@@ -92,15 +92,18 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
         if (authored.Count == 0) return Array.Empty<RunPhase>();
 
-        var subtaskAgents = SubtaskAgentMap(decisions);
+        var subtaskAttempts = SubtaskAgentAttempts(decisions, plan!.Sequence);
 
-        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, rollup)).ToList();
+        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan, subtaskAttempts, rollup)).ToList();
     }
 
-    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, AgentRollup rollup)
+    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, IReadOnlyList<Guid>> subtaskAttempts, AgentRollup rollup)
     {
+        // Flatten EVERY attempt of each subtask (the spawn's original first, then each retry's fresh agent), so a
+        // retried subtask surfaces BOTH its failed original AND the retry — the room shows the real trajectory, not just
+        // the latest winner. PhaseStatusFromAgents then honestly folds to Failed while a failed attempt is present.
         var agents = phase.SubtaskIds
-            .Select(subtaskAgents.GetValueOrDefault)
+            .SelectMany(id => subtaskAttempts.GetValueOrDefault(id) ?? Array.Empty<Guid>())
             .Where(id => id != Guid.Empty && rollup.Knows(id))
             .Select(rollup.RefFor)
             .ToList();
@@ -122,16 +125,21 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     }
 
     /// <summary>
-    /// subtaskId → the agent-run id that ran it, walking <c>spawn</c> AND <c>retry</c> decisions in Sequence order so the
-    /// CHRONOLOGICALLY-LATEST attempt wins (a spawn fans the payload <c>subtaskIds[i]</c> ↔ outcome <c>agentRunIds[i]</c>;
-    /// a retry re-runs ONE subtask as a fresh agent). So a subtask that failed and was retried shows the retry's fresh
-    /// agent (ground-truth), not the original failed one.
+    /// subtaskId → the agent-run ids that ran it, in ATTEMPT order (the spawn's original first, then each retry's fresh
+    /// agent), walking <c>spawn</c> AND <c>retry</c> decisions in Sequence order (a spawn fans the payload
+    /// <c>subtaskIds[i]</c> ↔ outcome <c>agentRunIds[i]</c>; a retry re-runs ONE subtask as a fresh agent). A retried
+    /// subtask therefore carries BOTH its failed original AND the retry, so the room can render the full trajectory
+    /// (the failure + its recovery); a never-retried subtask yields a single-element list.
+    ///
+    /// <para>Scoped to decisions AFTER the LATEST plan (<paramref name="planSequence"/>) — subtask ids are model-authored
+    /// and plan-local (not unique across a re-plan), and the phases render the latest plan only, so an earlier plan that
+    /// reused an id must not leak its superseded (possibly failed) agent into this plan's phase.</para>
     /// </summary>
-    private static IReadOnlyDictionary<string, Guid> SubtaskAgentMap(IReadOnlyList<SupervisorDecisionRecord> decisions)
+    private static IReadOnlyDictionary<string, IReadOnlyList<Guid>> SubtaskAgentAttempts(IReadOnlyList<SupervisorDecisionRecord> decisions, long planSequence)
     {
-        var map = new Dictionary<string, Guid>();
+        var map = new Dictionary<string, List<Guid>>();
 
-        foreach (var d in decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry).OrderBy(d => d.Sequence))
+        foreach (var d in decisions.Where(d => d.Sequence > planSequence && d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry).OrderBy(d => d.Sequence))
         {
             var agentIds = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson);
 
@@ -140,19 +148,26 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
                 var subtaskIds = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
 
                 for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
-                    map[subtaskIds[i]] = agentIds[i];
+                    Append(map, subtaskIds[i], agentIds[i]);
             }
             else if (SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } retried && agentIds.Count > 0)
-                map[retried] = agentIds[0];
+                Append(map, retried, agentIds[0]);
         }
 
-        return map;
+        return map.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<Guid>)kv.Value);
+    }
+
+    private static void Append(Dictionary<string, List<Guid>> map, string subtaskId, Guid agentId)
+    {
+        if (!map.TryGetValue(subtaskId, out var list)) map[subtaskId] = list = new List<Guid>();
+
+        list.Add(agentId);
     }
 
     /// <summary>
     /// The per-agent ALLOCATION the model authored: <c>agentRunId → (role, subtask title)</c>. Joins the latest plan's
     /// subtasks (<c>subtaskId → title</c>) and the spawn's per-agent dispatch roles (<c>subtaskId → role</c>) onto each
-    /// staged agent through the SAME <c>subtaskIds[i] ↔ agentRunIds[i]</c> staging order as <see cref="SubtaskAgentMap"/>
+    /// staged agent through the SAME <c>subtaskIds[i] ↔ agentRunIds[i]</c> staging order as <see cref="SubtaskAgentAttempts"/>
     /// — so a spawn fans the title+role onto exactly the agent that ran it. A retry re-runs ONE subtask as a fresh agent
     /// (carrying the subtask title; no per-agent role on a retry). Pure + best-effort — a homogeneous spawn (no
     /// <c>agents[]</c>) or a flat plan simply yields null role/title, byte-identical to before.

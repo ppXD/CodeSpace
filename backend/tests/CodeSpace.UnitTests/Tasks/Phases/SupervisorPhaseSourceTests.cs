@@ -262,7 +262,7 @@ public class SupervisorPhaseSourceTests
     }
 
     [Fact]
-    public void A_retried_subtask_phase_shows_the_latest_attempt_not_the_failed_original()
+    public void A_retried_subtask_phase_shows_both_the_failed_original_and_the_retry()
     {
         var failedAgent = Guid.NewGuid();
         var retryAgent = Guid.NewGuid();
@@ -279,8 +279,66 @@ public class SupervisorPhaseSourceTests
 
         var implement = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn, retry }, statuses).Single(p => p.Kind == "phase");
 
-        implement.Agents.Single().AgentRunId.ShouldBe(retryAgent, "the retried subtask shows its FRESH agent (latest attempt wins), not the original failed one");
-        implement.Status.ShouldBe(PhaseStatus.Succeeded, "the subtask ultimately succeeded → the phase succeeded (ground-truth, not the stale failure)");
+        implement.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { failedAgent, retryAgent }, "both attempts show — the failed original first, then the retry — so the room renders the real trajectory, not just the surviving agent");
+        implement.Status.ShouldBe(PhaseStatus.Failed, "a failed attempt is present → the phase honestly reads failed (matching the run detail's failed-phase step), even though the retry ultimately recovered the subtask");
+    }
+
+    [Fact]
+    public void A_multi_agent_phase_with_two_failures_and_two_retries_reads_two_failed()
+    {
+        var okA = Guid.NewGuid();
+        var okB = Guid.NewGuid();
+        var failedC = Guid.NewGuid();
+        var failedD = Guid.NewGuid();
+        var retryC = Guid.NewGuid();
+        var retryD = Guid.NewGuid();
+
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":4,"phases":[{"id":"research","title":"Research","subtaskIds":["sa","sb","sc","sd"]}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":4,"agentRunIds":["{{okA}}","{{okB}}","{{failedC}}","{{failedD}}"]}""",
+            payloadJson: """{"subtaskIds":["sa","sb","sc","sd"]}""");
+        var retry1 = Decision(3, SupervisorDecisionKinds.Retry, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{retryC}}"]}""", payloadJson: """{"subtaskId":"sc"}""");
+        var retry2 = Decision(4, SupervisorDecisionKinds.Retry, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{retryD}}"]}""", payloadJson: """{"subtaskId":"sd"}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus>
+        {
+            [okA] = AgentRunStatus.Succeeded, [okB] = AgentRunStatus.Succeeded,
+            [failedC] = AgentRunStatus.Failed, [failedD] = AgentRunStatus.Failed,
+            [retryC] = AgentRunStatus.Succeeded, [retryD] = AgentRunStatus.Succeeded,
+        };
+
+        var research = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn, retry1, retry2 }, statuses).Single(p => p.Kind == "phase");
+
+        research.Agents.Count.ShouldBe(6, "the 4 spawned agents + the 2 retry agents all show — the full trajectory");
+        research.Metrics.FailedCount.ShouldBe(2, "the 2 failed originals are surfaced, not hidden behind their retries");
+        research.Metrics.SucceededCount.ShouldBe(4, "2 clean originals + 2 recovered retries");
+        research.Status.ShouldBe(PhaseStatus.Failed, "any failed attempt makes the phase read failed");
+    }
+
+    [Fact]
+    public void A_re_plan_reusing_a_subtask_id_does_not_leak_the_prior_plans_agent()
+    {
+        var oldAgent = Guid.NewGuid();   // plan-1's spawn for "s1" — FAILED, then abandoned by a re-plan
+        var newAgent = Guid.NewGuid();   // plan-2 re-plan's fresh spawn for the SAME id "s1" — clean, no retry
+
+        var plan1 = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"p","title":"Build","subtaskIds":["s1"]}]}""");
+        var spawn1 = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{oldAgent}}"]}""", payloadJson: """{"subtaskIds":["s1"]}""");
+        var plan2 = Decision(3, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"p","title":"Build","subtaskIds":["s1"]}]}""");
+        var spawn2 = Decision(4, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{newAgent}}"]}""", payloadJson: """{"subtaskIds":["s1"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [oldAgent] = AgentRunStatus.Failed, [newAgent] = AgentRunStatus.Succeeded };
+
+        var build = SupervisorPhaseSource.ProjectDecisions(new[] { plan1, spawn1, plan2, spawn2 }, statuses).Single(p => p.Kind == "phase");
+
+        build.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { newAgent }, "the latest plan's phase shows ONLY its own spawn — a reused subtask id does not leak the superseded prior-plan agent");
+        build.Status.ShouldBe(PhaseStatus.Succeeded, "the current plan's subtask succeeded cleanly → not falsely failed by the abandoned prior attempt");
     }
 
     [Fact]
