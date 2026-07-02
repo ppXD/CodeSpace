@@ -54,8 +54,8 @@ public static class EvalScorecard
         };
     }
 
-    /// <summary>Nearest-rank percentile over a pre-sorted ascending list; null when empty. Deterministic.</summary>
-    private static double? Percentile(IReadOnlyList<double> sorted, int p)
+    /// <summary>Nearest-rank percentile over a pre-sorted ascending list; null when empty. Deterministic. Internal so the sibling per-agent scorer (<see cref="AgentStatsScorer"/>) reuses the SAME percentile definition — no drift between the two scorecards.</summary>
+    internal static double? Percentile(IReadOnlyList<double> sorted, int p)
     {
         if (sorted.Count == 0) return null;
 
