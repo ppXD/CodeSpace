@@ -38,7 +38,9 @@ public static class PlannerSchema
                   "rationale": { "type": "string", "description": "Optional one-line 'why this subtask'." },
                   "harness": { "type": "string", "description": "Optional — the best harness for THIS subtask, chosen from the capability catalog (one whose providers can drive your chosen model). Omit to use the run default." },
                   "model": { "type": "string", "description": "Optional — the best model for THIS subtask, chosen from the run's credentialed pool in the capability catalog (match its provider to the chosen harness). Omit for the harness default." },
+                  "kind": { "type": "string", "description": "Optional short open kind for this subtask — e.g. research / code / analysis / write. A hint for allocation + rendering; omit when unsure." },
                   "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional plan-local subtask ids this subtask depends on — the plan's DAG edges (absent → an independent unit)." },
+                  "acceptanceCriteria": { "type": "array", "items": { "type": "string" }, "description": "Optional short SUBJECTIVE completion qualities a reviewer checks (never executed) — e.g. 'covers edge cases', 'cites sources'." },
                   "acceptance": {
                     "type": "object",
                     "additionalProperties": false,
@@ -57,7 +59,38 @@ public static class PlannerSchema
             "successCriteria": { "type": "array", "items": { "type": "string" }, "description": "Observable conditions that, together, mean the goal is done." },
             "risks": { "type": "array", "items": { "type": "string" }, "description": "Risks / unknowns the plan carries." },
             "recommendedWorkflowKind": { "type": "string", "description": "Execution shape per branch: 'coding' projects onto an agent; anything else onto an LLM step." },
-            "hasEnoughContext": { "type": "boolean", "description": "true ONLY when the goal needs no execution at all — the plan itself already answers it. Be very strict: even at 90% certainty, prefer execution (false)." }
+            "hasEnoughContext": { "type": "boolean", "description": "true ONLY when the goal needs no execution at all — the plan itself already answers it. Be very strict: even at 90% certainty, prefer execution (false)." },
+            "assumptions": { "type": "array", "items": { "type": "string" }, "description": "Defaults you chose where the goal was ambiguous — record them so the reviewer sees what was assumed." },
+            "questions": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string", "description": "Stable, plan-local id for the question." },
+                  "question": { "type": "string", "description": "The decision the operator should make." },
+                  "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": { "type": "string", "description": "Stable, question-local id." },
+                        "label": { "type": "string", "description": "The operator-facing option label." }
+                      },
+                      "required": ["id", "label"]
+                    }
+                  },
+                  "recommendedOptionId": { "type": "string", "description": "The option to proceed with when the operator doesn't answer — also record it under assumptions." },
+                  "allowFreeText": { "type": "boolean", "description": "Whether a free-text answer is also acceptable." }
+                },
+                "required": ["id", "question", "options"]
+              },
+              "description": "Optional operator questions (mutually exclusive options + a recommended default) when the goal leaves a real direction choice open. Omit when the plan needs no operator input."
+            }
           },
           "required": ["goal", "subtasks"]
         }

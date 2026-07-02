@@ -118,6 +118,12 @@ public sealed class PlanAuthorNode : INodeRuntime
             return NodeResult.Fail(ex.Message);
         }
 
+        var items = plan.Subtasks.Select(WorkPlanItem.From).ToList();
+
+        // Fail CLOSED on a structurally contradictory DAG (dup ids / dangling dependsOn / cycle) — the
+        // graph-tier twin of the supervisor's plan validator; a broken graph must never become the contract.
+        if (WorkPlanItemGraph.Validate(items) is { } graphError) return NodeResult.Fail($"The authored plan is structurally invalid: {graphError}");
+
         var saved = await scope.ServiceProvider.GetRequiredService<IWorkPlanService>().SaveVersionAsync(new WorkPlanDraft
         {
             TeamId = teamId,
@@ -131,9 +137,11 @@ public sealed class PlanAuthorNode : INodeRuntime
             // version-per-re-entry edit-loop contract.
             OriginKey = null,
             Goal = plan.Goal,
-            Items = plan.Subtasks.Select(WorkPlanItem.From).ToList(),
+            Items = items,
             SuccessCriteria = plan.SuccessCriteria,
             Risks = plan.Risks,
+            Assumptions = plan.Assumptions,
+            Questions = plan.Questions,
         }, cancellationToken).ConfigureAwait(false);
 
         context.Logger.LogInformation("plan.author persisted work plan {PlanId} v{Version} with {Items} item(s) (executionNeeded={ExecutionNeeded})", saved.Id, saved.Version, plan.Subtasks.Count, !plan.HasEnoughContext);

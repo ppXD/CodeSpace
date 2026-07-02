@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -74,6 +75,25 @@ public class PlanAuthorNodeFlowTests : IDisposable
             "the per-item objective acceptance — the sprint-contract half of the plan — survives into the persisted item");
         acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass", "the enum serializes as its NAME (AgentJson string enums), matching the supervisor tape vocabulary");
         items[0].TryGetProperty("acceptance", out _).ShouldBeFalse("an uncontracted item omits acceptance entirely — null-omitted, not null-valued");
+        items[0].GetProperty("kind").GetString().ShouldBe("research", "the open item kind survives into the persisted item");
+        items[1].GetProperty("acceptanceCriteria")[0].GetString().ShouldBe("covers edge cases", "the SUBJECTIVE per-item criteria survive alongside the objective spec");
+
+        // The plan-level contract enrichment: recorded assumptions + the operator-question form fodder.
+        JsonDocument.Parse(plan.AssumptionsJson!).RootElement[0].GetString().ShouldBe("assumed the default branch");
+        var questions = JsonDocument.Parse(plan.QuestionsJson!).RootElement;
+        questions.GetArrayLength().ShouldBe(1);
+        questions[0].GetProperty("id").GetString().ShouldBe("q1");
+        questions[0].GetProperty("options").GetArrayLength().ShouldBe(2);
+        questions[0].GetProperty("recommendedOptionId").GetString().ShouldBe("a");
+
+        // The checklist read model: contract verbatim + honestly-Pending execution state (no linkage on the graph tier yet).
+        var checklist = await verify.Resolve<IWorkPlanChecklistService>().GetCurrentAsync(runId, teamId, CancellationToken.None);
+        checklist.ShouldNotBeNull();
+        checklist!.Questions!.Count.ShouldBe(1);
+        checklist.Assumptions!.Count.ShouldBe(1);
+        checklist.Items.Count.ShouldBe(2);
+        checklist.Items.ShouldAllBe(i => i.State == WorkPlanItemStates.Pending && i.Attempts == 0);
+        checklist.Items[1].Item.AcceptanceCriteria!.Count.ShouldBe(1);
 
         // ── The node outputs: planId/version bind the artifact; items mirrors the persisted bytes; executionNeeded=true. ──
         var node = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan" && n.IterationKey == "");
@@ -108,6 +128,32 @@ public class PlanAuthorNodeFlowTests : IDisposable
 
         var second = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan2" && n.IterationKey == "");
         JsonDocument.Parse(second.OutputsJson!).RootElement.GetProperty("version").GetInt32().ShouldBe(2, "the second node's outputs carry ITS version");
+    }
+
+    [Fact]
+    public async Task A_structurally_invalid_dag_fails_the_node_closed()
+    {
+        using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().AuthorInvalidDag = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: true);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Failure, "a dangling dependsOn must fail the plan node CLOSED — a broken graph never becomes the contract");
+
+        var node = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan" && n.IterationKey == "");
+        node.Error.ShouldNotBeNull();
+        node.Error!.ShouldContain("structurally invalid", customMessage: "the failure names the structural contradiction legibly");
+
+        (await db.WorkPlan.AsNoTracking().CountAsync(p => p.WorkflowRunId == runId)).ShouldBe(0, "nothing was persisted for the invalid plan");
     }
 
     [Fact]

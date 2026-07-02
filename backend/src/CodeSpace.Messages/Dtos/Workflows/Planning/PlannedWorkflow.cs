@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Plans;
 
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 
@@ -43,6 +44,14 @@ public sealed record PlannedWorkflow
     /// so a downstream <c>logic.if</c> can route straight to synthesis.
     /// </summary>
     public bool HasEnoughContext { get; init; }
+
+    /// <summary>Optional defaults the planner chose where the goal was ambiguous — recorded so the reviewer sees what was assumed rather than re-deriving it. Null-omitted.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Assumptions { get; init; }
+
+    /// <summary>Optional operator questions (each with 2-4 options + a recommended default) — the plan-confirmation form's fodder. Null-omitted; absent ⇒ the plan needs no operator input.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WorkPlanQuestion>? Questions { get; init; }
 }
 
 /// <summary>One unit of work in a <see cref="PlannedWorkflow"/>. A data noun (Rule 18.1).</summary>
@@ -66,6 +75,10 @@ public sealed record PlannedSubtask
     /// <summary>P2 allocation — the model the planner picked for THIS subtask from the run's pool. Carried into the branch body as <c>{{item.model}}</c>. Null → the harness default. The catalog steers the planner to a model whose provider the chosen harness can drive.</summary>
     public string? Model { get; init; }
 
+    /// <summary>Optional OPEN subtask kind (e.g. "research" / "code" / "analysis" / "write") — an allocation + rendering hint, never a dispatch switch. Null-omitted.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Kind { get; init; }
+
     /// <summary>
     /// Optional plan-local subtask ids this subtask DEPENDS ON — the plan's DAG edges, the same vocabulary the
     /// supervisor's planned subtasks carry. Null-omitted so a dependency-free subtask serializes byte-identical.
@@ -81,4 +94,8 @@ public sealed record PlannedSubtask
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
+    /// <summary>Optional SUBJECTIVE per-subtask acceptance criteria — short free-text qualities a reviewer/critic grades (never executed; the objective half is <see cref="Acceptance"/>). Null-omitted.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 }
