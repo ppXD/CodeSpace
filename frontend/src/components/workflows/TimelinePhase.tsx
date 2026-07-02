@@ -11,13 +11,13 @@ import { RerunMenu } from "./RerunMenu";
 
 /**
  * One phase on the Activity timeline as a Claude-style CONVERSATION BOX — a 3-level drill-down. Collapsed it's a
- * compact summary: phase name + "N agents · time" + a status dot per agent. Click to expand: a MULTI-agent phase
- * reveals its terminal-tile thumbnails, and clicking a tile opens that one agent's full real-time terminal below; a
- * SINGLE-agent phase skips the tile layer and opens straight to its one terminal. The box defaults open while the
- * phase is in flight (else collapsed, so a long run reads as a tidy stack of summaries) and the outline force-opens it
- * when it selects one of its agents (that terminal must show, outranking a stale manual collapse). The open terminal is
- * keyed off `selectedAgentRunId` (lifted to the route) so the outline + timeline share one selection. Scrolls into view
- * when the outline selects this phase.
+ * compact summary: phase name + "N agents · time" + a status dot per agent. Click to expand: the phase reveals its
+ * terminal-tile thumbnails (one per agent, single- or multi-agent alike), and clicking a tile opens that one agent's
+ * full real-time terminal below — never auto-expanded, so every phase reads the same. The box defaults open while the
+ * phase is in flight (else collapsed, so a long run reads as a tidy stack of summaries) and force-opens when a host
+ * selects one of its agents (that terminal must show, outranking a stale manual collapse). The open terminal is keyed
+ * off `selectedAgentRunId` (owned by RunDetailView, optionally lifted) so an outline + the timeline share one
+ * selection. Scrolls into view when the outline selects this phase.
  */
 function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelectAgent, rerunnableNodeIds }: {
   wave: AgentWave;
@@ -41,7 +41,6 @@ function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelect
     if (wave.id === selectedPhaseId) ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [wave.id, selectedPhaseId]);
 
-  const single = wave.agents.length === 1;
   const openAgent = wave.agents.find((a) => a.agentRunId === selectedAgentRunId) ?? null;
   const toggleAgent = (id: string) => onSelectAgent?.(id === selectedAgentRunId ? null : id);
 
@@ -89,21 +88,20 @@ function TimelinePhaseImpl({ wave, selectedPhaseId, selectedAgentRunId, onSelect
         )}
       </div>
 
-      {open && (single
-        // Single agent → its full terminal directly (skip the tile layer); close collapses the box AND clears the
-        // shared selection (else the outline row stays highlighted, and a selection-driven open would re-open it).
-        ? <AgentTerminal agent={wave.agents[0]} onClose={() => { setUserToggle(false); onSelectAgent?.(null); }} rerun={terminalRerun(wave.agents[0])} />
-        : (
-          <>
-            <div className="run-tl-tiles">
-              {wave.agents.map((a: PhaseAgentRef) => (
-                <AgentTile key={a.agentRunId} agent={a} selected={a.agentRunId === selectedAgentRunId} open={a.agentRunId === selectedAgentRunId} onOpen={() => toggleAgent(a.agentRunId)} rerun={tileRerun(a)} />
-              ))}
-            </div>
+      {open && (
+        // Opening the box reveals the agent terminal-tile thumbnails — collapsed, one per agent (a single-agent phase
+        // shows one tile, consistent with the fan-out). Clicking a tile opens that agent's full terminal below; it is
+        // never auto-expanded, so every phase reads the same: a tidy row of tiles until you pick one.
+        <>
+          <div className="run-tl-tiles">
+            {wave.agents.map((a: PhaseAgentRef) => (
+              <AgentTile key={a.agentRunId} agent={a} selected={a.agentRunId === selectedAgentRunId} open={a.agentRunId === selectedAgentRunId} onOpen={() => toggleAgent(a.agentRunId)} rerun={tileRerun(a)} />
+            ))}
+          </div>
 
-            {openAgent && <AgentTerminal key={openAgent.agentRunId} agent={openAgent} onClose={() => onSelectAgent?.(null)} rerun={terminalRerun(openAgent)} />}
-          </>
-        ))}
+          {openAgent && <AgentTerminal key={openAgent.agentRunId} agent={openAgent} onClose={() => onSelectAgent?.(null)} rerun={terminalRerun(openAgent)} />}
+        </>
+      )}
     </div>
   );
 }

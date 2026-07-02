@@ -48,6 +48,12 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   const manifests = useNodeManifests();
   const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
   const [view, setView] = useState<RunView>(defaultView);
+  // The Activity terminal's expand/collapse is a single selected-agent id. A host (e.g. an outline that shares the
+  // selection) can LIFT it via onSelectAgent; when it doesn't (the modal, a nested embed), own it locally so a tile
+  // click still expands its terminal. Presence of the setter marks the controlled case.
+  const [pickedAgent, setPickedAgent] = useState<string | null>(null);
+  const selAgent = onSelectAgent ? (selectedAgentRunId ?? null) : pickedAgent;
+  const selectAgent = onSelectAgent ?? setPickedAgent;
   // The Live-work center is driven by the phase projection (shared ['run-phases', id] cache). Only the framed
   // route needs it — the embedded (nested) dialog keeps the plain node narrative, so it skips the fetch.
   const phases = useRunPhases(nested ? null : runId);
@@ -199,7 +205,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
           {!nested && (
             <RunActionsContext.Provider value={runActions}>
               <RunOpenContext.Provider value={onOpenRun ?? null}>
-                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} rerunnableNodeIds={rerunnableNodeIds} />
+                <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selAgent} onSelectAgent={selectAgent} rerunnableNodeIds={rerunnableNodeIds} />
               </RunOpenContext.Provider>
             </RunActionsContext.Provider>
           )}

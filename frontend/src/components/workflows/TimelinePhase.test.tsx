@@ -79,23 +79,22 @@ describe("TimelinePhase", () => {
     expect(tiles.every((t) => t.dataset.hasrerun === "true")).toBe(true);
   });
 
-  it("a single-agent phase opens straight to its terminal — skips the tile layer", () => {
+  it("a single-agent phase auto-opens to its one tile — the terminal is not shown until the tile is clicked", () => {
     render(<TimelinePhase wave={wave({ agents: [a("a1", "Running")] })} />);   // in flight → auto-open
 
-    expect(screen.getByTestId("terminal")).toHaveTextContent("term:a1");
-    expect(screen.queryByTestId("tile")).toBeNull();
-    expect(screen.getByTestId("terminal").dataset.closable).toBe("true");      // its close collapses the box
+    expect(screen.getAllByTestId("tile")).toHaveLength(1);           // one collapsed tile, consistent with a fan-out
+    expect(screen.queryByTestId("terminal")).toBeNull();             // never auto-expanded to the full terminal
   });
 
-  it("a settled single-agent phase starts collapsed; clicking the box opens its terminal directly", () => {
+  it("a settled single-agent phase starts collapsed; clicking the box reveals its one tile (not the full terminal)", () => {
     const { container } = render(<TimelinePhase wave={wave({ agents: [a("a1", "Succeeded", 9000)] })} />);
 
-    expect(screen.queryByTestId("terminal")).toBeNull();             // collapsed
-    expect(screen.getByText("1 agent · 9s")).toBeInTheDocument();    // singular "agent"
+    expect(screen.queryByTestId("tile")).toBeNull();                // collapsed
+    expect(screen.getByText("1 agent · 9s")).toBeInTheDocument();   // singular "agent"
 
     fireEvent.click(boxEl(container)!);
-    expect(screen.getByTestId("terminal")).toHaveTextContent("term:a1");
-    expect(screen.queryByTestId("tile")).toBeNull();
+    expect(screen.getAllByTestId("tile")).toHaveLength(1);          // reveals the tile — same as a multi-agent phase
+    expect(screen.queryByTestId("terminal")).toBeNull();            // still not expanded until the tile is clicked
   });
 
   it("lifts the selection on a tile click and opens the focused agent's terminal below", () => {
@@ -136,13 +135,12 @@ describe("TimelinePhase", () => {
     expect(screen.getByTestId("terminal")).toHaveTextContent("term:a2");   // agent-select outranks the stale collapse
   });
 
-  it("closing a single-agent terminal collapses the box and clears the shared selection", () => {
+  it("closing a focused agent's terminal clears the shared selection (back to the tiles)", () => {
     const onSelectAgent = vi.fn();
-    render(<TimelinePhase wave={wave({ agents: [a("a1", "Running")] })} onSelectAgent={onSelectAgent} />);
+    render(<TimelinePhase wave={wave({ agents: [a("a1", "Running")] })} selectedAgentRunId="a1" onSelectAgent={onSelectAgent} />);
 
-    expect(screen.getByTestId("terminal")).toHaveTextContent("term:a1");   // active single → open
+    expect(screen.getByTestId("terminal")).toHaveTextContent("term:a1");   // selected → its terminal is open
     fireEvent.click(screen.getByTestId("terminal"));                       // the mock fires onClose on click
-    expect(onSelectAgent).toHaveBeenCalledWith(null);                      // selection cleared (outline row un-highlights)
-    expect(screen.queryByTestId("terminal")).toBeNull();                   // and the box collapses
+    expect(onSelectAgent).toHaveBeenCalledWith(null);                      // selection cleared → collapses back to the tile
   });
 });
