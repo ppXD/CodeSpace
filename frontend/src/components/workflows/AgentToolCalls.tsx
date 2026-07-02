@@ -9,8 +9,11 @@ import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
  * Codex / Claude-Code run uses its OWN harness-native tools, which never touch the MCP fabric), it falls back to the
  * agent's ACTUAL tool calls off the append-only event stream, so the tab shows what the agent really did (Read / Edit /
  * WebSearch …) rather than a misleading "none". Read-only. Errors are already redacted at the source.
+ *
+ * <p>`hideHeader` drops the panel's own "Tool calls" caption — set it where a host already labels the panel (the
+ * agent terminal's Tool-calls TAB); a standalone embed (run detail / a workflow node) keeps the caption.</p>
  */
-export function AgentToolCalls({ agentRunId }: { agentRunId: string }) {
+export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string; hideHeader?: boolean }) {
   const run = useAgentRun(agentRunId);
   const active = isAgentRunActive(run.data?.status);
 
@@ -28,7 +31,7 @@ export function AgentToolCalls({ agentRunId }: { agentRunId: string }) {
     if (toolCalls.isLoading || events.isLoading) return null;
     return (
       <div className="tc-panel">
-        <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>
+        {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
         <div className="tc-empty">No tool calls for this run</div>
       </div>
     );
@@ -36,7 +39,7 @@ export function AgentToolCalls({ agentRunId }: { agentRunId: string }) {
 
   return (
     <div className="tc-panel">
-      <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>
+      {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
       {governed.length > 0 ? (
         <ol className="tc-list">
           {governed.map((c, i) => {
