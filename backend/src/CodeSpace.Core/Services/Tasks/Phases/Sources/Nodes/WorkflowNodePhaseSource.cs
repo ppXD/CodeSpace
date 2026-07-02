@@ -160,6 +160,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             ToolCount = metrics?.ToolCount,
             CostUsd = metrics?.CostUsd,
             FilesChanged = metrics?.FilesChanged,
+            ChangedFiles = metrics?.ChangedFiles ?? Array.Empty<string>(),
         };
     }
 

@@ -32,4 +32,7 @@ public sealed record AgentRunMetrics
     public decimal? CostUsd { get; init; }
 
     public int? FilesChanged { get; init; }
+
+    /// <summary>The git-truth changed-file paths (bounded) off the result — the LIST behind <see cref="FilesChanged"/>, so a phase agent carries the files for the terminal's Files tab. Empty until the result lands / when it touched none.</summary>
+    public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 }

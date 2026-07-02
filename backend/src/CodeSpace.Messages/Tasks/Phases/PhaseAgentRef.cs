@@ -55,6 +55,9 @@ public sealed record PhaseAgentRef
     /// <summary>How many files the agent changed — the GIT-TRUTH count off the result's <c>changedFiles</c> (not a live FileChanged-event tally, which can double-count). Null before the result lands / when the agent row is absent; <c>0</c> is a real "touched none". Feeds the terminal's files fact.</summary>
     public int? FilesChanged { get; init; }
 
+    /// <summary>The agent's OWN changed-file paths (bounded) — the git-truth <c>changedFiles</c> list, so the terminal's Files tab lists them in EVERY surface (run detail + the session room), not only where the room injects them. Empty before the result lands / when it touched none.</summary>
+    public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
     /// <summary>The agent's own one-line RESULT takeaway (its model-authored <c>summary</c> off the folded compact) — the human "what this agent concluded", shown before any raw log. Null before the result lands / when the agent produced none.</summary>
     public string? Summary { get; init; }
 }
