@@ -56,7 +56,7 @@ const useRoomDrawer = () => useContext(RoomDrawerContext);
  * owns no copy / order / status; an unknown block degrades to a faint line. The design palette IS the project warm
  * theme, but the design's deeper semantic colors (good/blue/err + bg/line variants) are scoped to `.room-room`.
  */
-export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: string; room: RoomView; onOpenRoom: () => void }) {
+export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: string; room: RoomView; onOpenRoom: (runId?: string) => void }) {
   const navigate = useNavigate();
 
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -97,7 +97,7 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
             <span className="room-crumb-cur">{room.sessionId.slice(0, 6)}</span>
           </nav>
           <div className="room-head-icons">
-            <button className="room-icon-btn" title="Run details — the raw graph, trace, decisions" onClick={onOpenRoom}><Sym n="terminal" s={16} /></button>
+            <button className="room-icon-btn" title="Run details — the raw graph, trace, decisions" onClick={() => onOpenRoom()}><Sym n="terminal" s={16} /></button>
             <button className="room-icon-btn" title="Copy link to this session" onClick={() => navigator.clipboard?.writeText(window.location.href)}><Sym n="link" s={16} /></button>
           </div>
         </div>
@@ -269,7 +269,7 @@ function baseName(path: string): string {
 }
 
 /** A top-level block: the user's message bubble, an assistant turn, or a forward-compat fallback. */
-function TopBlock({ block, anchorId, nowMs, onOpenRun, onOpenRoom }: { block: RoomBlock; anchorId?: string | null; nowMs: number; onOpenRun: (runId: string) => void; onOpenRoom: () => void }) {
+function TopBlock({ block, anchorId, nowMs, onOpenRun, onOpenRoom }: { block: RoomBlock; anchorId?: string | null; nowMs: number; onOpenRun: (runId: string) => void; onOpenRoom: (runId?: string) => void }) {
   if (block.type === "user_message") return <UserBubble text={block.text} at={block.at} nowMs={nowMs} />;
   if (block.type === "assistant_turn") return <AssistantTurn turn={block} anchored={anchorId === block.id} nowMs={nowMs} onOpenRun={onOpenRun} onOpenRoom={onOpenRoom} />;
   return <p className="room-para room-muted">{describeUnknown(block)}</p>;
@@ -297,7 +297,7 @@ function UserBubble({ text, at, nowMs }: { text: string; at?: string | null; now
 }
 
 /** The AI's reply for one turn — header (avatar + name + status + duration + collapse), then the transcript body. */
-function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn: AssistantTurnBlock; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void; onOpenRoom: () => void }) {
+function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn: AssistantTurnBlock; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void; onOpenRoom: (runId?: string) => void }) {
   const live = isRunActive(turn.status);
   const [open, setOpen] = useState(anchored || live);
 
@@ -374,7 +374,7 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
 }
 
 /** One inner block, rendered by type as a Codex-style detail row / card. */
-function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: () => void }) {
+function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: (runId?: string) => void }) {
   if (block.type === "stat") return <StatRow stat={block as StatBlock} />;
   if (block.type === "plan_checklist") return <PlanChecklistCard plan={block as PlanChecklistBlock} />;
   if (block.type === "agent_group") return <AgentSection group={block as AgentGroupBlock} />;
@@ -804,8 +804,9 @@ function PrCard({ delivery }: { delivery: DeliveryBlock }) {
 }
 
 /** The rich failure diagnostic — humanized title + cause + typed remediation + the raw error behind a toggle. */
-function ErrorCard({ diag, onOpenRoom }: { diag: DiagnosticBlock; onOpenRoom: () => void }) {
+function ErrorCard({ diag, onOpenRoom }: { diag: DiagnosticBlock; onOpenRoom: (runId?: string) => void }) {
   const [showRaw, setShowRaw] = useState(false);
+  const run = useContext(RunActionsContext);
   const actions = diag.actions ?? [];
 
   return (
@@ -822,7 +823,7 @@ function ErrorCard({ diag, onOpenRoom }: { diag: DiagnosticBlock; onOpenRoom: ()
                 className={i === 0 ? "room-btn-primary" : act.kind === "OpenTrace" ? "room-btn-ghost" : "room-btn"}
                 disabled={!act.enabled}
                 title={act.disabledReason ?? undefined}
-                onClick={act.kind === "OpenTrace" ? onOpenRoom : undefined}
+                onClick={act.kind === "OpenTrace" ? () => onOpenRoom(run?.runId) : undefined}
               >
                 {act.kind === "FixCredentials" && <Sym n="lock" s={13} />}
                 {act.kind === "RerunTurn" && <Sym n="rerun" s={13} />}
@@ -875,7 +876,7 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
 
 /** The turn footer actions — the doing-actions first (Stop / Re-run / Retry), then "View trace" LAST. Re-run and Stop
  *  both confirm before firing; Stop is destructive-red with a live pulse. Capability-gated by the backend (never 422s). */
-function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenRoom: () => void; onOpenRun: (runId: string) => void }) {
+function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenRoom: (runId?: string) => void; onOpenRun: (runId: string) => void }) {
   const replay = useReplayRun();
   const cancel = useCancelRun(turn.runId);
   const confirm = useConfirm();
@@ -906,7 +907,7 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
         if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
         return null;
       })}
-      {trace && <button className="room-btn-ghost" onClick={onOpenRoom}><Sym n="terminal" s={13} /> {trace.label}</button>}
+      {trace && <button className="room-btn-ghost" onClick={() => onOpenRoom(turn.runId)}><Sym n="terminal" s={13} /> {trace.label}</button>}
     </div>
   );
 }
