@@ -5518,12 +5518,12 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-arow-act { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 11px; color: var(--muted-2); }
 .room-arow:hover .room-arow-act { color: var(--ink-2); }
 /* right-side preview drawer — scoped INSIDE the room panel (not the viewport); agent shows its terminal / file shows its preview */
-.room-drawer-scrim { position: absolute; inset: 0; background: rgba(38,28,22,.28); z-index: 40; animation: rm-fade .16s ease; }
-.room-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(460px, 82%); z-index: 41; display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--line); box-shadow: -14px 0 40px rgba(38,28,22,.14); animation: rm-slide-in .2s cubic-bezier(.22,.61,.36,1); }
+.room-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(460px, 82%); z-index: 41; display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--line); box-shadow: -10px 0 28px rgba(38,28,22,.09); animation: rm-slide-in .2s cubic-bezier(.22,.61,.36,1); }
 .room-drawer-head { display: flex; align-items: center; gap: 9px; padding: 13px 14px; border-bottom: 1px solid var(--line); flex: none; }
 .room-drawer-ic { color: var(--accent); flex: none; display: inline-flex; }
 .room-drawer-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.room-drawer-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.room-drawer-act, .room-drawer-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.room-drawer-act:hover { background: var(--accent-soft); color: var(--accent); }
 .room-drawer-close:hover { background: var(--panel-2); color: var(--ink-2); }
 .room-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
 .room-drawer-term .agent-terminal { border-color: var(--line); box-shadow: none; }
@@ -5546,7 +5546,6 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-diffline-hunk { color: var(--accent); }
 .room-fprev-spin { width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: rm-spin .7s linear infinite; }
 @keyframes rm-spin { to { transform: rotate(360deg); } }
-@keyframes rm-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rm-slide-in { from { transform: translateX(16px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
 /* turn footer — destructive Stop with a live pulse */
