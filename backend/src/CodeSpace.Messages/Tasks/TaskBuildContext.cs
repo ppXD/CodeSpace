@@ -48,6 +48,9 @@ public sealed record TaskBuildContext
     /// <summary>The S3 plan-confirmation gate — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>requirePlanConfirmation</c>, parking every authored plan version for the operator before any agent is created. False (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public bool RequirePlanConfirmation { get; init; }
 
+    /// <summary>The session's chat surface (S4a) — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>conversationId</c>, giving the launched run's HITL cards (ask_human, plan confirmation, approvals) a real channel to post into. Null (single-agent / map launches, or a launch predating the surface) ⇒ the builder omits the key (byte-identical).</summary>
+    public Guid? ConversationId { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>decisionReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

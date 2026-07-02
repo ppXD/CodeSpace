@@ -50,6 +50,14 @@ public class WorkSession : IEntity<Guid>, IAuditable
     public WorkSessionStatus Status { get; set; } = WorkSessionStatus.Open;
 
     /// <summary>
+    /// The thread's chat surface — the channel the supervisor's HITL cards (ask_human, plan confirmation,
+    /// approvals) post into, created lazily on the first supervisor-tier launch and REUSED by every later turn
+    /// (one thread, one room). SOFT reference (no FK): a deleted channel degrades at ask time and the next
+    /// ensure re-creates. Null until a launch needs a surface. Also the S6 chat-with-agent anchor.
+    /// </summary>
+    public Guid? ConversationId { get; set; }
+
+    /// <summary>
     /// Reserved durable thread SCOPE (jsonb) — e.g. the per-repo branch-continuity map + read-only repos.
     /// NULL until the policy/context slices populate it; carried here now so the column lands with the table.
     /// </summary>

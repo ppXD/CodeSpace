@@ -36,9 +36,10 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 /// passes <c>DefinitionValidator</c>. Self-registers via <see cref="ISingletonDependency"/>; a new projection is
 /// a sibling builder folder, never an edit here.</para>
 ///
-/// <para><b>Deferred (not built this PR):</b> the <c>conversationId</c> + mid-loop ask_human / approval HITL
-/// surface — the deep bounds preset sets <c>Caps.RequiresApproval</c> false, so deep runs autonomously
-/// (approvalPolicy <c>"none"</c>) to Success. Approval-gated deep is a follow-up.</para>
+/// <para>The <c>conversationId</c> HITL surface is wired (S4a): a supervisor launch carries its session's
+/// channel, so mid-loop ask_human / plan-confirmation / approval cards post somewhere real. The deep bounds
+/// preset still sets <c>Caps.RequiresApproval</c> false (deep runs autonomously to Success unless the operator
+/// opts into a gate); approval-gated deep remains a follow-up.</para>
 /// </summary>
 public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, ISingletonDependency
 {
@@ -111,6 +112,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The S3 plan-confirmation gate — every authored plan version parks for the operator's confirmation before any
         // agent is created. Omitted when off (byte-identical).
         AddIfPresent(config, "requirePlanConfirmation", context.RequirePlanConfirmation ? (object)true : null);
+        // The session's chat surface (S4a) — where the run's HITL cards (ask_human, plan confirmation, approvals) post.
+        // Omitted when absent (byte-identical; the executor then degrades asks to no-surface and the confirm gate
+        // force-stops fail-closed rather than bypassing).
+        AddIfPresent(config, "conversationId", context.ConversationId?.ToString());
         // The operator's tool allow-list lives on the parent supervisor config (NOT the nested agentProfile — it threads
         // into each spawned AgentTask.Tools via SpawnedAgentTools, the same place an authored allowedTools lands). Read
         // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the

@@ -86,7 +86,15 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // projection — single-agent / map launches are byte-identical.
         var brainModelId = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+        // Deep/Auto: the session's chat surface — the channel the supervisor's HITL cards (ask_human, plan
+        // confirmation, approvals) post into. Get-or-STAGED onto this launch's unit of work (a failed launch
+        // leaves no orphan channel); every later turn of the session reuses the same room. Inert (null) for
+        // every non-supervisor projection — single-agent / map launches are byte-identical.
+        var conversationId = route.ProjectionKind == TaskProjectionKinds.Supervisor
+            ? await _sessions.EnsureConversationAsync(session.SessionId, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false)
+            : (Guid?)null;
+
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, ConversationId = conversationId, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 

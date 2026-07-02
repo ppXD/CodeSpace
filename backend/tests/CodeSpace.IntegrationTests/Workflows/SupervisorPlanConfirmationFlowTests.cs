@@ -15,6 +15,11 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
+using CodeSpace.Messages.Commands.Tasks;
+using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Tasks.Effort;
+using CodeSpace.Core.Services.Tasks;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -272,6 +277,70 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
         return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
     }
 
+    [Fact]
+    public async Task A_launched_deep_task_with_the_gate_parks_on_a_real_card_in_the_sessions_channel_then_approve_ships()
+    {
+        // THE product path the S3 review flagged as untested: a real LAUNCH (not a hand-authored definition) with
+        // requirePlanConfirmation — S4a's auto-staged session channel gives the card a surface, the run parks, the
+        // checklist confirm endpoint releases it. Launch → plan → park-with-card → approve → stop, end to end.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        LaunchTaskResult launched;
+        using (var scope = _fixture.BeginScope())
+        {
+            launched = await scope.Resolve<ITaskLaunchService>().LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+                RequirePlanConfirmation = true,
+            }, CancellationToken.None);
+        }
+
+        launched.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor);
+
+        // Drain the dispatch + walk + self-advance job chain until the run parks on the confirmation.
+        await jobClient.WaitForPendingAsync();
+
+        Guid conversationId;
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == launched.RunId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the launched run parked on the plan confirmation — zero agents before the operator answers");
+
+            conversationId = (await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == launched.SessionId)).ConversationId!.Value;
+
+            var card = await db.Message.AsNoTracking().IgnoreQueryFilters()
+                .SingleAsync(m => m.ConversationId == conversationId && m.InteractionJson != null && m.DeletedDate == null);
+            card.Body.ShouldContain(SupervisorPlanConfirmation.ConfirmationMarker, customMessage: "the REAL confirmation card landed in the auto-staged session channel");
+
+            (await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == launched.RunId)).Status
+                .ShouldBe(WorkPlanStatuses.AwaitingConfirmation);
+
+            (await db.AgentRun.AsNoTracking().CountAsync(a => a.TeamId == teamId)).ShouldBe(0);
+        }
+
+        var outcome = await ConfirmAsync(launched.RunId, teamId, userId, approve: true, feedback: null);
+        outcome!.Resumed.ShouldBeTrue();
+
+        await jobClient.WaitForPendingAsync();
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == launched.RunId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "approve released the launched run end to end");
+
+            (await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == launched.RunId)).Status
+                .ShouldBe(WorkPlanStatuses.Confirmed);
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private async Task<WorkPlanConfirmationOutcome?> ConfirmAsync(Guid runId, Guid teamId, Guid userId, bool approve, string? feedback)
@@ -325,6 +394,12 @@ public class SupervisorPlanConfirmationFlowTests : IDisposable
 
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
+    }
+
+    private InMemoryBackgroundJobClient ResolveJobClient()
+    {
+        using var scope = _fixture.BeginScope();
+        return scope.Resolve<InMemoryBackgroundJobClient>();
     }
 
     private async Task RunEngineAsync(Guid runId)

@@ -1318,6 +1318,170 @@ public class TaskLaunchFlowTests
     }
 
     /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>supervisorModelId</c> (the self-resolved brain) out of the frozen supervisor snapshot. Null when the key is absent (no brain baked).</summary>
+    // ── S4a: the session's chat surface — a deep launch stages a channel and bakes it into the supervisor node ──
+
+    [Fact]
+    public async Task A_deep_launch_stages_a_session_channel_and_bakes_it_into_the_supervisor_node()
+    {
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+            });
+
+            using var scope = _fixture.BeginScope();
+            var db = scope.Resolve<CodeSpaceDbContext>();
+
+            var session = await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == result.SessionId);
+            session.ConversationId.ShouldNotBeNull("the deep launch staged the session's HITL channel and linked it");
+
+            var channel = await db.Conversation.AsNoTracking().SingleAsync(c => c.Id == session.ConversationId);
+            channel.TeamId.ShouldBe(teamId);
+            channel.Kind.ShouldBe(ConversationKind.Channel);
+            channel.Slug.ShouldBe($"task-{result.SessionId:N}"[..17], "the deterministic per-session slug — the adopt-by-slug idempotency key");
+            channel.DeletedDate.ShouldBeNull();
+
+            (await db.ConversationMember.AsNoTracking().CountAsync(m => m.ConversationId == channel.Id && m.UserId == userId))
+                .ShouldBe(1, "the launching operator owns the channel, so the cards are visible to them");
+
+            var run = await LoadRunAsync(result.RunId);
+            ReadSupervisorConfigString(run.DefinitionSnapshotJson!, "conversationId")
+                .ShouldBe(session.ConversationId.ToString(), "the frozen supervisor node carries the surface — every turn + replay reads the same channel");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_quick_launch_stages_no_channel_and_the_session_stays_unlinked()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Fix the typo", RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
+        });
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == result.SessionId)).ConversationId
+            .ShouldBeNull("only the supervisor lane needs a HITL surface — single-agent launches are byte-identical");
+
+        (await db.Conversation.AsNoTracking().CountAsync(c => c.TeamId == teamId)).ShouldBe(0, "no channel was staged at all");
+    }
+
+    [Fact]
+    public async Task A_deep_continue_reuses_the_sessions_channel()
+    {
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var first = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+            });
+
+            var second = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Now harden the error paths", RequestedEffort = TaskEffortModes.Deep,
+                ContinueSessionId = first.SessionId,
+            });
+
+            second.SessionId.ShouldBe(first.SessionId);
+
+            using var scope = _fixture.BeginScope();
+            var db = scope.Resolve<CodeSpaceDbContext>();
+
+            (await db.Conversation.AsNoTracking().CountAsync(c => c.TeamId == teamId))
+                .ShouldBe(1, "one thread, one room — the continue reused the channel instead of minting a twin");
+
+            var linked = (await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == first.SessionId)).ConversationId;
+            var run = await LoadRunAsync(second.RunId);
+            ReadSupervisorConfigString(run.DefinitionSnapshotJson!, "conversationId").ShouldBe(linked.ToString());
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_deleted_channel_is_replaced_on_the_next_deep_turn()
+    {
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var first = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+            });
+
+            Guid firstChannel;
+            using (var scope = _fixture.BeginScope())
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+                firstChannel = (await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == first.SessionId)).ConversationId!.Value;
+
+                // Soft-delete the room (the operator archived it) — the soft link must not park future cards into it.
+                await db.Conversation.Where(c => c.Id == firstChannel)
+                    .ExecuteUpdateAsync(u => u.SetProperty(c => c.DeletedDate, DateTimeOffset.UtcNow).SetProperty(c => c.Slug, (string?)null));
+            }
+
+            var second = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Now harden the error paths", RequestedEffort = TaskEffortModes.Deep,
+                ContinueSessionId = first.SessionId,
+            });
+
+            using var verify = _fixture.BeginScope();
+            var vdb = verify.Resolve<CodeSpaceDbContext>();
+
+            var relinked = (await vdb.WorkSession.AsNoTracking().SingleAsync(x => x.Id == first.SessionId)).ConversationId;
+            relinked.ShouldNotBeNull();
+            relinked.ShouldNotBe(firstChannel, "a dead room reads as unlinked — the ensure re-created rather than posting cards into it");
+
+            ReadSupervisorConfigString((await LoadRunAsync(second.RunId)).DefinitionSnapshotJson!, "conversationId").ShouldBe(relinked.ToString());
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    private static string? ReadSupervisorConfigString(string definitionSnapshotJson, string key)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty(key, out var value) ? value.GetString() : null;
+    }
+
     private static string? ReadSupervisorBrainModelId(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;

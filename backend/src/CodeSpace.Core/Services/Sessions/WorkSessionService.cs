@@ -23,9 +23,12 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
     /// <summary>Fallback when the supplied title is blank after sanitisation — a session row always has a non-empty title.</summary>
     private const string DefaultTitle = "Untitled session";
 
-    public WorkSessionService(CodeSpaceDbContext db)
+    private readonly Chat.IConversationService _conversations;
+
+    public WorkSessionService(CodeSpaceDbContext db, Chat.IConversationService conversations)
     {
         _db = db;
+        _conversations = conversations;
     }
 
     public Task<SessionAssignment> OpenAsync(Guid teamId, string title, WorkSessionKind kind, Guid actorUserId, CancellationToken cancellationToken)
@@ -76,6 +79,58 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
 
         throw new KeyNotFoundException($"Session {sessionId} not found or not accessible.");
     }
+
+    public async Task<Guid> EnsureConversationAsync(Guid sessionId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var session = await FindOwnedSessionAsync(sessionId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (await AliveLinkedConversationIdAsync(session, cancellationToken).ConfigureAwait(false) is { } linked) return linked;
+
+        var slug = SessionChannelSlug(sessionId);
+
+        // Adopt-by-slug makes a concurrent / crashed first-time ensure CONVERGENT: the deterministic slug is the
+        // idempotency key, so a racer that lost the link still finds ONE channel rather than minting a twin.
+        var conversationId = await AliveChannelIdBySlugAsync(teamId, slug, cancellationToken).ConfigureAwait(false)
+            ?? await _conversations.StageChannelAsync(teamId, SessionChannelName(session.Title), slug, isPrivate: false, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        session.ConversationId = conversationId;
+
+        return conversationId;
+    }
+
+    /// <summary>The tracked session row (a just-STAGED fresh open or the persisted continue target) — <c>FindAsync</c> reads the change tracker first, so the fresh-launch path sees its own uncommitted session. Team-scoped fail-closed.</summary>
+    private async Task<WorkSession> FindOwnedSessionAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var session = await _db.WorkSession.FindAsync(new object[] { sessionId }, cancellationToken).ConfigureAwait(false);
+
+        if (session == null || session.TeamId != teamId)
+            throw new KeyNotFoundException($"Session {sessionId} not found.");
+
+        return session;
+    }
+
+    /// <summary>The session's linked channel id when the link is set AND the channel is still alive in this team — a deleted / foreign channel reads as unlinked, so the ensure re-creates instead of parking cards into a dead room.</summary>
+    private async Task<Guid?> AliveLinkedConversationIdAsync(WorkSession session, CancellationToken cancellationToken)
+    {
+        if (session.ConversationId is not { } linked) return null;
+
+        var alive = await _db.Conversation.AsNoTracking()
+            .AnyAsync(c => c.Id == linked && c.TeamId == session.TeamId && c.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+        return alive ? linked : null;
+    }
+
+    private async Task<Guid?> AliveChannelIdBySlugAsync(Guid teamId, string slug, CancellationToken cancellationToken) =>
+        await _db.Conversation.AsNoTracking()
+            .Where(c => c.TeamId == teamId && c.Slug == slug && c.DeletedDate == null)
+            .Select(c => (Guid?)c.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The session's deterministic channel slug — the idempotency key adopt-by-slug converges on.</summary>
+    private static string SessionChannelSlug(Guid sessionId) => $"task-{sessionId:N}"[..17];
+
+    /// <summary>The channel's display name — the thread title, clipped to a chat-friendly width.</summary>
+    private static string SessionChannelName(string title) => title.Length <= 60 ? title : title[..59] + "…";
 
     public async Task<bool> RenameAsync(Guid sessionId, string title, Guid teamId, CancellationToken cancellationToken)
     {

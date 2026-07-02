@@ -17,6 +17,14 @@ public interface IConversationService
     Task<Guid> CreateChannelAsync(Guid teamId, string name, string slug, bool isPrivate, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// STAGE a channel + Owner membership onto the caller's unit of work WITHOUT saving — for composers whose
+    /// whole graph must commit atomically (a task launch stages session + snapshot + run + this channel in one
+    /// save, so a failed launch leaves no orphan channel). Same validation + slug normalization as
+    /// <see cref="CreateChannelAsync"/> (which is now this + an immediate save).
+    /// </summary>
+    Task<Guid> StageChannelAsync(Guid teamId, string name, string slug, bool isPrivate, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Find-or-create the singleton DM between two users. Idempotent + race-safe via the
     /// dm_key unique index (migration 0029): concurrent opens collide and the loser re-queries
     /// the winner, so a pair NEVER ends up with two DM rows. Returns the same id on every call.

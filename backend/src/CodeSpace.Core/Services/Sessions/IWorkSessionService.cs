@@ -36,4 +36,14 @@ public interface IWorkSessionService
     /// not-found — never a leak), true when a row was renamed.
     /// </summary>
     Task<bool> RenameAsync(Guid sessionId, string title, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The session's chat surface — get-or-STAGE (triad S4a): return the linked channel when it is alive, adopt
+    /// the session's deterministic channel slug when a prior attempt's channel exists unlinked, else stage a new
+    /// public channel (+ Owner membership) and link it onto the tracked session row. NOTHING is saved here — the
+    /// caller's unit of work commits the channel + link atomically with whatever it is composing (a failed launch
+    /// leaves no orphan channel). Works on a just-staged session (the fresh-open launch path) and a persisted one
+    /// (continue). Foreign / missing session → <see cref="KeyNotFoundException"/>.
+    /// </summary>
+    Task<Guid> EnsureConversationAsync(Guid sessionId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 }
