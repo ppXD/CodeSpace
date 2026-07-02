@@ -207,6 +207,24 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task Opening_a_prior_attempts_run_focuses_that_attempts_flow_not_the_latest()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Flaky");
+        var now = DateTimeOffset.UtcNow;
+
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddMinutes(-5));
+        var winner = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Rerun, createdAt: now);
+
+        // Anchoring on the PRIOR attempt's run (the switcher navigates there) focuses THAT attempt, not the latest.
+        var turn = (await ProjectByRunAsync(original, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+
+        turn.RunId.ShouldBe(original, "the focused run is the requested prior attempt, not the latest");
+        turn.Status.ShouldBe(WorkflowRunStatus.Failure, "and it carries that attempt's OWN status");
+        turn.Attempts.Single(a => a.IsCurrent).RunId.ShouldBe(original, "attempt 1 reads 'shown' when focused; the winner is just another row");
+    }
+
+    [Fact]
     public async Task A_never_reran_turn_has_no_attempt_timeline()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

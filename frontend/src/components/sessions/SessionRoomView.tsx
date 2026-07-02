@@ -328,6 +328,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
               {pillLabel(turn.status, live)}
             </span>
             <span className="room-turn-meta">Turn {turn.turnIndex}{turnMeta(turn, nowMs, live)}</span>
+            <TurnAttempts attempts={turn.attempts ?? []} nowMs={nowMs} onOpenRun={onOpenRun} />
             <button className="room-collapse" title={open ? "Collapse turn" : "Expand turn"} onClick={() => setOpen((o) => !o)}>
               <Sym n={open ? "chevron-down" : "chevron-right"} s={14} />
             </button>
@@ -338,8 +339,6 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
               {lead && <p className="room-lead"><Inline text={lead} /></p>}
 
               {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} />}
-
-              <TurnAttempts attempts={turn.attempts ?? []} nowMs={nowMs} onOpenRoom={onOpenRoom} />
 
               {turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
 
@@ -353,37 +352,47 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
 }
 
 /**
- * The turn's rerun/replay attempt timeline — shown only when the turn was rerun (> 1 attempt). A "N attempts" toggle
- * that expands to a vertical timeline, one row per attempt (status · when), each openable to view that attempt's run
- * (the current/shown one reads "shown"). Attempts are a TURN property — the whole turn reran — so this lives on the
- * turn, not one agent card.
+ * The turn's rerun/replay attempt switcher — a compact "attempt N of M ▾" chip in the turn header (shown only when the
+ * turn was rerun > 1 time). Opening it drops a menu of every attempt (status · when); picking one navigates to THAT
+ * attempt's run, so the whole turn re-renders on the selected attempt's flow (the backend focuses the anchor run). The
+ * shown attempt reads "shown". Attempts are a TURN property — the whole turn reran — so this lives on the turn header,
+ * not one agent card (a per-agent rerun switches inside the agent's terminal instead).
  */
-function TurnAttempts({ attempts, nowMs, onOpenRoom }: { attempts: RoomTurnAttempt[]; nowMs: number; onOpenRoom: (runId?: string) => void }) {
+function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttempt[]; nowMs: number; onOpenRun: (runId: string) => void }) {
   const [open, setOpen] = useState(false);
 
   if (attempts.length < 2) return null;
 
+  const current = attempts.find((a) => a.isCurrent) ?? attempts[attempts.length - 1];
+
   return (
-    <div className="room-attempts">
-      <button className="room-attempts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <Sym n={open ? "chevron-down" : "chevron-right"} s={12} />
-        {attempts.length} attempts
+    <div className="room-attempts-hd">
+      <button className="room-attempts-chip" onClick={() => setOpen((o) => !o)} aria-expanded={open} title="Switch attempt">
+        attempt {current.attemptNumber} of {attempts.length}
+        <Sym n="chevron-down" s={11} />
       </button>
 
       {open && (
-        <ol className="room-attempts-list">
-          {attempts.map((a) => (
-            <li className={`room-attempt room-attempt-${statusTone(a.status, false)}`} key={a.runId} data-current={a.isCurrent || undefined}>
-              <span className="room-attempt-dot" />
-              <span className="room-attempt-n">attempt {a.attemptNumber}</span>
-              <span className="room-attempt-status">{pillLabel(a.status, false)}</span>
-              <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
-              {a.isCurrent
-                ? <span className="room-attempt-shown">shown</span>
-                : <button className="room-attempt-open" onClick={() => onOpenRoom(a.runId)}>open <Sym n="chevron-right" s={11} /></button>}
-            </li>
-          ))}
-        </ol>
+        <>
+          <div className="room-attempts-mask" onClick={() => setOpen(false)} />
+          <div className="room-attempts-menu" role="menu">
+            {attempts.map((a) => (
+              <button
+                key={a.runId}
+                className={`room-attempts-item room-attempt-${statusTone(a.status, false)}`}
+                data-current={a.isCurrent || undefined}
+                role="menuitem"
+                onClick={() => { setOpen(false); if (!a.isCurrent) onOpenRun(a.runId); }}
+              >
+                <span className="room-attempt-dot" />
+                <span className="room-attempt-n">attempt {a.attemptNumber}</span>
+                <span className="room-attempt-status">{pillLabel(a.status, false)}</span>
+                <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
+                {a.isCurrent && <span className="room-attempt-shown">shown</span>}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
