@@ -127,7 +127,12 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         "run defaults. " +
         "When a subtask's completion can be OBJECTIVELY verified, author its acceptance: a test/check command argv " +
         "(kind TestsPass) for code, or the deliverable file paths (kind ArtifactPresent) for research/analysis output — " +
-        "omit it when no objective check exists. Use dependsOn to order subtasks that need another subtask's result. " +
+        "omit it when no objective check exists. Add short subjective acceptanceCriteria a reviewer checks when they " +
+        "add real signal. Use dependsOn to order subtasks that need another subtask's result; you MAY type each " +
+        "subtask with a short open kind (research / code / analysis / write). " +
+        "When the goal leaves a REAL direction choice open, author up to 3 questions, each with 2-4 mutually " +
+        "exclusive options and a recommendedOptionId; record the defaults you proceed on under assumptions. Omit " +
+        "questions when the plan needs no operator input. " +
         "Set hasEnoughContext true ONLY when the goal needs no execution at all; even at 90% certainty, prefer false. " +
         "Even with hasEnoughContext true you MUST still author at least one subtask — make it the single step that " +
         "states the answer/summary. " +

@@ -26,8 +26,10 @@ public class WorkPlanItemTests
             Title = "Second",
             Instruction = "do the second thing",
             Rationale = "depends on the first",
+            Kind = "research",
             DependsOn = new[] { "s1" },
             Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" }, Kind = BenchmarkGradingKind.ArtifactPresent, Description = "the check" },
+            AcceptanceCriteria = new[] { "cites sources" },
             Harness = "claude-code",
             Model = "some-model",
         });
@@ -36,9 +38,11 @@ public class WorkPlanItemTests
         item.Title.ShouldBe("Second");
         item.Instruction.ShouldBe("do the second thing");
         item.Rationale.ShouldBe("depends on the first");
+        item.Kind.ShouldBe("research");
         item.DependsOn.ShouldBe(new[] { "s1" });
         item.Acceptance!.Command.ShouldBe(new[] { "sh", "check.sh" });
         item.Acceptance.Kind.ShouldBe(BenchmarkGradingKind.ArtifactPresent);
+        item.AcceptanceCriteria.ShouldBe(new[] { "cites sources" });
         item.Harness.ShouldBe("claude-code");
         item.Model.ShouldBe("some-model");
     }

@@ -47,6 +47,12 @@ public class WorkPlan : IEntity<Guid>
     /// <summary>Optional plan-level risks (JSON string array).</summary>
     public string? RisksJson { get; set; }
 
+    /// <summary>Optional producer-recorded assumptions (JSON string array).</summary>
+    public string? AssumptionsJson { get; set; }
+
+    /// <summary>Optional operator questions — the confirm-form fodder (JSON <c>WorkPlanQuestion</c> array).</summary>
+    public string? QuestionsJson { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public Team Team { get; set; } = default!;

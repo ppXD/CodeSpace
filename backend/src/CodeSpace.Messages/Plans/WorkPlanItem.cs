@@ -34,6 +34,10 @@ public sealed record WorkPlanItem
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Rationale { get; init; }
 
+    /// <summary>Optional OPEN item kind the producer typed it with (e.g. "research" / "code" / "analysis" / "write") — an allocation + rendering hint, never a dispatch switch.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Kind { get; init; }
+
     /// <summary>Optional plan-local item ids this item depends on — the plan's DAG edges (absent → independent).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? DependsOn { get; init; }
@@ -46,6 +50,14 @@ public sealed record WorkPlanItem
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
+    /// <summary>
+    /// Optional SUBJECTIVE per-item acceptance criteria — short free-text qualities a reviewer/critic grades
+    /// (never executed; the objective half is <see cref="Acceptance"/>). The Evaluation layer's critic reads
+    /// these as its per-item yardstick.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
     /// <summary>Optional producer-picked harness for this item (e.g. "claude-code"); null → the run default.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -62,8 +74,10 @@ public sealed record WorkPlanItem
         Title = subtask.Title,
         Instruction = subtask.Instruction,
         Rationale = subtask.Rationale,
+        Kind = subtask.Kind,
         DependsOn = subtask.DependsOn,
         Acceptance = subtask.Acceptance,
+        AcceptanceCriteria = subtask.AcceptanceCriteria,
         Harness = subtask.Harness,
         Model = subtask.Model,
     };

@@ -74,6 +74,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>The run's CURRENT plan as a live checklist — the persisted contract (items + dependencies + acceptance) with per-item execution state derived from the durable tape. Foreign / absent / plan-less → 404.</summary>
+    [HttpGet("{runId:guid}/plan")]
+    public async Task<IActionResult> GetPlan([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRunWorkPlanQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The lineage's attempt ladder — the original run + every replay/rerun fork of it, oldest first, latest flagged. Drives the run-detail attempt switcher. Foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/attempts")]
     public async Task<IActionResult> GetAttempts([FromRoute] Guid runId, CancellationToken cancellationToken)

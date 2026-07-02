@@ -66,11 +66,22 @@ public class WorkflowPlannerTests
         // acceptance (same shape as the supervisor's plan schema) + the plan-level self-bypass.
         var itemProps = item.GetProperty("properties");
         itemProps.TryGetProperty("dependsOn", out _).ShouldBeTrue();
+        itemProps.TryGetProperty("kind", out _).ShouldBeTrue();
+        itemProps.TryGetProperty("acceptanceCriteria", out _).ShouldBeTrue();
         var acceptance = itemProps.GetProperty("acceptance");
         acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "command" });
         acceptance.GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(e => e.GetString())
             .ShouldBe(new[] { "TestsPass", "ArtifactPresent" }, "the acceptance oracle vocabulary matches the supervisor plan schema verbatim");
         root.GetProperty("properties").TryGetProperty("hasEnoughContext", out _).ShouldBeTrue();
+        root.GetProperty("properties").TryGetProperty("assumptions", out _).ShouldBeTrue();
+
+        // The operator-question form fodder (S2a): bounded 2-4 mutually exclusive options per question, ≤3 questions.
+        var questions = root.GetProperty("properties").GetProperty("questions");
+        questions.GetProperty("maxItems").GetInt32().ShouldBe(3);
+        var question = questions.GetProperty("items");
+        question.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "id", "question", "options" });
+        question.GetProperty("properties").GetProperty("options").GetProperty("minItems").GetInt32().ShouldBe(2);
+        question.GetProperty("properties").GetProperty("options").GetProperty("maxItems").GetInt32().ShouldBe(4);
     }
 
     [Fact]
@@ -95,6 +106,32 @@ public class WorkflowPlannerTests
         plan.Subtasks[1].DependsOn.ShouldBe(new[] { "s1" });
         plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "dotnet", "test" });
         plan.Subtasks[1].Acceptance!.Kind.ShouldBe(CodeSpace.Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, "the string kind binds through the planner options' enum converter");
+    }
+
+    [Fact]
+    public void Questions_and_assumptions_round_trip_from_a_schema_valid_object()
+    {
+        var schemaValid = JsonSerializer.SerializeToElement(new
+        {
+            goal = "Ship it",
+            subtasks = new object[] { new { id = "s1", title = "T", instruction = "I", kind = "research", acceptanceCriteria = new[] { "cites sources" } } },
+            assumptions = new[] { "assumed the default branch" },
+            questions = new object[]
+            {
+                new { id = "q1", question = "Which direction?", options = new object[] { new { id = "a", label = "Fast" }, new { id = "b", label = "Thorough" } }, recommendedOptionId = "a", allowFreeText = true },
+            },
+        });
+
+        var plan = schemaValid.Deserialize<PlannedWorkflow>(PlannerSchema.Options)!;
+
+        plan.Subtasks[0].Kind.ShouldBe("research");
+        plan.Subtasks[0].AcceptanceCriteria.ShouldBe(new[] { "cites sources" });
+        plan.Assumptions.ShouldBe(new[] { "assumed the default branch" });
+        plan.Questions!.Count.ShouldBe(1);
+        plan.Questions[0].Id.ShouldBe("q1");
+        plan.Questions[0].Options.Select(o => o.Label).ShouldBe(new[] { "Fast", "Thorough" });
+        plan.Questions[0].RecommendedOptionId.ShouldBe("a");
+        plan.Questions[0].AllowFreeText.ShouldBeTrue();
     }
 
     [Fact]

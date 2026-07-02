@@ -13,6 +13,8 @@ public class WorkPlanConfiguration : IEntityTypeConfiguration<WorkPlan>
         builder.Property(p => p.ItemsJson).HasColumnType("jsonb");
         builder.Property(p => p.SuccessCriteriaJson).HasColumnType("jsonb");
         builder.Property(p => p.RisksJson).HasColumnType("jsonb");
+        builder.Property(p => p.AssumptionsJson).HasColumnType("jsonb");
+        builder.Property(p => p.QuestionsJson).HasColumnType("jsonb");
 
         builder.HasOne(p => p.Team).WithMany().HasForeignKey(p => p.TeamId);
 

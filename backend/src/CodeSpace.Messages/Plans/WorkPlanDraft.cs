@@ -35,6 +35,12 @@ public sealed record WorkPlanDraft
 
     /// <summary>Optional risks/unknowns the plan carries — what the reviewer weighs before confirming.</summary>
     public IReadOnlyList<string>? Risks { get; init; }
+
+    /// <summary>Optional defaults the producer chose where the goal was ambiguous — recorded so the operator sees what was assumed (the Codex-style plan contract).</summary>
+    public IReadOnlyList<string>? Assumptions { get; init; }
+
+    /// <summary>Optional operator questions (choose-a-direction form fodder) — see <see cref="WorkPlanQuestion"/>.</summary>
+    public IReadOnlyList<WorkPlanQuestion>? Questions { get; init; }
 }
 
 /// <summary>

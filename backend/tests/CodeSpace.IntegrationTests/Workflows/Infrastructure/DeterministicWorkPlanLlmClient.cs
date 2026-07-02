@@ -34,27 +34,46 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        var subtasks = _script.AuthorContract
-            ? new object[]
+        object[] subtasks;
+        if (_script.AuthorInvalidDag)
+            subtasks = new object[] { new { id = "s1", title = "First", instruction = "do the first thing", dependsOn = new[] { "ghost" } } };
+        else if (_script.AuthorContract)
+            subtasks = new object[]
             {
-                new { id = "s1", title = "First", instruction = "do the first thing" },
-                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { command = AcceptanceCommand, kind = "TestsPass", description = "the unit check" } },
-            }
-            : new object[]
+                new { id = "s1", title = "First", instruction = "do the first thing", kind = "research" },
+                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { command = AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
+            };
+        else
+            subtasks = new object[]
             {
                 new { id = "s1", title = "First", instruction = "do the first thing" },
                 new { id = "s2", title = "Second", instruction = "do the second thing" },
             };
 
-        var json = JsonSerializer.SerializeToElement(new
-        {
-            goal = PlannedGoal,
-            subtasks,
-            successCriteria = new[] { "both things done" },
-            risks = new[] { "unknowns" },
-            recommendedWorkflowKind = "analysis",
-            hasEnoughContext = _script.HasEnoughContext,
-        });
+        var json = _script.AuthorContract
+            ? JsonSerializer.SerializeToElement(new
+            {
+                goal = PlannedGoal,
+                subtasks,
+                successCriteria = new[] { "both things done" },
+                risks = new[] { "unknowns" },
+                recommendedWorkflowKind = "analysis",
+                hasEnoughContext = _script.HasEnoughContext,
+                assumptions = new[] { "assumed the default branch" },
+                questions = new object[]
+                {
+                    new { id = "q1", question = "Which direction?", options = new object[] { new { id = "a", label = "Fast" }, new { id = "b", label = "Thorough" } }, recommendedOptionId = "a", allowFreeText = false },
+                },
+            })
+            : JsonSerializer.SerializeToElement(new
+            {
+                goal = PlannedGoal,
+                subtasks,
+                successCriteria = new[] { "both things done" },
+                risks = new[] { "unknowns" },
+                recommendedWorkflowKind = "analysis",
+                hasEnoughContext = _script.HasEnoughContext,
+            });
 
         return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 13, OutputTokens = 17 } });
     }
@@ -69,9 +88,13 @@ public sealed class WorkPlanPlanScript
     /// <summary>The plan-level self-bypass the node surfaces as <c>executionNeeded = false</c>.</summary>
     public bool HasEnoughContext { get; set; }
 
+    /// <summary>When true, the plan authors a DANGLING dependsOn — the structurally-invalid DAG the node must fail closed on.</summary>
+    public bool AuthorInvalidDag { get; set; }
+
     public void Reset()
     {
         AuthorContract = false;
         HasEnoughContext = false;
+        AuthorInvalidDag = false;
     }
 }

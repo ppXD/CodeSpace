@@ -88,6 +88,8 @@ public sealed class WorkPlanService : IWorkPlanService, IScopedDependency
             ItemsJson = JsonSerializer.Serialize(draft.Items, AgentJson.Options),
             SuccessCriteriaJson = draft.SuccessCriteria is { Count: > 0 } criteria ? JsonSerializer.Serialize(criteria, AgentJson.Options) : null,
             RisksJson = draft.Risks is { Count: > 0 } risks ? JsonSerializer.Serialize(risks, AgentJson.Options) : null,
+            AssumptionsJson = draft.Assumptions is { Count: > 0 } assumptions ? JsonSerializer.Serialize(assumptions, AgentJson.Options) : null,
+            QuestionsJson = draft.Questions is { Count: > 0 } questions ? JsonSerializer.Serialize(questions, AgentJson.Options) : null,
         };
 
         _db.WorkPlan.Add(row);
