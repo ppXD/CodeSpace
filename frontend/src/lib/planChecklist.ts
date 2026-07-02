@@ -42,3 +42,13 @@ export function planDepsLabel(deps: number[] | null | undefined): string | null 
   if (!deps || deps.length === 0) return null;
   return `after ${deps.map((d) => `#${d}`).join(", ")}`;
 }
+
+/// Compose the confirmation answer's feedback text from the operator's question choices + free-text note —
+/// one "question → choice" line per answered question, then the note. Empty when nothing was entered (the
+/// caller decides whether that's allowed — approve tolerates it, request-changes requires it).
+export function composePlanFeedback(choices: Array<{ question: string; choice: string }>, note: string): string {
+  const lines = choices.map((c) => `${c.question} → ${c.choice}`);
+  const text = note.trim();
+  if (text) lines.push(text);
+  return lines.join("\n");
+}

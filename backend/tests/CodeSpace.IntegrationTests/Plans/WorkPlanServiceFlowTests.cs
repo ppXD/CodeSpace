@@ -80,6 +80,34 @@ public class WorkPlanServiceFlowTests
         (await plans.ListVersionsAsync(runId, foreignTeamId, CancellationToken.None)).ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task SetStatus_is_a_compare_and_swap_scoped_to_the_team()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var plans = scope.Resolve<IWorkPlanService>();
+
+        var row = await plans.SaveVersionAsync(Draft(teamId, runId, goal: "the plan"), CancellationToken.None);
+
+        (await plans.SetStatusAsync(row.Id, foreignTeamId, WorkPlanStatuses.Authored, WorkPlanStatuses.AwaitingConfirmation, CancellationToken.None))
+            .ShouldBeFalse("a foreign team can never flip another team's plan");
+
+        (await plans.SetStatusAsync(row.Id, teamId, WorkPlanStatuses.AwaitingConfirmation, WorkPlanStatuses.Confirmed, CancellationToken.None))
+            .ShouldBeFalse("a wrong FROM status no-ops — the CAS is the double-transition guard");
+
+        (await plans.SetStatusAsync(row.Id, teamId, WorkPlanStatuses.Authored, WorkPlanStatuses.AwaitingConfirmation, CancellationToken.None))
+            .ShouldBeTrue();
+
+        (await plans.SetStatusAsync(row.Id, teamId, WorkPlanStatuses.Authored, WorkPlanStatuses.AwaitingConfirmation, CancellationToken.None))
+            .ShouldBeFalse("a crash-replayed flip is a no-op, never a second transition");
+
+        (await plans.GetCurrentAsync(runId, teamId, CancellationToken.None))!.Status
+            .ShouldBe(WorkPlanStatuses.AwaitingConfirmation, "the one successful CAS is the row's status");
+    }
+
     private static WorkPlanDraft Draft(Guid teamId, Guid runId, string goal, string? originKey = null) => new()
     {
         TeamId = teamId,

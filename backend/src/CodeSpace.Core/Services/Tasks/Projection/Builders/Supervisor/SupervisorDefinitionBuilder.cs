@@ -108,6 +108,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The operator's free-text acceptance CRITERIA — rendered into the decider prompt as the definition of done (the
         // model targets them; NOT executed, distinct from the acceptanceChecks argv floor). Omitted when empty (byte-identical).
         AddIfPresent(config, "acceptanceCriteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
+        // The S3 plan-confirmation gate — every authored plan version parks for the operator's confirmation before any
+        // agent is created. Omitted when off (byte-identical).
+        AddIfPresent(config, "requirePlanConfirmation", context.RequirePlanConfirmation ? (object)true : null);
         // The operator's tool allow-list lives on the parent supervisor config (NOT the nested agentProfile — it threads
         // into each spawned AgentTask.Tools via SpawnedAgentTools, the same place an authored allowedTools lands). Read
         // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the

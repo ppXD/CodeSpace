@@ -104,6 +104,7 @@ public sealed partial class SupervisorTurnService
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
             AllowedAgentDefinitionIds = NormalizeModelIds(goalConfig?.AllowedAgentDefinitionIds),
             AcceptanceCriteria = NormalizeTools(goalConfig?.AcceptanceCriteria),
+            RequirePlanConfirmation = goalConfig?.RequirePlanConfirmation == true,
             SupervisorModelId = goalConfig?.SupervisorModelId,
             DecisionReviewMode = goalConfig?.DecisionReviewMode ?? ReviewMode.None,
             ReviewerModelId = goalConfig?.ReviewerModelId,
@@ -165,11 +166,11 @@ public sealed partial class SupervisorTurnService
         return streak;
     }
 
-    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it (it consumed prior results). A wave of all-failed/empty agents, a plan, or an ask_human makes no fresh progress.</summary>
+    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it (it consumed prior results); an ANSWERED plan-confirmation card advanced it too (an operator actively steering the plan is engagement, not a stall — without this, a couple of revise loops would trip the no-progress guard mid-conversation). A wave of all-failed/empty agents, a plan, or a content ask_human makes no fresh progress.</summary>
     private static bool MadeProgress(SupervisorPriorDecision decision) =>
         SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
             ? SupervisorOutcome.HasSettledEvidence(SupervisorOutcome.ReadAgentResults(decision.OutcomeJson))
-            : decision.DecisionKind == SupervisorDecisionKinds.Merge;
+            : decision.DecisionKind == SupervisorDecisionKinds.Merge || SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision);
 
     /// <summary>
     /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded

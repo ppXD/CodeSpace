@@ -47,6 +47,9 @@ public static class SupervisorDecisionGoldenScenarios
         FiveSubtaskMiddleFailed(),        // 5 subtasks, s3 failed           → retry s3 (positional at high fan-out)
         FourSubtaskAllSucceeded(),        // 4 succeeded                     → merge (largest clean fan-out)
         SubsetConflictAcrossThree(),      // 3 agents, a real conflict       → resolve
+        // S3 plan-confirmation gate — the answered confirmation card is in the tape; the brain must REACT to it.
+        ConfirmationApproved(),           // plan + card answered "approve"  → spawn (release, don't re-plan)
+        ConfirmationFeedback(),           // plan + revision feedback        → plan (a REVISED version, never spawn)
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -321,6 +324,31 @@ public static class SupervisorDecisionGoldenScenarios
 
     /// <summary>The canonical real-model fixture goal — deliberately SPECIFIC and unambiguous (clear deliverable + acceptance) so the only correct first move is to PLAN, never to ask a clarifying question. Shared with the trajectory eval so both gates score the same well-specified task.</summary>
     public const string FixtureGoal = "Add server-side email-format validation to the signup endpoint: reject malformed addresses with HTTP 400 and a clear error message, and cover it with unit tests.";
+
+    /// <summary>The operator APPROVED the plan on the confirmation card → the gate released; the ONLY sensible move is to spawn the confirmed subtasks (re-planning ignores the approval; stopping abandons the goal).</summary>
+    private static SupervisorGoldenScenario ConfirmationApproved() => new()
+    {
+        Name = "confirmation-approved",
+        Context = Context(turn: 2, new[] { Plan("s1", "s2"), ConfirmationAnswered("approve") }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Spawn },
+    };
+
+    /// <summary>The operator answered the confirmation card with REVISION FEEDBACK → the brain must author a REVISED plan incorporating it — never spawn the rejected plan unchanged, never stop.</summary>
+    private static SupervisorGoldenScenario ConfirmationFeedback() => new()
+    {
+        Name = "confirmation-feedback",
+        Context = Context(turn: 2, new[] { Plan("s1", "s2"), ConfirmationAnswered("revise: merge both steps into ONE subtask and verify with ./check.sh") }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Plan },
+    };
+
+    /// <summary>The S3 gate's own confirmation card, already ANSWERED — built from the production card builder (so the question is exactly what the gate injects) with a FIXED token for byte-stable prompts.</summary>
+    private static SupervisorPriorDecision ConfirmationAnswered(string answer)
+    {
+        var card = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2);
+        var outcome = JsonSerializer.Serialize(new { question = "confirm plan v1", askHumanToken = "fixed-confirmation-token", answer }, AgentJson.Options);
+
+        return PriorDecision(SupervisorDecisionKinds.AskHuman, 1, card.PayloadJson, outcome);
+    }
 
     private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors) =>
         new() { Goal = FixtureGoal, TurnNumber = turn, PriorDecisions = priors, SupervisorModelId = BrainModelRowId };

@@ -50,6 +50,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA (e.g. "tests pass") — the definition of done RENDERED into the supervisor decider prompt so the model targets them. NOT the executable floor (that is <see cref="AcceptanceChecks"/>): these are never executed. Null / empty ⇒ no prompt block (byte-identical). Also the forward seam for a future supervisor critic-gate yardstick.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
+    /// <summary>When true, an AUTHORED plan must be confirmed by a human before any agent runs (triad S3): the turn loop parks an ask_human confirmation card right after each new plan version — an approving answer releases execution (plan → Confirmed); any other answer is revision feedback the decider folds into a revised plan version (→ Rejected + re-gate). Null / false ⇒ no gate (byte-identical pre-S3 behaviour).</summary>
+    public bool? RequirePlanConfirmation { get; init; }
+
     /// <summary>
     /// Which decisions require a human in the loop before their side effect fires (PR-E E5 governance). Parsed
     /// leniently into <see cref="SupervisorApprovalPolicy"/>: <c>"none"</c> (autonomous), <c>"spawns"</c> /

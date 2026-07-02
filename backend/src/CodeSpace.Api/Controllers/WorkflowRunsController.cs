@@ -82,6 +82,16 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Answer the run's pending plan-confirmation card (triad S3): approve releases execution; a non-approve answer must carry revision feedback (400 otherwise) the supervisor folds into a revised plan version. No pending confirmation / foreign / absent → 404 (conflated).</summary>
+    [HttpPost("{runId:guid}/plan/confirm")]
+    public async Task<IActionResult> ConfirmPlan([FromRoute] Guid runId, [FromBody] ConfirmRunPlanCommand command, CancellationToken cancellationToken)
+    {
+        if (!command.Approve && string.IsNullOrWhiteSpace(command.Feedback)) return BadRequest(new { error = "Revision feedback is required when not approving the plan." });
+
+        var result = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The lineage's attempt ladder — the original run + every replay/rerun fork of it, oldest first, latest flagged. Drives the run-detail attempt switcher. Foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/attempts")]
     public async Task<IActionResult> GetAttempts([FromRoute] Guid runId, CancellationToken cancellationToken)

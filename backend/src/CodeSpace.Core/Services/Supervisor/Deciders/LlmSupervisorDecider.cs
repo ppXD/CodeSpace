@@ -394,6 +394,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; you may spawn ONE agent " +
         "to reconcile the preserved branches, build, and run the tests (then merge again), or stop to leave the conflict " +
         "for a human — never accept an unverified resolution. " +
+        "If the context shows a PLAN-CONFIRMATION question (it asks the human to confirm a plan version) that was just " +
+        "answered: an approving answer means the plan is confirmed — proceed to 'spawn' its subtasks; ANY other answer " +
+        "is the operator's revision feedback — author a REVISED 'plan' that incorporates it (keep what they liked, " +
+        "change what they asked), never spawn the rejected plan unchanged. " +
         "You never name node types, run ids, or graph wiring — only the action + its payload. " +
         "Return ONLY the schema-constrained JSON.";
 }

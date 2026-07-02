@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Plans;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -25,11 +26,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly IDecisionQueueService _decisionQueue;
     private readonly IDecisionArbiter _arbiter;
     private readonly IDecisionAnswerService _decisionAnswer;
+    private readonly Plans.IWorkPlanService _workPlans;
     private readonly Workflows.Lifecycle.IRunRecordLogger _recordLogger;
     private readonly Workflows.Artifacts.IArtifactOffloader _offloader;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
@@ -39,6 +41,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _decisionQueue = decisionQueue;
         _arbiter = arbiter;
         _decisionAnswer = decisionAnswer;
+        _workPlans = workPlans;
         _recordLogger = recordLogger;
         _offloader = offloader;
         _logger = logger;
@@ -103,6 +106,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     internal async Task<SupervisorDecision> ChooseDecisionAsync(SupervisorTurnContext context, SupervisorGoalPlan plan, int depth, CancellationToken cancellationToken)
     {
+        // S3: settle a just-answered confirmation's status flip BEFORE the pre-bounds — a budget/no-progress stop
+        // landing on the release turn must not strand the WorkPlan at AwaitingConfirmation (the CAS keeps it once-only).
+        await SettleConfirmationReleaseAsync(context, cancellationToken).ConfigureAwait(false);
+
         var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
         if (preBound != null) return ForcedStop(preBound);
@@ -112,6 +119,14 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // human. A pure side-channel (it resolves CHILD-grain decisions, never the supervisor's own turn), so it always
         // falls through to the decider; skipped on a force-stopping run (it runs only past the pre-bound guard).
         await ArbitratePendingChildDecisionsAsync(context, cancellationToken).ConfigureAwait(false);
+
+        // S3 plan-confirmation gate: an unconfirmed plan parks for the operator BEFORE the decider can spawn —
+        // the injected ask_human (or, with no surface to ask on, a fail-closed force-stop) replaces this turn's
+        // decision entirely. The release flip already ran above, so on the release turn this falls through and
+        // the decider reacts to the folded answer.
+        var confirmation = await GatePlanConfirmationAsync(context, cancellationToken).ConfigureAwait(false);
+
+        if (confirmation != null) return confirmation;
 
         // Push the run-correlation around the brain call (spans the critic decorator's re-decide too) so the
         // recording LLM-client decorator binds this turn's interaction.* rows + reaches the scoped logger/offloader.
@@ -125,6 +140,79 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         decision = ClampSpawnToDependencyFrontier(context, decision);
 
         return ApplyPostDecisionGate(context, plan, decision);
+    }
+
+    /// <summary>
+    /// The S3 plan-confirmation gate's PARK half (see <see cref="SupervisorPlanConfirmation"/>). When the operator
+    /// opted in and the tape's latest plan has no SURFACED confirmation card yet: with a usable conversation, flip
+    /// the current WorkPlan version to AwaitingConfirmation and return the injected ask_human (the run parks; NO
+    /// agent is created); with NO conversation to post the card into, FORCE-STOP with a distinct reason — the
+    /// degraded no-surface ask would self-advance and silently bypass the gate, so stopping is the only fail-closed
+    /// move (a task launch does not wire a conversation yet). Detection is pure over the tape, so a crash-replay
+    /// re-derives the identical injection.
+    /// </summary>
+    private async Task<SupervisorDecision?> GatePlanConfirmationAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (!context.RequirePlanConfirmation || !SupervisorPlanConfirmation.NeedsConfirmation(context)) return null;
+
+        if (context.ConversationId == null)
+        {
+            _logger.LogWarning("Supervisor plan confirmation is required but run {RunId} has no conversation surface to ask on — force-stopping rather than spawning an unconfirmed plan", context.SupervisorRunId);
+
+            return ForcedStop(SupervisorStopReasons.PlanConfirmationUnavailable);
+        }
+
+        var current = await _workPlans.GetCurrentAsync(context.SupervisorRunId, context.TeamId, cancellationToken, WorkPlanOrigins.Supervisor).ConfigureAwait(false);
+
+        // Defensive: the executor persists the WorkPlan BEFORE the plan decision turns terminal, so a terminal
+        // plan without a row is unreachable in production. Degrading open here (decider proceeds unconfirmed) is a
+        // deliberate, logged exception to the gate's otherwise fail-closed construction — a park would strand the
+        // run on a card whose checklist the operator could never review.
+        if (current == null)
+        {
+            _logger.LogWarning("Supervisor plan-confirmation gate found no WorkPlan row for run {RunId} at turn {Turn} — skipping the gate", context.SupervisorRunId, context.TurnNumber);
+
+            return null;
+        }
+
+        await _workPlans.SetStatusAsync(current.Id, context.TeamId, WorkPlanStatuses.Authored, WorkPlanStatuses.AwaitingConfirmation, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Supervisor plan v{Version} awaits the operator's confirmation at turn {Turn} on node {NodeId} — parking before any agent is created", current.Version, context.TurnNumber, context.NodeId);
+
+        return SupervisorPlanConfirmation.IntoAskHuman(current.Version, CountPlanItems(current.ItemsJson));
+    }
+
+    /// <summary>
+    /// The gate's RELEASE half: when the confirmation card was JUST answered, settle the WorkPlan version to
+    /// Confirmed / Rejected (once — the CAS no-ops on a replay). Runs BEFORE the pre-bounds so a stop landing on
+    /// the release turn still leaves the persisted status truthful. The decider then proceeds with the folded
+    /// answer in context (approve → spawn the plan; feedback → author a revised version, which re-gates).
+    /// </summary>
+    private async Task SettleConfirmationReleaseAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (!context.RequirePlanConfirmation || !SupervisorPlanConfirmation.WasJustAnswered(context, out var approved)) return;
+
+        var current = await _workPlans.GetCurrentAsync(context.SupervisorRunId, context.TeamId, cancellationToken, WorkPlanOrigins.Supervisor).ConfigureAwait(false);
+
+        if (current != null)
+            await _workPlans.SetStatusAsync(current.Id, context.TeamId, WorkPlanStatuses.AwaitingConfirmation, approved ? WorkPlanStatuses.Confirmed : WorkPlanStatuses.Rejected, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Supervisor plan confirmation was {Verdict} at turn {Turn} on node {NodeId} — the decider proceeds with the operator's answer", approved ? "approved" : "answered with revision feedback", context.TurnNumber, context.NodeId);
+    }
+
+    /// <summary>The persisted contract's item count (for the confirmation question) — a malformed items payload degrades to 0 rather than failing the turn.</summary>
+    private static int CountPlanItems(string itemsJson)
+    {
+        try
+        {
+            var root = JsonDocument.Parse(itemsJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Array ? root.GetArrayLength() : 0;
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>
@@ -181,6 +269,16 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         var planInvalid = SupervisorPlanValidator.Validate(decision);
 
         if (planInvalid != null) return ForcedStop(planInvalid);
+
+        // S3 structural floor: a spawn/retry while the latest plan stands REJECTED is refused — the operator's
+        // revision feedback demands a REVISED plan version first, and prompt-following is not a guarantee. Pure
+        // over the tape (replay-deterministic); authoring the revision clears it by construction.
+        if (context.RequirePlanConfirmation && SupervisorDecisionKinds.StagesAgents(decision.Kind) && SupervisorPlanConfirmation.LatestPlanRejected(context))
+        {
+            _logger.LogWarning("Supervisor tried to {Kind} while the latest plan stands REJECTED at turn {Turn} on node {NodeId} — refusing (a rejected plan may never be executed)", decision.Kind, context.TurnNumber, context.NodeId);
+
+            return ForcedStop(SupervisorStopReasons.RejectedPlanSpawnRefused);
+        }
 
         var postBound = SupervisorBounds.PostDecision(context, plan, decision);
 

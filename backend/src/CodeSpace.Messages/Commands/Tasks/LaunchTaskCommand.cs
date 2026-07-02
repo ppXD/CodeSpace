@@ -122,6 +122,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
     /// <summary>
+    /// The S3 plan-confirmation gate: when true, every plan version the supervisor AUTHORS parks the run on a
+    /// confirmation card before any agent is created — approve releases execution, any other answer is revision
+    /// feedback folded into a revised plan version. Null / false ⇒ omitted ⇒ byte-identical (fully autonomous
+    /// planning, the pre-S3 default). Inert on a non-supervisor projection.
+    /// </summary>
+    public bool? RequirePlanConfirmation { get; init; }
+
+    /// <summary>
     /// The agent working-directory mode in a MULTI-repo workspace, in wire vocabulary: <c>"workspace"</c> (cwd = the
     /// shared workspace root, every repo a sibling) or <c>"primary"</c> (cwd = the primary repo's root). <c>"auto"</c> /
     /// null ⇒ the Auto default (repo-root for one repo, workspace-root for many), omitted ⇒ byte-identical. INERT on a

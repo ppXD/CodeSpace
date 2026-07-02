@@ -87,3 +87,37 @@ public sealed class FakeDecisionAnswerService : IDecisionAnswerService
 
 /// <summary>One recorded supervisor-author answer — the exact args the drain passed, for asserting the verdict mapped through verbatim.</summary>
 public sealed record SupervisorAnswerCall(Guid DecisionId, IReadOnlyList<string> SelectedOptions, string? FreeText, string Rationale, Guid TeamId);
+
+/// <summary>
+/// In-memory <c>IWorkPlanService</c> for the S3 plan-confirmation gate's unit seams. Default-constructed it holds NO
+/// plan — <c>GetCurrentAsync</c> returns null, so the gate degrades open and every pre-S3 ctor site behaves
+/// identically. Seed a row to drive the gate; <c>StatusFlips</c> records each CAS so tests assert the transitions.
+/// </summary>
+public sealed class FakeWorkPlanStore : CodeSpace.Core.Services.Plans.IWorkPlanService
+{
+    private readonly CodeSpace.Core.Persistence.Entities.WorkPlan? _current;
+
+    public FakeWorkPlanStore(CodeSpace.Core.Persistence.Entities.WorkPlan? current = null) => _current = current;
+
+    public List<(string From, string To)> StatusFlips { get; } = new();
+
+    public Task<CodeSpace.Core.Persistence.Entities.WorkPlan> SaveVersionAsync(CodeSpace.Messages.Plans.WorkPlanDraft draft, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("The turn-loop gate never saves plans.");
+
+    public Task<CodeSpace.Core.Persistence.Entities.WorkPlan?> GetCurrentAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken, string? originKind = null) =>
+        Task.FromResult(_current != null && (originKind == null || _current.OriginKind == originKind) ? _current : null);
+
+    public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.WorkPlan>> ListVersionsAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<CodeSpace.Core.Persistence.Entities.WorkPlan>>(_current == null ? Array.Empty<CodeSpace.Core.Persistence.Entities.WorkPlan>() : new[] { _current });
+
+    public Task<bool> SetStatusAsync(Guid planId, Guid teamId, string fromStatus, string toStatus, CancellationToken cancellationToken)
+    {
+        StatusFlips.Add((fromStatus, toStatus));
+
+        if (_current == null || _current.Id != planId || _current.Status != fromStatus) return Task.FromResult(false);
+
+        _current.Status = toStatus;
+
+        return Task.FromResult(true);
+    }
+}

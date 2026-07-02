@@ -107,6 +107,9 @@ public sealed record SupervisorTurnContext
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA (blank entries dropped) — the definition of done rendered into the decider prompt so the model targets it. NOT executed (distinct from <see cref="AcceptanceChecks"/>). Null/empty (none / all-blank) ⇒ no prompt block (byte-identical). The intended yardstick for a future supervisor critic-gate.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
+    /// <summary>Whether an AUTHORED plan must be confirmed by a human before any agent runs (triad S3 gate) — the turn loop parks an ask_human confirmation card after each unconfirmed plan version. False (the default) ⇒ no gate.</summary>
+    public bool RequirePlanConfirmation { get; init; }
+
     /// <summary>
     /// The tool allow-list each spawned agent is restricted to (P2-3) — the supervisor config's REUSED
     /// <c>AllowedTools</c> threaded into <c>AgentTask.Tools</c>. Tri-state, matching the task envelope: <c>null</c>
