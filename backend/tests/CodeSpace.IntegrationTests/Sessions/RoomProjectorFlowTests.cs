@@ -187,6 +187,61 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_reran_turn_surfaces_its_attempt_timeline_oldest_to_newest()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Flaky");
+        var now = DateTimeOffset.UtcNow;
+
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddMinutes(-5));
+        var winner = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Rerun, createdAt: now);
+
+        var room = await ProjectByRunAsync(winner, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single();
+
+        turn.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2 }, "the turn's attempts, oldest → newest");
+        turn.Attempts.Select(a => a.RunId).ShouldBe(new[] { original, winner });
+        turn.Attempts[0].Status.ShouldBe(WorkflowRunStatus.Failure, "attempt 1 failed");
+        turn.Attempts[1].Status.ShouldBe(WorkflowRunStatus.Success, "the rerun recovered");
+        turn.Attempts.Single(a => a.IsCurrent).RunId.ShouldBe(winner, "the shown attempt is the newest");
+    }
+
+    [Fact]
+    public async Task A_never_reran_turn_has_no_attempt_timeline()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "One shot");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Do it once", resultSummary: "Done.");
+
+        var room = await ProjectByRunAsync(run, teamId);
+        room!.Blocks.OfType<AssistantTurnBlock>().Single().Attempts.ShouldBeEmpty("a lone attempt needs no history — the timeline stays empty");
+    }
+
+    /// <summary>Seed one attempt (a top-level turn run when turnIndex is set, else a rerun/replay fork with rootRunId) of a session turn, with an explicit created time so the attempt ordering is deterministic.</summary>
+    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = source, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}",
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = createdAt, VerifiedAt = createdAt, NormalizedAt = createdAt,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = source,
+            Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId,
+            OutputsJson = "{}", CreatedDate = createdAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+        return runId;
+    }
+
+    [Fact]
     public async Task A_supervisor_turn_with_a_retry_surfaces_the_failed_original_and_a_retry_step()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

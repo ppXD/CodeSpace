@@ -129,6 +129,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             Actions = _actions.ResolveTurnActions(runId, turn.RunStatus),
             At = turn.CreatedDate,
             DurationMs = DurationMs(turn),
+            Attempts = AttemptsOf(turn),
         };
     }
 
@@ -147,7 +148,21 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         Actions = _actions.ResolveTurnActions(turn.RunId, turn.RunStatus),
         At = turn.CreatedDate,
         DurationMs = DurationMs(turn),
+        Attempts = AttemptsOf(turn),
     };
+
+    /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt); a lone attempt needs no history, so it stays empty and the frontend shows nothing.</summary>
+    private static IReadOnlyList<RoomTurnAttempt> AttemptsOf(SessionTurn turn)
+    {
+        var attempts = turn.Attempts ?? Array.Empty<SessionTurnAttempt>();
+
+        if (attempts.Count < 2) return Array.Empty<RoomTurnAttempt>();
+
+        return attempts
+            .OrderBy(a => a.AttemptNumber)
+            .Select(a => new RoomTurnAttempt { RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.IsLatest })
+            .ToList();
+    }
 
     /// <summary>
     /// The turn's wall-clock. A COMPLETED turn measures <c>CompletedAt − CreatedDate</c> — anchored on the immutable

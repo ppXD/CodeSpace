@@ -19,6 +19,7 @@ import type {
   RoomBlock,
   RoomFilePreview,
   RoomPlanQuestion,
+  RoomTurnAttempt,
   RoomView,
   StatBlock,
   StatItem,
@@ -338,6 +339,8 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
 
               {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} />}
 
+              <TurnAttempts attempts={turn.attempts ?? []} nowMs={nowMs} onOpenRoom={onOpenRoom} />
+
               {turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
 
               <TurnActions actions={turn.actions} turn={turn} onOpenRoom={onOpenRoom} onOpenRun={onOpenRun} />
@@ -346,6 +349,43 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
         </div>
       </RunOpenContext.Provider>
     </RunActionsContext.Provider>
+  );
+}
+
+/**
+ * The turn's rerun/replay attempt timeline — shown only when the turn was rerun (> 1 attempt). A "N attempts" toggle
+ * that expands to a vertical timeline, one row per attempt (status · when), each openable to view that attempt's run
+ * (the current/shown one reads "shown"). Attempts are a TURN property — the whole turn reran — so this lives on the
+ * turn, not one agent card.
+ */
+function TurnAttempts({ attempts, nowMs, onOpenRoom }: { attempts: RoomTurnAttempt[]; nowMs: number; onOpenRoom: (runId?: string) => void }) {
+  const [open, setOpen] = useState(false);
+
+  if (attempts.length < 2) return null;
+
+  return (
+    <div className="room-attempts">
+      <button className="room-attempts-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <Sym n={open ? "chevron-down" : "chevron-right"} s={12} />
+        {attempts.length} attempts
+      </button>
+
+      {open && (
+        <ol className="room-attempts-list">
+          {attempts.map((a) => (
+            <li className={`room-attempt room-attempt-${statusTone(a.status, false)}`} key={a.runId} data-current={a.isCurrent || undefined}>
+              <span className="room-attempt-dot" />
+              <span className="room-attempt-n">attempt {a.attemptNumber}</span>
+              <span className="room-attempt-status">{pillLabel(a.status, false)}</span>
+              <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
+              {a.isCurrent
+                ? <span className="room-attempt-shown">shown</span>
+                : <button className="room-attempt-open" onClick={() => onOpenRoom(a.runId)}>open <Sym n="chevron-right" s={11} /></button>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   );
 }
 
