@@ -12,10 +12,13 @@ import type {
   FinalAnswerBlock,
   LiveActivityBlock,
   NarrativeStepBlock,
+  PlanChecklistBlock,
+  PlanChecklistItem,
   RoomAction,
   RoomAgentCard,
   RoomBlock,
   RoomFilePreview,
+  RoomPlanQuestion,
   RoomView,
   StatBlock,
   StatItem,
@@ -29,6 +32,7 @@ import { RunActionsContext } from "@/components/workflows/runActionsContext";
 import { RunOpenContext } from "@/components/workflows/runOpenContext";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { compactAge } from "@/components/workflows/cockpit";
+import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord } from "@/lib/planChecklist";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
@@ -372,6 +376,7 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
 /** One inner block, rendered by type as a Codex-style detail row / card. */
 function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: () => void }) {
   if (block.type === "stat") return <StatRow stat={block as StatBlock} />;
+  if (block.type === "plan_checklist") return <PlanChecklistCard plan={block as PlanChecklistBlock} />;
   if (block.type === "agent_group") return <AgentSection group={block as AgentGroupBlock} />;
   if (block.type === "narrative_step") return <SupervisorStep step={block as NarrativeStepBlock} />;
   if (block.type === "delivery") return <PrCard delivery={block as DeliveryBlock} />;
@@ -530,6 +535,98 @@ function FileRow({ item }: { item: StatItem }) {
       {item.detail && <span className="room-file-stat"><DiffStat text={item.detail} /></span>}
       <Sym n="chevron-right" s={11} cls="room-file-caret" />
     </button>
+  );
+}
+
+/** The run's plan as a live checklist — the whole current version, one checkable row per item: state icon ·
+ *  title · contract chips (kind / dependencies / acceptance / criteria / attempts) · state word · Details. The
+ *  backend owns every string; unknown states render neutral. Questions/assumptions are read-only here. */
+function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
+  const awaiting = plan.status === "AwaitingConfirmation";
+  const assumptions = plan.assumptions ?? [];
+  const questions = plan.questions ?? [];
+  const hasFooter = assumptions.length > 0 || questions.length > 0 || plan.hasPriorVersions;
+
+  return (
+    <div className="room-plan">
+      <div className="room-plan-head">
+        <Sym n="list" s={14} cls="room-plan-ic" />
+        <span className="room-plan-title">{plan.label}</span>
+        <span className="room-plan-ver">v{plan.version}</span>
+        {awaiting && <span className="room-plan-status">awaiting confirmation</span>}
+        {plan.detail && <><span className="room-row-mid">·</span><span className="room-plan-detail">{plan.detail}</span></>}
+      </div>
+      <div className="room-plan-rows">
+        {plan.items.map((it) => <PlanItemRow key={it.ordinal} it={it} />)}
+      </div>
+      {questions.length > 0 && (
+        <div className="room-plan-questions">
+          {questions.map((q) => <PlanQuestionRow key={q.id} q={q} />)}
+        </div>
+      )}
+      {hasFooter && (
+        <div className="room-plan-foot">
+          {assumptions.length > 0 && <span className="room-plan-assume" title={assumptions.join("\n")}><Sym n="edit" s={11} /> {assumptions.length === 1 ? assumptions[0] : `${assumptions.length} assumptions`}</span>}
+          <span className="room-plan-foot-gap" />
+          {plan.hasPriorVersions && <span className="room-plan-prior">v{plan.version - 1} superseded</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One checklist row. Opens the latest attempt's agent terminal from Details when an agent is linked. */
+function PlanItemRow({ it }: { it: PlanChecklistItem }) {
+  const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
+  const tone = planStateTone(it.state);
+  const criteria = it.acceptanceCriteria ?? [];
+  const deps = it.dependsOn ?? [];
+  const canOpen = run != null && it.agentRunId != null;
+
+  return (
+    <div className="room-prow">
+      <span className={`room-prow-ic room-prow-ic-${tone}`}><Sym n={planStateIcon(it.state) as SymName} s={15} /></span>
+      <div className="room-prow-main">
+        <div className="room-prow-title">{it.ordinal}. {it.title}</div>
+        {(it.kind || deps.length > 0 || it.acceptanceLabel || criteria.length > 0 || it.attempts > 1) && (
+          <div className="room-prow-chips">
+            {it.kind && <span className="room-pchip">{it.kind}</span>}
+            {planDepsLabel(deps) && <span className="room-prow-deps">{planDepsLabel(deps)}</span>}
+            {it.acceptanceLabel && (
+              <span className={`room-pchip room-pchip-${it.acceptancePassed === true ? "ok" : it.acceptancePassed === false ? "err" : "check"}`} title={it.acceptanceDetail ?? undefined}>
+                <Sym n={it.acceptanceKind === "ArtifactPresent" ? "file" : "terminal"} s={10} /> {it.acceptanceLabel}
+              </span>
+            )}
+            {criteria.map((c, i) => <span key={i} className="room-pchip">{c}</span>)}
+            {it.attempts > 1 && <span className="room-pchip room-pchip-tries">×{it.attempts} attempts</span>}
+          </div>
+        )}
+      </div>
+      <span className={`room-prow-state room-prow-state-${tone}`}>{planStateWord(it.state)}</span>
+      <button
+        className="room-prow-act"
+        disabled={!canOpen}
+        onClick={() => canOpen && openDrawer({ kind: "agent", runId: run!.runId, agent: { agentRunId: it.agentRunId!, label: it.title, status: planAgentStatus(it.state) } })}
+      >
+        Details <Sym n="chevron-right" s={11} />
+      </button>
+    </div>
+  );
+}
+
+/** A planner question rendered read-only — the choose-a-direction preview (the interactive form arrives with the plan gate). */
+function PlanQuestionRow({ q }: { q: RoomPlanQuestion }) {
+  const opts = q.options ?? [];
+  return (
+    <div className="room-plan-q">
+      <div className="room-plan-q-text"><Sym n="sparkle" s={12} cls="room-ic-accent" /> {q.question}</div>
+      {opts.length > 0 && (
+        <div className="room-chips">
+          {opts.map((o) => <span key={o.id} className={`room-chip ${o.recommended ? "room-chip-accent" : "room-chip-plain"}`}>{o.label}{o.recommended ? " · recommended" : ""}</span>)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -871,7 +968,7 @@ function describeUnknown(block: RoomBlock): string {
 type SymName =
   | "chevron-right" | "chevron-down" | "chevron-up" | "check" | "x" | "dot" | "file" | "terminal" | "sparkle"
   | "zap" | "lock" | "folder" | "send" | "rerun" | "more" | "alert" | "clock" | "link" | "branch"
-  | "pr" | "stop" | "edit" | "list" | "cpu" | "download";
+  | "pr" | "stop" | "edit" | "list" | "cpu" | "download" | "square" | "square-check" | "square-x";
 
 const ICONS: Record<SymName, { fill?: boolean; sw?: number; body: ReactNode }> = {
   "chevron-right": { sw: 1.9, body: <path d="M9 18l6-6-6-6" /> },
@@ -899,6 +996,9 @@ const ICONS: Record<SymName, { fill?: boolean; sw?: number; body: ReactNode }> =
   list: { sw: 1.8, body: <><line x1="8" y1="6" x2="20" y2="6" /><line x1="8" y1="12" x2="20" y2="12" /><line x1="8" y1="18" x2="20" y2="18" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></> },
   cpu: { sw: 1.7, body: <><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2" /></> },
   download: { sw: 1.8, body: <><path d="M12 3v12" /><path d="M7 11l5 5 5-5" /><path d="M5 21h14" /></> },
+  square: { sw: 1.7, body: <rect x="4" y="4" width="16" height="16" rx="3" /> },
+  "square-check": { sw: 1.9, body: <><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M8.5 12.2l2.4 2.4 4.6-4.9" /></> },
+  "square-x": { sw: 1.9, body: <><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6" /></> },
 };
 
 function Sym({ n, s = 14, cls }: { n: SymName; s?: number; cls?: string }) {

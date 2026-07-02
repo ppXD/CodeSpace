@@ -156,6 +156,40 @@ export interface NarrativeStepBlock extends RoomBlockBase { type: "narrative_ste
 export interface AgentGroupBlock extends RoomBlockBase { type: "agent_group"; title: string; agents: RoomAgentCard[]; }
 /// A collapsible stat row — one generic block for subtasks / files / tools / reasoning (the projector fills kind/label/detail/items).
 export interface StatBlock extends RoomBlockBase { type: "stat"; kind: string; label: string; detail?: string | null; items?: StatItem[] | null; }
+/// One checkable line of the plan checklist — the item's contract plus its tape-derived execution state.
+export interface PlanChecklistItem {
+  ordinal: number;
+  itemId: string;
+  title: string;
+  kind?: string | null;
+  /// WorkPlanItemStates value (open vocabulary): Pending / InProgress / Completed / Failed / NeedsReview.
+  state: string;
+  /// 1-based ordinals of the items this one depends on — rendered "after #1, #3".
+  dependsOn?: number[] | null;
+  acceptanceLabel?: string | null;
+  /// "TestsPass" (command chip) or "ArtifactPresent" (deliverable chip) — picks the chip icon.
+  acceptanceKind?: string | null;
+  acceptancePassed?: boolean | null;
+  acceptanceDetail?: string | null;
+  acceptanceCriteria?: string[] | null;
+  agentRunId?: string | null;
+  attempts: number;
+}
+export interface RoomPlanQuestionOption { id: string; label: string; recommended?: boolean; }
+/// A planner-authored operator question — read-only in the checklist (the interactive form arrives with the plan gate).
+export interface RoomPlanQuestion { id: string; question: string; options?: RoomPlanQuestionOption[] | null; allowFreeText?: boolean; }
+/// The run's durable plan as a live checklist — the whole current version with per-item execution state.
+export interface PlanChecklistBlock extends RoomBlockBase {
+  type: "plan_checklist";
+  label: string;
+  version: number;
+  status: string;
+  detail?: string | null;
+  items: PlanChecklistItem[];
+  assumptions?: string[] | null;
+  questions?: RoomPlanQuestion[] | null;
+  hasPriorVersions?: boolean;
+}
 /// The delivered change set (PR card).
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
@@ -231,6 +265,7 @@ export type RoomBlock =
   | NarrativeStepBlock
   | AgentGroupBlock
   | StatBlock
+  | PlanChecklistBlock
   | DeliveryBlock
   | DecisionBlock
   | DiagnosticBlock

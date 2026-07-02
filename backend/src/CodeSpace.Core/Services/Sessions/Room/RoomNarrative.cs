@@ -2,8 +2,10 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Plans;
 using CodeSpace.Messages.Tasks.Phases;
 
 namespace CodeSpace.Core.Services.Sessions.Room;
@@ -153,6 +155,12 @@ public static class RoomNarrative
         var blocks = new List<RoomBlock>();
         var agentById = narrativePhases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).ToDictionary(g => g.Key, g => g.First());
 
+        // The plan checklist leads the turn when the run persisted a plan — the whole current version as a live
+        // tracker. It SUBSUMES the per-round "Plan · N subtasks" rows (suppressed below), so plan titles never
+        // render twice; a plan-less run projects exactly as before.
+        if (facts.Checklist is { } checklist)
+            blocks.Add(PlanChecklist(idPrefix, seq, checklist));
+
         if (authored.Count > 0)
         {
             for (var i = 0; i < authored.Count; i++)
@@ -203,7 +211,7 @@ public static class RoomNarrative
     {
         var subtasks = phase.Agents.Select(a => a.AssignedSubtask ?? a.Goal).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!).Distinct().ToList();
 
-        if (subtasks.Count > 0)
+        if (subtasks.Count > 0 && facts.Checklist == null)
             blocks.Add(new StatBlock { Id = $"{idPrefix}:r{index}:plan", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(subtasks.Count, "subtask"), Items = subtasks.Select(t => new StatItem { Text = t }).ToList() });
 
         if (phase.Agents.Count > 0)
@@ -213,7 +221,7 @@ public static class RoomNarrative
     /// <summary>One TAPE round (a flat plan / a re-plan) — "Plan · N subtasks" (the round's plan) then its spawned Agent cards then the round's closing supervisor operation.</summary>
     private static void EmitTapeRound(List<RoomBlock> blocks, string idPrefix, long seq, WorkflowRunStatus status, RoomRound r, RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
     {
-        if (r.Subtasks.Count > 0)
+        if (r.Subtasks.Count > 0 && facts.Checklist == null)
             blocks.Add(new StatBlock { Id = $"{idPrefix}:r{r.Index}:plan", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(r.Subtasks.Count, "subtask"), Items = r.Subtasks.Select(t => new StatItem { Text = t }).ToList() });
 
         var agents = r.AgentRunIds.Distinct().Select(id => agentById.GetValueOrDefault(id)).Where(a => a != null).Select(a => a!).ToList();
@@ -273,6 +281,76 @@ public static class RoomNarrative
     private static bool IsActive(WorkflowRunStatus status) => status is WorkflowRunStatus.Pending or WorkflowRunStatus.Enqueued or WorkflowRunStatus.Running or WorkflowRunStatus.Suspended;
 
     private static bool IsTerminal(WorkflowRunStatus status) => status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
+
+    // ─── the plan checklist (the whole current plan as a live tracker) ──────────────
+
+    /// <summary>Map the derived checklist read model onto the render block — every string authored HERE (states pass through as the open vocabulary; dependency ids become 1-based ordinals; acceptance specs become chip labels).</summary>
+    private static PlanChecklistBlock PlanChecklist(string idPrefix, long seq, WorkPlanChecklist checklist)
+    {
+        // First-wins on a duplicate item id: the supervisor's plan validator TOLERATES dup subtask ids (a
+        // degenerate flat plan), so this mapper must render both lines rather than throw and kill the room.
+        var ordinalById = checklist.Items.Select((it, i) => (it.Item.Id, Ordinal: i + 1))
+            .GroupBy(x => x.Id, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Ordinal, StringComparer.Ordinal);
+
+        return new PlanChecklistBlock
+        {
+            Id = $"{idPrefix}:plan-checklist",
+            Seq = seq,
+            Label = "Plan",
+            Version = checklist.Version,
+            Status = checklist.Status,
+            Detail = ChecklistDetail(checklist.Items),
+            Items = checklist.Items.Select((it, i) => ChecklistItem(it, i + 1, ordinalById)).ToList(),
+            Assumptions = checklist.Assumptions ?? Array.Empty<string>(),
+            Questions = (checklist.Questions ?? Array.Empty<WorkPlanQuestion>()).Select(RoomQuestion).ToList(),
+            HasPriorVersions = checklist.Version > 1,
+        };
+    }
+
+    /// <summary>"5 items · 2 done · 1 running · 1 failed · 1 needs review" — the item count plus every non-zero non-pending state, in severity order. Just "N items" when nothing has started.</summary>
+    private static string ChecklistDetail(IReadOnlyList<WorkPlanChecklistItem> items)
+    {
+        var parts = new List<string> { Count(items.Count, "item") };
+
+        Append(WorkPlanItemStates.Completed, _ => "done");
+        Append(WorkPlanItemStates.InProgress, _ => "running");
+        Append(WorkPlanItemStates.Failed, _ => "failed");
+        Append(WorkPlanItemStates.NeedsReview, n => n == 1 ? "needs review" : "need review");
+
+        return string.Join(" · ", parts);
+
+        void Append(string state, Func<int, string> word)
+        {
+            var n = items.Count(i => i.State == state);
+            if (n > 0) parts.Add($"{n} {word(n)}");
+        }
+    }
+
+    private static PlanChecklistItem ChecklistItem(WorkPlanChecklistItem it, int ordinal, IReadOnlyDictionary<string, int> ordinalById) => new()
+    {
+        Ordinal = ordinal,
+        ItemId = it.Item.Id,
+        Title = it.Item.Title,
+        Kind = it.Item.Kind,
+        State = it.State,
+        DependsOn = (it.Item.DependsOn ?? Array.Empty<string>()).Select(id => ordinalById.TryGetValue(id, out var o) ? o : 0).Where(o => o > 0).ToList(),
+        AcceptanceLabel = it.Item.Acceptance is { } spec ? string.Join(" ", spec.Command ?? Array.Empty<string>()) : null,
+        AcceptanceKind = it.Item.Acceptance is { } s ? (s.Kind ?? BenchmarkGradingKind.TestsPass).ToString() : null,
+        AcceptancePassed = it.AcceptancePassed,
+        AcceptanceDetail = it.AcceptanceDetail,
+        AcceptanceCriteria = it.Item.AcceptanceCriteria ?? Array.Empty<string>(),
+        AgentRunId = it.AgentRunId,
+        Attempts = it.Attempts,
+    };
+
+    private static RoomPlanQuestion RoomQuestion(WorkPlanQuestion q) => new()
+    {
+        Id = q.Id,
+        Question = q.Question,
+        Options = (q.Options ?? Array.Empty<WorkPlanQuestionOption>()).Select(o => new RoomPlanQuestionOption { Id = o.Id, Label = o.Label, Recommended = o.Id == q.RecommendedOptionId }).ToList(),
+        AllowFreeText = q.AllowFreeText,
+    };
 
     // ─── stat rows (label · detail, design vocabulary) ──────────────────────────────
 

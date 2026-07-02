@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -10,6 +11,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Plans;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -216,6 +218,45 @@ public class RoomProjectorFlowTests
             });
 
         await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task A_run_with_a_persisted_work_plan_projects_the_checklist_and_suppresses_the_plan_stat_rows()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Planned");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Do the thing", resultSummary: "Shipped it.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Trace DI registration", "Analyze the template store");
+
+        // The durable plan artifact (what the S1 supervisor writer persists) — the checklist's contract source.
+        using (var seed = _fixture.BeginScope())
+        {
+            await seed.Resolve<IWorkPlanService>().SaveVersionAsync(new WorkPlanDraft
+            {
+                TeamId = teamId,
+                WorkflowRunId = run,
+                OriginKind = WorkPlanOrigins.Supervisor,
+                OriginKey = "sup#turn0",
+                Goal = "Do the thing",
+                Items = new[]
+                {
+                    new WorkPlanItem { Id = "s1", Title = "Trace DI registration", Instruction = "trace it" },
+                    new WorkPlanItem { Id = "s2", Title = "Analyze the template store", Instruction = "analyze it", DependsOn = new[] { "s1" } },
+                },
+            }, CancellationToken.None);
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var checklist = turn.Blocks.OfType<PlanChecklistBlock>().Single();
+        checklist.Version.ShouldBe(1);
+        checklist.Items.Select(i => i.Title).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" });
+        checklist.Items[1].DependsOn.ShouldBe(new[] { 1 }, "the dependency id resolves to the 1-based ordinal");
+        checklist.Items.ShouldAllBe(i => i.State == WorkPlanItemStates.Pending, "the fabricated tape staged no agents — honestly pending");
+
+        turn.Blocks.OfType<StatBlock>().Where(b => b.Kind == "subtasks").ShouldBeEmpty("the checklist subsumes the per-round plan rows");
     }
 
     /// <summary>Stamp a supervisor PLAN decision (its subtask decomposition) onto a run's tape — enough for the canonical map + the subtasks stat row.</summary>

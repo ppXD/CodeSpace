@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Decisions;
+using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Messages.Agents;
@@ -26,15 +27,17 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IDecisionQueueService _decisions;
     private readonly IRunActionCapabilityResolver _actions;
     private readonly ISupervisorDecisionLog _decisionLog;
+    private readonly IWorkPlanChecklistService _checklists;
     private readonly CodeSpaceDbContext _db;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, CodeSpaceDbContext db)
     {
         _sessions = sessions;
         _phases = phases;
         _decisions = decisions;
         _actions = actions;
         _decisionLog = decisionLog;
+        _checklists = checklists;
         _db = db;
     }
 
@@ -247,9 +250,14 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false);
 
+        // The run's durable plan checklist (contract + tape-derived states) — null for pre-plan runs, which then
+        // project exactly as before (the per-round plan stat rows carry the story).
+        var checklist = await _checklists.GetCurrentAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
         return new RoomTurnFacts
         {
             Rounds = rounds,
+            Checklist = checklist,
             FinalAnswer = BuildFinalAnswer(SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson), changedFiles, delivery),
             LatestLines = latestLines,
             AgentFiles = agentFiles,

@@ -16,6 +16,7 @@ namespace CodeSpace.Messages.Dtos.Sessions.Room;
 [JsonDerivedType(typeof(NarrativeStepBlock), "narrative_step")]
 [JsonDerivedType(typeof(AgentGroupBlock), "agent_group")]
 [JsonDerivedType(typeof(StatBlock), "stat")]
+[JsonDerivedType(typeof(PlanChecklistBlock), "plan_checklist")]
 [JsonDerivedType(typeof(DeliveryBlock), "delivery")]
 [JsonDerivedType(typeof(DecisionBlock), "decision")]
 [JsonDerivedType(typeof(DiagnosticBlock), "diagnostic")]
@@ -180,6 +181,98 @@ public sealed record StatItem
 
     /// <summary>Optional tone for the item (e.g. a failed subtask reads danger). Null = neutral.</summary>
     public NarrativeTone? Tone { get; init; }
+}
+
+/// <summary>
+/// The run's durable plan as a LIVE CHECKLIST — the whole current plan version with per-item execution state
+/// derived from the tape (triad S2b). Emitted once per turn (first inner block) when the run persisted a
+/// <c>work_plan</c>; replaces the per-round "Plan · N subtasks" stat rows (the checklist subsumes them). The
+/// backend owns every string (states, detail copy, dependency ordinals, acceptance labels); the frontend only
+/// renders. Questions/assumptions are READ-ONLY here — the interactive confirm card is the plan-gate slice.
+/// </summary>
+public sealed record PlanChecklistBlock : RoomBlock
+{
+    public required string Label { get; init; }
+
+    /// <summary>This plan's version within the run (1-based; re-plans / edit-loop re-entries bump it).</summary>
+    public required int Version { get; init; }
+
+    /// <summary>The plan's confirmation lifecycle value (<c>WorkPlanStatuses</c>) — an open string.</summary>
+    public required string Status { get; init; }
+
+    /// <summary>The header summary — always at least the item count, plus every non-zero non-pending state (e.g. "5 items · 2 done · 1 running").</summary>
+    public string? Detail { get; init; }
+
+    public required IReadOnlyList<PlanChecklistItem> Items { get; init; }
+
+    /// <summary>Producer-recorded defaults chosen where the goal was ambiguous. Empty → the row isn't shown.</summary>
+    public IReadOnlyList<string> Assumptions { get; init; } = Array.Empty<string>();
+
+    /// <summary>Planner-authored operator questions (choose-a-direction) — read-only display in this block. Empty → none.</summary>
+    public IReadOnlyList<RoomPlanQuestion> Questions { get; init; } = Array.Empty<RoomPlanQuestion>();
+
+    /// <summary>True when earlier plan versions exist (a re-plan superseded them) — the "v1 superseded" affordance.</summary>
+    public bool HasPriorVersions { get; init; }
+}
+
+/// <summary>One checkable line of the plan checklist — the item's contract plus its derived execution state.</summary>
+public sealed record PlanChecklistItem
+{
+    /// <summary>1-based position in the plan — the number the reader sees and dependency ordinals reference.</summary>
+    public required int Ordinal { get; init; }
+
+    /// <summary>The plan-local item id (stable across versions of the same item).</summary>
+    public required string ItemId { get; init; }
+
+    public required string Title { get; init; }
+
+    /// <summary>Open item kind chip (e.g. "research" / "code"). Null → no chip.</summary>
+    public string? Kind { get; init; }
+
+    /// <summary>The derived execution state — a <c>WorkPlanItemStates</c> value (open vocabulary; unknown renders neutral).</summary>
+    public required string State { get; init; }
+
+    /// <summary>The 1-based ordinals of the items this one depends on — rendered as "after #1, #3". Empty → independent.</summary>
+    public IReadOnlyList<int> DependsOn { get; init; } = Array.Empty<int>();
+
+    /// <summary>The objective acceptance chip text (the check argv, or the deliverable paths). Null → no objective contract.</summary>
+    public string? AcceptanceLabel { get; init; }
+
+    /// <summary>The oracle kind behind the chip ("TestsPass" / "ArtifactPresent") — picks the chip icon. Null when no contract.</summary>
+    public string? AcceptanceKind { get; init; }
+
+    /// <summary>The latest attempt's objective verdict: true = passed (green chip), false = rejected (red chip), null = ungraded (neutral chip).</summary>
+    public bool? AcceptancePassed { get; init; }
+
+    /// <summary>The grader's one-line verdict detail (shown on hover / expand). Null when ungraded.</summary>
+    public string? AcceptanceDetail { get; init; }
+
+    /// <summary>Subjective per-item criteria chips (reviewed, never executed). Empty → none.</summary>
+    public IReadOnlyList<string> AcceptanceCriteria { get; init; } = Array.Empty<string>();
+
+    /// <summary>The LATEST attempt's agent run — the "Details" deep-link into its terminal. Null before any attempt.</summary>
+    public Guid? AgentRunId { get; init; }
+
+    /// <summary>How many execution attempts the item has had — the "×2 attempts" badge when &gt; 1.</summary>
+    public int Attempts { get; init; }
+}
+
+/// <summary>A planner-authored operator question, rendered read-only in the checklist (the interactive form is the plan-confirmation gate).</summary>
+public sealed record RoomPlanQuestion
+{
+    public required string Id { get; init; }
+    public required string Question { get; init; }
+    public IReadOnlyList<RoomPlanQuestionOption> Options { get; init; } = Array.Empty<RoomPlanQuestionOption>();
+    public bool AllowFreeText { get; init; }
+}
+
+public sealed record RoomPlanQuestionOption
+{
+    public required string Id { get; init; }
+    public required string Label { get; init; }
+
+    /// <summary>True on the planner's recommended default — the option an unattended run proceeds with.</summary>
+    public bool Recommended { get; init; }
 }
 
 /// <summary>
