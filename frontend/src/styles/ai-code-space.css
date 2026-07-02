@@ -5548,7 +5548,10 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
 .room-drawer-term .agent-terminal { border-color: var(--line); box-shadow: none; }
 /* per-agent file-count chip on the compact agent row */
-.room-arow-files { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* per-agent meta cluster — tool + file counts grouped, separated from the run time */
+.room-arow-meta { display: inline-flex; align-items: center; gap: 10px; flex: none; margin-right: 8px; }
+.room-arow-metaitem { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.room-arow-metaic { color: var(--muted-2); }
 
 .room-fprev { display: flex; flex-direction: column; min-height: 100%; }
 .room-fprev-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--muted); padding: 32px 20px; }

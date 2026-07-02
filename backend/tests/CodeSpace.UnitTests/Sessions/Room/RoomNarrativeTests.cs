@@ -355,17 +355,17 @@ public class RoomNarrativeTests
     }
 
     [Fact]
-    public void Tools_row_carries_the_histogram_detail_and_items()
+    public void Tools_row_summarizes_to_the_call_total_and_expands_to_the_per_tool_breakdown()
     {
         var facts = new RoomTurnFacts
         {
             ToolCalls = 14,
-            ToolHistogram = new[] { new ToolKindCount("read", 6), new ToolKindCount("edit", 5), new ToolKindCount("test", 3) },
+            ToolHistogram = new[] { new ToolKindCount("Read", 6), new ToolKindCount("WebSearch", 5), new ToolKindCount("Write", 3) },
         };
 
         var tools = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().Single(s => s.Kind == "tools");
-        tools.Detail.ShouldBe("14 calls · read, edit, test", "count plus the top tool kinds");
-        tools.Items.Select(i => (i.Text, i.Detail)).ShouldBe(new[] { ("read", "6"), ("edit", "5"), ("test", "3") });
+        tools.Detail.ShouldBe("14 calls", "collapsed: just the total, no inline histogram");
+        tools.Items.Select(i => (i.Text, i.Detail)).ShouldBe(new[] { ("Read", "6"), ("WebSearch", "5"), ("Write", "3") }, "expanded: the per-tool breakdown");
     }
 
     [Fact]

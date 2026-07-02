@@ -673,13 +673,19 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
   const queued = a.status === "Queued" || a.status === "Pending";
   const action = running ? "Open terminal" : queued ? "View" : cls === "err" ? "View trace" : "Details";
   const fileCount = a.changedFiles?.length ?? a.filesChanged ?? 0;
+  const toolCount = a.toolCount ?? 0;
 
   return (
     <div className="room-arow-wrap">
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {fileCount > 0 && <span className="room-arow-files"><Sym n="file" s={10} /> {fileCount}</span>}
+        {(toolCount > 0 || fileCount > 0) && (
+          <span className="room-arow-meta">
+            {toolCount > 0 && <span className="room-arow-metaitem" title={`${toolCount} tool call${toolCount === 1 ? "" : "s"}`}><Sym n="terminal" s={10} cls="room-arow-metaic" /> {toolCount} {toolCount === 1 ? "tool" : "tools"}</span>}
+            {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
+          </span>
+        )}
         <span className="room-arow-time">{a.durationMs != null ? formatDurationMs(a.durationMs) : "—"}</span>
         <span className={`room-arow-state room-arow-state-${cls}`}>{agentStatusWord(a.status)}</span>
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
