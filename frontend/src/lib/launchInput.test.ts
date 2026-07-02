@@ -33,6 +33,9 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   autonomyCeiling: "",
   integrateBranches: false,
   acceptanceCriteria: [...DEFAULT_ACCEPTANCE],
+  acceptanceChecks: [],
+  requirePlanConfirmation: false,
+  plannerReview: "None",
   timeLimit: "3600",
   decisionReview: "None",
   outputReview: "None",
@@ -356,5 +359,50 @@ describe("buildLaunchInput — autonomy ceiling", () => {
   it("omits the ceiling on quick and standard (Coordination tab hidden)", () => {
     expect(buildLaunchInput(form({ effort: "quick", autonomyCeiling: "Confined" }))).not.toHaveProperty("autonomyCeiling");
     expect(buildLaunchInput(form({ effort: "standard", autonomyCeiling: "Confined" }))).not.toHaveProperty("autonomyCeiling");
+  });
+});
+
+describe("triad launch fields (S4)", () => {
+  it("sends the confirm gate + checks floor only on cap tiers and only when set", () => {
+    const deep = buildLaunchInput(form({ effort: "deep", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
+    expect(deep.requirePlanConfirmation).toBe(true);
+    expect(deep.acceptanceChecks).toEqual(["sh", "check.sh"]);
+
+    const quick = buildLaunchInput(form({ effort: "quick", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
+    expect(quick.requirePlanConfirmation).toBeUndefined();
+    expect(quick.acceptanceChecks).toBeUndefined();
+
+    const off = buildLaunchInput(form({ effort: "deep" }));
+    expect(off.requirePlanConfirmation).toBeUndefined();
+    expect(off.acceptanceChecks).toBeUndefined();
+  });
+
+  it("sends the plan critic only on the plan-map tiers and only when active", () => {
+    expect(buildLaunchInput(form({ effort: "standard", plannerReview: "Improve" })).plannerReviewMode).toBe("Improve");
+    expect(buildLaunchInput(form({ effort: "auto", plannerReview: "Gate" })).plannerReviewMode).toBe("Gate");
+    expect(buildLaunchInput(form({ effort: "deep", plannerReview: "Improve" })).plannerReviewMode).toBeUndefined();
+    expect(buildLaunchInput(form({ effort: "quick", plannerReview: "Improve" })).plannerReviewMode).toBeUndefined();
+    expect(buildLaunchInput(form({ effort: "standard" })).plannerReviewMode).toBeUndefined();
+  });
+
+  it("the reviewer model rides ANY active critic — including the plan critic alone", () => {
+    // The operator's pick sits directly beneath the Plan critic combo; dropping it silently would run the
+    // critic on the auto-picked model (the S4c review's top finding).
+    const plannerOnly = buildLaunchInput(form({ effort: "standard", plannerReview: "Gate", reviewerModel: "row-1" }));
+    expect(plannerOnly.reviewerModelId).toBe("row-1");
+
+    const noCritic = buildLaunchInput(form({ effort: "standard", reviewerModel: "row-1" }));
+    expect(noCritic.reviewerModelId).toBeUndefined();
+  });
+
+  it("gate + checks send on auto (it can route deep) and the checks array is a copy", () => {
+    const checks = ["sh", "check.sh"];
+    const auto = buildLaunchInput(form({ effort: "auto", requirePlanConfirmation: true, acceptanceChecks: checks }));
+
+    expect(auto.requirePlanConfirmation).toBe(true);
+    expect(auto.acceptanceChecks).toEqual(["sh", "check.sh"]);
+
+    checks.push("mutated");
+    expect(auto.acceptanceChecks).toEqual(["sh", "check.sh"]);
   });
 });

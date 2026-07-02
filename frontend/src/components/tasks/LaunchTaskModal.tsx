@@ -78,23 +78,31 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const [menu, setMenu] = useState<null | "perm" | "repos" | "mr">(null);
   const [effortOpen, setEffortOpen] = useState(false);
   const [repoSearch, setRepoSearch] = useState("");
-  const [customizeTab, setCustomizeTab] = useState<"execution" | "supervisor" | "safety" | "review">("execution");
+  const [customizeTab, setCustomizeTab] = useState<"execution" | "planning" | "supervisor" | "safety" | "evaluation">("execution");
   const [acceptDraft, setAcceptDraft] = useState("");
+  const [checksDraft, setChecksDraft] = useState("");
+
+  // Per-row tier honesty (the Coordination tab's lt3-cdisabled pattern, at row grain — these two tabs mix tiers):
+  // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
+  const deepTier = effort === "deep" || effort === "auto";
+  const planTier = effort === "standard" || effort === "auto";
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
     pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
     maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
-    acceptance: [...DEFAULT_ACCEPTANCE],
+    acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [] as string[],
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
+    requirePlanConfirmation: false, plannerReview: "None",
     decisionReview: "None", outputReview: "None", reviewerModel: "",
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
-    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: [...DEFAULT_ACCEPTANCE] });
-    else if (customizeTab === "review") setC({ decisionReview: "None", outputReview: "None", reviewerModel: "" });
+    else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", decisionReview: "None", reviewerModel: "" });
+    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "" });
+    else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None" });
     else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
 
@@ -187,7 +195,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
       taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
       agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
-      integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance,
+      integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
+      requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
       decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
@@ -362,10 +371,11 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
         {expanded && (
           <div className="lt3-cust">
             <div className="lt3-ctabs">
+              <button type="button" className="lt3-ctab" data-on={customizeTab === "planning"} onClick={() => setCustomizeTab("planning")}>Planning</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "execution"} onClick={() => setCustomizeTab("execution")}>Agent setup</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "supervisor"} onClick={() => setCustomizeTab("supervisor")}>Coordination</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "safety"} onClick={() => setCustomizeTab("safety")}>Permissions</button>
-              <button type="button" className="lt3-ctab" data-on={customizeTab === "review"} onClick={() => setCustomizeTab("review")}>Review</button>
+              <button type="button" className="lt3-ctab" data-on={customizeTab === "evaluation"} onClick={() => setCustomizeTab("evaluation")}>Evaluation</button>
               <button type="button" className="lt3-reset" onClick={resetTab}>Reset</button>
             </div>
 
@@ -439,19 +449,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   </div>
                 </RowPop>
                 <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
-                <RowPop label="Acceptance" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>
-                  <div className="lt3-chips2">
-                    {cfg.acceptance.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptance: cfg.acceptance.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
-                    <input className="lt3-chip2-add" placeholder="+ add" value={acceptDraft} onChange={e => setAcceptDraft(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key !== "Enter") return;
-                        e.preventDefault();
-                        const v = acceptDraft.trim();
-                        if (v && !cfg.acceptance.includes(v)) setC({ acceptance: [...cfg.acceptance, v] });
-                        setAcceptDraft("");
-                      }} />
-                  </div>
-                </RowPop>
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
                 <SToggleRow label="Integrate branches" on={cfg.integrateBranches} onToggle={() => setC({ integrateBranches: !cfg.integrateBranches })} />
               </> : (
@@ -471,11 +468,48 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                 <Combo label="Time limit" value={cfg.timeLimit} options={[{ value: "1800", label: "30 minutes" }, { value: "3600", label: "1 hour" }, { value: "7200", label: "2 hours" }, { value: "0", label: "No limit" }]} onChange={v => setC({ timeLimit: v })} />
               </>}
 
-              {customizeTab === "review" && <>
-                <div className="lt3-cnote">Have an independent model review the work before it lands. Off by default.</div>
-                <Combo label="Decisions (Deep)" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} />
-                <Combo label="Agent output" value={cfg.outputReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak change for human review" }]} onChange={v => setC({ outputReview: v })} />
+              {customizeTab === "planning" && <>
+                <div className="lt3-cnote">Think it through before any agent runs — the plan, its reviewer, and your say on it.</div>
+                {deepTier ? <SToggleRow label="Confirm plan first" on={cfg.requirePlanConfirmation} onToggle={() => setC({ requirePlanConfirmation: !cfg.requirePlanConfirmation })} /> : <TierRow label="Confirm plan first" tier="Deep only" />}
+                {planTier ? <Combo label="Plan critic" value={cfg.plannerReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — annotate concerns onto the plan" }, { value: "Improve", label: "Improve — one revision against the critique" }]} onChange={v => setC({ plannerReview: v })} /> : <TierRow label="Plan critic" tier="Standard only" />}
+                {deepTier ? <Combo label="Decision critic" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} /> : <TierRow label="Decision critic" tier="Deep only" />}
                 <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
+              </>}
+
+              {customizeTab === "evaluation" && <>
+                <div className="lt3-cnote">How the result is judged — free-text criteria steer the work; the checks command verifies it.</div>
+                {!deepTier && <TierRow label="Acceptance criteria" tier="Deep only" />}
+                {!deepTier && <TierRow label="Acceptance checks" tier="Deep only" />}
+                {deepTier && <RowPop label="Acceptance criteria" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>
+                  <div className="lt3-chips2">
+                    {cfg.acceptance.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptance: cfg.acceptance.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
+                    <input className="lt3-chip2-add" placeholder="+ add" value={acceptDraft} onChange={e => setAcceptDraft(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        const v = acceptDraft.trim();
+                        if (v && !cfg.acceptance.includes(v)) setC({ acceptance: [...cfg.acceptance, v] });
+                        setAcceptDraft("");
+                      }} />
+                  </div>
+                </RowPop>}
+                {deepTier && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : "None"}>
+                  <div className="lt3-chips2">
+                    {cfg.acceptanceChecks.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptanceChecks: cfg.acceptanceChecks.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
+                    <input className="lt3-chip2-add" placeholder="+ command, e.g. sh check.sh" value={checksDraft} onChange={e => setChecksDraft(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        // Split on whitespace: the backend execs a pure argv (no shell), so a pasted "sh check.sh"
+                        // must become two tokens — one space-containing chip would ENOENT the whole floor at stop.
+                        // No dedupe (unlike criteria): argv is a SEQUENCE and repeated tokens are legitimate.
+                        const parts = checksDraft.trim().split(/\s+/).filter(Boolean);
+                        if (parts.length) setC({ acceptanceChecks: [...cfg.acceptanceChecks, ...parts] });
+                        setChecksDraft("");
+                      }} />
+                  </div>
+                </RowPop>}
+                <Combo label="Agent output critic" value={cfg.outputReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak change for human review" }]} onChange={v => setC({ outputReview: v })} />
               </>}
             </div>
           </div>
@@ -505,6 +539,16 @@ function SendGlyph() {
 }
 
 /** A settings row whose value opens a custom popover (Limits, Acceptance). */
+/** An off-tier control rendered honestly: a muted read-only row naming the tier that owns it — never an armed switch the wire would silently drop (the same doctrine as the locked safety rows). */
+function TierRow({ label, tier }: { label: string; tier: string }) {
+  return (
+    <div className="lt3-srow lt3-srow-ro">
+      <span className="lt3-srow-l">{label}</span>
+      <span className="lt3-combo-v">{tier}</span>
+    </div>
+  );
+}
+
 function RowPop({ label, value, children }: { label: string; value: string; children: ReactNode }) {
   const { open, setOpen, btnRef, popRef, pos } = usePopover();
   return (

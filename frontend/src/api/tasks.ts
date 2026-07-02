@@ -70,8 +70,12 @@ export interface LaunchTaskInput {
   integrateBranches?: boolean;
   /** Deep-only: free-text acceptance criteria the supervisor targets (rendered into its prompt, never executed). Omitted when unchanged from the default. */
   acceptanceCriteria?: string[];
-  /** Deep-only: every authored plan version parks for the operator's confirmation before any agent runs (S3 gate). The run needs a conversation surface for the card — a launch without one force-stops fail-closed, so the modal does not expose this yet (S4 wires the surface). Omitted ⇒ fully autonomous planning. */
+  /** Deep-only: every authored plan version parks for the operator's confirmation before any agent runs (S3 gate; the launch stages the session's channel as the card surface). Omitted ⇒ fully autonomous planning. */
   requirePlanConfirmation?: boolean;
+  /** Standard/Auto: how an independent critic reviews the AUTHORED PLAN (the plan.author reviewMode) — "Gate" / "Improve". Omitted ⇒ no critic. */
+  plannerReviewMode?: string;
+  /** Deep-only: the EXECUTABLE acceptance argv floor (e.g. ["sh","check.sh"]) enforced at the terminal stop. Omitted ⇒ no floor. */
+  acceptanceChecks?: string[];
   /** Multi-repo working-directory mode (`"workspace"` / `"primary"`). Omitted for `"auto"` (the default). Inert on a single-repo run. */
   workingDirMode?: string;
   /** Per-run opt-in to the full (side-effecting) MCP tool fabric. Omitted (defer to the ambient flag) unless `true`. */
