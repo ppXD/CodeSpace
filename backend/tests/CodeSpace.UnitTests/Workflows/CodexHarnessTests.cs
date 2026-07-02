@@ -124,6 +124,66 @@ public class CodexHarnessTests
         spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" });
     }
 
+    [Fact]
+    public void Restores_the_prior_rollout_under_sessions_on_a_continue()
+    {
+        // P3 (Codex continue producer): on a CONTINUE the restored transcript is laid at sessions/rollout-<id>.jsonl —
+        // where `codex exec resume` finds it (it scans sessions/ and matches the id in the rollout filename; the
+        // original timestamp is NOT needed, verified against codex 0.142.2). The Goal/argv is unchanged by the restore.
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-x", RestoredTranscript = "{\"session_meta\":1}\n" });
+
+        var rollout = spec.ConfigHomeFiles.Single(f => f.RelativePath.StartsWith("sessions/", StringComparison.Ordinal));
+        rollout.RelativePath.ShouldBe("sessions/rollout-thr-x.jsonl", "codex resume matches the id in the rollout-<id> filename under sessions/");
+        rollout.Content.ShouldBe("{\"session_meta\":1}\n");
+    }
+
+    [Fact]
+    public void Fresh_run_restores_no_rollout_byte_identical_config_home()
+    {
+        // Both-or-neither: a fresh run (no resume, no transcript) adds no sessions file — byte-identical to today.
+        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldNotContain(f => f.RelativePath.StartsWith("sessions/", StringComparison.Ordinal));
+
+        // A resume id WITHOUT the captured bytes must NOT lay a rollout (a partial restore would fail "no rollout found").
+        Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-x", RestoredTranscript = null })
+            .ConfigHomeFiles.ShouldNotContain(f => f.RelativePath.StartsWith("sessions/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SessionTranscriptRelativePath_globs_the_id_bearing_rollout_under_sessions()
+    {
+        // CAPTURE-locate: Codex writes sessions/<date>/rollout-<ts>-<id>.jsonl with a timestamp not known ahead of
+        // time, so the file is FOUND by globbing the config home's sessions/ for the id-bearing rollout — not computed.
+        var resumable = (IAgentSessionTranscript)Harness;
+        var configHome = Path.Combine(Path.GetTempPath(), "cs-codex-locate-" + Guid.NewGuid().ToString("N"));
+        var nested = Path.Combine(configHome, "sessions", "2026", "07", "02");
+        Directory.CreateDirectory(nested);
+
+        try
+        {
+            var fileName = "rollout-2026-07-02T15-24-25-thread-abc.jsonl";
+            File.WriteAllText(Path.Combine(nested, fileName), "{}\n");
+
+            resumable.SessionTranscriptRelativePath(configHome, "/tmp/ws", "thread-abc")
+                .ShouldBe(Path.Combine("sessions", "2026", "07", "02", fileName), "globs the date-nested rollout whose filename carries the thread id");
+
+            resumable.SessionTranscriptRelativePath(configHome, "/tmp/ws", "thread-does-not-exist").ShouldBeNull("no rollout carries this id → cold-start");
+            resumable.SessionTranscriptRelativePath(configHome, "/tmp/ws", null).ShouldBeNull("no session id → nothing to locate");
+            resumable.SessionTranscriptRelativePath(Path.Combine(configHome, "nonexistent"), "/tmp/ws", "thread-abc").ShouldBeNull("no sessions dir → cold-start, no throw");
+        }
+        finally
+        {
+            try { Directory.Delete(configHome, recursive: true); } catch { /* best-effort temp cleanup */ }
+        }
+    }
+
+    [Fact]
+    public void SessionsRoot_is_pinned_to_the_codex_home_relative_sessions_dir()
+    {
+        // Rule 8: pin the rollout-root constant. codex resume scans $CODEX_HOME/sessions — a rename silently breaks
+        // both capture (glob finds nothing) and restore (the CLI never sees the rollout). Re-verify on a Codex upgrade.
+        CodexHarness.SessionsRoot.ShouldBe("sessions");
+    }
+
     [Theory]
     [InlineData(null)]   // persona Model=empty rule: blank model → let Codex pick its own default
     [InlineData("")]

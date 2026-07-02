@@ -121,7 +121,8 @@ public class ClaudeCodeHarnessTests
         // BuildConfigHomeFiles RESTORES a transcript to — otherwise capture + restore key on different dirs and a
         // continue cold-starts. This pins that symmetry: SessionTranscriptRelativePath == the restore ConfigHomeFile's
         // RelativePath, both projects/<sanitized-cwd>/<id>.jsonl.
-        var capturePath = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath("/tmp/ws", "sess-x");
+        // Claude's path is COMPUTED from cwd+id, so the configHome arg is ignored (no search).
+        var capturePath = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath("/tmp/cfg", "/tmp/ws", "sess-x");
 
         var restorePath = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-x", RestoredTranscript = "x\n" })
             .ConfigHomeFiles.Single(f => f.RelativePath.StartsWith("projects/", StringComparison.Ordinal)).RelativePath;
@@ -135,9 +136,9 @@ public class ClaudeCodeHarnessTests
     {
         var h = (IAgentSessionTranscript)Harness;
 
-        h.SessionTranscriptRelativePath(null, "sess").ShouldBeNull("no cwd → nothing to encode the projects dir on");
-        h.SessionTranscriptRelativePath("/tmp/ws", null).ShouldBeNull("no session id → nothing to name the file");
-        h.SessionTranscriptRelativePath("   ", "sess").ShouldBeNull("a blank cwd is not addressable");
+        h.SessionTranscriptRelativePath("/tmp/cfg", null, "sess").ShouldBeNull("no cwd → nothing to encode the projects dir on");
+        h.SessionTranscriptRelativePath("/tmp/cfg", "/tmp/ws", null).ShouldBeNull("no session id → nothing to name the file");
+        h.SessionTranscriptRelativePath("/tmp/cfg", "   ", "sess").ShouldBeNull("a blank cwd is not addressable");
     }
 
     [Fact]

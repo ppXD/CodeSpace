@@ -69,4 +69,45 @@ public abstract class AgentHarnessContractTests
         Harness.BuildResult(Harness.ParseEvents(line), exitCode: 0).SessionId
             .ShouldBe(expectedId, "every harness must surface its CLI session/thread id so a rerun can CONTINUE the prior conversation");
     }
+
+    /// <summary>
+    /// The CONTINUE round-trip that makes conversation-resume coherent for ANY harness implementing the optional
+    /// <see cref="IAgentSessionTranscript"/> capability (Rule 7): whatever path its <c>BuildInvocation</c> RESTORES a
+    /// transcript to, its capture-locate MUST find on disk. This is generic over the two on-disk shapes — Claude's
+    /// computed <c>projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c> and Codex's globbed <c>sessions/…/rollout-…&lt;id&gt;</c> — because
+    /// it asserts the RELATION (restore ⟹ locatable), not a specific layout. A capture/restore key mismatch (the P3
+    /// cold-start bug) fails here for every harness. Harnesses without the capability are a clean no-op.
+    /// </summary>
+    [Fact]
+    public void A_restored_session_transcript_is_relocatable_by_the_capture_locator()
+    {
+        if (Harness is not IAgentSessionTranscript resumable) return;   // the capability is optional
+
+        const string sessionId = "sess-contract-roundtrip";
+        var configHome = Path.Combine(Path.GetTempPath(), "cs-harness-contract-" + Guid.NewGuid().ToString("N"));
+        var cwd = Path.Combine(configHome, "ws");   // a resolved path the harness keys its layout on (or ignores)
+        Directory.CreateDirectory(cwd);
+
+        try
+        {
+            var continueTask = MinimalTask() with { WorkspaceDirectory = cwd, ResumeFromSessionId = sessionId, RestoredTranscript = "{\"turn\":1}\n" };
+
+            // Materialize the harness's restore ConfigHomeFiles into the config home — what the runner does at launch.
+            foreach (var file in Harness.BuildInvocation(continueTask).ConfigHomeFiles)
+            {
+                var dest = Path.Combine(configHome, file.RelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.WriteAllText(dest, file.Content);
+            }
+
+            var located = resumable.SessionTranscriptRelativePath(configHome, cwd, sessionId);
+
+            located.ShouldNotBeNull("a harness that RESTORES a transcript must re-LOCATE it for capture — else capture+restore key on different paths and a continue cold-starts");
+            File.Exists(Path.Combine(configHome, located!)).ShouldBeTrue("the located path resolves to the file the harness restored");
+        }
+        finally
+        {
+            try { Directory.Delete(configHome, recursive: true); } catch { /* best-effort temp cleanup */ }
+        }
+    }
 }

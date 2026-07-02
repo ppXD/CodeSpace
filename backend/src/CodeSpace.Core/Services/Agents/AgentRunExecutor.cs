@@ -503,7 +503,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (harness is not IAgentSessionTranscript resumable) return result;
 
-        if (resumable.SessionTranscriptRelativePath(task.WorkspaceDirectory, result.SessionId) is not { } relativePath) return result;
+        if (string.IsNullOrEmpty(result.SessionId)) return result;   // no captured session → nothing to resume (both harness shapes need it)
 
         try
         {
@@ -511,7 +511,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (handle is null) return result;   // a non-durable runner has no on-disk config home to read
 
-            if (ResolveSessionTranscriptPath(LocalProcessRunner.ConfigHomePath(handle.SpoolDirectory), relativePath) is not { } path)
+            var configHome = LocalProcessRunner.ConfigHomePath(handle.SpoolDirectory);
+
+            // Locate the transcript WITHIN the config home — a computable path (Claude) or a glob (Codex, whose rollout
+            // name carries a timestamp unknown ahead of time). Null → this run can't address one → cold-start on continue.
+            if (resumable.SessionTranscriptRelativePath(configHome, task.WorkspaceDirectory, result.SessionId) is not { } relativePath) return result;
+
+            if (ResolveSessionTranscriptPath(configHome, relativePath) is not { } path)
             {
                 _logger.LogWarning("Agent run {RunId}: the session-transcript path escaped the config home (hostile session id?); skipping capture", runId);
                 return result;
@@ -557,11 +563,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// within <paramref name="configHome"/>. The session id naming the file is captured from the agent's UNTRUSTED
     /// stream unescaped, AND the agent has WRITE access to its config home (it is <c>--bind</c>-mounted), so two escapes
     /// must be blocked: a hostile id (<c>../../etc/passwd</c>) that spells out of bounds — caught lexically — and a
-    /// planted SYMLINK (<c>ln -s /etc/passwd projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c>) that spells in bounds but points
-    /// out — caught by resolving the link's FINAL target and re-clamping (fail-closed, matching ArtifactPresentGrader).
-    /// Capture runs AFTER the agent process exits, so there is no live check-then-read race. Returns null when the path
-    /// escapes (the caller logs + skips); a non-existent in-bounds path is returned as-is (the caller's existence check
-    /// then treats it as a cold-start).
+    /// planted SYMLINK that spells in bounds but points out. The symlink can be the LEAF (<c>ln -s /etc/passwd
+    /// projects/&lt;cwd&gt;/&lt;id&gt;.jsonl</c>) OR an INTERMEDIATE DIRECTORY (<c>ln -s / sessions/leak</c>, then a real
+    /// <c>rollout-&lt;id&gt;.jsonl</c> under the linked target — which a search-based locate like Codex's glob surfaces and
+    /// a leaf-only resolve misses). So the check walks EVERY component from just below the config home to the leaf and
+    /// fail-closes on ANY symlink: the CLIs only ever write real files/dirs here, so a symlink component in this subtree
+    /// is inherently hostile. Capture runs AFTER the agent process exits, so there is no live check-then-read race.
+    /// Returns null when the path escapes (the caller logs + skips); a non-existent in-bounds path is returned as-is
+    /// (the caller's existence check then treats it as a cold-start).
+    ///
+    /// <para>RESIDUAL (documented, not closed here): a HARDLINK carries no link target, so a per-component symlink walk
+    /// cannot see it. This is NOT a symlink-style escalation under the default hardening — Linux <c>protected_hardlinks=1</c>
+    /// (the modern default) only permits hardlinking a file the caller can already READ, so a confined agent gains
+    /// nothing it couldn't get by copying, and under bubblewrap its namespace exposes only the read-only-bound roots, not
+    /// operator secrets. It is exploitable only with <c>protected_hardlinks=0</c> AND a worker-readable-but-agent-unreadable
+    /// secret on the config-home filesystem — a deployment misconfiguration. No cheap managed check closes it (a realpath
+    /// re-clamp does not: a hardlink's PATH is genuinely in-bounds); the airtight fix is to capture from WITHIN the
+    /// sandbox namespace instead of host-side post-exit, tracked as a follow-up.</para>
     /// </summary>
     internal static string? ResolveSessionTranscriptPath(string configHome, string relativePath)
     {
@@ -570,8 +588,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (!lexical.StartsWith(boundary, StringComparison.Ordinal)) return null;   // .. escape / absolute / the home itself
 
-        if (File.Exists(lexical) && new FileInfo(lexical).ResolveLinkTarget(returnFinalTarget: true) is { } target
-            && !Path.GetFullPath(target.FullName).StartsWith(boundary, StringComparison.Ordinal)) return null;   // symlink pointing OUT
+        // Reject ANY symlink component below the config home — an intermediate directory symlink defeats a leaf-only
+        // check and lets a search/computed path escape the tree (LinkTarget is non-null IFF the component is a symlink).
+        for (var current = lexical; current.Length > boundary.Length && current.StartsWith(boundary, StringComparison.Ordinal); current = Path.GetDirectoryName(current) ?? "")
+            if ((new FileInfo(current).LinkTarget ?? new DirectoryInfo(current).LinkTarget) is not null) return null;
 
         return lexical;
     }
