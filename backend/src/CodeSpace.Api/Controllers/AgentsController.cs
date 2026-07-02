@@ -66,6 +66,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Per-agent run stats — one row per persona with runs: its recent-outcome sparkline, windowed success rate, latency, spend, and last-active stamp. The evidence the Agents roster shows on each agent row. Optional since window narrows the horizon. Team-scoped (the team is the X-Team-Id header, never the query string).</summary>
+    [HttpGet("stats")]
+    public async Task<IActionResult> GetStats([FromQuery] GetAgentStatsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>The team's supervisor-run scorecard — the cross-run roll-up (avg decisions/replan rounds, overall ground-truth spawn success, outcome distribution) + recent per-run scores over the durable supervisor lane. Optional since filter windows the trend. Team-scoped (the team is the X-Team-Id header, never the query string); empty when no supervisor runs exist.</summary>
     [HttpGet("supervisor-scorecard")]
     public async Task<IActionResult> GetSupervisorScorecard([FromQuery] GetSupervisorScorecardQuery query, CancellationToken cancellationToken)
