@@ -346,6 +346,21 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A_single_agent_turn_with_no_supervisor_leads_with_that_agents_own_summary()
+    {
+        var a1 = Guid.NewGuid();
+
+        // A plain agent turn has NO supervisor tape, so ComposeLead (which walks tape agents) sees nothing; the reply
+        // still isn't voiceless — it leads with the sole agent's own summary.
+        var solo = new RoomTurnFacts { AgentSummaries = new Dictionary<Guid, string> { [a1] = "Printed PONG." } };
+        Build(Array.Empty<RunPhase>(), facts: solo).Summary.ShouldBe("Printed PONG.", "no supervisor tape → the reply leads with the sole agent's own summary");
+
+        // The sole-agent fallback fires ONLY for exactly one summary — two agents with no tape have no single voice.
+        var two = new RoomTurnFacts { AgentSummaries = new Dictionary<Guid, string> { [a1] = "A", [Guid.NewGuid()] = "B" } };
+        Build(Array.Empty<RunPhase>(), facts: two).Summary.ShouldBeNull("two agents with no tape → no sole-agent lead (ComposeLead needs the tape)");
+    }
+
+    [Fact]
     public void With_no_summaries_at_all_the_lead_falls_back_to_a_factual_recap()
     {
         // No stop summary, no agent summaries (e.g. agents hit provider errors) → the reply still isn't voiceless.

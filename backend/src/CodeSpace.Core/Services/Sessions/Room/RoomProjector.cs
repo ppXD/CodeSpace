@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
@@ -191,6 +192,8 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
         var subtasks = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson).Select(s => s.Title).ToList();
 
+        var agentIds = phases.SelectMany(p => p.Agents).Select(a => a.AgentRunId).Distinct().ToList();
+
         // The turn's agent results (latest fold per agent) — the one read drives the changed-file list, the per-agent
         // card summaries, and the lead fallback (no stop summary → compose from these).
         var agentResults = decisions
@@ -198,6 +201,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
             .GroupBy(r => r.AgentRunId).Select(g => g.Last())
             .ToList();
+
+        // A single-agent / non-supervisor run has an EMPTY decision tape, so the fold above is empty. Source its result
+        // straight from the run's own AgentRun rows (the persisted AgentRunResult — summary + git-ground-truth changed
+        // files) so a plain agent turn still shows a RESULT + its output, not just the execution dots.
+        if (decisions.Count == 0 && agentIds.Count > 0)
+            agentResults = await ReadAgentRunResultsAsync(agentIds, cancellationToken).ConfigureAwait(false);
 
         var changedFiles = agentResults
             .SelectMany(r => r.ChangedFiles)
@@ -216,7 +225,11 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
 
-        var agentIds = phases.SelectMany(p => p.Agents).Select(a => a.AgentRunId).Distinct().ToList();
+        // The delivered answer text: the supervisor's stop summary, else — for a single-agent run with no supervisor —
+        // that one agent's own final summary (its result IS the answer). A multi-agent run without a supervisor has no
+        // synthesized answer, so it falls to the file attachments alone.
+        var finalAnswerText = SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson)
+            ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
         // The turn's tool-call TOTAL — summed from the already-projected per-agent counts (no extra query; the same
         // figure the agent cards show). Dedup by agent (an agent can appear in both a decision + an authored phase).
@@ -273,7 +286,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson), changedFiles, delivery),
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFiles, delivery),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             Subtasks = subtasks,
@@ -303,6 +316,33 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
         return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments };
+    }
+
+    /// <summary>
+    /// The run's OWN agent results, read straight from the durable AgentRun rows — the non-supervisor path (empty
+    /// decision tape). Projects each row's persisted <c>AgentRunResult</c> (summary + git-ground-truth changed files)
+    /// into the same <see cref="SupervisorAgentResult"/> shape the tape fold yields, so the downstream projection
+    /// (changed files · card summaries · final answer) is identical for a plain agent turn.
+    /// </summary>
+    private async Task<List<SupervisorAgentResult>> ReadAgentRunResultsAsync(IReadOnlyList<Guid> agentIds, CancellationToken cancellationToken)
+    {
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => agentIds.Contains(r.Id))
+            .Select(r => new { r.Id, r.Status, r.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Select(r =>
+        {
+            var result = string.IsNullOrWhiteSpace(r.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(r.ResultJson!, AgentJson.Options);
+
+            return new SupervisorAgentResult
+            {
+                AgentRunId = r.Id,
+                Status = r.Status.ToString(),
+                Summary = result?.Summary,
+                ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
+            };
+        }).ToList();
     }
 
     private const int MaxChangedFiles = 200;
