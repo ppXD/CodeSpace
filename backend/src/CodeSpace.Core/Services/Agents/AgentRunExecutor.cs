@@ -57,6 +57,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private const int MaxPatchChars = 1_000_000;
 
     /// <summary>
+    /// Air-gapped/large-context operator override (Rule 8) for the max session-transcript file size the P3 capture will
+    /// read into memory. The session <c>.jsonl</c> is read whole into a string and then offloaded, so the transient
+    /// per-capture peak is ~3× the file size (a ~2× UTF-8→UTF-16 string co-resident with the ~1× <c>byte[]</c> the
+    /// artifact offloader encodes) — and it is NOT bounded across concurrency, so the worst-case envelope is roughly
+    /// <c>runningParallelism × 3× cap</c> when many runs complete at once (raise the cap only on a worker sized for it;
+    /// LOWER it on a constrained one). Beyond the cap the capture SKIPS (a continue cold-starts) rather than risk an OOM.
+    /// Full-fidelity capture of an over-cap session would need a streaming artifact put — a separate slice; skipping is
+    /// the safe floor (a cold-start is strictly better than an OOM).
+    /// </summary>
+    public const string MaxSessionTranscriptBytesEnvVar = "CODESPACE_AGENT_MAX_SESSION_TRANSCRIPT_BYTES";
+
+    /// <summary>Default session-transcript capture cap — 32 MiB comfortably covers realistic multi-hour conversations; a larger file is treated as pathological and skipped. Env-overridable via <see cref="MaxSessionTranscriptBytesEnvVar"/>.</summary>
+    internal const long DefaultMaxSessionTranscriptBytes = 32L * 1024 * 1024;
+
+    /// <summary>
     /// Operators opt INTO pushing a successful run's diff to a remote branch (a side-effecting write to the
     /// user's remote) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything
     /// else → no push), so every existing run is byte-identical until an operator flips it. Pinned by a test
@@ -495,6 +510,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (!File.Exists(path)) return result;   // the CLI wrote its session elsewhere (cwd mismatch) or not at all — cold-start on continue
 
+            var length = new FileInfo(path).Length;
+            var cap = MaxSessionTranscriptBytes();
+
+            if (length > cap)   // a pathological session file — skip rather than read it whole into memory (cold-start >> OOM)
+            {
+                _logger.LogWarning("Agent run {RunId}: session transcript is {Bytes} bytes (> {Cap} cap); skipping capture — a continue will cold-start", runId, length, cap);
+                return result;
+            }
+
             return result with { SessionTranscript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false) };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -527,6 +551,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return lexical;
     }
+
+    /// <summary>The session-transcript capture cap in bytes — the env override (<see cref="MaxSessionTranscriptBytesEnvVar"/>) when it parses to a positive long, else <see cref="DefaultMaxSessionTranscriptBytes"/>.</summary>
+    private static long MaxSessionTranscriptBytes() =>
+        ParseMaxSessionTranscriptBytes(Environment.GetEnvironmentVariable(MaxSessionTranscriptBytesEnvVar), DefaultMaxSessionTranscriptBytes);
+
+    /// <summary>Parse the cap override — a positive long wins; anything else (null / non-numeric / non-positive) falls back to <paramref name="fallback"/>. Pure, so the parse + fallback is unit-pinned without touching the process env.</summary>
+    internal static long ParseMaxSessionTranscriptBytes(string? raw, long fallback) =>
+        long.TryParse(raw, out var value) && value > 0 ? value : fallback;
 
     private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {

@@ -204,6 +204,50 @@ public class RealHarnessExecutionTests
     }
 
     [Fact]
+    public async Task Real_executor_skips_capturing_a_session_transcript_over_the_size_cap()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A0: a pathologically-large session .jsonl must NOT be read whole into memory (OOM risk) — over the cap the
+        // capture SKIPS and a continue cold-starts (cold-start >> OOM). Proven end-to-end: a real fake CLI writes a real
+        // session file, the cap env is lowered below it, and the REAL executor persists an EMPTY transcript + still
+        // Succeeds. Env mutation is safe here — PostgresCollection serializes its classes, and only the capture path (this
+        // collection) reads this var; restored in finally.
+        const string sid = "sess-claude-realexec";
+        const string sessionContent = "{\"type\":\"assistant\",\"text\":\"this transcript is over the (test-lowered) cap\"}\n";
+
+        var workspaceDir = Path.Combine(Path.GetTempPath(), "cs-cap-ws-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceDir);
+        var relPath = ClaudeTranscriptPath.For(workspaceDir, sid);
+
+        var priorCap = Environment.GetEnvironmentVariable(AgentRunExecutor.MaxSessionTranscriptBytesEnvVar);
+        using var cli = new FakeCli(ClaudeCodeHarness.CommandEnvVar, ClaudeSessionFixture);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.MaxSessionTranscriptBytesEnvVar, "10");   // 10 bytes < the session file
+
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_SESSION_REL"] = relPath, ["FAKE_SESSION_CONTENT"] = sessionContent };
+            var runId = await CreateRunAsync(teamId, "claude-code", env, workspaceDirectory: workspaceDir);
+
+            await ExecuteRealAsync(runId);
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "an over-cap transcript never fails the run — it just isn't captured");
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.SessionTranscript.ShouldBe("", "the over-cap session file was skipped (not read into memory) — a continue cold-starts");
+            result.SessionTranscriptArtifactId.ShouldBeNull("nothing captured → nothing offloaded");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.MaxSessionTranscriptBytesEnvVar, priorCap);
+            if (Directory.Exists(workspaceDir)) Directory.Delete(workspaceDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Real_executor_captures_the_claude_session_transcript_from_the_config_home()
     {
         if (OperatingSystem.IsWindows()) return;
