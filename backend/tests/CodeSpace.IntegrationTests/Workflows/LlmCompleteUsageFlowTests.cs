@@ -92,6 +92,42 @@ public class LlmCompleteUsageFlowTests
         cost.ValueKind.ShouldBe(JsonValueKind.Null, "an unpriced model yields a present-but-null cost on the ledger — never a dropped key or a bogus zero");
     }
 
+    [Fact]
+    public async Task Llm_complete_records_its_interaction_via_the_engine_node_scope_with_no_manual_push()
+    {
+        // Recording coverage: the ENGINE now pushes a node-level LlmCallScope around every node, so a model-calling
+        // node's interaction.* triple lands on the ledger WITHOUT the node writing any capture code (before, ONLY
+        // supervisor.decision pushed a scope, so llm.complete / planner / critic / merge recorded nothing). Prove an
+        // llm.complete run persists interaction.started + interaction.completed, keyed to the node + attributed by kind.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PricedModel, provider: DeterministicSynthLlmClient.ProviderTag);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, PricedModel);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var interactions = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && (r.RecordType == WorkflowRunRecordTypes.InteractionStarted || r.RecordType == WorkflowRunRecordTypes.InteractionCompleted))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        interactions.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted },
+            customMessage: "the engine's node-level scope auto-records the llm.complete model call — no manual push, no per-node capture code");
+        interactions.ShouldAllBe(r => r.NodeId == "gen", "the interaction is bound to the node that made the call");
+        interactions[0].CorrelationId.ShouldNotBeNull();
+        interactions[0].CorrelationId.ShouldBe(interactions[1].CorrelationId, "the started+completed pair share one correlation id");
+
+        var started = JsonDocument.Parse(interactions[0].PayloadJson).RootElement;
+        started.GetProperty("kind").GetString().ShouldBe("llm.complete", "the interaction is attributed to the node type that made the call");
+        started.GetProperty("prompt").GetProperty("user").GetString().ShouldContain("reduce these results", Case.Sensitive, "the captured prompt is the node's real user prompt");
+
+        var completed = JsonDocument.Parse(interactions[1].PayloadJson).RootElement;
+        completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(19, "the completion usage is captured on the interaction row");
+    }
+
     private async Task<Guid> CreateLlmWorkflowAsync(Guid teamId, Guid userId, string pinnedModel)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

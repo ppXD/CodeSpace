@@ -4,12 +4,15 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
 /// <summary>
-/// The ambient run-correlation for an in-process model call — a scoped caller (e.g. the supervisor turn) PUSHES one
-/// around a model call so the singleton <see cref="RecordingStructuredLLMClientDecorator"/> can (a) bind its
-/// <c>interaction.*</c> rows to the right run / node / turn and (b) reach the SCOPED ledger writer + artifact
-/// offloader — a singleton decorator can't inject scoped collaborators, so they ride the scope. Absent (no caller
-/// pushed one — a model call outside any run) ⇒ the decorator records nothing (FAIL-OPEN). Flows across awaits via
-/// <see cref="AsyncLocal{T}"/>; the prior value is restored on dispose so nested / sequential calls don't leak.
+/// The ambient run-correlation for an in-process model call so the singleton <see cref="RecordingStructuredLLMClientDecorator"/>
+/// can (a) bind its <c>interaction.*</c> rows to the right run / node / turn and (b) reach the SCOPED ledger writer +
+/// artifact offloader — a singleton decorator can't inject scoped collaborators, so they ride the scope. The ENGINE
+/// pushes a NODE-level scope around every node's execution (<c>WorkflowEngine.RunNodeOnceAsync</c>), so EVERY model call
+/// a node makes (llm.complete, the plan-author's planner + critic, any future one) is recorded with zero per-node wiring;
+/// a specific caller (e.g. the supervisor turn) may NEST a finer scope (a different <c>Kind</c> / turn iteration) that
+/// wins for its own call. Absent (a model call outside any run — e.g. an off-graph pre-flight) ⇒ the decorator records
+/// nothing (FAIL-OPEN). Flows across awaits via <see cref="AsyncLocal{T}"/>; the prior value is restored on dispose so
+/// nested / sequential calls don't leak.
 /// </summary>
 public sealed record LlmCallScope(
     Guid RunId,

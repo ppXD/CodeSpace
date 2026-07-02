@@ -50,6 +50,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly INodeRegistry _nodeRegistry;
     private readonly IVariableService _variableService;
     private readonly IRunRecordLogger _recordLogger;
+    private readonly IArtifactOffloader _offloader;
     private readonly IPayloadRedactor _redactor;
     private readonly IArtifactStore _artifactStore;
     private readonly ILogger<WorkflowEngine> _logger;
@@ -75,7 +76,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -83,6 +84,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _recordLogger = recordLogger;
         _redactor = redactor;
         _artifactStore = artifactStore;
+        _offloader = offloader;
         _logger = logger;
         _loggerFactory = loggerFactory;
         _backgroundJobClient = backgroundJobClient;
@@ -2954,6 +2956,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             var context = BuildNodeRunContext(exec);
+
+            // Recording (make "record EVERY in-process model call" literally true, not just supervisor.decision): push the
+            // run/node correlation + this engine's SCOPED ledger writer + offloader for the duration of the node, so the
+            // singleton RecordingLLMClientDecorator captures the interaction.* triple of ANY model call the node makes
+            // (llm.complete, the plan-author's planner + critic, a future model-calling node) with ZERO per-node wiring.
+            // A more-specific inner Push (e.g. the supervisor's per-turn "supervisor.decision") nests + wins for its call.
+            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader));
+
             var result = await exec.Runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
             return (result, null);
         }
