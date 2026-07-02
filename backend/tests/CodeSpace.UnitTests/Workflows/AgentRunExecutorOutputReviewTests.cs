@@ -1,7 +1,11 @@
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Review;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Agents;
@@ -29,7 +33,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var input = SucceededWithChanges();   // OutputReviewMode defaults to None
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, DefaultTask, input, Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(DefaultTask, input, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("None never reviews — byte-identical to no review");
         result.ShouldBeSameAs(input, "the result is passed through reference-unchanged");
@@ -42,7 +46,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, failed, Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, failed, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a non-success has no produced change to gate");
         result.Status.ShouldBe(AgentRunStatus.Failed);
@@ -54,7 +58,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, noChanges, Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, noChanges, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a no-op / re-attach run with no captured diff has nothing to gate");
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
@@ -66,7 +70,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks good" });
 
         var input = SucceededWithChanges();
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, input, Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, input, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeTrue("a gated run with a diff IS reviewed");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "an approved change stays a clean success");
@@ -78,7 +82,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"));
 
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, SucceededWithChanges(), Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a failed review is never worse than no review — fail-open");
         runs.AppendedEvents.ShouldBeEmpty();
@@ -89,7 +93,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Issues = new[] { "no tests for the new path" }, Rationale = "incomplete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, SucceededWithChanges(), Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "a disapproved change blocks the clean-success path so a human looks");
         result.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
@@ -111,12 +115,50 @@ public sealed class AgentRunExecutorOutputReviewTests
         // blocking decision is pending, the output review is skipped entirely — the critic is never even called.
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false }, pendingDecision: Guid.NewGuid());
 
-        var result = await executor.ReviewOutputIfEnabledAsync(runId, GatedTask, SucceededWithChanges(), Guid.NewGuid(), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a pending decision defers to A1 — the output review never runs");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the output review leaves the status for A1 to re-grade at completion");
         runs.AppendedEvents.ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task A_workflow_run_pushes_an_agent_critic_scope_keyed_to_the_cell_so_the_call_records()
+    {
+        // The critic is the executor's one IN-PROCESS model call, and it runs OUTSIDE the engine's per-node scope. This
+        // pins the fix: when the agent run belongs to a workflow run, the critic call is made UNDER an LlmCallScope keyed
+        // to the run's (WorkflowRunId, NodeId, IterationKey) cell with kind "agent.critic" — so the recording decorator
+        // lands its interaction.* on the SAME workflow_run_record ledger as the rest of the run.
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        var workflowRunId = Guid.NewGuid();
+        var run = Run(runId, workflowRunId: workflowRunId, nodeId: "agent-node", iterationKey: "agent-node#2");
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), run, CancellationToken.None);
+
+        critic.Called.ShouldBeTrue();
+        critic.ObservedScope.ShouldNotBeNull("the critic call is made under a pushed recording scope");
+        critic.ObservedScope!.RunId.ShouldBe(workflowRunId, "the interaction is bound to the OWNING workflow run, not the agent run id");
+        critic.ObservedScope.NodeId.ShouldBe("agent-node");
+        critic.ObservedScope.IterationKey.ShouldBe("agent-node#2", "the full cell key rides so a map-branch agent's critic is distinguishable");
+        critic.ObservedScope.Kind.ShouldBe("agent.critic", "the step is attributed as the agent's critic, not the node's own call");
+    }
+
+    [Fact]
+    public async Task A_standalone_run_pushes_no_scope_so_the_critic_runs_byte_identically()
+    {
+        // A standalone agent run (no WorkflowRunId) has no workflow_run_record ledger to write to, so NO scope is pushed
+        // — the critic still runs (records nothing), fail-open and byte-identical to the pre-recording behaviour.
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
+
+        critic.Called.ShouldBeTrue("the critic still runs for a standalone run");
+        critic.ObservedScope.ShouldBeNull("no workflow run ⇒ no scope pushed ⇒ the call records nothing (fail-open)");
+    }
+
+    private static AgentRun Run(Guid id, Guid? workflowRunId = null, string? nodeId = null, string iterationKey = "") =>
+        new() { Id = id, TeamId = Guid.NewGuid(), WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey };
 
     private static AgentTask DefaultTask => new() { Goal = "g", Harness = "codex-cli" };   // OutputReviewMode = None
     private static AgentTask GatedTask => new() { Goal = "g", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate };
@@ -131,7 +173,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         return (runId, executor, runs, critic);
     }
 
-    /// <summary>A minimal IServiceScopeFactory whose scope resolves ONLY the ledger (the single dep the A1-defer guard pulls from a fresh scope).</summary>
+    /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard) plus the record logger + offloader the recording scope pulls from a fresh scope.</summary>
     private sealed class FakeScopeFactory : IServiceScopeFactory, IServiceScope, IServiceProvider
     {
         private readonly IToolCallLedgerService _ledger;
@@ -139,8 +181,47 @@ public sealed class AgentRunExecutorOutputReviewTests
 
         public IServiceScope CreateScope() => this;
         public IServiceProvider ServiceProvider => this;
-        public object? GetService(Type serviceType) => serviceType == typeof(IToolCallLedgerService) ? _ledger : null;
+        public object? GetService(Type serviceType) =>
+            serviceType == typeof(IToolCallLedgerService) ? _ledger
+            : serviceType == typeof(IRunRecordLogger) ? new NoopRecordLogger()
+            : serviceType == typeof(IArtifactOffloader) ? new NoopOffloader()
+            : null;
         public void Dispose() { }
+    }
+
+    /// <summary>The offloader carried on the pushed scope. Never exercised here (the fake critic short-circuits before any decorator) — it only needs to be resolvable and non-null so the scope can be constructed.</summary>
+    private sealed class NoopOffloader : IArtifactOffloader
+    {
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken ct) => Task.FromResult(new OffloadedText(text ?? "", null));
+        public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken ct) => Task.FromResult(inline ?? "");
+    }
+
+    /// <summary>The ledger writer carried on the pushed scope. Never exercised here (the fake critic never reaches the recording decorator) — every member is an inert no-op; it only needs to be resolvable and non-null.</summary>
+    private sealed class NoopRecordLogger : IRunRecordLogger
+    {
+        public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
+        public Task RunQueuedAsync(Guid runId, string sourceType, Guid? actorId, CancellationToken ct) => Task.CompletedTask;
+        public Task RunStartedAsync(Guid runId, CancellationToken ct) => Task.CompletedTask;
+        public Task ReleaseLoadedAsync(Guid runId, int version, string definitionHash, int nodeCount, int edgeCount, CancellationToken ct) => Task.CompletedTask;
+        public Task ScopeResolvedAsync(Guid runId, int wfCount, int teamCount, int sysCount, int secretPathCount, CancellationToken ct) => Task.CompletedTask;
+        public Task VariablesSnapshottedAsync(Guid runId, int wfCount, int teamCount, string releaseHash, CancellationToken ct) => Task.CompletedTask;
+        public Task RunCompletedAsync(Guid runId, TimeSpan duration, bool outputsPresent, CancellationToken ct) => Task.CompletedTask;
+        public Task RunFailedAsync(Guid runId, string error, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task RunCancelledAsync(Guid runId, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task RunReplayedAsync(Guid runId, Guid? parentRunId, int snapshotCount, CancellationToken ct) => Task.CompletedTask;
+        public Task SupervisorRunRecoveredAsync(Guid runId, int attempt, CancellationToken ct) => Task.CompletedTask;
+        public Task<Guid> NodeStartedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
+        public Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task AttemptFailedAsync(Guid runId, string nodeId, string iterationKey, int attempt, int maxAttempts, string error, TimeSpan duration, double retryInSeconds, Guid? parentRecordId, CancellationToken ct) => Task.CompletedTask;
+        public Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken ct) => Task.CompletedTask;
+        public Task NodeSuspendedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, DateTimeOffset? wakeAt, CancellationToken ct) => Task.CompletedTask;
+        public Task IterationStartedAsync(Guid runId, string nodeId, int itemCount, CancellationToken ct) => Task.CompletedTask;
+        public Task IterationCompletedAsync(Guid runId, string nodeId, int itemCount, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task<(Guid RecordId, Guid CorrelationId)> ExternalCallStartedAsync(Guid runId, string? nodeId, string target, string method, JsonElement? requestPayload, Guid? parentRecordId, CancellationToken ct) => Task.FromResult((Guid.NewGuid(), Guid.NewGuid()));
+        public Task ExternalCallCompletedAsync(Guid runId, string? nodeId, Guid correlationId, int? statusCode, JsonElement? responsePayload, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken ct) => Task.CompletedTask;
+        public Task LogAsync(Guid runId, string? nodeId, LogLevel level, string message, CancellationToken ct) => Task.CompletedTask;
     }
 
     /// <summary>A minimal ledger: serves only FindBlockingDecisionIdAsync (a configurable blocking id, null = none). Every other member throws — the review step calls none of them.</summary>
@@ -171,9 +252,13 @@ public sealed class AgentRunExecutorOutputReviewTests
         public CriticVerdict Verdict { get; set; } = new() { Mode = ReviewMode.Gate };
         public bool Called { get; private set; }
 
+        /// <summary>The ambient LlmCallScope in flight when the critic was invoked — the executor's recording push, or null when none.</summary>
+        public LlmCallScope? ObservedScope { get; private set; }
+
         public Task<CriticVerdict> ReviewAsync(CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
         {
             Called = true;
+            ObservedScope = LlmCallContext.Current;
             return Task.FromResult(Verdict);
         }
     }
