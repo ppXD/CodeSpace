@@ -108,6 +108,26 @@ describe("AgentToolCalls", () => {
     expect(screen.getByText(/"query":"ai coding agents"/)).toBeInTheDocument();   // the arg preview, minus id/name
   });
 
+  it("renders a tool call's name + args, and makes long args a click-to-expand block (no lossy ellipsis)", () => {
+    const longPath = "/private/var/folders/z7/qrtkqj255vs6dg3wjfkgcn380000gn/T/codespace/really/long/ai-coding-agents-research-report.md";
+    state.run = { status: "Succeeded" };
+    state.isLoading = false;
+    state.eventsLoading = false;
+    state.identities = new Map();
+    state.toolCalls = [];
+    state.events = [
+      { sequence: 1, kind: "ToolCall", text: longPath, data: `{"id":"c1","name":"Read","type":"tool_use","input":{"file_path":"${longPath}","limit":100}}`, occurredAt: "2026-06-11T11:15:00Z" },
+    ];
+
+    const { container } = render(<AgentToolCalls agentRunId="r1" />);
+
+    expect(screen.getByText("Read")).toBeInTheDocument();   // the tool NAME (from data.name), not the raw path
+    const details = container.querySelector("details.tc-argbox");
+    expect(details).not.toBeNull();   // long args → a disclosure, not a hard-cut
+    const full = container.querySelector(".tc-args-full");
+    expect(full?.textContent).toContain(longPath);   // the FULL value is present, expandable — never truncated away
+  });
+
   it("shows the empty state when there are no tool calls at all", () => {
     state.run = { status: "Succeeded" };
     state.isLoading = false;
