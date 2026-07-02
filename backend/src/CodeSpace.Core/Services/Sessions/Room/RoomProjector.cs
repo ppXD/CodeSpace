@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Decisions;
@@ -207,9 +208,8 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var agentIds = phases.SelectMany(p => p.Agents).Select(a => a.AgentRunId).Distinct().ToList();
 
-        // Tool total from the already-projected phases (the phase source folded the per-agent count) — no second ledger
-        // query, and the room's "N tool calls" can't diverge from the board. Dedup by agent (an agent appears in both a
-        // decision phase + an authored phase). The reasoning COUNT is a distinct metric, so it stays one bounded query.
+        // The turn's tool-call TOTAL — summed from the already-projected per-agent counts (no extra query; the same
+        // figure the agent cards show). Dedup by agent (an agent can appear in both a decision + an authored phase).
         int? toolCalls = agentIds.Count == 0 ? null : phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).Sum(g => g.First().ToolCount ?? 0);
 
         var reasoningCount = agentIds.Count == 0 ? 0 : await _db.AgentRunEvent.AsNoTracking()
@@ -225,15 +225,19 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Take(MaxReasoningSteps)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // The per-kind tool histogram (WebSearch · read · edit · …) — one GROUP BY over the turn's agents' actual tool
-        // calls (the ToolCall event log's tool name), matching the ToolCount semantics (both now off the harness-native
-        // events, not the governed ledger). No N+1.
-        var toolHistogram = agentIds.Count == 0 ? new List<ToolKindCount>() : (await _db.AgentRunEvent.AsNoTracking()
-            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.ToolCall && e.Text != null && e.Text != "")
-            .GroupBy(e => e.Text!)
-            .Select(g => new { Kind = g.Key, Count = g.Count() })
-            .ToListAsync(cancellationToken).ConfigureAwait(false))
-            .Select(x => new ToolKindCount(x.Kind, x.Count))
+        // The per-TOOL histogram (Read · WebSearch · Write · …) — grouped by the tool NAME parsed from each ToolCall
+        // event's payload (data.name), NOT the event text (which for some tools is a path / description, so grouping on
+        // it produced noisy pseudo-"tools"). One bounded fetch of the payloads, grouped in-memory.
+        var toolPayloads = agentIds.Count == 0 ? new List<string?>() : await _db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.ToolCall)
+            .OrderBy(e => e.Sequence)
+            .Select(e => e.DataJson)
+            .Take(MaxToolScan)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var toolHistogram = toolPayloads
+            .GroupBy(ToolName)
+            .Select(g => new ToolKindCount(g.Key, g.Count()))
             .OrderByDescending(x => x.Count).ThenBy(x => x.Kind, StringComparer.Ordinal).ToList();
 
         // The live "working…" indicator source — the latest PUBLIC activity line per agent (never reasoning). Only for an
@@ -296,6 +300,21 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private const int MaxReasoningSteps = 40;
     private const int MaxLatestLineScan = 200;
     private const int MaxAnswerFiles = 40;
+    private const int MaxToolScan = 2000;
+
+    /// <summary>The tool NAME from a ToolCall event's payload (<c>data.name</c>, e.g. "Read" / "WebSearch") — the clean grouping key for the histogram. Falls back to "tool" for a missing / malformed payload.</summary>
+    private static string ToolName(string? dataJson)
+    {
+        if (string.IsNullOrEmpty(dataJson)) return "tool";
+
+        try
+        {
+            using var doc = JsonDocument.Parse(dataJson);
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String && n.GetString() is { Length: > 0 } name
+                ? name : "tool";
+        }
+        catch (JsonException) { return "tool"; }
+    }
 
     /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches). Null when the turn opened none.</summary>
     private async Task<RoomDelivery?> DeliveryAsync(Guid runId, CancellationToken cancellationToken)

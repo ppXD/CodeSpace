@@ -357,8 +357,9 @@ public static class RoomNarrative
     private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f) =>
         f.ChangedFiles.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, f.ChangedFiles.Count), Items = f.ChangedFiles.Select(p => new StatItem { Text = p }).ToList() };
 
+    /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>
-        f.ToolCalls is not > 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:tools", Seq = seq, Kind = "tools", Label = "Tools", Detail = ToolsDetail(f.ToolCalls.Value, f.ToolHistogram), Items = f.ToolHistogram.Select(h => new StatItem { Text = h.Kind, Detail = h.Count.ToString() }).ToList() };
+        f.ToolCalls is not > 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:tools", Seq = seq, Kind = "tools", Label = "Tools", Detail = Count(f.ToolCalls.Value, "call"), Items = f.ToolHistogram.Select(h => new StatItem { Text = h.Kind, Detail = h.Count.ToString() }).ToList() };
 
     /// <summary>"+148 −32 · 6 files" when the diff stat is captured, else just "6 files" (the line counts are a true gap → no "+X −Y").</summary>
     private static string FilesDetail(int? additions, int? deletions, int count)
@@ -366,10 +367,6 @@ public static class RoomNarrative
         var files = Count(count, "file");
         return DiffStat(additions, deletions) is { } diff ? $"{diff} · {files}" : files;
     }
-
-    /// <summary>"14 calls · read, edit, test" — the count plus the top tool kinds, or just the count when the histogram is empty.</summary>
-    private static string ToolsDetail(int calls, IReadOnlyList<ToolKindCount> histogram) =>
-        histogram.Count == 0 ? Count(calls, "call") : $"{Count(calls, "call")} · {string.Join(", ", histogram.Take(4).Select(h => h.Kind))}";
 
     private static string? DiffStat(int? additions, int? deletions) =>
         additions is { } a && deletions is { } d ? $"+{a} −{d}" : null;   // "+148 −32" (U+2212 minus); null until the diff stat is captured
