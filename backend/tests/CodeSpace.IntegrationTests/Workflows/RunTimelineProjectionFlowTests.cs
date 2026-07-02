@@ -56,6 +56,36 @@ public sealed class RunTimelineProjectionFlowTests
     }
 
     [Fact]
+    public async Task Projects_a_model_calls_completed_outcome_dropping_the_started_open_bracket()
+    {
+        // The recording substrate writes interaction.started/completed for every in-process model call; the timeline
+        // renders the OUTCOME (kind + model + token cost) at Detail and drops the started open bracket. Proves the render
+        // chain end-to-end: the source loads the interaction.* records (no type filter) and the new map arm surfaces them.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedRecordsAsync(runId,
+            (WorkflowRunRecordTypes.RunStarted, null, "{}", t),
+            (WorkflowRunRecordTypes.NodeStarted, "gen", "{}", t.AddSeconds(1)),
+            (WorkflowRunRecordTypes.InteractionStarted, "gen", """{"kind":"llm.complete","model":"claude-opus-4-8"}""", t.AddSeconds(2)),
+            (WorkflowRunRecordTypes.InteractionCompleted, "gen", """{"kind":"llm.complete","model":"claude-opus-4-8","usage":{"inputTokens":17,"outputTokens":19}}""", t.AddSeconds(3)),
+            (WorkflowRunRecordTypes.NodeCompleted, "gen", "{}", t.AddSeconds(4)),
+            (WorkflowRunRecordTypes.RunCompleted, null, "{}", t.AddSeconds(5)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var modelCalls = events!.Where(e => e.SourceKey == "run-record" && e.Title.StartsWith("Model call")).ToList();
+
+        modelCalls.ShouldHaveSingleItem("the completed outcome surfaces once; the interaction.started open bracket is Trace-only");
+        modelCalls[0].Title.ShouldBe("Model call");
+        modelCalls[0].Summary.ShouldBe("llm.complete · claude-opus-4-8 · 36 tokens", "the per-call kind + model + token cost surfaces in the narrative");
+        modelCalls[0].NodeId.ShouldBe("gen");
+        modelCalls[0].Level.ShouldBe(TimelineLevel.Detail);
+    }
+
+    [Fact]
     public async Task A_foreign_run_resolves_to_null()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
