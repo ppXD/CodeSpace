@@ -786,7 +786,7 @@ public static class SupervisorOutcome
 
     private static readonly IReadOnlyDictionary<string, string> EmptyRoles = new Dictionary<string, string>();
 
-    /// <summary>Read the single plan-local subtask id off a <c>retry</c> decision's PAYLOAD — null when absent/malformed. A retry re-runs ONE subtask as a fresh agent, so the phase projection (C2) remaps that subtask to the retry's fresh agent (latest attempt wins) rather than the original failed one.</summary>
+    /// <summary>Read the single plan-local subtask id off a <c>retry</c> decision's PAYLOAD — null when absent/malformed. A retry re-runs ONE subtask as a fresh agent; the phase projection appends that fresh agent to the subtask's attempt list (after the failed original), so the room renders BOTH the failure and its recovery.</summary>
     public static string? ReadRetrySubtaskId(string? retryPayloadJson)
     {
         if (string.IsNullOrWhiteSpace(retryPayloadJson)) return null;

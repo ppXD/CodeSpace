@@ -60,8 +60,14 @@ public sealed record RoomTurnFacts
     /// <summary>The raw engine error, surfaced behind "Show raw error" on a failure diagnostic. Null when there's nothing rawer than the humanized text.</summary>
     public string? RawError { get; init; }
 
+    /// <summary>The supervisor's RETRY beats in tape order — one per retry decision ("Supervisor retried a subtask"). The narrative renders each as a step so the room shows the recovery flow, not just the surviving agents. Empty when the turn had no retries.</summary>
+    public IReadOnlyList<RoomRetryStep> RetrySteps { get; init; } = Array.Empty<RoomRetryStep>();
+
     public static readonly RoomTurnFacts Empty = new();
 }
+
+/// <summary>One supervisor RETRY beat — the tape sequence it landed at and its user-facing line (authored by the shared timeline copy). Rendered as a narrative step so a failed-then-retried subtask reads as the trajectory it was.</summary>
+public sealed record RoomRetryStep(long Sequence, string Text);
 
 /// <summary>One bucket of the tool-call histogram — a tool kind and how many times the turn's agents called it.</summary>
 public sealed record ToolKindCount(string Kind, int Count);

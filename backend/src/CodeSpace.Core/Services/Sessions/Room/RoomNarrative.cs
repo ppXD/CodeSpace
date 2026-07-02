@@ -172,6 +172,8 @@ public static class RoomNarrative
                     blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:think{i}", Seq = seq, Text = $"Supervisor reviewed {AgentWord(authored[i].Agents.Count)}' results · planning the next step", Tone = NarrativeTone.Info });
             }
 
+            EmitRetrySteps(blocks, idPrefix, seq, facts);
+
             // Authored phases don't carry the supervisor's closing operation — surface it from the tape.
             foreach (var op in facts.Rounds.Select(r => r.Operation).Where(o => o != null).Select(o => o!).DistinctBy(o => o.Text))
                 blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:op:{op.Kind}", Seq = seq, Text = op.Text, Tone = op.Tone });
@@ -180,6 +182,8 @@ public static class RoomNarrative
         {
             foreach (var round in facts.Rounds)
                 EmitTapeRound(blocks, idPrefix, seq, status, round, facts, agentById);
+
+            EmitRetrySteps(blocks, idPrefix, seq, facts);
         }
         else if (AgentGroup(idPrefix, seq, status, facts, narrativePhases) is { } fanout)
         {
@@ -231,6 +235,13 @@ public static class RoomNarrative
 
         if (r.Operation is { } op)
             blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:r{r.Index}:op", Seq = seq, Text = op.Text, Tone = op.Tone });
+    }
+
+    /// <summary>The supervisor's retry beats — one "Supervisor retried a subtask" step per retry, rendered after the agent work so a failed-then-retried subtask reads as the recovery it was (its retry agent already shows as a card above, this is the connective line). No-op when the turn had no retries.</summary>
+    private static void EmitRetrySteps(List<RoomBlock> blocks, string idPrefix, long seq, RoomTurnFacts facts)
+    {
+        foreach (var step in facts.RetrySteps)
+            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:retry:{step.Sequence}", Seq = seq, Text = step.Text, Tone = NarrativeTone.Info });
     }
 
     /// <summary>The rich final answer — the closing text + typed attachments (files / PR / images), each rendered distinctly.</summary>
