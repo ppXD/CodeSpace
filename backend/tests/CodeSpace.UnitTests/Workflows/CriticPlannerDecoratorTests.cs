@@ -46,6 +46,20 @@ public class CriticPlannerDecoratorTests
     }
 
     [Fact]
+    public async Task The_producer_model_row_reaches_the_critic_for_the_distinct_first_reviewer_pick()
+    {
+        var producerRow = Guid.NewGuid();
+        var planner = new FakePlanner();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true } };
+        var decorator = new CriticPlannerDecorator(planner, critic);
+
+        await decorator.PlanAsync(new WorkflowPlanRequest { TaskText = "t", TeamId = Guid.NewGuid(), Review = ReviewMode.Gate, BrainModelId = producerRow }, CancellationToken.None);
+
+        critic.LastRequest!.ProducerModelRowId.ShouldBe(producerRow,
+            customMessage: "the reviewer's distinct-first ladder needs the producer's row — dropping it silently reverts to a same-model-possible pick");
+    }
+
+    [Fact]
     public async Task Gate_annotates_the_plan_risks_without_re_planning_or_discarding()
     {
         var planner = new FakePlanner();

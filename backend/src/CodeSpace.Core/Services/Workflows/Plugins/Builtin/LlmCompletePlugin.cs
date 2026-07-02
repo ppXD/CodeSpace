@@ -15,6 +15,7 @@ public sealed class LlmCompletePlugin : IPluginModule
     {
         typeof(LlmCompleteNode),
         typeof(PlanAuthorNode),
+        typeof(PlanConfirmNode),
     };
 
     public IReadOnlyList<Type> RunSourceMatchers { get; } = Array.Empty<Type>();

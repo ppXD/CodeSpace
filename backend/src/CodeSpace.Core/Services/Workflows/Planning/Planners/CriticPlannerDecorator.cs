@@ -34,7 +34,7 @@ public sealed class CriticPlannerDecorator : IWorkflowPlanner
         if (request.Review == ReviewMode.None || !CriticToggle.Enabled) return plan;
 
         var verdict = await _critic.ReviewAsync(
-            new CriticRequest { Mode = request.Review, ArtifactKind = "workflow plan", Artifact = Render(plan), Goal = request.TaskText },
+            new CriticRequest { Mode = request.Review, ArtifactKind = "workflow plan", Artifact = Render(plan), Goal = request.TaskText, ProducerModelRowId = request.BrainModelId },
             request.TeamId, request.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed) return plan;   // fail-open — a failed review is never worse than no review

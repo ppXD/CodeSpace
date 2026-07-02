@@ -61,7 +61,7 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — rendered into the supervisor decider prompt as the definition of done (NOT executed; distinct from the <c>acceptanceChecks</c> argv floor). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
-    /// <summary>The S3 plan-confirmation gate — every authored plan version parks the run for the operator's confirmation before any agent is created. Null / false ⇒ omitted (byte-identical, fully autonomous planning). Inert on a non-supervisor projection.</summary>
+    /// <summary>The plan-confirmation gate — every authored plan version parks the run for the operator's confirmation before any agent is created (supervisor in-loop on Deep; a <c>plan.confirm</c> node on the plan-map tiers). Null / false ⇒ omitted (byte-identical). Inert on the quick tier.</summary>
     public bool? RequirePlanConfirmation { get; init; }
 
     /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN on the plan-map tiers (S4b) — baked into the plan.author node's <c>reviewMode</c>. <see cref="ReviewMode.None"/> (default) ⇒ omitted (byte-identical). Inert elsewhere.</summary>

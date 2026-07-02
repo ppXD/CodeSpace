@@ -37,37 +37,62 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     {
         SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
         Nodes = BuildNodes(context),
-        Edges = BuildEdges(),
+        Edges = BuildEdges(context),
     };
 
-    private IReadOnlyList<NodeDefinition> BuildNodes(TaskBuildContext context) => new List<NodeDefinition>
+    private IReadOnlyList<NodeDefinition> BuildNodes(TaskBuildContext context)
     {
-        new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
+        var nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
-        new() { Id = "planner", TypeKey = "plan.author", Label = "Plan",
-                Config = PlannerConfig(context), Inputs = PlannerInputs(context) },
+            new() { Id = "planner", TypeKey = "plan.author", Label = "Plan",
+                    Config = PlannerConfig(context), Inputs = PlannerInputs(context) },
+        };
 
-        new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = MapConfigJson(context), Inputs = MapInputs() },
+        // The confirm gate (S4d): the operator opted into confirm-plan-first, so the run PARKS on the authored
+        // plan and the map binds the CONFIRM node's outputs — always the APPROVED version, never a rejected one.
+        // The gate node carries the SAME planner config so a revision re-plans under the same model + critic.
+        if (context.RequirePlanConfirmation)
+            nodes.Add(new() { Id = "confirm", TypeKey = "plan.confirm", Label = "Confirm plan",
+                              Config = PlannerConfig(context), Inputs = PlannerInputs(context) });
 
-        new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
+        nodes.AddRange(new NodeDefinition[]
+        {
+            new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = MapConfigJson(context), Inputs = MapInputs(context) },
 
-        new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map",
-                Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+            new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
 
-        new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",
-                Config = SynthConfig(context), Inputs = SynthInputs(context) },
+            new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map",
+                    Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
-        new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs() },
-    };
+            new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",
+                    Config = SynthConfig(context), Inputs = SynthInputs(context) },
 
-    private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
-    {
-        new() { From = "start", To = "planner" },
-        new() { From = "planner", To = "map" },
-        new() { From = "map", To = "synth" },
-        new() { From = "synth", To = "done" },
-        new() { From = "ms", To = "agent" },
-    };
+            new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs() },
+        });
+
+        return nodes;
+    }
+
+    private static IReadOnlyList<EdgeDefinition> BuildEdges(TaskBuildContext context) => context.RequirePlanConfirmation
+        ? new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "planner" },
+            new() { From = "planner", To = "confirm" },
+            new() { From = "confirm", To = "map" },
+            new() { From = "map", To = "synth" },
+            new() { From = "synth", To = "done" },
+            new() { From = "ms", To = "agent" },
+        }
+        : new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "planner" },
+            new() { From = "planner", To = "map" },
+            new() { From = "map", To = "synth" },
+            new() { From = "synth", To = "done" },
+            new() { From = "ms", To = "agent" },
+        };
 
     /// <summary>The plan.author Config — always a FLAT plan (the parallel map cannot honor ordering), plus the launch's pinned planner model row + the operator's planner critic (reviewMode / reviewerModelId, omitted when off — byte-identical).</summary>
     private static JsonElement PlannerConfig(TaskBuildContext context)
@@ -97,10 +122,10 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         return JsonSerializer.SerializeToElement(inputs);
     }
 
-    /// <summary>The map Inputs — fan out over the planner's typed subtasks array (a string array or an object array binds the same).</summary>
-    private static JsonElement MapInputs() => JsonSerializer.SerializeToElement(new
+    /// <summary>The map Inputs — fan out over the plan's typed subtasks array. Under the confirm gate the map binds the CONFIRM node (always the APPROVED version); ungated it binds the planner directly (byte-identical to pre-gate).</summary>
+    private static JsonElement MapInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
     {
-        items = "{{nodes.planner.outputs.json.subtasks}}",
+        items = context.RequirePlanConfirmation ? "{{nodes.confirm.outputs.json.subtasks}}" : "{{nodes.planner.outputs.json.subtasks}}",
     });
 
     /// <summary>The map Config — carries the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>). Only the one key is written, and only when the cap is set — an absent cap leaves the map unbounded.</summary>

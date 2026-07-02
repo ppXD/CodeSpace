@@ -33,7 +33,7 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         // to the original output). Any failure of resolution / the brain call / the parse returns a Failed verdict.
         try
         {
-            var rowId = reviewerModelId ?? await ResolveAutoReviewerAsync(teamId, cancellationToken).ConfigureAwait(false);
+            var rowId = reviewerModelId ?? await ResolveAutoReviewerAsync(teamId, request.ProducerModelRowId, cancellationToken).ConfigureAwait(false);
 
             if (rowId is not { } id) return CriticVerdict.ReviewFailed(request.Mode, "No reviewer model is available in the team's pool.");
 
@@ -55,12 +55,12 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         }
     }
 
-    /// <summary>Auto-pick the strongest structured-eligible pool model as the reviewer (independent of a specific producer when the team has &gt; 1 model). Null when nothing qualifies.</summary>
-    private async Task<Guid?> ResolveAutoReviewerAsync(Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Auto-pick the reviewer via the distinct-first ladder: prefer a model DIFFERENT from the producer (a real second opinion), fall back to the producer's own model on a one-model pool — an independent call either way, never a silent no-review. Null only when NOTHING structured-eligible exists.</summary>
+    private async Task<Guid?> ResolveAutoReviewerAsync(Guid teamId, Guid? producerRowId, CancellationToken cancellationToken)
     {
         var providers = _clientRegistry.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
-        return providers.Count == 0 ? null : await _modelSelector.SelectBrainRowIdAsync(teamId, providers, cancellationToken).ConfigureAwait(false);
+        return providers.Count == 0 ? null : await _modelSelector.SelectReviewerRowIdAsync(teamId, providers, producerRowId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Project the schema-valid model review into the canonical <see cref="CriticVerdict"/>, FAIL-CLOSED per mode. Internal for direct unit testing.</summary>

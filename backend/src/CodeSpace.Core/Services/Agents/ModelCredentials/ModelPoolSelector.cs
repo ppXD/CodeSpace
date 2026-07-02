@@ -153,7 +153,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .ToList();
     }
 
-    public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
+    public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
+        await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, excludeRowId: null, cancellationToken).ConfigureAwait(false);
+
+    private async Task<Guid?> SelectBrainRowIdCoreAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? excludeRowId, CancellationToken cancellationToken)
     {
         if (eligibleProviders.Count == 0) return null;
 
@@ -171,7 +174,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // ONLY that eligible subset. The anti-strand fallback (all-unavailable ⇒ keep the full eligible set) must never
         // widen PAST eligibility, else it could bake a provider-ineligible brain the decider can't run (a post-launch
         // NoModelStop). `Available != false` keeps NULL/never-probed rows preferred (byte-identical when un-probed).
-        var eligibleRows = rows.Where(r => eligible.Contains(r.Provider.ToLower())).ToList();
+        var eligibleRows = rows.Where(r => eligible.Contains(r.Provider.ToLower()) && (excludeRowId == null || r.Id != excludeRowId)).ToList();
 
         var reachable = eligibleRows.Where(r => r.Available != false).ToList();
 
@@ -188,6 +191,21 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .ThenBy(r => r.Id)
             .Select(r => (Guid?)r.Id)
             .FirstOrDefault();
+    }
+
+    public async Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken)
+    {
+        // The distinct-first ladder (S4d): a reviewer on a DIFFERENT model is a real second opinion, so exclude
+        // the producer's row from the pick — but a one-model team must still get its critic, so an empty
+        // excluded pick falls back to the full pool (the producer's own model, independently prompted).
+        if (producerRowId is { } producer)
+        {
+            var distinct = await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, producer, cancellationToken).ConfigureAwait(false);
+
+            if (distinct != null) return distinct;
+        }
+
+        return await SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
