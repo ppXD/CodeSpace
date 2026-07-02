@@ -137,6 +137,10 @@ export interface RoomAgentCard {
   /// The agent's own one-line result takeaway (what it concluded) — shown on the card before any raw log.
   summary?: string | null;
   latestLine?: string | null;
+  /// The workflow node + iteration this agent ran as (the cell key) — lets the opened terminal fetch this cell's attempt
+  /// history and switch between attempts, like Activity. Null for a supervisor-spawned agent (no workflow cell to switch).
+  nodeId?: string | null;
+  iterationKey?: string | null;
 }
 
 export interface RoomDecisionOption {

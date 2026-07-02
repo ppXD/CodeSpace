@@ -445,6 +445,8 @@ public static class RoomNarrative
         DurationMs = a.DurationMs,
         Summary = facts.AgentSummaries.TryGetValue(a.AgentRunId, out var s) ? s : null,
         LatestLine = facts.LatestLines.TryGetValue(a.AgentRunId, out var l) ? l : null,
+        NodeId = a.NodeId,
+        IterationKey = a.IterationKey,
     };
 
     private static DeliveryBlock? DeliveryFrom(string idPrefix, long seq, RoomTurnFacts f)

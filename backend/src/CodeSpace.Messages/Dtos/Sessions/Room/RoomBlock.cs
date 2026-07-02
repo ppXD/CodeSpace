@@ -170,6 +170,10 @@ public sealed record RoomAgentCard
 
     /// <summary>The agent's latest PUBLIC activity line (e.g. "running tests · 12 passing", "editing auth.ts") — never reasoning. Null when idle / unknown.</summary>
     public string? LatestLine { get; init; }
+
+    /// <summary>The workflow node + iteration this agent ran as — the cell key. Lets the opened terminal fetch this cell's ATTEMPT history (rerun-from-here) and switch between attempts, exactly like the Activity view. Null for a supervisor-spawned agent (no workflow node), where there is no cell to switch.</summary>
+    public string? NodeId { get; init; }
+    public string? IterationKey { get; init; }
 }
 
 /// <summary>
