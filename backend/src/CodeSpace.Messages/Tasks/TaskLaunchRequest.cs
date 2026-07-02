@@ -61,6 +61,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — rendered into the supervisor decider prompt as the definition of done (NOT executed; distinct from the <c>acceptanceChecks</c> argv floor). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
+    /// <summary>The S3 plan-confirmation gate — every authored plan version parks the run for the operator's confirmation before any agent is created. Null / false ⇒ omitted (byte-identical, fully autonomous planning). Inert on a non-supervisor projection.</summary>
+    public bool? RequirePlanConfirmation { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision (Deep only) — baked into the supervisor node so every turn + replay reads it. <see cref="ReviewMode.None"/> (the default) ⇒ no critic (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

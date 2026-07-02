@@ -103,6 +103,7 @@ public sealed class SupervisorMergeWithholdFlowTests
                 scope.Resolve<IDecisionQueueService>(),
                 scope.Resolve<IDecisionArbiter>(),
                 scope.Resolve<IDecisionAnswerService>(),
+                scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
                 scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(), CancellationToken.None);

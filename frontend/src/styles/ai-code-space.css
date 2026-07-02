@@ -5822,6 +5822,19 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-plan-questions { border-top: 1px solid var(--line); padding: 10px 14px; display: flex; flex-direction: column; gap: 10px; }
 .room-plan-q { display: flex; flex-direction: column; }
 .room-plan-q-text { font-size: 12px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+.room-plan-confirm { border-top: 1px solid var(--line); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.room-plan-confirm-note { resize: vertical; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; font-size: 12.5px; }
+.room-plan-confirm-note:focus { outline: none; border-color: var(--accent); }
+.room-plan-confirm-row { display: flex; align-items: center; gap: 8px; }
+.room-plan-confirm-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--line); }
+.room-plan-confirm-btn:disabled { opacity: .45; cursor: default; }
+.room-plan-confirm-approve { background: var(--accent); border-color: var(--accent); color: #fff; }
+.room-plan-confirm-approve:not(:disabled):hover { filter: brightness(1.06); }
+.room-plan-confirm-revise { background: var(--panel); color: var(--ink-2); }
+.room-plan-confirm-revise:not(:disabled):hover { border-color: var(--ink-3); }
+.room-plan-confirm-err { font-size: 11.5px; color: var(--danger); }
+.room-chip-pick { cursor: pointer; font: inherit; font-size: 12px; }
+.room-chip-pick:hover { border-color: var(--accent); }
 .room-plan-foot { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding: 8px 14px; }
 .room-plan-assume { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-plan-foot-gap { flex: 1; }

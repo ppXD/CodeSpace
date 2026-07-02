@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord } from "./planChecklist";
+import { composePlanFeedback, planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord } from "./planChecklist";
 
 // The five backend states (WorkPlanItemStates) — the render vocabulary must cover each deliberately, and an
 // UNKNOWN state must degrade neutral (open vocabulary: a new backend state reads as "something new", never red).
@@ -37,5 +37,21 @@ describe("planDepsLabel", () => {
     expect(planDepsLabel([])).toBeNull();
     expect(planDepsLabel(null)).toBeNull();
     expect(planDepsLabel(undefined)).toBeNull();
+  });
+});
+
+describe("composePlanFeedback", () => {
+  it("joins question choices and the free-text note as lines", () => {
+    expect(composePlanFeedback([{ question: "Which market?", choice: "US" }], "ship behind a flag")).toBe(
+      "Which market? → US\nship behind a flag",
+    );
+  });
+
+  it("is just the note when no questions were answered", () => {
+    expect(composePlanFeedback([], "  split step 2  ")).toBe("split step 2");
+  });
+
+  it("is empty when nothing was entered — the caller gates on it", () => {
+    expect(composePlanFeedback([], "   ")).toBe("");
   });
 });

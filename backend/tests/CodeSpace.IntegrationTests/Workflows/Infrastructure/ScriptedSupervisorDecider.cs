@@ -45,6 +45,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveApprovedMergeStop => PlanSpawnMergeResolveApprovedMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
+            SupervisorScriptMode.PlanConfirmReactive => PlanConfirmReactive(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
             SupervisorScriptMode.PlanSpawnBadRepoStop => PlanSpawnBadRepoStop(context),
@@ -248,6 +249,33 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             Agents = new[] { new SupervisorAgentDispatch { SubtaskId = SubtaskA, AgentDefinition = MissingPersonaSlug } },
         });
 
+    /// <summary>The single revised subtask id the S3 confirm arc's re-plan authors — the flow test asserts v2 carries it.</summary>
+    public const string SubtaskRevised = "sr";
+
+    // S3 confirm arc — the SCRIPTED TWIN of the real decider's plan-confirmation directive: author a plan, then
+    // REACT to the answer the gate folds. An approving answer → stop echoing it (proves the answer reached the
+    // context); any other answer → a REVISED plan (one merged subtask echoing the feedback) which re-gates.
+    // No plan yet → plan. The gate itself injects the ask_human — this decider NEVER asks.
+    private static SupervisorDecision PlanConfirmReactive(SupervisorTurnContext context)
+    {
+        if (!context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan)) return Plan(context.Goal);
+
+        var last = context.PriorDecisions.Count > 0 ? context.PriorDecisions[^1] : null;
+        var answer = last?.DecisionKind == SupervisorDecisionKinds.AskHuman ? SupervisorOutcome.ReadAskHumanAnswer(last.OutcomeJson) : null;
+
+        if (answer != null && answer.TrimStart().StartsWith("approve", StringComparison.OrdinalIgnoreCase))
+            return Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = $"confirmed: {answer}" });
+
+        if (answer != null)
+            return Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
+            {
+                Goal = context.Goal,
+                Subtasks = new[] { new SupervisorPlannedSubtask { Id = SubtaskRevised, Title = "Revised", Instruction = $"revised per: {answer}" } },
+            });
+
+        return Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "no confirmation answer folded" });
+    }
+
     private static SupervisorDecision Plan(string goal) => Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
     {
         Goal = goal,
@@ -315,6 +343,8 @@ public sealed class SupervisorDecisionScript
 
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
+    public void PlanConfirmReactive() => Mode = SupervisorScriptMode.PlanConfirmReactive;
+
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
 
     public void PlanSpawnDispatchStop() => Mode = SupervisorScriptMode.PlanSpawnDispatchStop;
@@ -356,6 +386,7 @@ public enum SupervisorScriptMode
     PlanSpawnBadModelStop,
     PlanSpawnPersonaStop,
     PlanSpawnBadPersonaStop,
+    PlanConfirmReactive,
     AskHumanStop,
     PlanThenSpawnForever,
 }

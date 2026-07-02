@@ -24,7 +24,7 @@ import type {
   StatItem,
 } from "@/api/sessions";
 import { sessionsApi } from "@/api/sessions";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PendingDecision, PhaseAgentRef, WorkflowRunStatus } from "@/api/workflows";
 import { AgentTerminal } from "@/components/workflows/AgentTerminal";
 import { DecisionCard } from "@/components/workflows/DecisionCard";
@@ -32,7 +32,7 @@ import { RunActionsContext } from "@/components/workflows/runActionsContext";
 import { RunOpenContext } from "@/components/workflows/runOpenContext";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { compactAge } from "@/components/workflows/cockpit";
-import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord } from "@/lib/planChecklist";
+import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
@@ -542,10 +542,56 @@ function FileRow({ item }: { item: StatItem }) {
  *  title · contract chips (kind / dependencies / acceptance / criteria / attempts) · state word · Details. The
  *  backend owns every string; unknown states render neutral. Questions/assumptions are read-only here. */
 function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
+  const run = useContext(RunActionsContext);
+  const queryClient = useQueryClient();
   const awaiting = plan.status === "AwaitingConfirmation";
+  // The card is answerable only on a live turn — a superseded / finished turn renders the same card read-only.
+  const confirmable = awaiting && run != null && !run.isTerminal;
   const assumptions = plan.assumptions ?? [];
   const questions = plan.questions ?? [];
   const hasFooter = assumptions.length > 0 || questions.length > 0 || plan.hasPriorVersions;
+
+  // Question choices default to the planner's recommendation; the free-text note is the operator's own words.
+  const [choices, setChoices] = useState<Record<string, string>>(() => recommendedChoices(questions));
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // A revised plan version re-gates in place (same block id, no remount) — reset the form to ITS
+  // recommendations. Render-time adjustment (not an effect): React re-renders immediately, no stale frame.
+  const [formVersion, setFormVersion] = useState(plan.version);
+  if (formVersion !== plan.version) {
+    setFormVersion(plan.version);
+    setChoices(recommendedChoices(questions));
+    setNote("");
+    setError(null);
+  }
+
+  const feedback = () =>
+    composePlanFeedback(
+      questions
+        .map((q) => {
+          const opt = (q.options ?? []).find((o) => o.id === choices[q.id]);
+          return opt ? { question: q.question, choice: opt.label } : null;
+        })
+        .filter((c): c is { question: string; choice: string } => c != null),
+      note,
+    );
+
+  const answer = async (approve: boolean) => {
+    if (!run) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await sessionsApi.confirmRunPlan(run.runId, { approve, feedback: feedback() || undefined });
+      if (result == null) setError("Nothing left to confirm — the plan was already answered.");
+      await queryClient.invalidateQueries({ queryKey: ["run-room"] });
+    } catch {
+      setError("Could not send your answer — try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="room-plan">
@@ -561,7 +607,31 @@ function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
       </div>
       {questions.length > 0 && (
         <div className="room-plan-questions">
-          {questions.map((q) => <PlanQuestionRow key={q.id} q={q} />)}
+          {questions.map((q) => (
+            <PlanQuestionRow key={q.id} q={q} value={confirmable ? choices[q.id] : undefined} onSelect={confirmable ? (optId) => setChoices((c) => ({ ...c, [q.id]: optId })) : undefined} />
+          ))}
+        </div>
+      )}
+      {confirmable && (
+        <div className="room-plan-confirm">
+          <textarea
+            className="room-plan-confirm-note"
+            placeholder="Optional note — or describe the changes you want…"
+            value={note}
+            rows={2}
+            onChange={(e) => setNote(e.target.value)}
+            disabled={busy}
+          />
+          <div className="room-plan-confirm-row">
+            {error && <span className="room-plan-confirm-err">{error}</span>}
+            <span className="room-plan-foot-gap" />
+            <button className="room-plan-confirm-btn room-plan-confirm-revise" disabled={busy || note.trim().length === 0} title={note.trim().length === 0 ? "Describe the changes you want first" : undefined} onClick={() => answer(false)}>
+              Request changes
+            </button>
+            <button className="room-plan-confirm-btn room-plan-confirm-approve" disabled={busy} onClick={() => answer(true)}>
+              <Sym n="check" s={12} /> Approve & run
+            </button>
+          </div>
         </div>
       )}
       {hasFooter && (
@@ -616,14 +686,34 @@ function PlanItemRow({ it }: { it: PlanChecklistItem }) {
 }
 
 /** A planner question rendered read-only — the choose-a-direction preview (the interactive form arrives with the plan gate). */
-function PlanQuestionRow({ q }: { q: RoomPlanQuestion }) {
+/** Each question's planner-recommended option id — the confirm form's default selection. */
+function recommendedChoices(questions: RoomPlanQuestion[]): Record<string, string> {
+  return Object.fromEntries(
+    questions
+      .map((q) => {
+        const rec = (q.options ?? []).find((o) => o.recommended);
+        return rec ? ([q.id, rec.id] as const) : null;
+      })
+      .filter((e): e is readonly [string, string] => e != null),
+  );
+}
+
+function PlanQuestionRow({ q, value, onSelect }: { q: RoomPlanQuestion; value?: string; onSelect?: (optionId: string) => void }) {
   const opts = q.options ?? [];
   return (
     <div className="room-plan-q">
       <div className="room-plan-q-text"><Sym n="sparkle" s={12} cls="room-ic-accent" /> {q.question}</div>
       {opts.length > 0 && (
         <div className="room-chips">
-          {opts.map((o) => <span key={o.id} className={`room-chip ${o.recommended ? "room-chip-accent" : "room-chip-plain"}`}>{o.label}{o.recommended ? " · recommended" : ""}</span>)}
+          {opts.map((o) =>
+            onSelect ? (
+              <button key={o.id} className={`room-chip room-chip-pick ${value === o.id ? "room-chip-accent" : "room-chip-plain"}`} onClick={() => onSelect(o.id)}>
+                {o.label}{o.recommended ? " · recommended" : ""}
+              </button>
+            ) : (
+              <span key={o.id} className={`room-chip ${o.recommended ? "room-chip-accent" : "room-chip-plain"}`}>{o.label}{o.recommended ? " · recommended" : ""}</span>
+            ),
+          )}
         </div>
       )}
     </div>

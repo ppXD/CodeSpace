@@ -45,6 +45,9 @@ public sealed record TaskBuildContext
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c>, rendered into the decider prompt (NOT executed). Null / empty ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
+    /// <summary>The S3 plan-confirmation gate — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>requirePlanConfirmation</c>, parking every authored plan version for the operator before any agent is created. False (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
+    public bool RequirePlanConfirmation { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>decisionReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

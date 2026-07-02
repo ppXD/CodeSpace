@@ -56,6 +56,12 @@ public class SupervisorDecisionEvalDeciderTests
         SupervisorDecisionEval.Score(unverified, await DecideAsync(unverified, """{"kind":"merge","merge":{}}"""))
             .Pass.ShouldBeFalse("merging an UNVERIFIED resolution must fail — the supervisor must never accept a reconciliation that did not pass the build/tests");
 
+        // confirmation-feedback (S3 gate): spawning the REJECTED plan unchanged instead of revising it must FAIL
+        // (accepted = {plan} — the operator's feedback demands a revised version).
+        var feedback = Scenario("confirmation-feedback");
+        SupervisorDecisionEval.Score(feedback, await DecideAsync(feedback, """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}"""))
+            .Pass.ShouldBeFalse("spawning a plan the operator just rejected must fail — the feedback demands a revision");
+
         // clean-integration: re-spawning after a clean integration is churn — must FAIL (accepted = {stop}).
         var clean = Scenario("clean-integration");
         SupervisorDecisionEval.Score(clean, await DecideAsync(clean, """{"kind":"spawn","spawn":{"subtaskIds":["s1"]}}"""))
@@ -123,6 +129,8 @@ public class SupervisorDecisionEvalDeciderTests
         "five-subtask-middle-failed" => """{"kind":"retry","retry":{"subtaskId":"s3"}}""",
         "four-subtask-all-succeeded" => """{"kind":"merge","merge":{}}""",
         "subset-conflict-across-three" => """{"kind":"resolve","resolve":{}}""",
+        "confirmation-approved" => """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""",
+        "confirmation-feedback" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1r","title":"Merged step","instruction":"do both, verify with ./check.sh"}]}}""",
         _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),
     };
 

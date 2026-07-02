@@ -13,7 +13,8 @@ namespace CodeSpace.Core.Services.Plans;
 /// The Postgres <see cref="IWorkPlanService"/>. Insert-only versioning: the two unique indexes —
 /// (run, version) and the partial (run, origin_key) — are the authority; a concurrent/replayed writer that
 /// loses an insert race re-reads (origin-key hit ⇒ return the existing row) or re-numbers (version race ⇒
-/// retry with the fresh max). No row is ever updated here, so a plan version is immutable once written.
+/// retry with the fresh max). A version's CONTRACT is immutable once written; the one mutable column is the
+/// confirmation <c>Status</c>, and only via the <see cref="SetStatusAsync"/> compare-and-swap (S3 gate).
 /// </summary>
 public sealed class WorkPlanService : IWorkPlanService, IScopedDependency
 {
@@ -57,11 +58,20 @@ public sealed class WorkPlanService : IWorkPlanService, IScopedDependency
         }
     }
 
-    public async Task<WorkPlan?> GetCurrentAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
-        await _db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == workflowRunId && p.TeamId == teamId).OrderByDescending(p => p.Version).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    public async Task<WorkPlan?> GetCurrentAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken, string? originKind = null) =>
+        await _db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == workflowRunId && p.TeamId == teamId && (originKind == null || p.OriginKind == originKind)).OrderByDescending(p => p.Version).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<WorkPlan>> ListVersionsAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == workflowRunId && p.TeamId == teamId).OrderBy(p => p.Version).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<bool> SetStatusAsync(Guid planId, Guid teamId, string fromStatus, string toStatus, CancellationToken cancellationToken)
+    {
+        var updated = await _db.WorkPlan
+            .Where(p => p.Id == planId && p.TeamId == teamId && p.Status == fromStatus)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.Status, toStatus), cancellationToken).ConfigureAwait(false);
+
+        return updated > 0;
+    }
 
     private async Task<WorkPlan?> FindByOriginKeyAsync(WorkPlanDraft draft, CancellationToken cancellationToken)
     {

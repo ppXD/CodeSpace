@@ -176,7 +176,7 @@ export interface PlanChecklistItem {
   attempts: number;
 }
 export interface RoomPlanQuestionOption { id: string; label: string; recommended?: boolean; }
-/// A planner-authored operator question — read-only in the checklist (the interactive form arrives with the plan gate).
+/// A planner-authored operator question — interactive while the plan awaits confirmation, read-only after.
 export interface RoomPlanQuestion { id: string; question: string; options?: RoomPlanQuestionOption[] | null; allowFreeText?: boolean; }
 /// The run's durable plan as a live checklist — the whole current version with per-item execution state.
 export interface PlanChecklistBlock extends RoomBlockBase {
@@ -190,6 +190,9 @@ export interface PlanChecklistBlock extends RoomBlockBase {
   questions?: RoomPlanQuestion[] | null;
   hasPriorVersions?: boolean;
 }
+/// The outcome of answering a pending plan-confirmation card (S3 gate). `resumed` is false when a concurrent
+/// answer won the wait first (first answer wins).
+export interface WorkPlanConfirmationOutcome { resumed: boolean; approved: boolean; }
 /// The delivered change set (PR card).
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
@@ -331,6 +334,18 @@ export const sessionsApi = {
     try {
       const scope = agentRunId ? `&agentRunId=${encodeURIComponent(agentRunId)}` : "";
       return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}${scope}`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+
+  /// Answer the run's pending plan-confirmation card (S3 gate): approve releases execution; a non-approve answer
+  /// carries the operator's revision feedback (the supervisor authors a revised plan version). Null when nothing is
+  /// pending (already answered / not parked / foreign run — 404).
+  confirmRunPlan: async (runId: string, body: { approve: boolean; feedback?: string }): Promise<WorkPlanConfirmationOutcome | null> => {
+    try {
+      return await fetchJson<WorkPlanConfirmationOutcome>(`/api/workflows/runs/${runId}/plan/confirm`, { method: "POST", body: JSON.stringify(body) });
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

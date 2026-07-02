@@ -30,6 +30,12 @@ public static class SupervisorStopReasons
     /// <summary>BEST-EFFORT: too many consecutive decisions produced no new settled agent result — the run is making no progress.</summary>
     public const string NoProgress = "no progress";
 
+    /// <summary>The S3 plan-confirmation gate has NO surface to ask on (the run has no usable conversation — e.g. a task launch, which does not wire one yet) — the run stops rather than spawning an unconfirmed plan (fail-closed, no silent bypass).</summary>
+    public const string PlanConfirmationUnavailable = "plan confirmation unavailable (no conversation surface)";
+
+    /// <summary>A spawn/retry was refused because the latest plan version stands REJECTED (the operator answered its confirmation with revision feedback) and no revised version has been authored — a rejected plan may never be executed.</summary>
+    public const string RejectedPlanSpawnRefused = "rejected plan spawn refused";
+
     /// <summary>The governance gate DENIED a side-effecting decision at the run's approval policy tier — refused (fail-closed, no side effect).</summary>
     public const string GovernanceDenied = "governance denied the side effect";
 

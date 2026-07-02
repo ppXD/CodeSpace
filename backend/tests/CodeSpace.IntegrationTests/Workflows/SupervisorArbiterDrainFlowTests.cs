@@ -215,6 +215,7 @@ public sealed class SupervisorArbiterDrainFlowTests
         scope.Resolve<IDecisionQueueService>(),
         arbiter,
         scope.Resolve<IDecisionAnswerService>(),
+        scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private async Task RunTurnAsync(Guid runId, Guid teamId, IDecisionArbiter arbiter)
