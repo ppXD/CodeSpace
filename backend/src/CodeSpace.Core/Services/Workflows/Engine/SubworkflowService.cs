@@ -88,30 +88,38 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
     public async Task DispatchChildRunAsync(Guid childRunId, CancellationToken cancellationToken) =>
         await _dispatcher.DispatchAsync(childRunId, cancellationToken).ConfigureAwait(false);
 
+    /// <summary>Cycle guard for the ancestry walk — a parent-run chain (real nesting + rerun lineage) never approaches this; a corrupt cycle can't loop forever.</summary>
+    private const int MaxChainWalk = 512;
+
     /// <summary>
-    /// Walk the <c>parent_run_id</c> chain up from <paramref name="parentRunId"/>. The child we're
-    /// about to create sits one level below the parent, so we refuse once the parent already has
-    /// <see cref="MaxDepth"/>-1 ancestors. The walk is itself bounded by <see cref="MaxDepth"/> so
-    /// a corrupt cycle in the data can't loop forever.
+    /// Walk the <c>parent_run_id</c> chain up from <paramref name="parentRunId"/> and refuse once the child we're about
+    /// to create would exceed <see cref="MaxDepth"/> subworkflow-nesting levels. A hop is counted as NESTING only when
+    /// the run it steps FROM is a genuine nesting run — a from-node RERUN / REPLAY fork links via <c>parent_run_id</c>
+    /// purely as rerun LINEAGE (D2 made <c>flow.subworkflow</c> rerunnable, routing such links into this walk), so those
+    /// hops must NOT inflate the depth, else N successive reruns of a subworkflow would spuriously trip this guard on
+    /// zero real nesting. The walk is bounded by <see cref="MaxChainWalk"/> against a corrupt cycle.
     /// </summary>
     private async Task EnsureWithinDepthAsync(Guid parentRunId, CancellationToken cancellationToken)
     {
-        var depthOfParent = 0;
+        var nestingDepth = 0;
         Guid? cursor = parentRunId;
 
-        while (cursor.HasValue && depthOfParent < MaxDepth)
+        for (var hop = 0; cursor is { } id && hop < MaxChainWalk; hop++)
         {
-            cursor = await _db.WorkflowRun.AsNoTracking()
-                .Where(r => r.Id == cursor.Value)
-                .Select(r => r.ParentRunId)
+            var run = await _db.WorkflowRun.AsNoTracking()
+                .Where(r => r.Id == id)
+                .Select(r => new { r.ParentRunId, r.SourceType })
                 .FirstOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-            if (cursor.HasValue) depthOfParent++;
-        }
+            if (run is null) break;
 
-        if (depthOfParent + 1 >= MaxDepth)
-            throw new SubworkflowStartException($"Sub-workflow nesting exceeds the limit of {MaxDepth} levels (possible recursion).");
+            var isRerunLineageHop = run.SourceType is WorkflowRunSourceTypes.Rerun or WorkflowRunSourceTypes.Replay;
+            cursor = run.ParentRunId;
+
+            if (cursor.HasValue && !isRerunLineageHop && ++nestingDepth + 1 >= MaxDepth)
+                throw new SubworkflowStartException($"Sub-workflow nesting exceeds the limit of {MaxDepth} levels (possible recursion).");
+        }
     }
 }
 

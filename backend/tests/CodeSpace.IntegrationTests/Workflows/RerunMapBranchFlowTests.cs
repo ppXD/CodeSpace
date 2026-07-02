@@ -1021,11 +1021,12 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
-    public async Task RerunBranchBodyPolicy_over_the_real_registry_admits_only_agentcode_among_suspendable_nodes()
+    public async Task RerunBranchBodyPolicy_over_the_real_registry_admits_agentcode_and_subworkflow_among_suspendable_nodes()
     {
-        // DRIFT-DETECTOR over the REAL node registry: the fail-closed allowlist must admit agent.code as the SOLE
-        // suspendable branch body, refuse every other CanSuspend node, and refuse every both-flagged node. This
-        // fails the instant a new CanSuspend node author forgets the opt-in, or a both-flagged node is admitted.
+        // DRIFT-DETECTOR over the REAL node registry: the fail-closed allowlist admits the re-stage opt-ins (agent.code
+        // → fresh AgentRun; flow.subworkflow → fresh child run, D2) as suspendable branch bodies, refuses every OTHER
+        // CanSuspend node, and refuses every both-flagged node. Fails the instant a new CanSuspend node author forgets
+        // the opt-in, or a both-flagged node is admitted.
         using var scope = _fixture.BeginScope();
         var registry = scope.Resolve<INodeRegistry>();
 
@@ -1035,9 +1036,9 @@ public class RerunMapBranchFlowTests
             .OrderBy(k => k)
             .ToList();
 
-        // agent.code must be the ONLY admitted suspendable branch body; a new CanSuspend node forgetting
-        // IsRerunnableWhenSuspendable (fail-closed default), or wrongly opting in, breaks this.
-        admittedSuspendable.ShouldHaveSingleItem().ShouldBe("agent.code");
+        // agent.code + flow.subworkflow are the admitted suspendable branch bodies (the two ReStageExternalRun opt-ins);
+        // a new CanSuspend node forgetting IsRerunnableWhenSuspendable (fail-closed default), or wrongly opting in, breaks this.
+        admittedSuspendable.ShouldBe(new[] { "agent.code", "flow.subworkflow" });
 
         registry.All
             .Where(n => n.Manifest.IsSideEffecting && n.Manifest.CanSuspend)
@@ -1054,12 +1055,12 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
-    public void RerunDispositions_over_the_real_registry_match_the_post_P2_2_from_node_gate_and_classify_agentcode_distinctly()
+    public void RerunDispositions_over_the_real_registry_match_the_from_node_gate_and_classify_the_re_stage_optins_distinctly()
     {
         // DRIFT-DETECTOR over the REAL registry for the FROM-NODE gate seam (the companion to the branch-policy one
-        // above): every live node's disposition-based from-node admit equals the POST-P2.2 IsRerunUnsupported negation,
-        // AND agent.code is the SOLE node earning ReStageExternalRun — the one node P2.2's from-node arm now admits —
-        // while every other suspendable node is fail-closed RefuseSuspendable.
+        // above): every live node's disposition-based from-node admit equals the IsRerunUnsupported negation, AND the
+        // re-stage opt-ins (agent.code + flow.subworkflow, D2) are the nodes earning ReStageExternalRun — the ones the
+        // from-node arm admits — while every other suspendable node is fail-closed RefuseSuspendable.
         static bool PostP2_2Unsupported(NodeManifest m, string nodeId, string? exemptMapId) =>
             (m.CanSuspend && !(m.IsRerunnableWhenSuspendable && !m.IsSideEffecting))   // suspendable EXCEPT the agent.code re-stage opt-in
             || (m.Kind == NodeKind.Map && nodeId != exemptMapId) || m.Kind is NodeKind.Loop or NodeKind.Try;
@@ -1075,15 +1076,16 @@ public class RerunMapBranchFlowTests
                 .ShouldBe(!PostP2_2Unsupported(n.Manifest, n.TypeKey, exemptMapId), $"from-node gate drifted for {n.TypeKey} exempt={exemptMapId ?? "null"}");
 
         var reStage = registry.All.Where(n => RerunDispositions.For(n.Manifest) == RerunDisposition.ReStageExternalRun).Select(n => n.TypeKey).OrderBy(k => k).ToList();
-        reStage.ShouldHaveSingleItem().ShouldBe("agent.code", "agent.code is the SOLE ReStageExternalRun — the node P2.2's from-node arm opened");
+        // the re-stage opt-ins earning ReStageExternalRun — agent.code (fresh AgentRun) + flow.subworkflow (fresh child run, D2)
+        reStage.ShouldBe(new[] { "agent.code", "flow.subworkflow" });
 
-        // The headline P2.2 behaviour over the LIVE registry: agent.code IS admitted as a from-node root, every other
-        // suspendable node is NOT (fail-closed). This is the live counterpart of the unit cube's surgical-change proof.
-        var agentCode = registry.All.Single(n => n.TypeKey == "agent.code");
-        RerunDispositions.Admits(agentCode.Manifest, RerunContext.FromNodeRoot, "agent.code", exemptMapId: null)
-            .ShouldBeTrue("agent.code re-stages a fresh AgentRun on the forked run id — admitted as a from-node root (P2.2)");
+        // The headline behaviour over the LIVE registry: both re-stage opt-ins ARE admitted as a from-node root, every
+        // OTHER suspendable node is NOT (fail-closed). The live counterpart of the unit cube's surgical-change proof.
+        foreach (var typeKey in new[] { "agent.code", "flow.subworkflow" })
+            RerunDispositions.Admits(registry.All.Single(n => n.TypeKey == typeKey).Manifest, RerunContext.FromNodeRoot, typeKey, exemptMapId: null)
+                .ShouldBeTrue($"{typeKey} re-stages a fresh external run on the forked run id — admitted as a from-node root");
 
-        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code").ToList()
+        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code" && n.TypeKey != "flow.subworkflow").ToList()
             .ShouldAllBe(n => RerunDispositions.For(n.Manifest) == RerunDisposition.RefuseSuspendable
                 && !RerunDispositions.Admits(n.Manifest, RerunContext.FromNodeRoot, n.TypeKey, null),
                 "every other suspendable node stays fail-closed RefuseSuspendable + refused as a from-node root");
