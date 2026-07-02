@@ -54,19 +54,23 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     /// <summary>
-    /// Return the patch reference of the repo that changed <paramref name="path"/>. When <paramref name="agentRunId"/>
-    /// is given, scope to THAT one agent's version (per-agent attribution — open an agent, preview ITS file, any terminal
-    /// status). Otherwise scan the turn's ACCEPTED agent runs (a Failed / cancelled agent's rejected diff was never
-    /// delivered) newest first — the newest accepted writer wins (a retry supersedes the original); newest-first also
-    /// keeps the <see cref="MaxAgentsScanned"/> window on the LATEST agents, so a late agent's file isn't sliced off.
+    /// Return the patch reference of the repo that changed <paramref name="path"/>. <paramref name="agentRunId"/> is a
+    /// PREFERRED scope (per-agent attribution — open an agent, preview ITS file, any terminal status): try that agent's
+    /// own version first. But a RESULT-card attribution is a last-writer-wins guess from a separately-capped per-agent
+    /// map, so it can point at an agent whose durable change set doesn't carry the path — when the scoped lookup MISSES,
+    /// fall through (never give up on a legitimately-produced file). The fallback scans the turn's ACCEPTED agent runs
+    /// (a Failed / cancelled agent's rejected diff was never delivered) newest first — the newest accepted writer wins
+    /// (a retry supersedes the original); newest-first also keeps the <see cref="MaxAgentsScanned"/> window on the
+    /// LATEST agents, so a late agent's file isn't sliced off.
     /// </summary>
     private async Task<PatchRef?> LocateFilePatchAsync(Guid runId, Guid teamId, string path, Guid? agentRunId, CancellationToken cancellationToken)
     {
         var query = _db.AgentRun.AsNoTracking()
             .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.ResultJson != null);
 
-        if (agentRunId is { } id)
-            return MatchFile(Deserialize(await query.Where(r => r.Id == id).Select(r => r.ResultJson!).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? ""), path);
+        if (agentRunId is { } id
+            && MatchFile(Deserialize(await query.Where(r => r.Id == id).Select(r => r.ResultJson!).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? ""), path) is { } scoped)
+            return scoped;
 
         var results = await query
             .Where(r => r.Status == AgentRunStatus.Succeeded || r.Status == AgentRunStatus.NeedsReview)

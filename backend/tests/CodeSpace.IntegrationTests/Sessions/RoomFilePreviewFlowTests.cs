@@ -69,6 +69,25 @@ public class RoomFilePreviewFlowTests
     }
 
     [Fact]
+    public async Task A_misattributed_result_file_falls_back_to_the_turn_scan_instead_of_failing()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var now = DateTimeOffset.UtcNow;
+
+        // The REAL producer of out.md.
+        await AddAgentAsync(teamId, runId, AgentRunStatus.Succeeded, new[] { "out.md" }, AddedFile("out.md", "hello"), now.AddMinutes(-1));
+        // A DIFFERENT accepted agent the RESULT card mis-attributed the file to (last-writer-wins) — its OWN change set lacks out.md.
+        var misattributed = await AddAgentAsync(teamId, runId, AgentRunStatus.Succeeded, new[] { "other.md" }, AddedFile("other.md", "x"), now);
+
+        var preview = await PreviewAsync(runId, "out.md", teamId, agentRunId: misattributed);
+
+        preview.ShouldNotBeNull();
+        preview!.Kind.ShouldBe("text", "the scoped agent lacked the file, but the turn-wide fallback found its real producer — NOT an 'isn't part of the change set' error");
+        preview.Text.ShouldBe("hello", "reconstructed from the real producer's patch");
+    }
+
+    [Fact]
     public async Task A_foreign_team_is_an_indistinguishable_not_found()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
