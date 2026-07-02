@@ -13,6 +13,20 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public static class AgentOperatingContract
 {
+    /// <summary>
+    /// B1: the full system-prompt text a harness projects natively — the agent's PERSONA (if any) followed by the
+    /// always-on <see cref="SystemDirective"/> operating contract, blank-line separated. A null/blank persona yields the
+    /// bare contract (byte-identical to a pre-persona run). The contract goes LAST so it can't be diluted by the persona,
+    /// and both live in the SYSTEM prompt (not the user goal) per Anthropic's guidance. Both harnesses call this and route
+    /// the result to their own channel (Claude <c>--append-system-prompt</c>; Codex config-home <c>AGENTS.md</c>).
+    /// </summary>
+    public static string Compose(string? persona)
+    {
+        var p = (persona ?? string.Empty).Trim();
+
+        return p.Length == 0 ? SystemDirective : p + "\n\n" + SystemDirective;
+    }
+
     /// <summary>The operating directive injected into the harness system prompt. Stable wording — a model relies on it, and tests pin it.</summary>
     public const string SystemDirective =
         "You are an automated, UNATTENDED agent running in a sandbox — no human is at the terminal to answer prompts. Operate accordingly:\n" +

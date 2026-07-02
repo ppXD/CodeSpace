@@ -115,10 +115,11 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             args.Add(resumeSessionId);
         }
 
-        // B1: the unattended operating contract as a system-prompt append (composes with any persona/goal prompt) — tell
-        // the model not to wait on stdin, to raise a genuine blocker via the decision tool, and not to end by asking.
+        // B1: the persona + the always-on operating contract, projected through Claude's NATIVE system-prompt channel
+        // (--append-system-prompt), NOT prepended to the goal — Anthropic's guidance is a system-prompt persona outweighs
+        // the same text in the user message. No persona ⇒ just the contract, argv byte-identical to a pre-persona run.
         args.Add("--append-system-prompt");
-        args.Add(AgentOperatingContract.SystemDirective);
+        args.Add(AgentOperatingContract.Compose(task.SystemPrompt));
 
         AppendSealedEgressSettings(args, task);
 

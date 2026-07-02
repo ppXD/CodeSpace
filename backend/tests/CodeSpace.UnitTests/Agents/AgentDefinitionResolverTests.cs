@@ -12,20 +12,26 @@ namespace CodeSpace.UnitTests.Agents;
 public class AgentDefinitionResolverTests
 {
     [Fact]
-    public void ComposeGoal_prepends_the_system_prompt_to_the_goal()
+    public void ResolvePersonaPrompt_keeps_the_persona_in_the_system_channel_and_the_goal_clean()
     {
-        AgentDefinitionResolver.ComposeGoal("You are a reviewer.", "Review PR #42.")
-            .ShouldBe("You are a reviewer.\n\nReview PR #42.");
+        // B1: the persona rides SystemPrompt (its own native channel), NOT prepended to the goal.
+        var (goal, systemPrompt) = AgentDefinitionResolver.ResolvePersonaPrompt("You are a reviewer.", "Review PR #42.");
+
+        goal.ShouldBe("Review PR #42.", "the goal stays the CLEAN task — no persona baked in");
+        systemPrompt.ShouldBe("You are a reviewer.", "the persona goes to the system-prompt channel");
     }
 
     [Theory]
-    [InlineData("You are a reviewer.", "", "You are a reviewer.")]   // persona only (node goal empty)
-    [InlineData("", "Review PR #42.", "Review PR #42.")]              // goal only (persona prompt empty)
-    [InlineData("  spaced  ", "  goal  ", "spaced\n\ngoal")]          // both trimmed before joining
-    [InlineData("", "", "")]                                         // nothing either side → empty (caller throws)
-    public void ComposeGoal_handles_each_one_sided_case(string systemPrompt, string goal, string expected)
+    [InlineData("You are a reviewer.", "", "You are a reviewer.", null)]   // persona-only (no node goal) → persona STAYS the goal (byte-identical to pre-B1); no separate system prompt
+    [InlineData("", "Review PR #42.", "Review PR #42.", null)]             // goal-only (no persona) → clean goal, null system prompt
+    [InlineData("  spaced  ", "  goal  ", "goal", "spaced")]               // both trimmed; persona → system, goal → user
+    [InlineData("", "", "", null)]                                        // nothing either side → empty goal (caller throws)
+    public void ResolvePersonaPrompt_handles_each_one_sided_case(string systemPrompt, string goal, string expectedGoal, string? expectedSystem)
     {
-        AgentDefinitionResolver.ComposeGoal(systemPrompt, goal).ShouldBe(expected);
+        var (resolvedGoal, resolvedSystem) = AgentDefinitionResolver.ResolvePersonaPrompt(systemPrompt, goal);
+
+        resolvedGoal.ShouldBe(expectedGoal);
+        resolvedSystem.ShouldBe(expectedSystem);
     }
 
     [Theory]

@@ -41,7 +41,7 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         var persona = await LoadPersonaAsync(id, teamId, cancellationToken).ConfigureAwait(false);
 
-        var goal = ComposeGoal(persona.SystemPrompt, task.Goal);
+        var (goal, systemPrompt) = ResolvePersonaPrompt(persona.SystemPrompt, task.Goal);
 
         if (string.IsNullOrWhiteSpace(goal))
             throw new AgentDefinitionResolutionException(
@@ -55,7 +55,7 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         var skills = await LoadSkillsAsync(id, teamId, cancellationToken).ConfigureAwait(false);
 
-        return task with { Goal = goal, Model = model, Tools = tools, ModelCredentialId = modelCredentialId, Skills = skills };
+        return task with { Goal = goal, SystemPrompt = systemPrompt, Model = model, Tools = tools, ModelCredentialId = modelCredentialId, Skills = skills };
     }
 
     /// <summary>
@@ -127,16 +127,20 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
             .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)
         ?? throw new AgentDefinitionResolutionException($"Agent persona {id} not found for this team.");
 
-    /// <summary>Persona system prompt PREPENDED to the node goal (blank-line separated); either side alone passes through.</summary>
-    internal static string ComposeGoal(string systemPrompt, string goal)
+    /// <summary>
+    /// B1: split the persona system prompt + node goal into (Goal, SystemPrompt) — the persona rides its own SYSTEM
+    /// channel (projected natively per harness) while the goal stays the user turn, NOT prepended to it. Degenerate
+    /// case — a persona with NO node goal: keep the persona AS the goal (byte-identical to pre-B1), since there would
+    /// otherwise be no user turn to run. A blank persona ⇒ null SystemPrompt (only the always-on contract is injected).
+    /// </summary>
+    internal static (string Goal, string? SystemPrompt) ResolvePersonaPrompt(string systemPrompt, string goal)
     {
-        var prompt = (systemPrompt ?? string.Empty).Trim();
+        var persona = (systemPrompt ?? string.Empty).Trim();
         var task = (goal ?? string.Empty).Trim();
 
-        if (prompt.Length == 0) return task;
-        if (task.Length == 0) return prompt;
+        if (task.Length == 0) return (persona, null);   // persona-only run: the persona IS the instruction → stays the goal
 
-        return prompt + "\n\n" + task;
+        return (task, persona.Length == 0 ? null : persona);
     }
 
     /// <summary>Node-pinned credential reference wins, else the persona's default, else null = fall back to a team/operator key at resolve time.</summary>

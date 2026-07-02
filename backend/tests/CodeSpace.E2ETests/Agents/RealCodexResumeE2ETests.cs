@@ -100,6 +100,35 @@ public sealed class RealCodexResumeE2ETests
         }
     }
 
+    [Fact]
+    public async Task Real_codex_loads_the_injected_persona_from_the_config_home_agents_md()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(GateEnvVar))) return;   // opt-in only (same gate as the resume E2E)
+        if (!CodexResolves()) return;
+
+        try
+        {
+            var cwd = NewWorkspace();
+            var marker = "PERSONA-MARKER-" + Guid.NewGuid().ToString("N");
+            var home = NewDir();
+
+            // B1: the production harness projects the persona to $CODEX_HOME/AGENTS.md; the production WriteConfigHomeFiles
+            // materializes it, then the REAL codex loads it into the turn (recorded in the rollout as a user-instructions
+            // response_item, after thread.started but independent of the model — so a dummy key still records it). Proves
+            // the Codex persona channel works end-to-end against the real binary.
+            var task = FreshTask(cwd) with { SystemPrompt = "You are a persona probe. " + marker };
+            var found = await RunCodexUntilRolloutContainsAsync(Harness.BuildInvocation(task), home, marker);
+
+            found.ShouldBeTrue("the real codex loaded the persona from the production-projected $CODEX_HOME/AGENTS.md into the session — the B1 Codex channel works end-to-end");
+        }
+        finally
+        {
+            foreach (var dir in _tempDirs)
+                try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup of the gated run's temp dirs */ }
+        }
+    }
+
     // ─── Tasks (production harness inputs) ────────────────────────────────────────
 
     private static AgentTask FreshTask(string cwd) => new()
@@ -174,6 +203,55 @@ public sealed class RealCodexResumeE2ETests
 
         try { stdout.Append(await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false)); } catch { /* stream closed by the kill */ }
         return (stdout.ToString(), await stderrTask.ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Materialize the spec's config-home files (incl. the persona AGENTS.md) via the production runner, spawn the real
+    /// codex, and poll its rollout under <c>&lt;home&gt;/sessions</c> until it CONTAINS <paramref name="marker"/> (the
+    /// AGENTS.md lands a few events after thread.started, independent of the model), then kill. Returns whether it appeared.
+    /// </summary>
+    private static async Task<bool> RunCodexUntilRolloutContainsAsync(SandboxSpec spec, string codexHome, string marker)
+    {
+        LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, codexHome);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = spec.Command,
+            WorkingDirectory = spec.WorkingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+        };
+
+        foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
+        psi.Environment[CodexHarness.ConfigHomeEnvVar] = codexHome;
+        psi.Environment[CodexHarness.ApiKeyEnvVar] = "dummy-key-persona-e2e";
+        foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
+
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Close();
+        _ = proc.StandardOutput.ReadToEndAsync();   // drain so the child's pipes never wedge
+        _ = proc.StandardError.ReadToEndAsync();
+
+        var sessions = Path.Combine(codexHome, "sessions");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        try
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                if (Directory.Exists(sessions))
+                    foreach (var f in Directory.EnumerateFiles(sessions, "*.jsonl", SearchOption.AllDirectories))
+                        if ((await File.ReadAllTextAsync(f, cts.Token).ConfigureAwait(false)).Contains(marker, StringComparison.Ordinal))
+                            return true;
+
+                await Task.Delay(150, cts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { /* timed out → the marker never landed → the caller's assertion fails clearly */ }
+        finally { if (!proc.HasExited) try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ } }
+
+        return false;
     }
 
     /// <summary>Poll until codex has flushed a non-empty rollout under <c>&lt;home&gt;/sessions</c>, so a kill can't leave a truncated file. Uses its OWN dedicated timeout (independent of the run-wide read backstop) so it always gets its full budget.</summary>

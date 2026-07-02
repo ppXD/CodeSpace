@@ -246,14 +246,27 @@ public class ClaudeCodeHarnessTests
     [Fact]
     public void Injects_the_operating_contract_as_a_system_prompt_before_the_prompt_positional()
     {
-        // B1: the unattended operating contract rides as --append-system-prompt (composing with any persona/goal), and
+        // B1: the unattended operating contract rides as --append-system-prompt (composing with any persona), and
         // the goal stays the trailing positional — so the directive never swallows or reorders the prompt.
         var args = Harness.BuildInvocation(Task()).Args.ToList();
 
         var at = args.IndexOf("--append-system-prompt");
         at.ShouldBeGreaterThanOrEqualTo(0, "the operating contract is injected as a system prompt");
-        args[at + 1].ShouldBe(AgentOperatingContract.SystemDirective);
+        args[at + 1].ShouldBe(AgentOperatingContract.SystemDirective, "no persona → the bare contract (byte-identical to pre-B1)");
         args[^1].ShouldBe("Fix the failing billing tests", "the goal remains the trailing positional argument");
+    }
+
+    [Fact]
+    public void Injects_the_persona_and_the_contract_through_append_system_prompt_keeping_the_goal_clean()
+    {
+        // B1: a persona rides Claude's NATIVE --append-system-prompt (persona + the always-on contract), NOT prepended
+        // to the goal — Anthropic's guidance is a system-prompt persona outweighs the same text in the user message.
+        var args = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer." }).Args.ToList();
+
+        var at = args.IndexOf("--append-system-prompt");
+        args[at + 1].ShouldBe(AgentOperatingContract.Compose("You are a meticulous reviewer."), "the persona composes before the operating contract on the native channel");
+        args[at + 1].ShouldContain("You are a meticulous reviewer.");
+        args[^1].ShouldBe("Fix the failing billing tests", "the goal positional is the clean task — no persona baked in");
     }
 
     [Theory]

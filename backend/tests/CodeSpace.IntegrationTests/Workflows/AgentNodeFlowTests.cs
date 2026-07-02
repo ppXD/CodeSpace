@@ -390,8 +390,8 @@ public class AgentNodeFlowTests
             var task = JsonSerializer.Deserialize<AgentTask>(agentRun.TaskJson, AgentJson.Options)!;
 
             task.AgentDefinitionId.ShouldBe(personaId, "the persona reference is frozen into TaskJson as run provenance");
-            task.Goal.ShouldBe("You are a careful billing engineer.\n\nFix the billing bug.",
-                customMessage: "the engine resolves the persona at staging: its system prompt prepends the node goal, persisted as the final task");
+            task.Goal.ShouldBe("Fix the billing bug.", "B1: the goal stays the clean node task — no persona baked in");
+            task.SystemPrompt.ShouldBe("You are a careful billing engineer.", "the engine resolves the persona at staging into its own SystemPrompt channel, persisted on the final task");
             task.Model.ShouldBe("gpt-5.4", "the node set no model inline → the persona's model fills in");
         }
         finally

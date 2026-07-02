@@ -37,15 +37,39 @@ public class CodexHarnessTests
 
         var spec = Harness.BuildInvocation(task);
 
-        spec.ConfigHomeFiles.Select(f => f.RelativePath).ShouldBe(new[] { "skills/tdd/SKILL.md" },
-            customMessage: "Codex scans CODEX_HOME/skills/<slug>/SKILL.md — the per-run config home the runner sets");
-        spec.ConfigHomeFiles.Single().Content.ShouldContain("Write the test first.");
+        var skill = spec.ConfigHomeFiles.Single(f => f.RelativePath.StartsWith("skills/", StringComparison.Ordinal));
+        skill.RelativePath.ShouldBe("skills/tdd/SKILL.md", "Codex scans CODEX_HOME/skills/<slug>/SKILL.md — the per-run config home the runner sets");
+        skill.Content.ShouldContain("Write the test first.");
     }
 
     [Fact]
-    public void No_skills_means_no_config_home_files()
+    public void Fresh_run_writes_agents_md_with_the_operating_contract_and_nothing_else()
     {
-        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldBeEmpty();
+        // B1: every run gets an AGENTS.md (Codex's native instruction channel) carrying the persona + the always-on
+        // operating contract. A fresh no-persona no-skills run has EXACTLY that one file, holding just the contract.
+        var spec = Harness.BuildInvocation(Task());
+
+        var agents = spec.ConfigHomeFiles.Single();
+        agents.RelativePath.ShouldBe("AGENTS.md");
+        agents.Content.ShouldBe(AgentOperatingContract.Compose(null), "no persona → the bare operating contract");
+        agents.Content.ShouldContain("UNATTENDED agent");
+    }
+
+    [Fact]
+    public void Persona_and_operating_contract_ride_agents_md_not_the_goal()
+    {
+        // B1: the persona goes to AGENTS.md (Codex has no --append-system-prompt), composed with the contract; the Goal
+        // positional stays the CLEAN task, never conflated with the persona.
+        var spec = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer." });
+
+        var agents = spec.ConfigHomeFiles.Single(f => f.RelativePath == "AGENTS.md");
+        agents.Content.ShouldBe(AgentOperatingContract.Compose("You are a meticulous reviewer."));
+        agents.Content.ShouldContain("You are a meticulous reviewer.");
+        agents.Content.ShouldContain("UNATTENDED agent", customMessage: "the operating contract composes after the persona");
+
+        spec.Args[^1].ShouldBe("Fix the failing billing tests", "the goal positional is the clean task, no persona baked in");
+
+        CodexHarness.AgentsFile.ShouldBe("AGENTS.md");   // Rule 8: pin the native instruction file
     }
 
     [Fact]

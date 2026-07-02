@@ -97,11 +97,11 @@ public class SupervisorRichSpawnFlowTests : IDisposable
             foreach (var task in tasks)
                 AssertRichTeamAgent(task, repoId, personaId, conversationId, credentialId);
 
-            // The per-subtask goal floor is the persona prompt PREPENDED to the planned instruction (the merge),
-            // distinct per agent — proving the goal fold + the persona compose both ran on the real path.
+            // B1: the per-subtask goal stays the CLEAN planned instruction, distinct per agent; the persona rides its own
+            // SystemPrompt channel (the merge ran on the real path, routing the persona natively, NOT into the goal).
             var goals = tasks.Select(t => t.Goal).OrderBy(g => g).ToList();
-            goals.ShouldContain($"{PersonaPrompt}\n\ndo alpha", "the persona prompt is PREPENDED to subtask alpha's planned instruction (the persona-merge ran)");
-            goals.ShouldContain($"{PersonaPrompt}\n\ndo beta", "the persona prompt is PREPENDED to subtask beta's planned instruction (the persona-merge ran)");
+            goals.ShouldBe(new[] { "do alpha", "do beta" });   // each subtask's goal is its CLEAN planned instruction — no persona baked in
+            tasks.ShouldAllBe(t => t.SystemPrompt == PersonaPrompt, "the persona is stamped on SystemPrompt (its native channel) for every spawned agent");
 
             // The denormalized Harness column also reflects the profile harness (not the codex-cli default).
             spawned.ShouldAllBe(r => r.Harness == ProfileHarness, "the spawned run's harness is the profile harness");
@@ -250,7 +250,8 @@ public class SupervisorRichSpawnFlowTests : IDisposable
 
             var task = JsonSerializer.Deserialize<AgentTask>(spawned[0].TaskJson, AgentJson.Options)!;
             task.AgentDefinitionId.ShouldBe(dispatchPersonaId, "the model-authored per-agent persona OVERRODE the run-level profile persona");
-            task.Goal.ShouldBe("You are a security reviewer.\n\ndo alpha", "the DISPATCH persona's system prompt is prepended (the merge ran on the dispatched persona, not the profile one)");
+            task.Goal.ShouldBe("do alpha", "the goal stays the clean planned instruction");
+            task.SystemPrompt.ShouldBe("You are a security reviewer.", "the DISPATCH persona's system prompt rides SystemPrompt (the merge ran on the dispatched persona, not the profile one)");
         }
         finally
         {
