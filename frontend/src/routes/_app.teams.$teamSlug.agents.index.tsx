@@ -1,48 +1,76 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import { AgentCard } from "@/components/agents/AgentCard";
 import { AgentEditorModal } from "@/components/agents/AgentEditor";
+import { AgentRosterRow } from "@/components/agents/AgentRosterRow";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { NewAgentModal } from "@/components/agents/NewAgentModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
-import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
-import { useAgentDefinitions } from "@/hooks/use-agents";
+import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
+import { useAgentDefinitions, useAgentStats } from "@/hooks/use-agents";
 
 type EditorState = { mode: "create" } | { mode: "edit"; id: string } | null;
 
+/** The stats time-window: a trend horizon fed to the backend's `since` filter. "All" sends no window. */
+const WINDOWS: { v: string; l: string; days: number | null }[] = [
+  { v: "7", l: "Last 7 days", days: 7 },
+  { v: "30", l: "Last 30 days", days: 30 },
+  { v: "all", l: "All time", days: null },
+];
+
 /**
- * Agents — the team's reusable personas as a schedulable agent bench. Each agent is a card that reads like a
- * working unit: a role-tinted avatar + role badge (a display heuristic), its @handle, and its loadout (model /
- * autonomy / tools chips + the skills it carries from the AgentSkillBinding join). A persona is harness-AGNOSTIC,
- * so there's deliberately no per-card harness field — the per-harness split lives in the Fleet-health scorecard,
- * which sits BELOW the bench (measurement second, the units first). "New agent" + a card click open the editor
- * modal; "Import" opens the import-from-URL pack modal.
+ * Agents — the team's reusable personas as a working roster. Each agent is a row that reads left-to-right: identity,
+ * its loadout (model / autonomy / tools / skills), then its recent-run evidence (an outcome sparkline, windowed
+ * success rate, latency, spend, last-active) joined from the per-agent stats endpoint. The primary action is
+ * "Launch task", which opens the ONE generic composer with this persona injected. Measurement is per-agent and
+ * on-row now — the old global Fleet-health card is gone (the fleet compare moves to the Runs analytics surface).
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
 });
 
 function AgentsListPage() {
+  const { teamSlug } = Route.useParams();
+  const navigate = useNavigate();
+
   const agents = useAgentDefinitions();
   const rows = agents.data ?? [];
 
   const [query, setQuery] = useState("");
   const [origin, setOrigin] = useState<OriginFilter>("all");
+  const [windowSel, setWindowSel] = useState("7");
   const [editor, setEditor] = useState<EditorState>(null);
   const [importing, setImporting] = useState(false);
   const [choosing, setChoosing] = useState(false);
+  const [launchAgentId, setLaunchAgentId] = useState<string | null>(null);
 
-  const openNew = () => setChoosing(true);
-  const openAgent = (id: string) => setEditor({ mode: "edit", id });
+  const windowed = windowSel !== "all";
+  const since = useMemo(() => {
+    const days = WINDOWS.find((w) => w.v === windowSel)?.days;
+    if (days == null) return undefined;
+    // Quantize the horizon to the hour so the react-query key is STABLE across a session (a raw ms-precision
+    // Date.now() would mint a fresh key every render/mount and defeat the staleTime cache).
+    const hourMs = 3_600_000;
+    const nowHour = Math.floor(Date.now() / hourMs) * hourMs;
+    return new Date(nowHour - days * 86_400_000).toISOString();
+  }, [windowSel]);
+
+  const stats = useAgentStats(since);
+  const statById = useMemo(
+    () => new Map((stats.data?.agents ?? []).map((s) => [s.agentDefinitionId, s])),
+    [stats.data],
+  );
 
   const importedCount = rows.filter((a) => a.origin === "Imported").length;
   const authoredCount = rows.length - importedCount;
   const visible = filterAgents(rows, query, origin);
 
   const hasAgents = !agents.isLoading && !agents.error && rows.length > 0;
+
+  const openNew = () => setChoosing(true);
+  const viewRuns = (agentId: string) => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug }, search: { agentDefinitionIds: [agentId] } });
 
   return (
     <section className="ct">
@@ -90,7 +118,7 @@ function AgentsListPage() {
 
         {hasAgents && (
           <>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, margin: "16px 0 12px", flexWrap: "wrap" }}>
+            <div className="ar-toolbar">
               <div className="ct-search">
                 <Ic.Search size={14} />
                 <input
@@ -101,13 +129,14 @@ function AgentsListPage() {
                 />
               </div>
               <div className="ct-tabs">
-                <OriginTab value="all" current={origin} count={rows.length} onSelect={setOrigin}>All</OriginTab>
-                <OriginTab value="Authored" current={origin} count={authoredCount} onSelect={setOrigin}>Authored</OriginTab>
-                <OriginTab value="Imported" current={origin} count={importedCount} onSelect={setOrigin}>Imported</OriginTab>
+                <SegTab value="all" current={origin} count={rows.length} onSelect={setOrigin}>All</SegTab>
+                <SegTab value="Authored" current={origin} count={authoredCount} onSelect={setOrigin}>Authored</SegTab>
+                <SegTab value="Imported" current={origin} count={importedCount} onSelect={setOrigin}>Imported</SegTab>
+              </div>
+              <div className="ct-tabs ar-window" role="group" aria-label="Stats window">
+                {WINDOWS.map((w) => <SegTab key={w.v} value={w.v} current={windowSel} onSelect={setWindowSel}>{w.l}</SegTab>)}
               </div>
             </div>
-
-            <div className="ab-section-lbl">Team bench · {visible.length}</div>
 
             {visible.length === 0 ? (
               <div className="ct-empty">
@@ -115,20 +144,23 @@ function AgentsListPage() {
                 <div className="ct-empty-p">No agent matches the current search and filter.</div>
               </div>
             ) : (
-              <div className="ab-grid">
-                {visible.map((a) => <AgentCard key={a.id} agent={a} onOpen={() => openAgent(a.id)} />)}
+              <div className="ar-list">
+                {visible.map((a) => (
+                  <AgentRosterRow
+                    key={a.id}
+                    agent={a}
+                    stat={statById.get(a.id)}
+                    statsPending={stats.isLoading}
+                    statsError={stats.isError}
+                    windowed={windowed}
+                    onLaunch={() => setLaunchAgentId(a.id)}
+                    onEdit={() => setEditor({ mode: "edit", id: a.id })}
+                    onViewRuns={() => viewRuns(a.id)}
+                  />
+                ))}
               </div>
             )}
           </>
-        )}
-
-        {/* Fleet health — the team's success / latency / spend over its run history. Measurement SECOND: it
-            sits beneath the bench. Rendered once the list resolves regardless of agent count, so a team that has
-            historical scored runs but no current agents still sees its rollup (self-contained, own team fetch). */}
-        {!agents.isLoading && !agents.error && (
-          <div className="ab-fleet">
-            <AgentScorecardPanel />
-          </div>
         )}
       </div>
 
@@ -149,12 +181,22 @@ function AgentsListPage() {
           onClose={() => setChoosing(false)}
         />
       )}
+
+      {launchAgentId && (
+        <LaunchTaskModal
+          surface="chat"
+          autofill={{ agentDefinitionId: launchAgentId }}
+          onClose={() => setLaunchAgentId(null)}
+          onLaunched={(runId) => { setLaunchAgentId(null); navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } }); }}
+        />
+      )}
     </section>
   );
 }
 
-/** One origin filter toggle — the warm underline-tab look, but a keyboard-operable toggle (role=button + Enter/Space), matching the accessible tab pattern in AgentDetailTabs / SettingsLayout. */
-function OriginTab({ value, current, count, onSelect, children }: { value: OriginFilter; current: OriginFilter; count: number; onSelect: (v: OriginFilter) => void; children: React.ReactNode }) {
+/** One segmented filter toggle — the warm underline-tab look, keyboard-operable (role=button + Enter/Space). Generic
+ *  over the value type, with an optional count pill, so it serves both the origin filter and the stats window. */
+function SegTab<T extends string>({ value, current, count, onSelect, children }: { value: T; current: T; count?: number; onSelect: (v: T) => void; children: React.ReactNode }) {
   const active = current === value;
 
   return (
@@ -167,7 +209,7 @@ function OriginTab({ value, current, count, onSelect, children }: { value: Origi
       onClick={() => onSelect(value)}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(value); } }}
     >
-      {children}<span className="ct-tab-c">{count}</span>
+      {children}{count != null && <span className="ct-tab-c">{count}</span>}
     </span>
   );
 }

@@ -20,6 +20,9 @@ export interface LaunchTaskAutofill {
   baseBranch?: string;
   effort?: string;
   autonomy?: string;
+  /** Pin the run to a specific agent persona (its AgentDefinition id). The Agents roster's per-row "Launch task"
+   *  sets it so the generic composer opens with that persona injected — no bespoke modal, just this prefill. */
+  agentDefinitionId?: string;
   linkedEntity?: { label: string; url?: string };
 }
 
@@ -72,7 +75,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const [model, setModel] = useState("");
   const [modelCredentialId, setModelCredentialId] = useState("");
   const [harness, setHarness] = useState("");
-  const [agentDefinitionId, setAgentDefinitionId] = useState("");
+  const [agentDefinitionId, setAgentDefinitionId] = useState(autofill?.agentDefinitionId ?? "");
   const [runnerKind, setRunnerKind] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [menu, setMenu] = useState<null | "perm" | "repos" | "mr">(null);
@@ -171,7 +174,10 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
   const missing: string[] = [];
   if (!taskText.trim()) missing.push("a task");
-  if (!primary?.repositoryId) missing.push("a repository");
+  // A repository is required only for the `repo` surface (a change anchored to a codebase). The `chat` surface's
+  // goal IS the task text — the backend runs it repo-less (a research / answer task, or an agent launched from the
+  // roster) — so requiring a repo there would dead-end the launch on a workspace the run never needs.
+  if (surface === "repo" && !primary?.repositoryId) missing.push("a repository");
   const canLaunch = missing.length === 0 && !launch.isPending;
 
   const toggleRepo = (id: string) => {

@@ -63,6 +63,23 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(onLaunched).toHaveBeenCalledWith("run-1");
   });
 
+  it("a chat-surface task launches WITHOUT a repository (the roster Launch isn't a dead-end)", () => {
+    renderBox({ surface: "chat", autofill: {} });
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+    typeTask("Research the auth flow");
+    expect(send).not.toBeDisabled();  // a repo is NOT required on the chat surface
+    fireEvent.click(send);
+    expect(lastInput).toMatchObject({ taskText: "Research the auth flow", surfaceKind: "chat", repositoryId: null });
+  });
+
+  it("injects the clicked agent as agentDefinitionId (the roster 'Launch task' prefill)", () => {
+    renderBox({ surface: "chat", autofill: { agentDefinitionId: "a1" } });
+    typeTask("Triage the flaky test");
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).toMatchObject({ surfaceKind: "chat", agentDefinitionId: "a1", repositoryId: null });
+  });
+
   it("Repositories multi-select adds a repo and shows the count", () => {
     renderBox();
     fireEvent.click(screen.getByTitle("Repositories"));

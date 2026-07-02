@@ -3,9 +3,14 @@ import type { AgentRunScorecard, HarnessScore, TeamCostRollup } from "@/api/agen
 import { useAgentScorecard, useTeamCost } from "@/hooks/use-agents";
 
 /**
+ * RETENTION NOTE (2026-07): not currently rendered. The Agents page moved to PER-AGENT evidence rows, so this
+ * global/per-harness fleet view was removed from it. It — and its {@link useAgentScorecard}/{@link useTeamCost}
+ * hooks — is deliberately KEPT for the forthcoming Runs → Analytics surface, where the fleet compare belongs; the
+ * scorecard + cost endpoints it binds are still live. Delete this file (and those hooks) if that surface is dropped.
+ *
  * The team's agent-run scorecard — the measurement spine that turns "is the agent working" into an auditable
  * NUMBER. A headline strip (overall success rate, P50/P95 latency, runs scored, est. spend) over a per-harness
- * comparison table, surfaced at the top of the Agents library. Read-only + team-scoped at the source.
+ * comparison table. Read-only + team-scoped at the source.
  *
  * <p>Success + latency come from the scorecard; the estimated USD spend comes from the SEPARATE cost rollup
  * (<c>/api/agents/cost</c>) — a real figure, qualified by an unknown-cost count, not fabricated. The cost stat
