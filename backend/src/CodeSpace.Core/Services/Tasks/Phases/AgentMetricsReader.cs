@@ -86,8 +86,12 @@ public sealed class AgentMetricsReader : IScopedDependency
             Model = model,
             CostUsd = tokens is null ? null : AgentCostPricing.CostUsd(model, tokens.InputTokens, tokens.OutputTokens),
             FilesChanged = result?.ChangedFiles?.Count,
+            ChangedFiles = (result?.ChangedFiles ?? Array.Empty<string>()).Take(MaxChangedFiles).ToList(),
         };
     }
+
+    /// <summary>Bound on the per-agent changed-file list carried for the terminal's Files tab (the count is still the full total).</summary>
+    private const int MaxChangedFiles = 40;
 
     /// <summary>Live duration: final once terminal (<c>CompletedAt − StartedAt</c>), else elapsed (<c>now − StartedAt</c>); null before it starts; a negative span (clock skew) clamps to 0. The ONE place both phase sources compute an agent's run duration.</summary>
     public static long? ComputeDuration(DateTimeOffset? startedAt, DateTimeOffset? completedAt, DateTimeOffset now)

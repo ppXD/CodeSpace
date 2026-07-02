@@ -61,6 +61,9 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>The <see cref="RunPhase.Kind"/> of a model-authored semantic phase (L4 arc C) — the shared discriminator the room projector reads to separate "the plan's shape" (the map) from "the decision tape" (the narrative).</summary>
     public const string AuthoredPhaseKind = "phase";
 
+    /// <summary>Bound on the per-agent changed-file list carried on the ref for the terminal's Files tab (the count stays the full total).</summary>
+    private const int MaxAgentFiles = 40;
+
     /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses (and the optional live duration/tool-count extras) → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim). The compact (model/tokens) folds from the ledger; <paramref name="extrasByAgent"/> carries the figures that don't (duration, tool count) — omitted leaves those ref fields null.</summary>
     public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunExtras>? extrasByAgent = null)
     {
@@ -284,6 +287,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
                 ToolCount = extras?.ToolCount,
                 CostUsd = compact is null ? null : AgentCostPricing.CostUsd(model, compact.InputTokens, compact.OutputTokens),
                 FilesChanged = compact?.ChangedFiles.Count,
+                ChangedFiles = compact is null ? Array.Empty<string>() : compact.ChangedFiles.Take(MaxAgentFiles).ToList(),
                 Summary = string.IsNullOrWhiteSpace(compact?.Summary) ? null : compact!.Summary,
             };
         }

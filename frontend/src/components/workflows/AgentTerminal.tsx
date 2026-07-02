@@ -38,7 +38,9 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
   const active = isAgentBusy(status);
   const events = useAgentRunEvents(activeAgentRunId, active);
 
-  const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
+  // Prefer the MEANINGFUL name (a supervisor agent's role / assigned subtask) over the structural node id, so the
+  // title reads the same in every surface (run detail + the session room) and the alloc strip suppresses its duplicate.
+  const name = agent.label || agent.role || agent.assignedSubtask || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const evts = events.data ?? [];
 
   // This agent's own changed files (per-agent attribution) — a Files tab, shown only when it produced any. The
