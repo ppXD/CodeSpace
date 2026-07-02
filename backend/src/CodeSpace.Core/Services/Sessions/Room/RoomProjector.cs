@@ -147,13 +147,23 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         DurationMs = DurationMs(turn),
     };
 
-    /// <summary>The turn's wall-clock — final once the run completed, else live elapsed since it started; null before it starts.</summary>
+    /// <summary>
+    /// The turn's wall-clock. A COMPLETED turn measures <c>CompletedAt − CreatedDate</c> — anchored on the immutable
+    /// enqueue time, NOT <c>StartedAt</c>, because a resumed / re-dispatched run (e.g. recovered after a restart) resets
+    /// StartedAt to its final leg, which would under-report the whole-turn elapsed (28m read as 36s). A LIVE turn shows
+    /// elapsed since it actually started (null before then, so a queued turn shows no growing time).
+    /// </summary>
     private static long? DurationMs(SessionTurn turn)
     {
+        if (turn.CompletedAt is { } end)
+        {
+            var span = (long)(end - turn.CreatedDate).TotalMilliseconds;
+            return span >= 0 ? span : null;
+        }
+
         if (turn.StartedAt is not { } start) return null;
 
-        var ms = (long)((turn.CompletedAt ?? DateTimeOffset.UtcNow) - start).TotalMilliseconds;
-
+        var ms = (long)(DateTimeOffset.UtcNow - start).TotalMilliseconds;
         return ms >= 0 ? ms : null;
     }
 

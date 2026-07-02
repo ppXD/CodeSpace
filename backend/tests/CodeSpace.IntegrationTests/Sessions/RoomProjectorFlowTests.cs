@@ -185,7 +185,52 @@ public class RoomProjectorFlowTests
         agents.Agents.Count.ShouldBe(2, "one card per spawned agent");
     }
 
+    [Fact]
+    public async Task Turn_duration_anchors_on_created_date_so_a_resumed_run_reports_the_full_wall_clock()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Long run");
+
+        // A resumed / re-dispatched run (recovered after a restart): StartedAt was reset to the FINAL leg — ~1 min before
+        // completion — long after the run was created ~30 min earlier. The wall-clock must be CompletedAt − CreatedDate.
+        var created = DateTimeOffset.UtcNow.AddMinutes(-30);
+        var runId = await SeedTimedTurnAsync(teamId, sessionId, created, startedAt: created.AddMinutes(29), completedAt: created.AddMinutes(30));
+
+        var room = await ProjectByRunAsync(runId, teamId);
+
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single();
+        turn.DurationMs.ShouldNotBeNull();
+        turn.DurationMs!.Value.ShouldBeInRange(29 * 60_000L, 31 * 60_000L, "the full CompletedAt − CreatedDate (~30m), NOT CompletedAt − the reset StartedAt (~1m)");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>Seed one completed turn run with EXPLICIT created / started / completed timestamps (to exercise the resume-safe wall-clock).</summary>
+    private async Task<Guid> SeedTimedTurnAsync(Guid teamId, Guid sessionId, DateTimeOffset created, DateTimeOffset startedAt, DateTimeOffset completedAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal = "Long task" }),
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = created, VerifiedAt = created, NormalizedAt = created,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = 1,
+            OutputsJson = JsonSerializer.Serialize(new { summary = "done", branch = (string?)null }),
+            StartedAt = startedAt, CompletedAt = completedAt,
+            CreatedDate = created, CreatedBy = SystemUsers.SeederId, LastModifiedDate = completedAt, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+        return runId;
+    }
 
     /// <summary>Stamp a supervisor SPAWN decision whose folded agentResults carry per-agent changed-file paths, plus the matching AgentRun rows so the phase projection surfaces the agents (the Agents group folds them).</summary>
     private async Task SeedSpawnDecisionAsync(Guid teamId, Guid runId, params (Guid AgentRunId, string[] Files)[] agents)
