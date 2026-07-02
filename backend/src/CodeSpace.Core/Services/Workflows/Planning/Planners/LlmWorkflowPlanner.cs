@@ -115,7 +115,9 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return plan;
     }
 
-    private const string SystemPrompt =
+    // Internal (not private): the planner-cassette drift detector reconstructs the EXACT run-time request from
+    // these production seams, so a prompt edit moves the pinned cassette key loudly (Rule 12.5).
+    internal const string SystemPrompt =
         "You are a senior engineer turning a free-text task into a concrete, reviewable plan. " +
         "Break the task into a small number of ordered, independently-executable subtasks (1–20). " +
         "Give each subtask a stable id, a short title, and a concrete instruction. " +

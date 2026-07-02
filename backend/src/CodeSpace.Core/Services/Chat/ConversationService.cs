@@ -16,6 +16,14 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
 
     public async Task<Guid> CreateChannelAsync(Guid teamId, string name, string slug, bool isPrivate, Guid actorUserId, CancellationToken cancellationToken)
     {
+        var conversationId = await StageChannelAsync(teamId, name, slug, isPrivate, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return conversationId;
+    }
+
+    public async Task<Guid> StageChannelAsync(Guid teamId, string name, string slug, bool isPrivate, Guid actorUserId, CancellationToken cancellationToken)
+    {
         var normalizedSlug = NormalizeSlug(slug);
 
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Channel name is required.", nameof(name));
@@ -36,7 +44,6 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
         _db.Conversation.Add(conversation);
         _db.ConversationMember.Add(BuildMember(conversation.Id, teamId, actorUserId, ConversationMemberRole.Owner));
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return conversation.Id;
     }
 

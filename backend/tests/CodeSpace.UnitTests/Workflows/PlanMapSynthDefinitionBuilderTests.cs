@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
 
@@ -30,6 +31,7 @@ public class PlanMapSynthDefinitionBuilderTests
     {
         new TriggerManualNode(),
         new LlmCompleteNode(new LLMClientRegistry(Array.Empty<ILLMClient>()), null!),
+        new PlanAuthorNode(null!),
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),
@@ -56,7 +58,7 @@ public class PlanMapSynthDefinitionBuilderTests
 
         var byId = def.Nodes.ToDictionary(n => n.Id, n => n.TypeKey);
         byId["start"].ShouldBe("trigger.manual");
-        byId["planner"].ShouldBe("llm.complete");
+        byId["planner"].ShouldBe("plan.author");
         byId["map"].ShouldBe("flow.map");
         byId["ms"].ShouldBe("flow.map_start");
         byId["agent"].ShouldBe("agent.code");
@@ -96,18 +98,42 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
-    public void Planner_emits_a_subtasks_response_schema_and_frames_the_seed_goal()
+    public void Planner_is_a_flat_plan_author_bound_to_the_seed_goal()
     {
         var def = Builder.Build(Context());
         var planner = def.Nodes.Single(n => n.Id == "planner");
 
-        // The responseSchema constrains the model to { subtasks: string[] } — the EXACT shape the map binds.
-        var schema = planner.Config.GetProperty("responseSchema");
-        schema.GetProperty("properties").GetProperty("subtasks").GetProperty("type").GetString().ShouldBe("array");
-        schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldContain("subtasks");
+        // The plan is FLAT: the parallel map cannot honor ordering, so the planner is constrained + stripped.
+        planner.Config.GetProperty("flatPlan").GetBoolean().ShouldBeTrue();
 
-        // The seed goal is framed into the decompose instruction (the userPrompt the structured LLM completes).
-        planner.Inputs.GetProperty("userPrompt").GetString().ShouldContain("Improve the onboarding module");
+        // No critic / no pin by default — the config carries ONLY the flat constraint (byte-stable baseline).
+        planner.Config.EnumerateObject().Select(o => o.Name).ShouldBe(new[] { "flatPlan" });
+
+        planner.Inputs.GetProperty("goal").GetString().ShouldBe("Improve the onboarding module");
+        planner.Inputs.TryGetProperty("grounding", out _).ShouldBeFalse("no launch grounding ⇒ the key is omitted");
+    }
+
+    [Fact]
+    public void The_planner_critic_and_pinned_model_ride_the_plan_author_config()
+    {
+        var context = Context() with { PlannerModelRowId = Guid.Parse("99999999-9999-9999-9999-999999999999"), PlannerReviewMode = ReviewMode.Improve, ReviewerModelId = Guid.Parse("88888888-8888-8888-8888-888888888888") };
+
+        var planner = Builder.Build(context).Nodes.Single(n => n.Id == "planner");
+
+        planner.Config.GetProperty("plannerModelId").GetString().ShouldBe("99999999-9999-9999-9999-999999999999");
+        planner.Config.GetProperty("reviewMode").GetInt32().ShouldBe((int)ReviewMode.Improve);
+        planner.Config.GetProperty("reviewerModelId").GetString().ShouldBe("88888888-8888-8888-8888-888888888888");
+    }
+
+    [Fact]
+    public void The_reviewer_model_is_omitted_when_the_planner_critic_is_off()
+    {
+        var context = Context() with { PlannerReviewMode = ReviewMode.None, ReviewerModelId = Guid.NewGuid() };
+
+        var planner = Builder.Build(context).Nodes.Single(n => n.Id == "planner");
+
+        planner.Config.TryGetProperty("reviewMode", out _).ShouldBeFalse("None ⇒ omitted ⇒ byte-identical");
+        planner.Config.TryGetProperty("reviewerModelId", out _).ShouldBeFalse("a reviewer without a review would not be byte-identical");
     }
 
     [Fact]
@@ -147,8 +173,8 @@ public class PlanMapSynthDefinitionBuilderTests
     {
         var agent = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent");
 
-        agent.Config.GetProperty("goal").GetString().ShouldBe("Work on {{item}}",
-            "each branch's goal carries its own subtask via the map's {{item}} — matching the headline body");
+        agent.Config.GetProperty("goal").GetString().ShouldBe("{{item.instruction}}",
+            "each branch's goal is its own plan item's authored instruction");
     }
 
     [Fact]
@@ -184,8 +210,9 @@ public class PlanMapSynthDefinitionBuilderTests
 
         var def = Builder.Build(Context(profile));
 
-        def.Nodes.Single(n => n.Id == "planner").Config.GetProperty("model").GetString().ShouldBe("claude-sonnet",
-            "the profile's model maps onto the planner llm.complete");
+        // The planner is plan.author: its model is pinned by ROW at launch (PlannerModelRowId), never by the
+        // profile's model NAME — the name still drives the agent body + synth via the shared mapping.
+        def.Nodes.Single(n => n.Id == "planner").Config.TryGetProperty("model", out _).ShouldBeFalse();
 
         var agent = def.Nodes.Single(n => n.Id == "agent");
         agent.Config.GetProperty("harness").GetString().ShouldBe("claude-code", "the agent body uses the shared profile mapping");
@@ -193,11 +220,11 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
-    public void Bare_profile_planner_omits_the_model_inheriting_the_node_default()
+    public void Bare_profile_planner_omits_the_model_pin_inheriting_the_node_auto_pick()
     {
         var planner = Builder.Build(Context()).Nodes.Single(n => n.Id == "planner");
 
-        planner.Config.TryGetProperty("model", out _).ShouldBeFalse("an absent model inherits the node/deployment default");
+        planner.Config.TryGetProperty("plannerModelId", out _).ShouldBeFalse("no launch pin ⇒ plan.author auto-picks the team's strongest structured model");
         Builder.Build(Context()).Nodes.Single(n => n.Id == "agent").Config.GetProperty("harness").GetString().ShouldBe("codex-cli",
             "a null harness folds to the agent.code catalog default");
     }

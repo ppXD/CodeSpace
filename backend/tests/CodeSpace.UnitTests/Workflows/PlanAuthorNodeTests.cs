@@ -23,12 +23,38 @@ public class PlanAuthorNodeTests
         node.TypeKey.ShouldBe("plan.author");
         node.Manifest.IsSideEffecting.ShouldBeTrue("one structured LLM call per execution — billing, like llm.complete");
 
-        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId" }, ignoreOrder: true);
+        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan" }, ignoreOrder: true);
         InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback" }, ignoreOrder: true);
         OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
 
         node.Manifest.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())
             .ShouldBe(new[] { "goal" }, "only the goal is required — grounding/feedback are optional binds");
+    }
+
+    [Fact]
+    public void A_flat_plan_config_appends_the_parallel_constraint_to_the_task_text()
+    {
+        var config = new Dictionary<string, JsonElement> { ["flatPlan"] = JsonSerializer.SerializeToElement(true) };
+
+        var request = PlanAuthorNode.BuildPlanRequest(config, Guid.NewGuid(), "ship it", grounding: "", feedback: "");
+
+        request.TaskText.ShouldContain(PlanAuthorNode.FlatPlanConstraint, customMessage: "the parallel map cannot honor ordering — the planner must be told");
+    }
+
+    [Fact]
+    public void The_flat_plan_constraint_is_pinned()
+    {
+        // The map projections bake flatPlan into every standard-tier launch — rewording the constraint is a
+        // visible prompt-behaviour decision, not an invisible refactor.
+        PlanAuthorNode.FlatPlanConstraint.ShouldBe("Constraint: author INDEPENDENT subtasks only — they run in PARALLEL, so do NOT use dependsOn.");
+    }
+
+    [Fact]
+    public void Without_the_flat_flag_the_task_text_is_unchanged()
+    {
+        var request = PlanAuthorNode.BuildPlanRequest(new Dictionary<string, JsonElement>(), Guid.NewGuid(), "ship it", grounding: "", feedback: "");
+
+        request.TaskText.ShouldNotContain(PlanAuthorNode.FlatPlanConstraint);
     }
 
     [Fact]

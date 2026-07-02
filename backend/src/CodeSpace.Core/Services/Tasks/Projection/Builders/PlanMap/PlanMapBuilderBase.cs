@@ -1,39 +1,36 @@
 using System.Text.Json;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
 
 /// <summary>
 /// The shared skeleton of the plan→map→agent→synth→done projection FAMILY (Rule 18 — the structure both
-/// plan-map variants share, specialized only where they actually differ). The graph shape + edges, the map
-/// parallelism cap, the planner-config/model wiring, the synth reduce, and the done terminal are IDENTICAL
-/// across variants; the ONLY divergence is the planner's response schema, the planner prompt, and the body
-/// agent's goal (+ optional per-branch mode) binding — the four hooks below.
+/// plan-map variants share, specialized only where they actually differ). The planner is the TRIAD's
+/// <c>plan.author</c> node (S4b): it authors a structured, DURABLE plan — a versioned WorkPlan row the run's
+/// checklist renders — and its <c>json.subtasks</c> output binds the map exactly like the structured
+/// <c>llm.complete</c> it replaced (the node's <c>json</c> output is binding-compatible by contract). The
+/// operator's planner critic (<c>reviewMode</c> None|Gate|Improve → the CriticPlannerDecorator) and pinned
+/// planner model ride the node config. The plan is FLAT (<c>flatPlan</c>): the map fans every subtask out in
+/// parallel, so the planner is constrained to independent items (authored dependsOn is stripped, logged).
 ///
-/// <para>A concrete variant overrides those hooks and NOTHING else, so the two builders cannot drift: a fix to
-/// the shared spine (the map items binding, the synth reduce prompt, the maxParallelism wiring, the done output
-/// key) lands once, here, for every variant. This eliminates the ~120-line duplication structurally (no Rule-12.5
-/// drift detector needed because there is nothing mirrored to drift). <see cref="Build"/> stays PURE — the planner
-/// is a NODE that runs at execution, not a build-time LLM call — so the output always passes the real
-/// <c>DefinitionValidator</c>. The base is abstract + not <c>ISingletonDependency</c>, so only the concrete
-/// variants self-register; each registers <c>As&lt;IWorkflowDefinitionBuilder&gt;</c> via its inherited interface.</para>
+/// <para>The graph shape + edges, the parallelism cap, the synth reduce, and the done terminal are IDENTICAL
+/// across variants; the ONLY divergence left is the body agent's goal binding + optional per-branch mode —
+/// the two hooks below. A fix to the shared spine lands once, here, for every variant. <see cref="Build"/>
+/// stays PURE — the planner is a NODE that runs at execution, not a build-time LLM call — so the output always
+/// passes the real <c>DefinitionValidator</c>. The base is abstract + not <c>ISingletonDependency</c>, so only
+/// the concrete variants self-register.</para>
 /// </summary>
 public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 {
     /// <summary>The projection kind this variant registers under (the key <c>ITaskProjectionRegistry</c> resolves by).</summary>
     public abstract string ProjectionKind { get; }
 
-    /// <summary>The planner's structured-output <c>responseSchema</c> for the <c>subtasks</c> array the map fans out over — a string array (plan-map-synth) or an object-array spec (plan-map-dynamic). Surfaced on <c>json.subtasks</c>, the shape <see cref="MapInputs"/> binds.</summary>
-    protected abstract object SubtasksResponseSchema();
-
-    /// <summary>The planner node's inputs — the prompt that frames the decomposition for this variant (the SAME structured node, different framing).</summary>
-    protected abstract JsonElement PlannerInputs(TaskBuildContext context);
-
-    /// <summary>The body agent's goal binding — e.g. <c>"Work on {{item}}"</c> over a string array, or <c>"{{item.goal}}"</c> over a spec object.</summary>
+    /// <summary>The body agent's goal binding over the planner's subtask objects — e.g. <c>"{{item.instruction}}"</c>.</summary>
     protected abstract string BranchGoal { get; }
 
-    /// <summary>The body agent's per-branch mode binding (e.g. <c>"{{item.mode}}"</c>), or null when the variant authors no mode — then <see cref="AgentNodeMapping.BuildAgentConfig"/> omits it (byte-identical to a no-mode node).</summary>
+    /// <summary>The body agent's per-branch mode binding (e.g. <c>"{{item.kind}}"</c> — the plan item's open kind), or null when the variant authors no mode — then <see cref="AgentNodeMapping.BuildAgentConfig"/> omits it (byte-identical to a no-mode node).</summary>
     protected virtual string? BranchMode => null;
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
@@ -47,7 +44,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     {
         new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
-        new() { Id = "planner", TypeKey = "llm.complete", Label = "Plan",
+        new() { Id = "planner", TypeKey = "plan.author", Label = "Plan",
                 Config = PlannerConfig(context), Inputs = PlannerInputs(context) },
 
         new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = MapConfigJson(context), Inputs = MapInputs() },
@@ -72,17 +69,32 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         new() { From = "ms", To = "agent" },
     };
 
-    /// <summary>The planner Config — the variant's <see cref="SubtasksResponseSchema"/> forcing structured output (surfaced on <c>json</c>) + the profile's model (AddIfPresent). The provider is the node's own default; a test retargets it at the IStructuredLLMClient seam, never the builder.</summary>
-    private JsonElement PlannerConfig(TaskBuildContext context)
+    /// <summary>The plan.author Config — always a FLAT plan (the parallel map cannot honor ordering), plus the launch's pinned planner model row + the operator's planner critic (reviewMode / reviewerModelId, omitted when off — byte-identical).</summary>
+    private static JsonElement PlannerConfig(TaskBuildContext context)
     {
         var config = new Dictionary<string, object?>
         {
-            ["responseSchema"] = SubtasksResponseSchema(),
+            ["flatPlan"] = true,
         };
 
-        AddIfPresent(config, "model", NullIfBlank(context.AgentProfile?.Model));
+        AddIfPresent(config, "plannerModelId", context.PlannerModelRowId?.ToString());
+        AddIfPresent(config, "reviewMode", context.PlannerReviewMode != ReviewMode.None ? (int)context.PlannerReviewMode : null);
+        AddIfPresent(config, "reviewerModelId", context.PlannerReviewMode != ReviewMode.None ? context.ReviewerModelId?.ToString() : null);
 
         return JsonSerializer.SerializeToElement(config);
+    }
+
+    /// <summary>The plan.author Inputs — the seed goal (+ the launch grounding when present, so a continue's prior-turn digest steers the plan).</summary>
+    private static JsonElement PlannerInputs(TaskBuildContext context)
+    {
+        var inputs = new Dictionary<string, object?>
+        {
+            ["goal"] = context.Seed.Goal,
+        };
+
+        AddIfPresent(inputs, "grounding", NullIfBlank(context.GroundingContext));
+
+        return JsonSerializer.SerializeToElement(inputs);
     }
 
     /// <summary>The map Inputs — fan out over the planner's typed subtasks array (a string array or an object array binds the same).</summary>

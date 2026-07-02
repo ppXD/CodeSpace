@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -99,7 +100,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
-        var modelSubtasks = ReadModelAuthoredSubtasks();
+        var modelSubtasks = await ReadModelAuthoredSubtasksAsync(teamId);
 
         await AssertRunSucceededAsync(db, runId);
         await AssertFannedOutOverModelAuthoredSubtasksAsync(db, runId, modelSubtasks);
@@ -129,23 +130,26 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         agentRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded, "every branch agent executed to Succeeded via the real executor + runner");
 
         var actualGoals = agentRuns.Select(r => JsonSerializer.Deserialize<Messages.Agents.AgentTask>(r.TaskJson, AgentJson.Options)!.Goal).OrderBy(g => g).ToList();
-        var expectedGoals = modelSubtasks.Select(s => $"Work on {s}").OrderBy(g => g).ToList();
+        var expectedGoals = modelSubtasks.OrderBy(g => g).ToList();
 
         actualGoals.ShouldBe(expectedGoals,
-            customMessage: "each agent's resolved goal must be 'Work on <subtask>' for the MODEL's own subtasks — proving the model-authored decomposition propagated through the map's per-branch {{item}} binding");
+            customMessage: "each agent's resolved goal must be the MODEL's own authored instruction — proving the plan.author decomposition propagated through the map's per-branch {{item.instruction}} binding");
     }
 
-    /// <summary>Read the subtasks the model authored back out of the committed cassette — the same JSON the planner node surfaced on its 'json' output and the map fanned out over.</summary>
-    private static IReadOnlyList<string> ReadModelAuthoredSubtasks()
+    /// <summary>Read the subtask INSTRUCTIONS the model authored back out of the committed cassette — plan.author's subtasks are objects, and the map's per-branch goal binds each item's <c>instruction</c>.</summary>
+    private async Task<IReadOnlyList<string>> ReadModelAuthoredSubtasksAsync(Guid teamId)
     {
-        var request = PlanMapSynthPlannerRequest.Build();
+        StructuredLLMCompletionRequest request;
+        using (var scope = _fixture.BeginScope())
+            request = await PlanMapSynthPlannerRequest.BuildAsync(scope, teamId, CancellationToken.None);
+
         var entries = JsonSerializer.Deserialize<List<RecordReplayStructuredLLMClient.CassetteEntry>>(File.ReadAllText(RealModelCassettePaths.PlannerCassettePath))!;
 
         var key = RecordReplayStructuredLLMClient.CassetteKey(request);
         var entry = entries.FirstOrDefault(e => e.KeyHash == key)
             ?? throw new InvalidOperationException($"Cassette has no entry for the plan-map-synth planner key {key} — re-record via the RealModel live test.");
 
-        return entry.JsonElement().GetProperty("subtasks").EnumerateArray().Select(s => s.GetString()!).ToList();
+        return entry.JsonElement().GetProperty("subtasks").EnumerateArray().Select(s => s.GetProperty("instruction").GetString()!).ToList();
     }
 
     // ─── Helpers (mirror PlanMapSynthFanoutFlowTests) ──────────────────────────
@@ -165,6 +169,8 @@ public sealed class RealModelPhaseAuthorshipFlowTests
     /// <summary>Build via the REAL projection builder, retarget ONLY the planner llm.complete to the RecordReplay decorator's tag (the real/recorded model at the IStructuredLLMClient seam), then start the snapshot run via the REAL starter.</summary>
     private async Task<Guid> ProjectRetargetToRealModelAndStartAsync(RoutePlan route, Guid teamId, Guid userId)
     {
+        var plannerRowId = await RecordReplayPlannerRowAsync(teamId);
+
         using var scope = _fixture.BeginScope();
 
         var context = new TaskBuildContext
@@ -176,23 +182,42 @@ public sealed class RealModelPhaseAuthorshipFlowTests
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
 
-        var definition = RetargetPlannerToRealModel(builder.Build(context));
+        var definition = RetargetPlannerToRealModel(builder.Build(context), plannerRowId);
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite the PLANNER node's <c>llm.complete</c> provider to the RecordReplay decorator's tag (the real/recorded model — the ONLY real model under test), and the SYNTH node's to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's decision authorship is under test here. Retarget is BY NODE ID (the graph now has two llm.complete nodes). The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
-    private static WorkflowDefinition RetargetPlannerToRealModel(WorkflowDefinition definition) => definition with
+    /// <summary>Test-only adaptation: PIN the plan.author planner's model to the seeded RecordReplay pool row (the real/recorded model — the ONLY real model under test; pool-driven resolve lands on the record/replay client and pick.ModelId equals the drift mirror's DefaultModel), and retarget the SYNTH llm.complete to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's plan authorship is under test here. The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    private static WorkflowDefinition RetargetPlannerToRealModel(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
-        Nodes = definition.Nodes.Select(RetargetNode).ToList(),
+        Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node) => node.Id switch
+    private static NodeDefinition RetargetNode(NodeDefinition node, Guid plannerRowId) => node.Id switch
     {
-        "planner" => RetargetProvider(node, RecordReplayStructuredLLMClient.ProviderTag),
+        "planner" => PinPlannerModel(node, plannerRowId),
         "synth" => RetargetProvider(node, DeterministicSynthLlmClient.ProviderTag),
         _ => node,
     };
+
+    /// <summary>The planner is plan.author (pool-driven, no provider config) — pin its plannerModelId to the SEEDED RecordReplay pool row, so ResolveByRowIdAsync lands on the record/replay client and pick.ModelId equals the drift mirror's DefaultModel exactly.</summary>
+    private static NodeDefinition PinPlannerModel(NodeDefinition node, Guid plannerRowId)
+    {
+        var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
+        config["plannerModelId"] = JsonSerializer.SerializeToElement(plannerRowId.ToString());
+
+        return node with { Config = JsonSerializer.SerializeToElement(config) };
+    }
+
+    /// <summary>The RecordReplay provider's seeded credentialed-model row for this team — the row the planner pin targets.</summary>
+    private async Task<Guid> RecordReplayPlannerRowAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Credential.TeamId == teamId && m.Credential.Provider == RecordReplayStructuredLLMClient.ProviderTag)
+            .Select(m => m.Id)
+            .SingleAsync();
+    }
 
     private static NodeDefinition RetargetProvider(NodeDefinition node, string providerTag)
     {

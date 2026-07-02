@@ -131,6 +131,59 @@ public class PlanAuthorNodeFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_flat_plan_strips_authored_dependencies_but_keeps_the_rest_of_the_contract()
+    {
+        // The rich contract authors dependsOn on s2 — under flatPlan (a parallel fan-out consumer) the persisted
+        // contract must NOT carry ordering the map cannot honor; the acceptance + criteria survive untouched.
+        using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreateFlatPlanWorkflowAsync(teamId, userId, plannerRowId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var plan = await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == runId);
+        var items = JsonDocument.Parse(plan.ItemsJson).RootElement.EnumerateArray().ToList();
+
+        items.Count.ShouldBe(2);
+        items.Any(i => i.TryGetProperty("dependsOn", out var deps) && deps.ValueKind != JsonValueKind.Null)
+            .ShouldBeFalse("flatPlan strips ordering the parallel map cannot honor — the checklist must never show dependency chips the execution ignored");
+        items.Single(i => i.GetProperty("id").GetString() == "s2").TryGetProperty("acceptance", out _)
+            .ShouldBeTrue("only the ORDERING is stripped — the per-item acceptance contract survives");
+    }
+
+    private async Task<Guid> CreateFlatPlanWorkflowAsync(Guid teamId, Guid userId, Guid plannerRowId)
+    {
+        var config = WorkflowsTestSeed.Json($$"""{"plannerModelId":"{{plannerRowId}}","flatPlan":true}""");
+
+        var nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "plan", TypeKey = "plan.author", Config = config, Inputs = WorkflowsTestSeed.Json("""{"goal":"ship the feature"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        };
+        var edges = new List<EdgeDefinition> { new() { From = "start", To = "plan" }, new() { From = "plan", To = "end" } };
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "plan-flat-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges },
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    [Fact]
     public async Task A_structurally_invalid_dag_fails_the_node_closed()
     {
         using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().AuthorInvalidDag = true;

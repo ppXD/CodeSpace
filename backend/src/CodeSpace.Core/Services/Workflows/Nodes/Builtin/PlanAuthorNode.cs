@@ -52,7 +52,8 @@ public sealed class PlanAuthorNode : INodeRuntime
               "properties": {
                 "plannerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the planner reasons on. Leave empty to auto-pick the team's strongest structured-eligible model." },
                 "reviewMode": { "type": "integer", "enum": [0, 1, 2], "default": 0, "description": "Independent reviewer over the produced plan: 0 = off, 1 = Gate (flag concerns onto the plan's risks), 2 = Improve (one bounded revision against the critique)." },
-                "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the plan reviewer runs on (ideally distinct from the planner). Leave empty to auto-pick. Only used when reviewMode is not 0." }
+                "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the plan reviewer runs on (ideally distinct from the planner). Leave empty to auto-pick. Only used when reviewMode is not 0." },
+                "flatPlan": { "type": "boolean", "default": false, "description": "Constrain the plan to INDEPENDENT subtasks (no dependsOn) — set by parallel fan-out projections (flow.map runs every item concurrently, so ordering could not be honored). Authored dependencies are stripped as a fail-safe (logged)." }
               }
             }
             """),
@@ -118,6 +119,16 @@ public sealed class PlanAuthorNode : INodeRuntime
             return NodeResult.Fail(ex.Message);
         }
 
+        // A flat-plan consumer (a parallel flow.map) cannot honor ordering — the prompt already forbade
+        // dependsOn; stripping any that slipped through keeps the persisted CONTRACT truthful to the execution
+        // (a checklist must never show "after #1" chips a parallel fan-out ignored).
+        if (ReadFlatPlan(context.Config) && plan.Subtasks.Any(t => t.DependsOn is { Count: > 0 }))
+        {
+            context.Logger.LogWarning("plan.author stripped dependsOn from {Count} subtask(s) — this is a flat plan for a parallel fan-out", plan.Subtasks.Count(t => t.DependsOn is { Count: > 0 }));
+
+            plan = plan with { Subtasks = plan.Subtasks.Select(t => t with { DependsOn = null }).ToList() };
+        }
+
         var items = plan.Subtasks.Select(WorkPlanItem.From).ToList();
 
         // Fail CLOSED on a structurally contradictory DAG (dup ids / dangling dependsOn / cycle) — the
@@ -149,10 +160,13 @@ public sealed class PlanAuthorNode : INodeRuntime
         return NodeResult.Ok(BuildOutputs(saved.Id, saved.Version, plan, saved.ItemsJson));
     }
 
-    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change; defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws).</summary>
+    /// <summary>The flat-plan constraint line appended to the task text — the planner must author parallel-safe subtasks. Pinned by a unit test (the map projections depend on it).</summary>
+    public const string FlatPlanConstraint = "Constraint: author INDEPENDENT subtasks only — they run in PARALLEL, so do NOT use dependsOn.";
+
+    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change (a flat plan additionally appends <see cref="FlatPlanConstraint"/>); defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws).</summary>
     internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, string goal, string grounding, string feedback) => new()
     {
-        TaskText = ComposeTaskText(goal, feedback),
+        TaskText = ReadFlatPlan(config) ? $"{ComposeTaskText(goal, feedback)}\n\n{FlatPlanConstraint}" : ComposeTaskText(goal, feedback),
         TeamId = teamId,
         GroundingContext = string.IsNullOrWhiteSpace(grounding) ? null : grounding,
         BrainModelId = ReadGuid(config, "plannerModelId"),
@@ -194,6 +208,9 @@ public sealed class PlanAuthorNode : INodeRuntime
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+
+    private static bool ReadFlatPlan(IReadOnlyDictionary<string, JsonElement> config) =>
+        config.TryGetValue("flatPlan", out var flat) && flat.ValueKind == JsonValueKind.True;
 
     private static Guid? ReadGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id) ? id : null;

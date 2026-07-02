@@ -52,8 +52,14 @@ export interface LaunchFormState {
   autonomyCeiling: string;
   /** Coordination "Integrate branches" — Deep only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Default false ⇒ defer to the ambient flag. */
   integrateBranches: boolean;
-  /** Coordination "Acceptance" — Deep only: free-text criteria the supervisor targets (rendered into its prompt). Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
+  /** Evaluation "Acceptance criteria" — Deep only: free-text criteria the supervisor targets (rendered into its prompt). Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
   acceptanceCriteria: string[];
+  /** Evaluation "Acceptance checks" — Deep only: the EXECUTABLE argv floor (one element per token, e.g. ["sh","check.sh"]) run against the reviewable head at the terminal stop. Sent only when non-empty (⇒ omitted, byte-identical). */
+  acceptanceChecks: string[];
+  /** Planning "Confirm plan first" — Deep only: park each authored plan version for the operator's confirmation before any agent runs. Sent only when ON (default off ⇒ omitted, byte-identical). */
+  requirePlanConfirmation: boolean;
+  /** Planning "Plan critic" — Standard/Auto (the plan-map planner): `"None"` (default) / `"Gate"` / `"Improve"` via the plan.author reviewMode. Sent (as the enum name) only when not None. */
+  plannerReview: string;
   /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
   timeLimit: string;
   /** Review "Decisions" — how an independent critic reviews each supervisor DECISION: `"None"` (default) / `"Gate"` / `"Improve"`. Deep only. Sent (as the enum name) only when not None. */
@@ -159,6 +165,14 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     input.acceptanceCriteria = [...state.acceptanceCriteria];
   }
 
+  // The plan-confirmation gate + the executable acceptance floor are Deep-only supervisor opt-ins; the plan critic
+  // rides the plan-map planner (standard/auto). Defaults ⇒ omitted ⇒ byte-identical.
+  if (tierExposesCaps(state.effort) && state.requirePlanConfirmation) input.requirePlanConfirmation = true;
+  if (tierExposesCaps(state.effort) && state.acceptanceChecks.length) input.acceptanceChecks = [...state.acceptanceChecks];
+
+  const plannerOn = (state.effort === "standard" || state.effort === "auto") && state.plannerReview !== "None";
+  if (plannerOn) input.plannerReviewMode = state.plannerReview;
+
   // The critic review modes (the enum NAME — the API has a string-enum converter). Decision review is a supervisor
   // concern (deep/auto only); output review applies to any agent run. "None" (the default) ⇒ omitted ⇒ byte-identical.
   // The reviewer model rides along only when a review is actually active (else baking it would not be byte-identical).
@@ -166,7 +180,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   const outputOn = state.outputReview !== "None";
   if (decisionOn) input.decisionReviewMode = state.decisionReview;
   if (outputOn) input.outputReviewMode = state.outputReview;
-  if (state.reviewerModel && (decisionOn || outputOn)) input.reviewerModelId = state.reviewerModel;
+  if (state.reviewerModel && (decisionOn || outputOn || plannerOn)) input.reviewerModelId = state.reviewerModel;
 
   return input;
 }

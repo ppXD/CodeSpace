@@ -86,7 +86,17 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // projection — single-agent / map launches are byte-identical.
         var brainModelId = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+        var plannerModelRowId = await ResolvePlannerModelAsync(request, route, cancellationToken).ConfigureAwait(false);
+
+        // Deep/Auto: the session's chat surface — the channel the supervisor's HITL cards (ask_human, plan
+        // confirmation, approvals) post into. Get-or-STAGED onto this launch's unit of work (a failed launch
+        // leaves no orphan channel); every later turn of the session reuses the same room. Inert (null) for
+        // every non-supervisor projection — single-agent / map launches are byte-identical.
+        var conversationId = route.ProjectionKind == TaskProjectionKinds.Supervisor
+            ? await _sessions.EnsureConversationAsync(session.SessionId, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false)
+            : (Guid?)null;
+
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -116,6 +126,25 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     {
         if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return null;
 
+        return await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The plan-map tiers' planner-model row (S4b) — the SAME pinned-or-auto resolution the deep brain uses, so
+    /// the operator's "model" chip drives the plan.author planner exactly like it drives the supervisor brain.
+    /// Null for every other projection (single-agent / supervisor use their own seams — byte-identical) and for
+    /// a structured-incapable pool (the node then auto-picks / fails legibly at execution).
+    /// </summary>
+    private async Task<Guid?> ResolvePlannerModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
+    {
+        if (route.ProjectionKind is not (TaskProjectionKinds.PlanMapSynth or TaskProjectionKinds.PlanMapDynamic)) return null;
+
+        return await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Pinned-or-auto structured "brain" row shared by the deep supervisor + the plan-map planner: the operator's pinned (model, credential) row wins when it resolves to a real enabled team row a structured client serves; otherwise self-resolve from the pool bounded to structured-capable providers. Null on an empty / structured-incapable pool (the consumer omits — the honest fail-closed floor).</summary>
+    private async Task<Guid?> ResolveStructuredBrainRowAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    {
         var structuredProviders = _llm.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
         if (structuredProviders.Count == 0) return null;

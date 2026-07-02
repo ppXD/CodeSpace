@@ -27,6 +27,17 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
 
     public DeterministicWorkPlanLlmClient(WorkPlanPlanScript script) { _script = script; }
 
+    /// <summary>The default plan's instructions — the map projections bind each branch goal to <c>{{item.instruction}}</c>, so the fan-out E2Es pin agents against these verbatim.</summary>
+    public static readonly IReadOnlyList<string> DefaultInstructions = new[] { "do the first thing", "do the second thing" };
+
+    /// <summary>The heterogeneous plan (<c>AuthorHeterogeneousKinds</c>) — one research + two code items, the dynamic fan-out's mode-mapping fodder (kind binds <c>{{item.kind}}</c> → the node's permission/push mapping).</summary>
+    public static readonly IReadOnlyList<(string Instruction, string Kind)> HeterogeneousItems = new[]
+    {
+        ("Work on alpha", "research"),
+        ("Work on beta", "code"),
+        ("Work on gamma", "code"),
+    };
+
     public string Provider => ProviderTag;
 
     public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
@@ -37,6 +48,8 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
         object[] subtasks;
         if (_script.AuthorInvalidDag)
             subtasks = new object[] { new { id = "s1", title = "First", instruction = "do the first thing", dependsOn = new[] { "ghost" } } };
+        else if (_script.AuthorHeterogeneousKinds)
+            subtasks = HeterogeneousItems.Select((item, i) => (object)new { id = $"h{i + 1}", title = item.Instruction, instruction = item.Instruction, kind = item.Kind }).ToArray();
         else if (_script.AuthorContract)
             subtasks = new object[]
             {
@@ -91,10 +104,14 @@ public sealed class WorkPlanPlanScript
     /// <summary>When true, the plan authors a DANGLING dependsOn — the structurally-invalid DAG the node must fail closed on.</summary>
     public bool AuthorInvalidDag { get; set; }
 
+    /// <summary>When true, the plan is the HETEROGENEOUS three-item shape (<c>DeterministicWorkPlanLlmClient.HeterogeneousItems</c>) — one research + two code kinds, for the dynamic fan-out's mode mapping.</summary>
+    public bool AuthorHeterogeneousKinds { get; set; }
+
     public void Reset()
     {
         AuthorContract = false;
         HasEnoughContext = false;
         AuthorInvalidDag = false;
+        AuthorHeterogeneousKinds = false;
     }
 }
