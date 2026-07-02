@@ -63,14 +63,14 @@ export function AgentToolCalls({ agentRunId }: { agentRunId: string }) {
       ) : (
         <ol className="tc-list">
           {native.map((e) => {
-            const args = argPreview(e.data);
+            const call = parseToolCall(e.data);
             return (
               <li key={e.sequence} className="tc-row" data-status="Succeeded">
                 <div className="tc-row-head">
-                  <span className="tc-tool">{e.text || "tool"}</span>
+                  <span className="tc-tool">{call?.name ?? e.text ?? "tool"}</span>
                   <span className="tc-when">{new Date(e.occurredAt).toLocaleTimeString()}</span>
                 </div>
-                {args && <div className="tc-args">{args}</div>}
+                <ToolCallArgs value={call ? call.args : e.text} />
               </li>
             );
           })}
@@ -97,16 +97,33 @@ function statusLabel(status: ToolCallLedgerStatus): string {
   return status === "AwaitingApproval" ? "Awaiting approval" : status;
 }
 
-/** A compact one-line argument preview from a ToolCall event's payload — the args minus the bookkeeping id/name. Null when there's nothing useful to show. */
-function argPreview(data: string | null): string | null {
+/** Parse a ToolCall event's payload into its tool name + its args (the tool_use `input`, else the payload minus bookkeeping id/name/type). Null when unparseable. */
+function parseToolCall(data: string | null): { name?: string; args: unknown } | null {
   if (!data) return null;
   try {
-    const parsed = JSON.parse(data) as Record<string, unknown>;
-    const { id: _id, name: _name, ...rest } = parsed;
-    const s = JSON.stringify(rest);
-    if (s === "{}" || s === "null") return null;
-    return s.length > 100 ? s.slice(0, 100) + "…" : s;
+    const o = JSON.parse(data) as Record<string, unknown>;
+    const name = typeof o.name === "string" ? o.name : undefined;
+    if ("input" in o) return { name, args: o.input };
+    const { id: _id, name: _n, type: _t, ...rest } = o;
+    return { name, args: rest };
   } catch {
     return null;
   }
+}
+
+/** A tool call's arguments — a one-line preview by default; long/multiline args become a click-to-expand disclosure showing the full pretty-printed value (no lossy ellipsis). */
+function ToolCallArgs({ value }: { value: unknown }) {
+  const oneLine = typeof value === "string" ? value : JSON.stringify(value);
+  if (!oneLine || oneLine === "{}" || oneLine === "null" || oneLine === '""') return null;
+
+  const full = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+
+  if (oneLine.length <= 88 && !full.includes("\n")) return <div className="tc-args">{oneLine}</div>;
+
+  return (
+    <details className="tc-argbox">
+      <summary className="tc-args tc-args-clip" title="Click to expand">{oneLine}</summary>
+      <pre className="tc-args-full">{full}</pre>
+    </details>
+  );
 }
