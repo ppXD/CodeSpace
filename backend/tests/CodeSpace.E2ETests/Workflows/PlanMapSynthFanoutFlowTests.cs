@@ -104,6 +104,69 @@ public class PlanMapSynthFanoutFlowTests
         await AssertFannedOutToMultipleRealAgentsAsync(db, runId);
         await AssertEachSubtaskGoalPropagatedAsync(db, runId);
         await AssertSynthComposedRealResultsAsync(db, runId);
+
+        // S5: the plan-map checklist is LIVE — every item joins its branch agent positionally (map#i ↔ items[i]).
+        using (var check = _fixture.BeginScope())
+        {
+            var checklist = await check.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanChecklistService>().GetCurrentAsync(runId, teamId, CancellationToken.None);
+
+            checklist!.Items.Count.ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count);
+            checklist.Items.ShouldAllBe(i => i.State == CodeSpace.Messages.Plans.WorkPlanItemStates.Completed, "every branch succeeded — the standard tier's checklist reads live states now, not honest-Pending");
+            checklist.Items.ShouldAllBe(i => i.AgentRunId != null, "each item links its OWN branch agent (the Details drawer opens it)");
+        }
+    }
+
+    [Fact]
+    public async Task An_item_whose_acceptance_contract_cannot_be_graded_fails_closed_through_to_the_checklist()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The rich-contract plan: s1 plain, s2 carries an OBJECTIVE acceptance. This fan-out runs REPO-LESS, so
+        // s2's contract has no produced branch to grade — the S5 gate must fail it CLOSED (never a phantom pass),
+        // the terminate-mode map must fail the run, and the checklist must tell the whole truth per item.
+        using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+
+        try
+        {
+            using var cli = new SubtaskAwareFakeCli();
+
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+            var jobClient = ResolveJobClient();
+            jobClient.Clear();
+            jobClient.AutoExecute = true;
+
+            var route = await RouteStandardAsync(teamId);
+            var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Failure, "terminate-mode map: an item that flunks its contract fails the run — the same withhold philosophy as Deep's stop floor");
+
+            var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.IterationKey).ToListAsync();
+            var flunked = agentRuns.Single(r => r.Status == AgentRunStatus.Failed);
+            flunked.ResultJson!.ShouldContain("acceptance-failed");
+            flunked.ResultJson!.ShouldContain("no-branch-or-repo");
+
+            var checklist = await verify.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanChecklistService>().GetCurrentAsync(runId, teamId, CancellationToken.None);
+            var states = checklist!.Items.Select(i => i.State).ToList();
+
+            states.ShouldContain(CodeSpace.Messages.Plans.WorkPlanItemStates.Failed);
+            var failedItem = checklist.Items.Single(i => i.State == CodeSpace.Messages.Plans.WorkPlanItemStates.Failed);
+            failedItem.AcceptancePassed.ShouldBe(false);
+            failedItem.AcceptanceDetail.ShouldBe("no-branch-or-repo");
+        }
+        finally
+        {
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();
+        }
     }
 
     /// <summary>THE S4b payoff: the standard tier's plan is a DURABLE versioned WorkPlan row (plan.author origin) — the run's checklist renders this contract, not a transient llm.complete output.</summary>

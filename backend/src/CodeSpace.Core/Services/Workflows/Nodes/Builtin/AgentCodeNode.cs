@@ -65,6 +65,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "enableMcp":      { "type": "boolean", "description": "Per-run opt-in: open the FULL MCP tool-fabric (the side-effecting catalog) for this agent, even when the deployment-wide flag is off. Leave unset to defer to the deployment flag (the read-only catalog). Cannot turn the fabric OFF when the deployment forces it on." },
                 "outputReviewMode": { "type": "integer", "enum": [0, 1], "description": "Review the agent's produced change with an independent critic at completion: 0 = None (default, no review), 1 = Gate (a disapproved change re-grades the run to NeedsReview so a human looks before the downstream PR-open consumes it). Leave unset for no review." },
                 "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the output critic runs on. Leave empty to auto-pick the team's strongest structured-eligible model. Only used when outputReviewMode is not None." },
+                "acceptance": { "type": "object", "description": "This task's OBJECTIVE definition-of-done: { command: [argv...], kind?: TestsPass|ArtifactPresent, description? }. The executor grades it against the produced branch at completion, fail-closed — a failing oracle re-grades the run to Failed. In a fan-out, bind {{item.acceptance}} to carry each plan item's authored contract." },
                 "mode":           { "type": "string", "enum": ["research", "code"], "description": "The model-authored intent of this run — the BASE the planner picks per fan-out subtask. research: analysis-only (read-only, no network, no produced branch); code: edits the codebase (workspace write, publishes its own branch). The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling clamp always bounds it. Leave unset for today's tier-derived behaviour." }
               },
               "required": ["harness"]
@@ -159,6 +160,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode);
 
+        if (!TryReadAcceptance(context.Config, out var acceptance, out var acceptanceError)) return Fail(acceptanceError!);
+
         var task = new AgentTask
         {
             Goal = goal,
@@ -178,13 +181,18 @@ public sealed class AgentCodeNode : INodeRuntime
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
-            PushProducedBranch = ResolvePushBranch(context.Config, mode),
+            PushProducedBranch = acceptance != null ? true : ResolvePushBranch(context.Config, mode),
             EnableMcpEndpoint = ReadOptionalBool(context.Config, "enableMcp"),
             // The output-review mode + its reviewer model — the executor runs an independent critic over the produced
             // change at completion. Absent ⇒ None ⇒ no review ⇒ byte-identical. Read as the enum int (the schema offers
             // 0=None / 1=Gate; v1 supports Gate only).
             OutputReviewMode = ReadInt(context.Config, "outputReviewMode") is { } rm ? (ReviewMode)rm : ReviewMode.None,
             ReviewerModelId = ReadOptionalGuid(context.Config, "reviewerModelId"),
+            // F4 (S5 review): a contract implies a GRADABLE branch — force the publish opt-in ON whenever an
+            // acceptance is bound (the resolve verb's forcePushBranch precedent; the pushBranch key is an OR-gate,
+            // so this can only widen). Without it, a stock deployment (push flag off) would fail every contract
+            // "no-branch-or-repo" even when the work and the check are both perfect.
+            Acceptance = acceptance,
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
@@ -192,6 +200,45 @@ public sealed class AgentCodeNode : INodeRuntime
             Kind = WorkflowWaitKinds.AgentRun,
             Payload = JsonSerializer.SerializeToElement(task, AgentJson.Options),
         }));
+    }
+
+    /// <summary>
+    /// The task's objective acceptance spec. A MISSING key or a JSON null (an item without a contract in a
+    /// fan-out — the {{item.acceptance}} no-contract resolution) reads as "no oracle"; but a PRESENT value that
+    /// is not a valid spec (a non-object, a typo'd command key, garbage kind) FAILS the node — the operator
+    /// authored a contract, and silently dropping it would invert the gate's fail-closed philosophy.
+    /// </summary>
+    private static bool TryReadAcceptance(IReadOnlyDictionary<string, JsonElement> config, out SupervisorAcceptanceSpec? acceptance, out string? error)
+    {
+        acceptance = null;
+        error = null;
+
+        if (!config.TryGetValue("acceptance", out var v) || v.ValueKind == JsonValueKind.Null || v.ValueKind == JsonValueKind.Undefined) return true;
+
+        if (v.ValueKind != JsonValueKind.Object)
+        {
+            error = "Config 'acceptance' must be an object: { command: [argv...], kind?, description? }.";
+            return false;
+        }
+
+        try
+        {
+            var spec = v.Deserialize<SupervisorAcceptanceSpec>(AgentJson.Options);
+
+            if (spec is not { Command.Count: > 0 } || spec.Command.All(string.IsNullOrWhiteSpace))
+            {
+                error = "Config 'acceptance' needs a non-empty 'command' argv (e.g. [\"sh\", \"check.sh\"]).";
+                return false;
+            }
+
+            acceptance = spec;
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "Config 'acceptance' is not a valid spec: { command: [argv...], kind?: TestsPass|ArtifactPresent, description? }.";
+            return false;
+        }
     }
 
     /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure.</summary>

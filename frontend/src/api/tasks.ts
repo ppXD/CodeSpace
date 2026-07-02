@@ -74,7 +74,7 @@ export interface LaunchTaskInput {
   requirePlanConfirmation?: boolean;
   /** Standard/Auto: how an independent critic reviews the AUTHORED PLAN (the plan.author reviewMode) — "Gate" / "Improve". Omitted ⇒ no critic. */
   plannerReviewMode?: string;
-  /** Deep-only: the EXECUTABLE acceptance argv floor (e.g. ["sh","check.sh"]) enforced at the terminal stop. Omitted ⇒ no floor. */
+  /** The EXECUTABLE acceptance argv floor (e.g. ["sh","check.sh"]): Deep enforces it at the terminal stop; Quick grades the single agent's produced branch (S5). Omitted ⇒ no floor. */
   acceptanceChecks?: string[];
   /** Multi-repo working-directory mode (`"workspace"` / `"primary"`). Omitted for `"auto"` (the default). Inert on a single-repo run. */
   workingDirMode?: string;

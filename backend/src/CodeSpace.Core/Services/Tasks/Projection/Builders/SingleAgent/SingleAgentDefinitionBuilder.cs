@@ -23,6 +23,12 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
 {
     public string ProjectionKind => TaskProjectionKinds.SingleAgent;
 
+    /// <summary>The operator's acceptance-checks floor as THIS agent's objective oracle (S5): the quick tier has one agent, so the launch-level argv IS its per-task contract. Null / empty ⇒ no oracle (byte-identical).</summary>
+    private static object? QuickAcceptance(TaskBuildContext context) =>
+        context.AcceptanceChecks?.Where(c => !string.IsNullOrWhiteSpace(c)).ToList() is { Count: > 0 } command
+            ? new { command, kind = "TestsPass" }
+            : null;
+
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
         SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
@@ -35,7 +41,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
         new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
         new() { Id = "agent", TypeKey = "agent.code", Label = "Run the task",
-                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
                 Inputs = TerminalInputs(IsMultiRepo(context)) },

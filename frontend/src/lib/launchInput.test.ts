@@ -140,9 +140,11 @@ describe("buildLaunchInput — base fields", () => {
     expect(input.acceptanceCriteria).not.toBe(acceptanceCriteria);
   });
 
-  it("never sends acceptanceCriteria on a single-agent tier (inert)", () => {
-    expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
-    expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
+  it("sends changed acceptanceCriteria on EVERY tier — they steer the planner, supervisor, or agent prompt (S5b)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] })).acceptanceCriteria).toEqual(["custom"]);
+    expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] })).acceptanceCriteria).toEqual(["custom"]);
+    // The unmodified default is still omitted everywhere (byte-identical).
+    expect(buildLaunchInput(form({ effort: "quick" }))).not.toHaveProperty("acceptanceCriteria");
   });
 
   it("omits workingDirMode at the auto default (byte-identical)", () => {
@@ -374,7 +376,11 @@ describe("triad launch fields (S4)", () => {
 
     const quick = buildLaunchInput(form({ effort: "quick", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
     expect(quick.requirePlanConfirmation).toBeUndefined();
-    expect(quick.acceptanceChecks).toBeUndefined();
+    // Quick DOES take the checks floor (S5): the single agent's produced branch is graded against it.
+    expect(quick.acceptanceChecks).toEqual(["sh", "check.sh"]);
+
+    const standardChecks = buildLaunchInput(form({ effort: "standard", acceptanceChecks: ["sh", "check.sh"] }));
+    expect(standardChecks.acceptanceChecks).toBeUndefined();
 
     const off = buildLaunchInput(form({ effort: "deep" }));
     expect(off.requirePlanConfirmation).toBeUndefined();

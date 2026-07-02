@@ -24,7 +24,7 @@ public class PlanAuthorNodeTests
         node.Manifest.IsSideEffecting.ShouldBeTrue("one structured LLM call per execution — billing, like llm.complete");
 
         ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan" }, ignoreOrder: true);
-        InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback" }, ignoreOrder: true);
+        InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback", "criteria" }, ignoreOrder: true);
         OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
 
         node.Manifest.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())
@@ -39,6 +39,22 @@ public class PlanAuthorNodeTests
         var request = PlanAuthorNode.BuildPlanRequest(config, Guid.NewGuid(), "ship it", grounding: "", feedback: "");
 
         request.TaskText.ShouldContain(PlanAuthorNode.FlatPlanConstraint, customMessage: "the parallel map cannot honor ordering — the planner must be told");
+    }
+
+    [Fact]
+    public void Criteria_fold_into_the_goal_and_empty_criteria_are_byte_identical()
+    {
+        // S5b: the operator's DoD reaches the STANDARD tier's planner — the plan and its per-item contracts
+        // target it, and the plan critic judges against the same yardstick (its Goal is this task text).
+        var folded = PlanAuthorNode.ComposeGoalWithCriteria("ship it", new[] { "tests pass", " ", "PR opened" });
+
+        folded.ShouldContain("ship it");
+        folded.ShouldContain("Acceptance criteria");
+        folded.ShouldContain("- tests pass");
+        folded.ShouldContain("- PR opened");
+
+        PlanAuthorNode.ComposeGoalWithCriteria("ship it", Array.Empty<string>()).ShouldBe("ship it");
+        PlanAuthorNode.ComposeGoalWithCriteria("ship it", new[] { " ", "" }).ShouldBe("ship it", "all-blank criteria collapse to the verbatim goal");
     }
 
     [Fact]

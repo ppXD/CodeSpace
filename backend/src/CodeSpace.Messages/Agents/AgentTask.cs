@@ -182,6 +182,17 @@ public sealed record AgentTask
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
 
+    /// <summary>
+    /// THIS task's OBJECTIVE definition-of-done (triad S5 — the sprint-contract carried to the single agent): a
+    /// server-run check the executor grades against the produced branch at completion, fail-closed — a failing
+    /// oracle re-grades the run to Failed ("acceptance-failed"), so success can never be a model self-report.
+    /// Sources: the plan item's authored acceptance (plan-map branches bind it per item) or the operator's
+    /// quick-tier checks floor. Null ⇒ no oracle (byte-identical). Supervisor-dispatched units deliberately do
+    /// NOT carry it — their per-unit gate grades at the fold (one grade, not two).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
     /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? ReviewerModelId { get; init; }

@@ -81,6 +81,12 @@ public sealed record AgentRunResult
     /// </summary>
     public CompletionDisposition CompletionDisposition { get; init; } = CompletionDisposition.Completed;
 
+    /// <summary>The task's OBJECTIVE acceptance verdict (S5): true/false when the executor graded <c>AgentTask.Acceptance</c> against the produced branch; null when the task carried no oracle (or the grade was deferred — multi-repo). The run-detail checklist reads this per item.</summary>
+    public bool? AcceptancePassed { get; init; }
+
+    /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
+    public string? AcceptanceDetail { get; init; }
+
     /// <summary>
     /// When <see cref="CompletionDisposition"/> is <see cref="CompletionDisposition.NeedsDecision"/>, the ledger id of the
     /// still-unanswered <c>decision.request</c> the run raised — the handle a reviewer (or the "Needs decision" queue)
