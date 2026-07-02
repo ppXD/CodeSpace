@@ -122,7 +122,7 @@ function AgentsListPage() {
         {hasAgents && (
           <>
             <div className="ar-toolbar">
-              <div className="ct-search">
+              <div className="ct-search ar-search">
                 <Ic.Search size={14} />
                 <input
                   value={query}
@@ -131,13 +131,15 @@ function AgentsListPage() {
                   aria-label="Search agents"
                 />
               </div>
-              <div className="ct-tabs">
-                <SegTab value="all" current={origin} count={rows.length} onSelect={setOrigin}>All</SegTab>
-                <SegTab value="Authored" current={origin} count={authoredCount} onSelect={setOrigin}>Authored</SegTab>
-                <SegTab value="Imported" current={origin} count={importedCount} onSelect={setOrigin}>Imported</SegTab>
-              </div>
-              <div className="ct-tabs ar-window" role="group" aria-label="Stats window">
-                {WINDOWS.map((w) => <SegTab key={w.v} value={w.v} current={windowSel} onSelect={setWindowSel}>{w.l}</SegTab>)}
+              <div className="ar-filters">
+                <div className="ct-tabs">
+                  <SegTab value="all" current={origin} count={rows.length} onSelect={setOrigin}>All</SegTab>
+                  <SegTab value="Authored" current={origin} count={authoredCount} onSelect={setOrigin}>Authored</SegTab>
+                  <SegTab value="Imported" current={origin} count={importedCount} onSelect={setOrigin}>Imported</SegTab>
+                </div>
+                <div className="ct-tabs ar-window" role="group" aria-label="Stats window">
+                  {WINDOWS.map((w) => <SegTab key={w.v} value={w.v} current={windowSel} onSelect={setWindowSel}>{w.l}</SegTab>)}
+                </div>
               </div>
             </div>
 
