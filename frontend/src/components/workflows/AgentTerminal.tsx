@@ -117,7 +117,7 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
       <div className="agent-terminal-body">
         {tab === "output"
           ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
-          : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} />
+          : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} hideHeader />
           : <AgentFiles files={files} onOpenFile={onOpenFile} />}
       </div>
 
