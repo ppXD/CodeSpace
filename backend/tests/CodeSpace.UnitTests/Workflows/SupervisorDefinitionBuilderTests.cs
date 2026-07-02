@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
 
@@ -39,6 +40,18 @@ public class SupervisorDefinitionBuilderTests
         AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
         AcceptanceChecks = acceptanceChecks,
     };
+
+    [Fact]
+    public void The_plan_critic_bakes_as_the_plan_scoped_review_and_omits_when_off()
+    {
+        var config = Builder.Build(Context() with { PlannerReviewMode = ReviewMode.Improve }).Nodes.Single(n => n.Id == "sup").Config;
+
+        config.GetProperty("planReviewMode").GetInt32().ShouldBe((int)ReviewMode.Improve,
+            customMessage: "the launch's tier-generic plan critic reaches Deep as the PLAN-scoped supervisor review");
+
+        Builder.Build(Context()).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("planReviewMode", out _)
+            .ShouldBeFalse("off ⇒ omitted (byte-identical)");
+    }
 
     [Fact]
     public void The_acceptance_checks_floor_bakes_with_blanks_dropped_and_omits_when_empty()

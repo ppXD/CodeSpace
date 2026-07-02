@@ -117,4 +117,20 @@ public class CriticSupervisorDeciderDecoratorTests
             return Task.FromResult(Verdict);
         }
     }
+
+    // ── S4e: the plan-scoped critic routing (the tier-generic "plan critic" on Deep) ──
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Plan, ReviewMode.Improve, ReviewMode.Gate, ReviewMode.Improve)]   // plan prefers the plan critic
+    [InlineData(SupervisorDecisionKinds.Plan, ReviewMode.None, ReviewMode.Gate, ReviewMode.Gate)]         // no plan critic → falls under the decision critic
+    [InlineData(SupervisorDecisionKinds.Spawn, ReviewMode.Improve, ReviewMode.Gate, ReviewMode.Gate)]     // non-plan NEVER uses the plan critic
+    [InlineData(SupervisorDecisionKinds.Spawn, ReviewMode.Improve, ReviewMode.None, ReviewMode.None)]     // plan-critic-only run: spawns/merges/stops go unreviewed (no per-step cost)
+    [InlineData(SupervisorDecisionKinds.Plan, ReviewMode.None, ReviewMode.None, ReviewMode.None)]
+    public void A_plan_decision_prefers_the_plan_critic_and_non_plans_never_use_it(string kind, ReviewMode planMode, ReviewMode decisionMode, ReviewMode expected)
+    {
+        var context = new SupervisorTurnContext { Goal = "g", PlanReviewMode = planMode, DecisionReviewMode = decisionMode };
+        var decision = new SupervisorDecision { Kind = kind, PayloadJson = "{}" };
+
+        CriticSupervisorDeciderDecorator.ReviewModeFor(context, decision).ShouldBe(expected);
+    }
 }

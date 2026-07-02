@@ -36,23 +36,35 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
     {
         var decision = await _inner.DecideAsync(context, cancellationToken).ConfigureAwait(false);
 
-        // Doubly-off ⇒ byte-identical: no per-run review baked, OR the operator killed the critic globally.
-        if (context.DecisionReviewMode == ReviewMode.None || !CriticToggle.Enabled) return decision;
+        // The applicable mode: a PLAN decision prefers the plan-scoped critic (the tier-generic "plan critic",
+        // S4e) so the operator can critique plans without paying a review on every spawn/merge/stop; everything
+        // else — and plans when no plan critic is set — rides the all-step decision critic. Doubly-off ⇒
+        // byte-identical (no per-run review baked, OR the operator killed the critic globally).
+        var mode = ReviewModeFor(context, decision);
+
+        if (mode == ReviewMode.None || !CriticToggle.Enabled) return decision;
 
         var verdict = await _critic.ReviewAsync(
-            new CriticRequest { Mode = context.DecisionReviewMode, ArtifactKind = "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
+            new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? "workflow plan" : "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed) return decision;   // fail-open — a failed review is never worse than no review
 
-        // IMPROVE: fold the critique into ONE bounded re-decide (Review reset to None ⇒ no recursion), so the decider
-        // revises against it. Gate (v1) + a blank critique fall through to the original — we never BLOCK a decision
-        // mid-loop (a supervisor decision is re-derivable; a hard block→re-decide→force-stop arc is a later slice).
-        if (context.DecisionReviewMode == ReviewMode.Improve && !string.IsNullOrWhiteSpace(verdict.Critique))
-            return await _inner.DecideAsync(context with { DecisionReviewMode = ReviewMode.None, ReviewerCritique = verdict.Critique }, cancellationToken).ConfigureAwait(false);
+        // IMPROVE: fold the critique into ONE bounded re-decide (BOTH review modes reset to None ⇒ no recursion),
+        // so the decider revises against it. Gate (v1) + a blank critique fall through to the original — we never
+        // BLOCK a decision mid-loop (a supervisor decision is re-derivable; a hard block→re-decide→force-stop arc
+        // is a later slice).
+        if (mode == ReviewMode.Improve && !string.IsNullOrWhiteSpace(verdict.Critique))
+            return await _inner.DecideAsync(context with { DecisionReviewMode = ReviewMode.None, PlanReviewMode = ReviewMode.None, ReviewerCritique = verdict.Critique }, cancellationToken).ConfigureAwait(false);
 
         return decision;
     }
+
+    /// <summary>A plan decision reviews under the PLAN critic when set, else the all-step decision critic; every other decision only under the decision critic. Internal for direct unit pinning.</summary>
+    internal static ReviewMode ReviewModeFor(SupervisorTurnContext context, SupervisorDecision decision) =>
+        decision.Kind == SupervisorDecisionKinds.Plan && context.PlanReviewMode != ReviewMode.None
+            ? context.PlanReviewMode
+            : context.DecisionReviewMode;
 
     /// <summary>The decision rendered for the reviewer — the verb + its canonical payload (a structured object, directly judgeable).</summary>
     private static string Render(SupervisorDecision decision) => $"{decision.Kind}: {decision.PayloadJson}";

@@ -47,15 +47,18 @@ function AgentsListPage() {
   const [launchAgentId, setLaunchAgentId] = useState<string | null>(null);
 
   const windowed = windowSel !== "all";
+  // Quantize "now" to the hour so the react-query key is STABLE across a session (a raw ms-precision Date.now()
+  // would mint a fresh key every render/mount and defeat the staleTime cache). Captured ONCE in a lazy state
+  // initializer — render stays pure (react-hooks/purity), and the hour-grain horizon never moves mid-session.
+  const [nowHour] = useState(() => {
+    const hourMs = 3_600_000;
+    return Math.floor(Date.now() / hourMs) * hourMs;
+  });
   const since = useMemo(() => {
     const days = WINDOWS.find((w) => w.v === windowSel)?.days;
     if (days == null) return undefined;
-    // Quantize the horizon to the hour so the react-query key is STABLE across a session (a raw ms-precision
-    // Date.now() would mint a fresh key every render/mount and defeat the staleTime cache).
-    const hourMs = 3_600_000;
-    const nowHour = Math.floor(Date.now() / hourMs) * hourMs;
     return new Date(nowHour - days * 86_400_000).toISOString();
-  }, [windowSel]);
+  }, [windowSel, nowHour]);
 
   const stats = useAgentStats(since);
   const statById = useMemo(

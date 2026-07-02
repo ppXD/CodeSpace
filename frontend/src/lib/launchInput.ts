@@ -58,7 +58,7 @@ export interface LaunchFormState {
   acceptanceChecks: string[];
   /** Planning "Confirm plan first" — any planning tier (standard/auto/deep): park each authored plan version for the operator's confirmation before any agent runs. Sent only when ON (default off ⇒ omitted, byte-identical); quick authors no plan, so it never sends. */
   requirePlanConfirmation: boolean;
-  /** Planning "Plan critic" — Standard/Auto (the plan-map planner): `"None"` (default) / `"Gate"` / `"Improve"` via the plan.author reviewMode. Sent (as the enum name) only when not None. */
+  /** Planning "Plan critic" — every planning tier (standard/auto/deep): the plan.author/plan.confirm reviewMode on the plan-map tiers, the supervisor's plan-scoped planReviewMode on Deep. Sent (as the enum name) only when not None; quick authors no plan. */
   plannerReview: string;
   /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
   timeLimit: string;
@@ -170,7 +170,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   if (state.effort !== "quick" && state.requirePlanConfirmation) input.requirePlanConfirmation = true;
   if (tierExposesCaps(state.effort) && state.acceptanceChecks.length) input.acceptanceChecks = [...state.acceptanceChecks];
 
-  const plannerOn = (state.effort === "standard" || state.effort === "auto") && state.plannerReview !== "None";
+  const plannerOn = state.effort !== "quick" && state.plannerReview !== "None";
   if (plannerOn) input.plannerReviewMode = state.plannerReview;
 
   // The critic review modes (the enum NAME — the API has a string-enum converter). Decision review is a supervisor

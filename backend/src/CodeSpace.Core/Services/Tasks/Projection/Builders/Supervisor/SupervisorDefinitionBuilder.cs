@@ -97,6 +97,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // None (the default) ⇒ omitted ⇒ the critic decorator is a pure passthrough ⇒ byte-identical. Baked as the enum's
         // INT (the supervisor config deserializer has no string-enum converter), round-tripping to ReviewMode by default.
         AddIfPresent(config, "decisionReviewMode", context.DecisionReviewMode == ReviewMode.None ? (object?)null : (int)context.DecisionReviewMode);
+        // The tier-generic PLAN critic (S4e) — on Deep it scopes to the supervisor's plan decisions, so "critique
+        // the plan before it runs" works identically on every tier. Omitted when off (byte-identical).
+        AddIfPresent(config, "planReviewMode", context.PlannerReviewMode == ReviewMode.None ? (object?)null : (int)context.PlannerReviewMode);
         AddIfPresent(config, "reviewerModelId", context.ReviewerModelId?.ToString());
         // The operator's allowed model pool (credentialed-model row ids) for the agents this supervisor dispatches —
         // baked as a string-uuid array onto the node's allowedModelIds, where a dispatched model out of the pool fails
