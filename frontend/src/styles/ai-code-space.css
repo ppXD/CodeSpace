@@ -514,36 +514,50 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .lib-art > svg { color: var(--muted-2); flex-shrink: 0; margin-left: auto; }
 .acs-root .lib-sec-h + .lib-art { border-top: none; }
 
-/* Agent bench — the Agents page as a roster of schedulable units (cards first, Fleet-health scorecard below). */
-.acs-root .ab-section-lbl { font-size: 12px; font-weight: 600; color: var(--muted); margin: 4px 0 10px; }
-.acs-root .ab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
-.acs-root .ab-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
-.acs-root .ab-card:hover { border-color: var(--accent); box-shadow: var(--shadow-1); }
-.acs-root .ab-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.acs-root .ab-top { display: flex; gap: 12px; align-items: flex-start; }
-.acs-root .ab-id { flex: 1; min-width: 0; }
-.acs-root .ab-namerow { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.acs-root .ab-name { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Second identity line — @handle + role badge, always below the name so the badge sits in a fixed position. */
-.acs-root .ab-subrow { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
-.acs-root .ab-handle { font-size: 12.5px; color: var(--muted-2); }
-.acs-root .ab-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .ab-origin { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
-/* The source-pack owner/repo can be long — cap + ellipsis so it never squeezes the identity column. */
-.acs-root .ab-origin-pack { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .ab-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-/* One-line runtime spec: model · autonomy · tools, hung under the identity (aligned past the avatar). */
-.acs-root .ab-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0 0 52px; font-size: 11.5px; color: var(--muted); }
-.acs-root .ab-meta-item { display: inline-flex; align-items: center; gap: 5px; }
-.acs-root .ab-meta-item svg { color: var(--muted-2); }
-.acs-root .ab-meta-dot { color: var(--muted-2); }
-/* Divider between the runtime spec and the skills — the "character sheet" rule. */
-.acs-root .ab-divide { height: 1px; background: var(--line); margin: 12px 0 11px 52px; }
-.acs-root .ab-skills { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-left: 52px; }
-.acs-root .ab-skills-empty { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted-2); }
-.acs-root .ab-tok { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: #99452A; font-family: var(--font-mono, ui-monospace, monospace); }
-.acs-root .ab-tok-more { font-size: 11px; color: var(--muted-2); }
-.acs-root .ab-fleet { margin-top: 22px; }
+/* Agents roster — each persona a row: identity → loadout → recent-run evidence, with a Launch-task action. */
+.acs-root .ar-toolbar { display: flex; align-items: center; gap: 12px; margin: 16px 0 14px; flex-wrap: wrap; }
+.acs-root .ar-window { margin-left: auto; }
+.acs-root .ar-list { display: flex; flex-direction: column; gap: 10px; }
+
+.acs-root .ar-row { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 13px 16px; transition: border-color .12s ease, box-shadow .12s ease; }
+.acs-root .ar-row:hover { border-color: var(--line-2); box-shadow: var(--shadow-1); }
+
+.acs-root .ar-head { display: flex; align-items: center; gap: 12px; }
+.acs-root .ar-avatar { width: 34px; height: 34px; border-radius: 9px; background: var(--accent-soft); color: #99452A; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; flex-shrink: 0; font-family: var(--font-mono, ui-monospace, monospace); }
+.acs-root .ar-id { flex: 1; min-width: 0; }
+.acs-root .ar-namerow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acs-root .ar-name { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .ar-origin { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
+.acs-root .ar-origin-pack { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .ar-handle { font-size: 12px; color: var(--muted-2); margin-top: 2px; }
+
+.acs-root .ar-launch { height: 30px; padding: 0 12px; font-size: 12.5px; white-space: nowrap; flex-shrink: 0; }
+.acs-root .ar-icon-btn { height: 30px; width: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+.acs-root .ar-config { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 0 46px; font-size: 11.5px; color: var(--muted); }
+.acs-root .ar-chip { display: inline-flex; align-items: center; gap: 5px; }
+.acs-root .ar-chip svg { color: var(--muted-2); }
+
+.acs-root .ar-evidence { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 10px 0 0 46px; font-size: 11.5px; color: var(--muted); }
+.acs-root .ar-noruns { color: var(--muted-2); }
+.acs-root .ar-ev-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.acs-root .ar-ev-item svg { color: var(--muted-2); }
+.acs-root .ar-ev-muted { color: var(--muted-2); }
+
+.acs-root .ar-spark { display: inline-flex; gap: 3px; align-items: center; }
+.acs-root .ar-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.acs-root .ar-dot-good { background: var(--good); }
+.acs-root .ar-dot-danger { background: var(--danger); }
+.acs-root .ar-dot-muted { background: var(--muted-2); }
+
+.acs-root .ar-rate { font-weight: 600; }
+.acs-root .ar-rate-good { color: var(--good); }
+.acs-root .ar-rate-warn { color: var(--warn); }
+.acs-root .ar-rate-danger { color: var(--danger); }
+.acs-root .ar-rate-muted { color: var(--muted-2); }
+
+.acs-root .ar-runs-link { margin-left: auto; background: none; border: none; padding: 0; cursor: pointer; color: var(--accent); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; font-family: inherit; }
+.acs-root .ar-runs-link:hover { text-decoration: underline; }
 
 /* Model-credential cards (Settings → Model credentials) — provider logo + masked key, never the secret. */
 .acs-root .mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 14px; padding: 16px; }
@@ -2152,6 +2166,7 @@ textarea:-webkit-autofill {
 .acs-root .ar-status-running, .acs-root .ar-status-queued { background: var(--accent-soft); color: var(--accent); }
 .acs-root .ar-status-succeeded { background: #E4F0E4; color: #2F7D33; }
 .acs-root .ar-status-failed, .acs-root .ar-status-timedout, .acs-root .ar-status-cancelled { background: #FCEDED; color: #9E3535; }
+.acs-root .ar-status-needsreview { background: #FBF0DE; color: #8A5B16; }
 .acs-root .ar-live { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-weight: 500; }
 .acs-root .ar-live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: ar-pulse 1.4s ease-in-out infinite; }
 @keyframes ar-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }

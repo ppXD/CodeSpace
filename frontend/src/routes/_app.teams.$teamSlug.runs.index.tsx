@@ -23,16 +23,30 @@ const ATTENTION_LIMIT = 50;
  * fire / is the system working" at a glance and arm a filter; the board below is where you act (Needs attention),
  * watch (Live), or scan (Recent). Each run opens the same Run Room. Polled while anything is still live.
  */
+/** URL search contract for the cockpit. Only the agent scope is deep-linkable today (the Agents roster's "View runs"
+ *  drill-down seeds it); the rest of the scope stays local bar state. Extra keys can join here as more surfaces link in. */
+type RunsSearch = { agentDefinitionIds?: string[] };
+
 export const Route = createFileRoute("/_app/teams/$teamSlug/runs/")({
   component: TeamRunsPage,
+  validateSearch: (search: Record<string, unknown>): RunsSearch => {
+    const raw = search.agentDefinitionIds;
+    const ids = Array.isArray(raw)
+      ? raw.filter((x): x is string => typeof x === "string" && x.length > 0)
+      : typeof raw === "string" && raw ? [raw] : [];
+    return ids.length ? { agentDefinitionIds: ids } : {};
+  },
 });
 
 function TeamRunsPage() {
   const { teamSlug } = Route.useParams();
+  const search = Route.useSearch();
   const navigate = useNavigate();
   // The bar's server-side scope filter (which kind / repo / project / actor / agent); the cards below are the
-  // orthogonal client-side status/time lens over whatever this scope returns.
-  const [scope, setScope] = useState<RunListFilterInput>({});
+  // orthogonal client-side status/time lens over whatever this scope returns. Seeded once from the URL's agent scope
+  // so the Agents roster's "View runs" lands pre-filtered to that persona; the bar owns it thereafter.
+  const [scope, setScope] = useState<RunListFilterInput>(() =>
+    search.agentDefinitionIds?.length ? { agentDefinitionIds: search.agentDefinitionIds } : {});
   const [filter, setFilter] = useState<CockpitFilter>(null);
   const [historyPage, setHistoryPage] = useState(1);
   // A session-less run has no Session room to navigate to, so it opens its raw detail in a modal OVER this list (the

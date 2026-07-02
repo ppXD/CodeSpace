@@ -65,7 +65,7 @@ export interface HarnessSummary {
   supportedProviders: string[];
 }
 
-export type AgentRunStatus = "Queued" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelled";
+export type AgentRunStatus = "Queued" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelled" | "NeedsReview";
 
 /** Mirrors backend `AgentRunSummary` — one agent run's live status + timing (no secret). */
 export interface AgentRunSummary {
@@ -165,6 +165,35 @@ export interface TeamCostRollup {
   truncated: boolean;
 }
 
+/**
+ * Mirrors backend `AgentStat` — one persona's run evidence for its roster row. `total` counts only TERMINAL runs
+ * (the success denominator; an in-flight run isn't scored). `recentOutcomes` is the persona's last runs' statuses
+ * oldest→newest (a sparkline the row renders left-to-right, in-flight runs included). `estimatedCostUsd` is null when
+ * nothing was priceable (distinct from 0 = priced but free); `unknownCostRuns` is the honesty qualifier on it.
+ * `lastRunAt` (ISO) is always present — a persona appears only if it has at least one run.
+ */
+export interface AgentStat {
+  agentDefinitionId: string;
+  total: number;
+  succeeded: number;
+  successRate: number;
+  p50DurationSeconds: number | null;
+  p95DurationSeconds: number | null;
+  estimatedCostUsd: number | null;
+  unknownCostRuns: number;
+  lastRunAt: string;
+  recentOutcomes: AgentRunStatus[];
+}
+
+/**
+ * Mirrors backend `AgentStatsRollup` — one `AgentStat` per persona that has runs in the window. The roster joins
+ * these onto its persona list by `agentDefinitionId`; a persona with no entry has simply had no runs (its row
+ * renders an empty state). Team-scoped at the source (the X-Team-Id header), keyed only by the `since` window.
+ */
+export interface AgentStatsRollup {
+  agents: AgentStat[];
+}
+
 /** A run is still in flight (worth polling) while Queued or Running; terminal states stop the poll. */
 export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
   status === "Queued" || status === "Running";
@@ -231,4 +260,8 @@ export const agentsApi = {
     return fetchJson<AgentRunScorecard>(`/api/agents/scorecard${qs ? `?${qs}` : ""}`);
   },
   getCost: () => fetchJson<TeamCostRollup>("/api/agents/cost"),
+  // Per-agent run stats for the roster rows — grouped by persona, optionally windowed. Mirrors getScorecard's
+  // since-passing (the window the roster's time control finally feeds).
+  getStats: (since?: string) =>
+    fetchJson<AgentStatsRollup>(`/api/agents/stats${since ? `?since=${encodeURIComponent(since)}` : ""}`),
 };

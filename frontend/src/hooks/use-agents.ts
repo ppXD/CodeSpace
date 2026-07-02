@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentDefinitionInput, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
 
@@ -190,5 +190,21 @@ export function useTeamCost() {
     queryKey: ["agent-cost"],
     queryFn: () => agentsApi.getCost(),
     staleTime: 30 * 1000,
+  });
+}
+
+/**
+ * Per-agent run stats — each persona's recent-outcome sparkline + windowed success / latency / spend, joined onto
+ * the roster by agentDefinitionId. Team-scoped at the source; keyed on the `since` window so changing the roster's
+ * time control refetches. Short staleTime like the scorecard, so repeated visits within a session stay cheap.
+ */
+export function useAgentStats(since?: string) {
+  return useQuery({
+    queryKey: ["agent-stats", since ?? null],
+    queryFn: () => agentsApi.getStats(since),
+    staleTime: 30 * 1000,
+    // Keep the prior window's rows on screen while a new window fetches, so toggling 7d/30d/all never flashes the
+    // roster back to "no runs" empty states (isLoading stays true only on the very first load).
+    placeholderData: keepPreviousData,
   });
 }
