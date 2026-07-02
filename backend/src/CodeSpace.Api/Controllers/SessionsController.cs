@@ -52,6 +52,14 @@ public class SessionsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>A generic preview of one file the run's turn produced (from the producing agent's captured diff), keyed by repo-relative path. Team-scoped; foreign / absent run → 404.</summary>
+    [HttpGet("by-run/{runId:guid}/room/file")]
+    public async Task<IActionResult> RunRoomFile([FromRoute] Guid runId, [FromQuery] string path, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetSessionRoomFileQuery { RunId = runId, Path = path }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Rename a session's thread title (the body carries the new title; the route is the authoritative id). Team-scoped; foreign / absent → 404.</summary>
     [HttpPatch("{sessionId:guid}")]
     public async Task<IActionResult> Rename([FromRoute] Guid sessionId, [FromBody] RenameSessionCommand command, CancellationToken cancellationToken)
