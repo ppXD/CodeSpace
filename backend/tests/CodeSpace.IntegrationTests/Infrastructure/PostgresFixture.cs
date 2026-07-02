@@ -341,6 +341,16 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .SingleInstance();
 
+        // Contract-authoring structured fake for the plan.author node flows (triad S1): under its OWN provider
+        // tag (DeterministicWorkPlanLlmClient.ProviderTag = "TestWorkPlanner"). The node's production
+        // LlmWorkflowPlanner resolves it by the test's pinned pool row; the fixture-singleton WorkPlanPlanScript
+        // knob drives whether it authors dependsOn/acceptance + hasEnoughContext (tests reset it in cleanup).
+        builder.RegisterType<Workflows.Infrastructure.WorkPlanPlanScript>().AsSelf().SingleInstance();
+        builder.RegisterType<Workflows.Infrastructure.DeterministicWorkPlanLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
+
         // S0a real-model phase-authorship instrument: a RECORD/REPLAY decorator over the REAL AnthropicClient,
         // under its OWN provider tag (RecordReplayStructuredLLMClient.ProviderTag), so the LLMClientRegistry holds
         // it alongside the real client + the deterministic fakes without a duplicate-provider collision. The

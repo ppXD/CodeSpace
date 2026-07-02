@@ -124,5 +124,12 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         "otherwise 'analysis'. " +
         "When a capability catalog is provided, you MAY give each subtask its best-fit harness + model from it — pick a " +
         "model from the listed pool and a harness whose providers can drive that model's provider; omit them to use the " +
-        "run defaults. Return ONLY the schema-constrained JSON.";
+        "run defaults. " +
+        "When a subtask's completion can be OBJECTIVELY verified, author its acceptance: a test/check command argv " +
+        "(kind TestsPass) for code, or the deliverable file paths (kind ArtifactPresent) for research/analysis output — " +
+        "omit it when no objective check exists. Use dependsOn to order subtasks that need another subtask's result. " +
+        "Set hasEnoughContext true ONLY when the goal needs no execution at all; even at 90% certainty, prefer false. " +
+        "Even with hasEnoughContext true you MUST still author at least one subtask — make it the single step that " +
+        "states the answer/summary. " +
+        "Return ONLY the schema-constrained JSON.";
 }

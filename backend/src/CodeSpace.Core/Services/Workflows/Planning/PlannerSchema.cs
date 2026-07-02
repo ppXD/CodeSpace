@@ -37,23 +37,37 @@ public static class PlannerSchema
                   "instruction": { "type": "string", "description": "The concrete instruction the branch executes." },
                   "rationale": { "type": "string", "description": "Optional one-line 'why this subtask'." },
                   "harness": { "type": "string", "description": "Optional — the best harness for THIS subtask, chosen from the capability catalog (one whose providers can drive your chosen model). Omit to use the run default." },
-                  "model": { "type": "string", "description": "Optional — the best model for THIS subtask, chosen from the run's credentialed pool in the capability catalog (match its provider to the chosen harness). Omit for the harness default." }
+                  "model": { "type": "string", "description": "Optional — the best model for THIS subtask, chosen from the run's credentialed pool in the capability catalog (match its provider to the chosen harness). Omit for the harness default." },
+                  "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional plan-local subtask ids this subtask depends on — the plan's DAG edges (absent → an independent unit)." },
+                  "acceptance": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "For kind=TestsPass (default): an argv the server runs to OBJECTIVELY verify this subtask is done. For kind=ArtifactPresent: the list of repo-relative deliverable file paths that must exist." },
+                      "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent"], "description": "Which objective oracle verifies this — TestsPass (run the command argv, exit 0) for code, or ArtifactPresent (the command lists deliverable files that must exist) for research/analysis output. Omit for TestsPass." },
+                      "description": { "type": "string", "description": "Optional human-readable description of the subtask's acceptance check." }
+                    },
+                    "required": ["command"],
+                    "description": "Optional per-subtask acceptance — the unit's objective definition of done, authored WITH the task so the evaluation layer grades against the plan's own contract."
+                  }
                 },
                 "required": ["id", "title", "instruction"]
               }
             },
             "successCriteria": { "type": "array", "items": { "type": "string" }, "description": "Observable conditions that, together, mean the goal is done." },
             "risks": { "type": "array", "items": { "type": "string" }, "description": "Risks / unknowns the plan carries." },
-            "recommendedWorkflowKind": { "type": "string", "description": "Execution shape per branch: 'coding' projects onto an agent; anything else onto an LLM step." }
+            "recommendedWorkflowKind": { "type": "string", "description": "Execution shape per branch: 'coding' projects onto an agent; anything else onto an LLM step." },
+            "hasEnoughContext": { "type": "boolean", "description": "true ONLY when the goal needs no execution at all — the plan itself already answers it. Be very strict: even at 90% certainty, prefer execution (false)." }
           },
           "required": ["goal", "subtasks"]
         }
         """).RootElement.Clone();
 
-    /// <summary>Deserialization options for mapping a schema-valid object back into <c>PlannedWorkflow</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties.</summary>
+    /// <summary>Deserialization options for mapping a schema-valid object back into <c>PlannedWorkflow</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>.</summary>
     public static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new JsonStringEnumConverter() },
     };
 }
