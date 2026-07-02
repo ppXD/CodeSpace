@@ -28,13 +28,25 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 ///         opt-in: a re-run branch re-executes the node, staging a FRESH child run under the branch's fork
 ///         (mechanically identical to the agent.code re-stage). Its child's side effects are governed WITHIN the child
 ///         (the same "execute-again" semantics), not by this scan — so the node itself is not flagged side-effecting.</item>
+///   <item><c>flow.sleep</c> (D3) — the same opt-in, and the SIMPLEST re-stage: the "external run" is just the engine's
+///         OWN <c>Timer</c> wait, minted keyed to the fork's run id + a fresh wait id and self-woken by the scheduled
+///         <c>ResumeWaitAsync</c>. Nothing external is re-issued (contrast the wait/decision nodes below), the original
+///         run's timer is untouched, and a delay has no side effects — so it is not flagged side-effecting.</item>
 /// </list></para>
 ///
 /// <para><b>REFUSED</b> (the predicate returns true):
 /// <list type="bullet">
-///   <item>Any OTHER suspendable node — a <c>CanSuspend</c> node that did NOT opt in. <c>flow.wait_*</c> strand the fork
-///         (a fresh wait is minted but no human / webhook re-issues the original signal); <c>agent.supervisor</c> has a
-///         distinct per-turn wait shape; <c>flow.sleep</c> is unanalyzed. Each stays refused until its substrate is proven.</item>
+///   <item>Any OTHER suspendable node — a <c>CanSuspend</c> node that did NOT opt in, each fail-closed for a concrete
+///         reason (NOT "unanalyzed"): the EXTERNAL-signal waits STRAND the fork because re-executing mints a fresh
+///         pending wait that nobody re-issues — <c>flow.wait_approval</c> needs a human to re-approve,
+///         <c>flow.wait_callback</c> needs the external caller to re-POST the new token, and <c>flow.wait_action</c>
+///         needs the upstream producer to re-emit the signal to the new correlation token; none happens on a rerun, so
+///         the fork would park forever. <c>flow.decision</c> does NOT strand (it parks on a BOUNDED wait that self-wakes
+///         to its default at the deadline), but re-executing it either re-prompts a human or applies that STALE DEFAULT
+///         — a different answer than the original decision, so it is not a faithful re-stage (unlike <c>flow.sleep</c>,
+///         whose timer resumes with no semantic change). Making the external-signal waits rerunnable needs a signal
+///         RE-ISSUE substrate (the separate "suspend-and-wake" track), not this scan. <c>agent.supervisor</c> is refused
+///         here too (its re-stage is a ledger-replay turn loop, a distinct larger substrate).</item>
 ///   <item>A node that is BOTH side-effecting AND suspendable (<c>chat.post_message</c>) — the D7-3 gate runs
 ///         unconditionally at the top of every walk and discriminates only on resume-payload presence + the
 ///         <c>approved</c> field, so a post-then-suspend node would FIRE its effect on the gate-approved walk and then

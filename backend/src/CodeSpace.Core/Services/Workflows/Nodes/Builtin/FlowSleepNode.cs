@@ -25,6 +25,12 @@ public sealed class FlowSleepNode : INodeRuntime
         Category = "Logic",
         Kind = NodeKind.Regular,
         CanSuspend = true,
+        // D3: rerunnable as a from-node ROOT — the last CanSuspend node whose re-execution is a clean re-stage.
+        // The "external run" a re-stage mints is just the engine's OWN Timer wait, keyed to the fork's run id +
+        // a fresh wait id and self-woken by the scheduled ResumeWaitAsync (no external party re-issues anything,
+        // unlike Approval/Callback/Action/Decision, which strand). Re-executing on the fork parks a fresh timer;
+        // the original run's wait is untouched. A sleep has no side effects, so it is not side-effecting here.
+        IsRerunnableWhenSuspendable = true,
         IconKey = "clock",
         Description = "Pauses the workflow for a fixed delay, then resumes. The run shows as Suspended while waiting.",
         ConfigSchema = SchemaBuilder.Parse("""
