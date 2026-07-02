@@ -30,7 +30,7 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
     // genuinely empty, name it — the agent made no tool calls at all.
     if (toolCalls.isLoading || events.isLoading) return null;
     return (
-      <div className="tc-panel">
+      <div className="tc-panel" data-flush={hideHeader || undefined}>
         {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
         <div className="tc-empty">No tool calls for this run</div>
       </div>
@@ -38,7 +38,7 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
   }
 
   return (
-    <div className="tc-panel">
+    <div className="tc-panel" data-flush={hideHeader || undefined}>
       {!hideHeader && <div className="tc-panel-head"><Ic.Command size={12} /> Tool calls</div>}
       {governed.length > 0 ? (
         <ol className="tc-list">
