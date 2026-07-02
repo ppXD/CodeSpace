@@ -448,6 +448,8 @@ export interface PhaseAgentRef {
   costUsd?: number | null;
   /** Git-truth count of files the agent changed (off the result's changedFiles, not a live event tally). null before the result lands; `0` is a real "touched none". */
   filesChanged?: number | null;
+  /** The agent's OWN changed-file paths (the Files tab). Optional — populated by the Session Room card mapping; a bare phase ref carries only the count above. */
+  changedFiles?: string[] | null;
 }
 
 /** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */
