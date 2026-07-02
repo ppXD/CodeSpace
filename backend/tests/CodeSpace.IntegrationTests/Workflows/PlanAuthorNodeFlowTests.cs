@@ -106,6 +106,34 @@ public class PlanAuthorNodeFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Plan_author_records_the_planners_model_call_via_the_engine_node_scope()
+    {
+        // Recording coverage: the planner (+ its critic decorator) was one of the sites the "record EVERY model call"
+        // claim missed — it runs INSIDE the plan-author node, so the engine's node-level scope now auto-records its
+        // interaction.* triple with no per-planner wiring. Prove the plan node's model call lands on the ledger.
+        using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: true);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var interactions = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.NodeId == "plan" && (r.RecordType == WorkflowRunRecordTypes.InteractionStarted || r.RecordType == WorkflowRunRecordTypes.InteractionCompleted))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        interactions.ShouldContain(r => r.RecordType == WorkflowRunRecordTypes.InteractionStarted, "the planner's model call is recorded on the plan node — the engine node scope covers the planner + critic, not just supervisor.decision");
+        interactions.ShouldContain(r => r.RecordType == WorkflowRunRecordTypes.InteractionCompleted, "the planner call's completion (usage) is captured too");
+    }
+
+    [Fact]
     public async Task A_second_plan_author_execution_appends_the_runs_next_version()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
