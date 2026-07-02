@@ -80,7 +80,10 @@ public class PlanMapDynamicFanoutFlowTests
             // The CLI's intelligence is faked at the binary; everything the executor/runner/harness does is real.
             using var cli = new SubtaskAwareFakeCli();
 
-            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorHeterogeneousKinds = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
 
             var jobClient = ResolveJobClient();
             jobClient.Clear();
@@ -98,7 +101,7 @@ public class PlanMapDynamicFanoutFlowTests
 
             // ── PROJECT + START: the real builder emits the graph; retarget the planner llm.complete to the SPEC
             //    planner fake + the synth to the synth fake; the real starter freezes + dispatches the snapshot run. ──
-            var runId = await ProjectRetargetAndStartAsync(route, teamId, userId);
+            var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
 
             // ── Pass 1: planner emits per-agent specs, the map fans out N real agent.code branches, each parks +
             //    dispatches its real executor job; the run suspends. ──
@@ -120,6 +123,9 @@ public class PlanMapDynamicFanoutFlowTests
         finally
         {
             Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, originalPushFlag);
+
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();   // the fixture-singleton knob is shared across the collection
         }
     }
 
@@ -146,7 +152,7 @@ public class PlanMapDynamicFanoutFlowTests
         var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
 
         agentRuns.Count.ShouldBeGreaterThan(1, "the map fanned out to MULTIPLE agents — this is a real multi-agent run, not a single agent");
-        agentRuns.Count.ShouldBe(DeterministicSpecPlannerLlmClient.Specs.Count, "one real AgentRun executed per planned subtask");
+        agentRuns.Count.ShouldBe(DeterministicWorkPlanLlmClient.HeterogeneousItems.Count, "one real AgentRun executed per planned subtask");
         agentRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded, "every branch agent actually executed to Succeeded via the real executor + runner");
         agentRuns.ShouldAllBe(r => r.NodeId == "agent", "every branch links back to the projected agent.code body node");
     }
@@ -157,10 +163,10 @@ public class PlanMapDynamicFanoutFlowTests
         var tasks = await AgentTasksFor(db, runId);
 
         var actualGoals = tasks.Select(t => t.Goal).OrderBy(g => g).ToList();
-        var expectedGoals = DeterministicSpecPlannerLlmClient.Specs.Select(s => s.Goal).OrderBy(g => g).ToList();
+        var expectedGoals = DeterministicWorkPlanLlmClient.HeterogeneousItems.Select(s => s.Instruction).OrderBy(g => g).ToList();
 
         actualGoals.ShouldBe(expectedGoals,
-            customMessage: "each agent's resolved goal must be the planner's OWN authored subtask goal — proving the map's {{item.goal}} binding resolved per branch and the goal propagated through the fan-out");
+            customMessage: "each agent's resolved goal must be the plan item's OWN authored instruction — proving the map's {{item.instruction}} binding resolved per branch and the goal propagated through the fan-out");
     }
 
     /// <summary>
@@ -186,23 +192,23 @@ public class PlanMapDynamicFanoutFlowTests
 
         var byGoal = (await AgentTasksFor(db, runId)).ToDictionary(t => t.Goal);
 
-        foreach (var spec in DeterministicSpecPlannerLlmClient.Specs)
+        foreach (var (instruction, kind) in DeterministicWorkPlanLlmClient.HeterogeneousItems)
         {
-            var task = byGoal[spec.Goal];
+            var task = byGoal[instruction];
 
-            if (spec.Mode == "research")
+            if (kind == "research")
             {
                 task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly,
-                    customMessage: $"the planner tagged '{spec.Goal}' as research → the node resolved a READ-ONLY agent, OVERRIDING the Trusted tier's Workspace baseline (the mode-driven write-scope decision)");
+                    customMessage: $"the planner tagged '{instruction}' as research → the node resolved a READ-ONLY agent, OVERRIDING the Trusted tier's Workspace baseline (the kind-driven write-scope decision)");
                 task.PushProducedBranch.ShouldBe(false,
-                    customMessage: $"a research branch ('{spec.Goal}') produces no branch — the node maps mode=research → PushProducedBranch=false");
+                    customMessage: $"a research branch ('{instruction}') produces no branch — the node maps kind=research → PushProducedBranch=false");
             }
             else
             {
                 task.Permissions.WriteScope.ShouldBe(AgentWriteScope.Workspace,
-                    customMessage: $"a code branch ('{spec.Goal}') resolves to Workspace write (here equal to the Trusted tier baseline — code never raises the tier; its mode-driven signal is the push below)");
+                    customMessage: $"a code branch ('{instruction}') resolves to Workspace write (here equal to the Trusted tier baseline — code never raises the tier; its kind-driven signal is the push below)");
                 task.PushProducedBranch.ShouldBe(true,
-                    customMessage: $"a code branch ('{spec.Goal}') publishes its own branch — PushProducedBranch=true is purely the node's mapping of the planner's mode=code (the builder binds no explicit pushBranch, so mode is the sole driver)");
+                    customMessage: $"a code branch ('{instruction}') publishes its own branch — PushProducedBranch=true is purely the node's mapping of the planner's kind=code (the builder binds no explicit pushBranch, so kind is the sole driver)");
             }
         }
     }
@@ -219,11 +225,11 @@ public class PlanMapDynamicFanoutFlowTests
         reduced.ShouldStartWith(DeterministicSynthLlmClient.Prefix,
             customMessage: "the combined output is the deterministic synth client's REDUCE — proving an llm.complete node ran");
 
-        foreach (var spec in DeterministicSpecPlannerLlmClient.Specs)
+        foreach (var (instruction, _) in DeterministicWorkPlanLlmClient.HeterogeneousItems)
         {
-            var expectedSummary = SubtaskAwareFakeCli.ExpectedSummaryFor(spec.Goal);
+            var expectedSummary = SubtaskAwareFakeCli.ExpectedSummaryFor(instruction);
             reduced.ShouldContain(expectedSummary,
-                customMessage: $"the synth reduce must have read subtask '{spec.Goal}'s real folded summary from the results array — its absence means the reduce didn't see all branches");
+                customMessage: $"the synth reduce must have read subtask '{instruction}'s real folded summary from the results array — its absence means the reduce didn't see all branches");
         }
 
         reduced.ShouldContain(SeedGoal,
@@ -231,7 +237,7 @@ public class PlanMapDynamicFanoutFlowTests
 
         var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
         var mapOut = JsonDocument.Parse(mapNode.OutputsJson!).RootElement;
-        mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicSpecPlannerLlmClient.Specs.Count);
+        mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicWorkPlanLlmClient.HeterogeneousItems.Count);
         mapOut.GetProperty("failed").GetInt32().ShouldBe(0);
     }
 
@@ -258,7 +264,7 @@ public class PlanMapDynamicFanoutFlowTests
     }
 
     /// <summary>Build via the REAL projection builder (resolved by the route's kind), retarget BOTH llm.complete nodes to the deterministic fakes (planner→spec fake, synth→synth fake), then start the snapshot run via the REAL starter.</summary>
-    private async Task<Guid> ProjectRetargetAndStartAsync(RoutePlan route, Guid teamId, Guid userId)
+    private async Task<Guid> ProjectRetargetAndStartAsync(RoutePlan route, Guid teamId, Guid userId, Guid plannerRowId)
     {
         using var scope = _fixture.BeginScope();
 
@@ -271,23 +277,32 @@ public class PlanMapDynamicFanoutFlowTests
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
 
-        var definition = RetargetLlmNodesToFakes(builder.Build(context));
+        var definition = RetargetLlmNodesToFakes(builder.Build(context), plannerRowId);
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
     /// <summary>Test-only adaptation: rewrite BOTH <c>llm.complete</c> providers — the PLANNER node to the SPEC planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
-    private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition) => definition with
+    private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
-        Nodes = definition.Nodes.Select(RetargetNode).ToList(),
+        Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node) => node.Id switch
+    private static NodeDefinition RetargetNode(NodeDefinition node, Guid plannerRowId) => node.Id switch
     {
-        "planner" => RetargetProvider(node, DeterministicSpecPlannerLlmClient.ProviderTag),
+        "planner" => PinPlannerModel(node, plannerRowId),
         "synth" => RetargetProvider(node, DeterministicSynthLlmClient.ProviderTag),
         _ => node,
     };
+
+    /// <summary>Pin the plan.author planner's model to the deterministic work-plan fake's credentialed row — the same honest structured-LLM seam the provider retarget gave llm.complete.</summary>
+    private static NodeDefinition PinPlannerModel(NodeDefinition node, Guid plannerRowId)
+    {
+        var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
+        config["plannerModelId"] = JsonSerializer.SerializeToElement(plannerRowId.ToString());
+
+        return node with { Config = JsonSerializer.SerializeToElement(config) };
+    }
 
     private static NodeDefinition RetargetProvider(NodeDefinition node, string providerTag)
     {

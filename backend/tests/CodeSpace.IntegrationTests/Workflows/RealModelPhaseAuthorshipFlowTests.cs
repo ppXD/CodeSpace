@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -99,7 +100,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
-        var modelSubtasks = ReadModelAuthoredSubtasks();
+        var modelSubtasks = await ReadModelAuthoredSubtasksAsync(teamId);
 
         await AssertRunSucceededAsync(db, runId);
         await AssertFannedOutOverModelAuthoredSubtasksAsync(db, runId, modelSubtasks);
@@ -129,23 +130,26 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         agentRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded, "every branch agent executed to Succeeded via the real executor + runner");
 
         var actualGoals = agentRuns.Select(r => JsonSerializer.Deserialize<Messages.Agents.AgentTask>(r.TaskJson, AgentJson.Options)!.Goal).OrderBy(g => g).ToList();
-        var expectedGoals = modelSubtasks.Select(s => $"Work on {s}").OrderBy(g => g).ToList();
+        var expectedGoals = modelSubtasks.OrderBy(g => g).ToList();
 
         actualGoals.ShouldBe(expectedGoals,
-            customMessage: "each agent's resolved goal must be 'Work on <subtask>' for the MODEL's own subtasks — proving the model-authored decomposition propagated through the map's per-branch {{item}} binding");
+            customMessage: "each agent's resolved goal must be the MODEL's own authored instruction — proving the plan.author decomposition propagated through the map's per-branch {{item.instruction}} binding");
     }
 
-    /// <summary>Read the subtasks the model authored back out of the committed cassette — the same JSON the planner node surfaced on its 'json' output and the map fanned out over.</summary>
-    private static IReadOnlyList<string> ReadModelAuthoredSubtasks()
+    /// <summary>Read the subtask INSTRUCTIONS the model authored back out of the committed cassette — plan.author's subtasks are objects, and the map's per-branch goal binds each item's <c>instruction</c>.</summary>
+    private async Task<IReadOnlyList<string>> ReadModelAuthoredSubtasksAsync(Guid teamId)
     {
-        var request = PlanMapSynthPlannerRequest.Build();
+        StructuredLLMCompletionRequest request;
+        using (var scope = _fixture.BeginScope())
+            request = await PlanMapSynthPlannerRequest.BuildAsync(scope, teamId, CancellationToken.None);
+
         var entries = JsonSerializer.Deserialize<List<RecordReplayStructuredLLMClient.CassetteEntry>>(File.ReadAllText(RealModelCassettePaths.PlannerCassettePath))!;
 
         var key = RecordReplayStructuredLLMClient.CassetteKey(request);
         var entry = entries.FirstOrDefault(e => e.KeyHash == key)
             ?? throw new InvalidOperationException($"Cassette has no entry for the plan-map-synth planner key {key} — re-record via the RealModel live test.");
 
-        return entry.JsonElement().GetProperty("subtasks").EnumerateArray().Select(s => s.GetString()!).ToList();
+        return entry.JsonElement().GetProperty("subtasks").EnumerateArray().Select(s => s.GetProperty("instruction").GetString()!).ToList();
     }
 
     // ─── Helpers (mirror PlanMapSynthFanoutFlowTests) ──────────────────────────

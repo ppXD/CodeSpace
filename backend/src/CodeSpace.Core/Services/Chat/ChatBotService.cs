@@ -36,11 +36,12 @@ public sealed class ChatBotService : IChatBotService, IScopedDependency
     }
 
     public async Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken cancellationToken) =>
-        // Team-scoped existence read: a foreign-team or unknown conversation id finds nothing (fail-closed). The caller
-        // asserts this BEFORE PostAsBotAsync, which would otherwise derive the team FROM the conversation and post
-        // cross-tenant. Mirrors the team-scoped reads elsewhere in this service.
+        // Team-scoped ALIVE read: a foreign-team, unknown, or soft-deleted conversation finds nothing (fail-closed).
+        // The caller asserts this BEFORE PostAsBotAsync, which would otherwise derive the team FROM the conversation
+        // and post cross-tenant — or park a card into a deleted room every list/get read hides. Mirrors the
+        // team-scoped reads elsewhere in this service.
         await _db.Conversation.AsNoTracking()
-            .AnyAsync(c => c.Id == conversationId && c.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+            .AnyAsync(c => c.Id == conversationId && c.TeamId == teamId && c.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
     public async Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken cancellationToken)
     {

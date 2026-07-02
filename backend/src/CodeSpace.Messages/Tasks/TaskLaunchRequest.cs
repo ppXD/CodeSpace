@@ -64,6 +64,12 @@ public sealed record TaskLaunchRequest
     /// <summary>The S3 plan-confirmation gate — every authored plan version parks the run for the operator's confirmation before any agent is created. Null / false ⇒ omitted (byte-identical, fully autonomous planning). Inert on a non-supervisor projection.</summary>
     public bool? RequirePlanConfirmation { get; init; }
 
+    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN on the plan-map tiers (S4b) — baked into the plan.author node's <c>reviewMode</c>. <see cref="ReviewMode.None"/> (default) ⇒ omitted (byte-identical). Inert elsewhere.</summary>
+    public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv baked into the supervisor node's <c>acceptanceChecks</c>, enforced at the terminal stop. Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision (Deep only) — baked into the supervisor node so every turn + replay reads it. <see cref="ReviewMode.None"/> (the default) ⇒ no critic (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

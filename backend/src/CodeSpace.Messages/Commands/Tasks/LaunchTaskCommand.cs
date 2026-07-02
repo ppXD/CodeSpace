@@ -129,6 +129,12 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public bool? RequirePlanConfirmation { get; init; }
 
+    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN on the plan-map tiers (S4b): None (default, byte-identical) / Gate (annotate concerns onto the plan's risks) / Improve (one bounded revision against the critique). Runs on <see cref="ReviewerModelId"/> when set. Inert on non-plan-map projections.</summary>
+    public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv (e.g. ["sh","check.sh"]) run against the run's reviewable head at the terminal stop; a non-zero exit fails the stop and withholds the branch. DISTINCT from the free-text <see cref="AcceptanceCriteria"/> (prompt-rendered, never executed). Null / empty ⇒ omitted ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
+    public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
     /// <summary>
     /// The agent working-directory mode in a MULTI-repo workspace, in wire vocabulary: <c>"workspace"</c> (cwd = the
     /// shared workspace root, every repo a sibling) or <c>"primary"</c> (cwd = the primary repo's root). <c>"auto"</c> /

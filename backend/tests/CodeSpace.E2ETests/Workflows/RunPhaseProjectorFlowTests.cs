@@ -135,7 +135,9 @@ public class RunPhaseProjectorFlowTests : IDisposable
 
         route.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth);
 
-        var runId = await ProjectRetargetAndStartAsync(route, teamId, userId);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
         await RunEngineAsync(runId);
         await jobClient.WaitForPendingAsync();
 
@@ -148,7 +150,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
 
         fanOut.Label.ShouldBe("Fan out");
         fanOut.Agents.Count.ShouldBeGreaterThan(1, "the map fanned out to MULTIPLE real branch agents");
-        fanOut.Agents.Count.ShouldBe(DeterministicPlannerLlmClient.Subtasks.Count, "one branch agent ref per planned subtask");
+        fanOut.Agents.Count.ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count, "one branch agent ref per planned subtask");
         fanOut.Agents.ShouldAllBe(a => a.Status == nameof(AgentRunStatus.Succeeded), "every real branch agent finished Succeeded (the team-scoped AgentRunStatus, not the NodeStatus name)");
         fanOut.Agents.Select(a => a.IterationKey).ShouldAllBe(k => k != null && k.StartsWith("map#"), "each ref carries its map branch key");
         fanOut.Agents.ShouldAllBe(a => a.DurationMs != null, "the per-agent metrics project onto map BRANCH refs too, not just a single agent.code node");
@@ -156,7 +158,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
         var realBranchAgentIds = await BranchAgentRunIdsAsync(runId, teamId);
         fanOut.Agents.Select(a => a.AgentRunId).OrderBy(id => id).ShouldBe(realBranchAgentIds.OrderBy(id => id), "the refs are the REAL branch agent runs");
 
-        fanOut.Metrics.AgentCount.ShouldBe(DeterministicPlannerLlmClient.Subtasks.Count);
+        fanOut.Metrics.AgentCount.ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count);
         fanOut.Metrics.FailedCount.ShouldBe(0);
     }
 
@@ -365,7 +367,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
         return await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, session: null, CancellationToken.None);
     }
 
-    private async Task<Guid> ProjectRetargetAndStartAsync(RoutePlan route, Guid teamId, Guid userId)
+    private async Task<Guid> ProjectRetargetAndStartAsync(RoutePlan route, Guid teamId, Guid userId, Guid plannerRowId)
     {
         using var scope = _fixture.BeginScope();
 
@@ -376,18 +378,27 @@ public class RunPhaseProjectorFlowTests : IDisposable
             AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Confined" },
         };
 
-        var definition = RetargetPlannerToFake(scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind).Build(context));
+        var definition = RetargetPlannerToFake(scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind).Build(context), plannerRowId);
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    private static WorkflowDefinition RetargetPlannerToFake(WorkflowDefinition definition) => definition with
+    private static WorkflowDefinition RetargetPlannerToFake(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
-        Nodes = definition.Nodes.Select(RetargetNode).ToList(),
+        Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node)
+    /// <summary>Pin the plan.author planner to the deterministic work-plan fake's row; retarget every remaining llm.complete (the synth) to the plain planner fake — the honest LLM seams.</summary>
+    private static NodeDefinition RetargetNode(NodeDefinition node, Guid plannerRowId)
     {
+        if (node.TypeKey == "plan.author")
+        {
+            var planConfig = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
+            planConfig["plannerModelId"] = JsonSerializer.SerializeToElement(plannerRowId.ToString());
+
+            return node with { Config = JsonSerializer.SerializeToElement(planConfig) };
+        }
+
         if (node.TypeKey != "llm.complete") return node;
 
         var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();

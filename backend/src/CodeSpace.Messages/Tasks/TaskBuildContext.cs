@@ -51,6 +51,15 @@ public sealed record TaskBuildContext
     /// <summary>The session's chat surface (S4a) — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>conversationId</c>, giving the launched run's HITL cards (ask_human, plan confirmation, approvals) a real channel to post into. Null (single-agent / map launches, or a launch predating the surface) ⇒ the builder omits the key (byte-identical).</summary>
     public Guid? ConversationId { get; init; }
 
+    /// <summary>The operator's pinned planner-model ROW (S4b) — validated at launch like the supervisor brain; the plan-map builders bake it into the plan.author node's <c>plannerModelId</c>. Null ⇒ omitted ⇒ the node auto-picks the team's strongest structured-eligible model. Inert on non-plan-map projections.</summary>
+    public Guid? PlannerModelRowId { get; init; }
+
+    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN (S4b, plan-map tiers) — baked into the plan.author node's <c>reviewMode</c> (the CriticPlannerDecorator). <see cref="ReviewMode.None"/> (the default) ⇒ omitted (byte-identical). Inert on non-plan-map projections.</summary>
+    public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
+
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b) — an argv (e.g. ["sh","check.sh"]) the <c>SupervisorDefinitionBuilder</c> bakes into the node's <c>acceptanceChecks</c>, enforced at the terminal stop (a non-zero exit fails the stop + withholds the reviewable head). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>decisionReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 

@@ -190,9 +190,12 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        catch (DbUpdateException ex) when (idempotencyKey != null && IsUniqueViolation(ex))
         {
             // A fork with this idempotency key already committed (a double-submit / HTTP retry of the same rerun).
+            // Guarded on idempotencyKey: a LAUNCH save (key null) can hit an UNRELATED unique index (e.g. the staged
+            // session channel's slug) — swallowing that would log a lying "dedup", keep the twin rows tracked, and
+            // fail later far from the cause. An unexpected violation must propagate loud instead.
             // Mirror RunStarter: detach the unsaved pair so the caller's DbContext stays usable, return Guid.Empty so
             // the caller resolves + returns the prior fork. EF auto-savepoints SaveChanges inside the ambient command
             // transaction, so the 23505 rolls back to the savepoint and the subsequent lookup query still runs.

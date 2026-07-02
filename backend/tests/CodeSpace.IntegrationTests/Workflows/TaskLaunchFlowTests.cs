@@ -1317,7 +1317,6 @@ public class TaskLaunchFlowTests
         return agent.GetProperty("inputs").TryGetProperty("repositoryId", out var repo) ? repo.GetString() : null;
     }
 
-    /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>supervisorModelId</c> (the self-resolved brain) out of the frozen supervisor snapshot. Null when the key is absent (no brain baked).</summary>
     // ── S4a: the session's chat surface — a deep launch stages a channel and bakes it into the supervisor node ──
 
     [Fact]
@@ -1448,8 +1447,11 @@ public class TaskLaunchFlowTests
                 firstChannel = (await db.WorkSession.AsNoTracking().SingleAsync(x => x.Id == first.SessionId)).ConversationId!.Value;
 
                 // Soft-delete the room (the operator archived it) — the soft link must not park future cards into it.
+                // A plain soft delete KEEPS the slug — the stronger case: adopt-by-slug must skip the dead row
+                // (alive-only filter) AND the re-created channel's identical slug must not collide (the unique
+                // index is partial: alive rows only).
                 await db.Conversation.Where(c => c.Id == firstChannel)
-                    .ExecuteUpdateAsync(u => u.SetProperty(c => c.DeletedDate, DateTimeOffset.UtcNow).SetProperty(c => c.Slug, (string?)null));
+                    .ExecuteUpdateAsync(u => u.SetProperty(c => c.DeletedDate, DateTimeOffset.UtcNow));
             }
 
             var second = await LaunchAsync(new TaskLaunchRequest
@@ -1474,6 +1476,7 @@ public class TaskLaunchFlowTests
         }
     }
 
+    /// <summary>Reads ONE string key off the projected <c>agent.supervisor</c> node's config in the frozen snapshot. Null when the key is absent (omitted — byte-identical baseline).</summary>
     private static string? ReadSupervisorConfigString(string definitionSnapshotJson, string key)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1482,6 +1485,7 @@ public class TaskLaunchFlowTests
         return sup.GetProperty("config").TryGetProperty(key, out var value) ? value.GetString() : null;
     }
 
+    /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>supervisorModelId</c> (the self-resolved brain). Null when the key is absent (no brain baked).</summary>
     private static string? ReadSupervisorBrainModelId(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;

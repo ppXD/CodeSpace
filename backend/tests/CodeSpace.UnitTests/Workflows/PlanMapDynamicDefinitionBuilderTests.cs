@@ -16,18 +16,19 @@ namespace CodeSpace.UnitTests.Workflows;
 /// flow.map_start → agent.code(body) → llm.complete(synth) → builtin.terminal(done)</c>) and ALWAYS passes the
 /// REAL <see cref="DefinitionValidator"/>, with TWO differences from plan-map-synth: the planner's responseSchema
 /// is an OBJECT-ARRAY of per-agent specs (<c>{ name?, goal, mode }</c>, mode the enum research|code), and the
-/// body agent binds <c>goal={{item.goal}}</c> + <c>mode={{item.mode}}</c> so the MODEL decides each agent's intent.
+/// body agent binds <c>goal={{item.instruction}}</c> + <c>mode={{item.kind}}</c> so the MODEL decides each agent's intent.
 /// </summary>
 [Trait("Category", "Unit")]
 public class PlanMapDynamicDefinitionBuilderTests
 {
     private static readonly PlanMapDynamicDefinitionBuilder Builder = new();
 
-    /// <summary>The REAL validator over the REAL node runtimes the builder emits — the planner json output, the map structure, the {{item.goal}}/{{item.mode}} config refs, and the synth result refs all validate against the actual manifests (mirrors PlanMapSynthDefinitionBuilderTests).</summary>
+    /// <summary>The REAL validator over the REAL node runtimes the builder emits — the planner json output, the map structure, the {{item.instruction}}/{{item.kind}} config refs, and the synth result refs all validate against the actual manifests (mirrors PlanMapSynthDefinitionBuilderTests).</summary>
     private static DefinitionValidator RealValidator() => new(new NodeRegistry(new INodeRuntime[]
     {
         new TriggerManualNode(),
         new LlmCompleteNode(new LLMClientRegistry(Array.Empty<ILLMClient>()), null!),
+        new PlanAuthorNode(null!),
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),
@@ -54,7 +55,7 @@ public class PlanMapDynamicDefinitionBuilderTests
 
         var byId = def.Nodes.ToDictionary(n => n.Id, n => n.TypeKey);
         byId["start"].ShouldBe("trigger.manual");
-        byId["planner"].ShouldBe("llm.complete");
+        byId["planner"].ShouldBe("plan.author");
         byId["map"].ShouldBe("flow.map");
         byId["ms"].ShouldBe("flow.map_start");
         byId["agent"].ShouldBe("agent.code");
@@ -94,32 +95,13 @@ public class PlanMapDynamicDefinitionBuilderTests
     }
 
     [Fact]
-    public void Planner_emits_an_object_array_response_schema_with_a_mode_enum_and_required_goal_and_mode()
+    public void Planner_is_a_flat_plan_author_bound_to_the_seed_goal()
     {
         var def = Builder.Build(Context());
         var planner = def.Nodes.Single(n => n.Id == "planner");
 
-        var schema = planner.Config.GetProperty("responseSchema");
-
-        // subtasks is an ARRAY of OBJECTS (per-agent specs) — the shape the map fans out over.
-        var subtasks = schema.GetProperty("properties").GetProperty("subtasks");
-        subtasks.GetProperty("type").GetString().ShouldBe("array");
-
-        var item = subtasks.GetProperty("items");
-        item.GetProperty("type").GetString().ShouldBe("object");
-
-        // mode is the HARD enum bound — only research|code — so the model's intent vocabulary is bounded.
-        var modeEnum = item.GetProperty("properties").GetProperty("mode").GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList();
-        modeEnum.ShouldBe(new[] { "research", "code" });
-
-        // goal AND mode are required per subtask (name is optional); subtasks is required on the root.
-        item.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "goal", "mode" }, ignoreOrder: true);
-        schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldContain("subtasks");
-
-        // The seed goal is framed into the planner prompt (Slice 4) so the model decomposes + tags it.
-        planner.Inputs.GetProperty("userPrompt").GetString().ShouldContain("Improve the onboarding module");
-        planner.Inputs.GetProperty("systemPrompt").GetString().ShouldContain("research");
-        planner.Inputs.GetProperty("systemPrompt").GetString().ShouldContain("code");
+        planner.Config.GetProperty("flatPlan").GetBoolean().ShouldBeTrue("the parallel map cannot honor ordering");
+        planner.Inputs.GetProperty("goal").GetString().ShouldBe("Improve the onboarding module");
     }
 
     [Fact]
@@ -136,8 +118,8 @@ public class PlanMapDynamicDefinitionBuilderTests
     {
         var agent = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent");
 
-        agent.Config.GetProperty("goal").GetString().ShouldBe("{{item.goal}}",
-            "each branch's goal carries its OWN authored subtask goal via the map's {{item.goal}}");
+        agent.Config.GetProperty("goal").GetString().ShouldBe("{{item.instruction}}",
+            "each branch's goal is its own plan item's authored instruction");
     }
 
     [Fact]
@@ -145,7 +127,7 @@ public class PlanMapDynamicDefinitionBuilderTests
     {
         var agent = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent");
 
-        agent.Config.GetProperty("mode").GetString().ShouldBe("{{item.mode}}",
+        agent.Config.GetProperty("mode").GetString().ShouldBe("{{item.kind}}",
             "each branch's mode carries the MODEL's chosen intent via the map's {{item.mode}} — the node maps it to permissions + push");
     }
 
@@ -184,8 +166,8 @@ public class PlanMapDynamicDefinitionBuilderTests
 
         var def = Builder.Build(Context(profile));
 
-        def.Nodes.Single(n => n.Id == "planner").Config.GetProperty("model").GetString().ShouldBe("claude-sonnet",
-            "the profile's model maps onto the planner llm.complete");
+        // The planner is plan.author: its model pins by ROW at launch, never by the profile's model NAME.
+        def.Nodes.Single(n => n.Id == "planner").Config.TryGetProperty("model", out _).ShouldBeFalse();
 
         var agent = def.Nodes.Single(n => n.Id == "agent");
         agent.Config.GetProperty("harness").GetString().ShouldBe("claude-code", "the agent body uses the shared profile mapping");

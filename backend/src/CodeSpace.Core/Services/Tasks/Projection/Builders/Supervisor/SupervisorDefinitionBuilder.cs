@@ -109,6 +109,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The operator's free-text acceptance CRITERIA — rendered into the decider prompt as the definition of done (the
         // model targets them; NOT executed, distinct from the acceptanceChecks argv floor). Omitted when empty (byte-identical).
         AddIfPresent(config, "acceptanceCriteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
+        // The operator's EXECUTABLE acceptance floor (S4b) — an argv run against the reviewable head at the terminal
+        // stop; a non-zero exit fails the stop + withholds the branch. Blank entries dropped; omitted when empty
+        // (byte-identical). The free-text criteria above steer the model; this floor VERIFIES the result.
+        AddIfPresent(config, "acceptanceChecks", context.AcceptanceChecks?.Where(c => !string.IsNullOrWhiteSpace(c)).ToList() is { Count: > 0 } checks ? checks : null);
         // The S3 plan-confirmation gate — every authored plan version parks for the operator's confirmation before any
         // agent is created. Omitted when off (byte-identical).
         AddIfPresent(config, "requirePlanConfirmation", context.RequirePlanConfirmation ? (object)true : null);
