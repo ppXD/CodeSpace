@@ -40,7 +40,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         if (context.DecisionReviewMode == ReviewMode.None || !CriticToggle.Enabled) return decision;
 
         var verdict = await _critic.ReviewAsync(
-            new CriticRequest { Mode = context.DecisionReviewMode, ArtifactKind = "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context) },
+            new CriticRequest { Mode = context.DecisionReviewMode, ArtifactKind = "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed) return decision;   // fail-open — a failed review is never worse than no review

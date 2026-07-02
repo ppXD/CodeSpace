@@ -193,6 +193,49 @@ public class ModelPoolSelectorFlowTests
         opusRow.ShouldNotBe(sonnetRow);
     }
 
+    // ─── SelectReviewerRowIdAsync (S4d): the critic's distinct-first ladder ───
+
+    [Fact]
+    public async Task SelectReviewerRowId_prefers_a_model_distinct_from_the_producer()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var producer = await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+        var alternative = await AddModelReturningIdAsync(cred, "claude-sonnet-4-6");
+
+        using var scope = _fixture.BeginScope();
+        var picked = await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producer, CancellationToken.None);
+
+        picked.ShouldBe(alternative, "a reviewer on a DIFFERENT model is a real second opinion — the producer's row is excluded when an alternative exists");
+    }
+
+    [Fact]
+    public async Task SelectReviewerRowId_falls_back_to_the_producers_own_model_on_a_one_model_pool()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var only = await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var picked = await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, only, CancellationToken.None);
+
+        picked.ShouldBe(only, "a one-model team still gets its critic — the same model, independently prompted, never a silent no-review");
+    }
+
+    [Fact]
+    public async Task SelectReviewerRowId_without_a_producer_matches_the_brain_pick()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        await AddModelReturningIdAsync(cred, "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var selector = scope.Resolve<IModelPoolSelector>();
+
+        (await selector.SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producerRowId: null, CancellationToken.None))
+            .ShouldBe(await selector.SelectBrainRowIdAsync(teamId, new[] { "Anthropic" }, CancellationToken.None), "no producer preference ⇒ byte-identical to today's pick");
+    }
+
     [Fact]
     public async Task SelectBrainRowId_prefers_the_operator_default_over_model_id_order()
     {

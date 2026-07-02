@@ -81,7 +81,7 @@ public class BuiltinPluginModuleTests
         module.Name.ShouldBe("LLM");
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LlmCompleteNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.PlanAuthorNode));
-        module.Nodes.Count.ShouldBe(2);
+        module.Nodes.Count.ShouldBe(3);
     }
 
     [Fact]
@@ -122,6 +122,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(41, "41 builtin node types across 6 domain plugins — incl. the Core Flow plugin's flow.decision Decision-substrate node (D1) — adjust this number when adding a builtin");
+        total.ShouldBe(42, "42 builtin node types across 6 domain plugins — incl. the Core Flow plugin's flow.decision Decision-substrate node (D1) — adjust this number when adding a builtin");
     }
 }

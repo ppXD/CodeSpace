@@ -30,6 +30,9 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
     /// <summary>The default plan's instructions — the map projections bind each branch goal to <c>{{item.instruction}}</c>, so the fan-out E2Es pin agents against these verbatim.</summary>
     public static readonly IReadOnlyList<string> DefaultInstructions = new[] { "do the first thing", "do the second thing" };
 
+    /// <summary>The REVISED plan's single merged instruction — returned whenever the request carries operator feedback (the plan.confirm edit loop), so the confirm E2Es can prove v2 ≠ v1 propagated to the fan-out.</summary>
+    public const string RevisedInstruction = "do both things in one pass";
+
     /// <summary>The heterogeneous plan (<c>AuthorHeterogeneousKinds</c>) — one research + two code items, the dynamic fan-out's mode-mapping fodder (kind binds <c>{{item.kind}}</c> → the node's permission/push mapping).</summary>
     public static readonly IReadOnlyList<(string Instruction, string Kind)> HeterogeneousItems = new[]
     {
@@ -46,7 +49,9 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         object[] subtasks;
-        if (_script.AuthorInvalidDag)
+        if (request.UserPrompt.Contains("feedback", StringComparison.OrdinalIgnoreCase) && !_script.AuthorInvalidDag && !_script.AuthorHeterogeneousKinds && !_script.AuthorContract)
+            subtasks = new object[] { new { id = "r1", title = "Merged", instruction = RevisedInstruction } };
+        else if (_script.AuthorInvalidDag)
             subtasks = new object[] { new { id = "s1", title = "First", instruction = "do the first thing", dependsOn = new[] { "ghost" } } };
         else if (_script.AuthorHeterogeneousKinds)
             subtasks = HeterogeneousItems.Select((item, i) => (object)new { id = $"h{i + 1}", title = item.Instruction, instruction = item.Instruction, kind = item.Kind }).ToArray();

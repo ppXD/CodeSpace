@@ -122,10 +122,11 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
     /// <summary>
-    /// The S3 plan-confirmation gate: when true, every plan version the supervisor AUTHORS parks the run on a
-    /// confirmation card before any agent is created — approve releases execution, any other answer is revision
-    /// feedback folded into a revised plan version. Null / false ⇒ omitted ⇒ byte-identical (fully autonomous
-    /// planning, the pre-S3 default). Inert on a non-supervisor projection.
+    /// The plan-confirmation gate: when true, every AUTHORED plan version parks the run for the operator before
+    /// any agent is created — approve releases execution, any other answer is revision feedback folded into a
+    /// revised plan version. Deep parks the supervisor's in-loop plan (S3); the plan-map tiers park a
+    /// <c>plan.confirm</c> node after the planner (S4d). Null / false ⇒ omitted ⇒ byte-identical (fully
+    /// autonomous planning). Inert on the quick tier (no plan is authored).
     /// </summary>
     public bool? RequirePlanConfirmation { get; init; }
 

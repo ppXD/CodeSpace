@@ -54,6 +54,9 @@ public static class WorkPlanOrigins
 
     /// <summary>The <c>agent.supervisor</c> node's <c>plan</c> decision (loop-tier producer).</summary>
     public const string Supervisor = "agent.supervisor";
+
+    /// <summary>A REVISION authored by the graph-tier confirm gate against the operator's feedback (node type key convention).</summary>
+    public const string Confirm = "plan.confirm";
 }
 
 /// <summary>

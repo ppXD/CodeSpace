@@ -56,7 +56,7 @@ export interface LaunchFormState {
   acceptanceCriteria: string[];
   /** Evaluation "Acceptance checks" — Deep only: the EXECUTABLE argv floor (one element per token, e.g. ["sh","check.sh"]) run against the reviewable head at the terminal stop. Sent only when non-empty (⇒ omitted, byte-identical). */
   acceptanceChecks: string[];
-  /** Planning "Confirm plan first" — Deep only: park each authored plan version for the operator's confirmation before any agent runs. Sent only when ON (default off ⇒ omitted, byte-identical). */
+  /** Planning "Confirm plan first" — any planning tier (standard/auto/deep): park each authored plan version for the operator's confirmation before any agent runs. Sent only when ON (default off ⇒ omitted, byte-identical); quick authors no plan, so it never sends. */
   requirePlanConfirmation: boolean;
   /** Planning "Plan critic" — Standard/Auto (the plan-map planner): `"None"` (default) / `"Gate"` / `"Improve"` via the plan.author reviewMode. Sent (as the enum name) only when not None. */
   plannerReview: string;
@@ -167,7 +167,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   // The plan-confirmation gate + the executable acceptance floor are Deep-only supervisor opt-ins; the plan critic
   // rides the plan-map planner (standard/auto). Defaults ⇒ omitted ⇒ byte-identical.
-  if (tierExposesCaps(state.effort) && state.requirePlanConfirmation) input.requirePlanConfirmation = true;
+  if (state.effort !== "quick" && state.requirePlanConfirmation) input.requirePlanConfirmation = true;
   if (tierExposesCaps(state.effort) && state.acceptanceChecks.length) input.acceptanceChecks = [...state.acceptanceChecks];
 
   const plannerOn = (state.effort === "standard" || state.effort === "auto") && state.plannerReview !== "None";
