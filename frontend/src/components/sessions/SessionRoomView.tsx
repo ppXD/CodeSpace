@@ -310,11 +310,11 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
   const liveDecisions = decisions.data ? decisionsForRun(decisions.data, turn.runId, agentIds) : [];
   const pdById = new Map(liveDecisions.map((d) => [d.id, d]));
 
-  // The final answer belongs at the END, in the RESULT card — not echoed at the top. When the turn carries a
-  // final_answer block (its summary IS that answer), drop the opening lead so the answer shows once, at the bottom.
-  // A live / failed turn has no RESULT card, so its lead still surfaces the one-line status.
-  const hasFinalAnswer = turn.blocks.some((b) => b.type === "final_answer");
-  const lead = turn.summary && !GENERIC_SUMMARY.has(turn.summary) && !hasFinalAnswer ? turn.summary : null;
+  // The outcome belongs at the END — the green RESULT card (success) or the red diagnostic (failure), never echoed at
+  // the top. When the turn carries either, drop the opening lead so the top is just the execution map + the flow, and
+  // the outcome reads once, at the bottom. A still-running turn has neither, so its lead surfaces the live one-liner.
+  const hasOutcome = turn.blocks.some((b) => b.type === "final_answer" || b.type === "diagnostic");
+  const lead = turn.summary && !GENERIC_SUMMARY.has(turn.summary) && !hasOutcome ? turn.summary : null;
 
   return (
     <RunActionsContext.Provider value={{ runId: turn.runId, isTerminal: !live }}>
@@ -981,8 +981,10 @@ function DiffStat({ text }: { text: string }) {
 
 function toPhaseAgentRef(c: RoomAgentCard): PhaseAgentRef {
   return {
-    agentRunId: c.agentRunId, nodeId: null, iterationKey: "", status: c.status, label: c.label, role: c.role ?? null,
-    assignedSubtask: c.assignedSubtask ?? null, model: c.model ?? null, inputTokens: null, outputTokens: null,
+    // nodeId/iterationKey (the cell key) light up the terminal's attempt switcher — the card carries the pre-summed token
+    // total, so forward it as inputTokens (the terminal sums input+output) rather than dropping it.
+    agentRunId: c.agentRunId, nodeId: c.nodeId ?? null, iterationKey: c.iterationKey ?? "", status: c.status, label: c.label, role: c.role ?? null,
+    assignedSubtask: c.assignedSubtask ?? null, model: c.model ?? null, inputTokens: c.tokens ?? null, outputTokens: null,
     durationMs: c.durationMs ?? null, toolCount: c.toolCount ?? null, costUsd: c.costUsd ?? null, filesChanged: c.filesChanged ?? null,
     changedFiles: c.changedFiles ?? null,
   };
