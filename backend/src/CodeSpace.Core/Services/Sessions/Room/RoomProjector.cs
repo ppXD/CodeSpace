@@ -280,8 +280,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Select(d =>
             {
                 var agentId = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson).FirstOrDefault();
+                var (why, evidence) = SupervisorOutcome.ReadRetryRationale(d.PayloadJson);
 
-                return new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d), agentId == Guid.Empty ? null : agentId);
+                return new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d), agentId == Guid.Empty ? null : agentId, FormatRationale(why, evidence));
             })
             .ToList();
 
@@ -371,6 +372,15 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
         return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments };
+    }
+
+    /// <summary>The retry's structured rationale as one readable line — the reason, then the evidence it acted on. Null when the model authored neither.</summary>
+    private static string? FormatRationale(string? why, string? evidence)
+    {
+        var reason = string.IsNullOrWhiteSpace(why) ? null : why.Trim();
+        var basis = string.IsNullOrWhiteSpace(evidence) ? null : $"Evidence: {evidence.Trim()}";
+
+        return string.Join(" · ", new[] { reason, basis }.Where(p => p != null)) is { Length: > 0 } line ? line : null;
     }
 
     /// <summary>

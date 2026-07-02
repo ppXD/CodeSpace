@@ -804,4 +804,27 @@ public static class SupervisorOutcome
             return null;
         }
     }
+
+    /// <summary>Read the structured rationale (why + evidence) off a <c>retry</c> decision's PAYLOAD — <c>(null, null)</c> when the model authored none. The room surfaces it under the retry step so a reader can see WHY the supervisor retried, not just that it did.</summary>
+    public static (string? Why, string? Evidence) ReadRetryRationale(string? retryPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(retryPayloadJson)) return (null, null);
+
+        try
+        {
+            var root = JsonDocument.Parse(retryPayloadJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("rationale", out var r) || r.ValueKind != JsonValueKind.Object)
+                return (null, null);
+
+            return (ReadNonEmptyString(r, "why"), ReadNonEmptyString(r, "evidence"));
+        }
+        catch (JsonException)
+        {
+            return (null, null);
+        }
+    }
+
+    private static string? ReadNonEmptyString(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : null;
 }

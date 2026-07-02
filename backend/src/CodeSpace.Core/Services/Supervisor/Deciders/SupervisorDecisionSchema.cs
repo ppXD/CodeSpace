@@ -136,7 +136,16 @@ public static class SupervisorDecisionSchema
               "additionalProperties": false,
               "properties": {
                 "subtaskId": { "type": "string", "description": "The plan-local subtask id to re-run as a fresh agent attempt." },
-                "revisedInstruction": { "type": "string", "description": "Optional replacement instruction for the retried subtask." }
+                "revisedInstruction": { "type": "string", "description": "Optional replacement instruction for the retried subtask." },
+                "rationale": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "why": { "type": "string", "description": "Why you are retrying this subtask (one or two sentences) — the reasoning a reader needs to understand the decision." },
+                    "evidence": { "type": "string", "description": "The concrete evidence you acted on — the prior attempt's error / output / status that drove this retry." }
+                  },
+                  "description": "STRONGLY RECOMMENDED. A short structured rationale so the trace explains WHY you retried — especially when retrying the SAME subtask more than once."
+                }
               },
               "required": ["subtaskId"],
               "description": "Required when kind == 'retry'."

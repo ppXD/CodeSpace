@@ -30,4 +30,27 @@ public class SupervisorOutcomeStopSummaryTests
     {
         SupervisorOutcome.ReadStopSummary(outcomeJson).ShouldBeNull();
     }
+
+    [Fact]
+    public void Reads_the_retry_rationale_why_and_evidence()
+    {
+        const string payload = """{"subtaskId":"sc","rationale":{"why":"The first attempt only skimmed one engine.","evidence":"attempt 1 exited with 'search tool rate-limited'."}}""";
+
+        var (why, evidence) = SupervisorOutcome.ReadRetryRationale(payload);
+
+        why.ShouldBe("The first attempt only skimmed one engine.");
+        evidence.ShouldBe("attempt 1 exited with 'search tool rate-limited'.");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("""{"subtaskId":"sc"}""")]
+    [InlineData("""{"subtaskId":"sc","rationale":{}}""")]
+    [InlineData("""{"subtaskId":"sc","rationale":{"why":42}}""")]
+    public void A_missing_or_malformed_retry_rationale_reads_nulls(string? payloadJson)
+    {
+        SupervisorOutcome.ReadRetryRationale(payloadJson).ShouldBe((null, null));
+    }
 }

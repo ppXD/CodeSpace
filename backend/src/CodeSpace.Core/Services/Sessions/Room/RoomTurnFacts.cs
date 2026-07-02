@@ -66,8 +66,8 @@ public sealed record RoomTurnFacts
     public static readonly RoomTurnFacts Empty = new();
 }
 
-/// <summary>One supervisor RETRY beat — the tape sequence it landed at, its user-facing line (authored by the shared timeline copy), and the fresh agent it staged. Rendered as a narrative step + that agent's own card, so a failed-then-retried subtask reads chronologically. <see cref="AgentRunId"/> is null for a no-op retry (nothing staged).</summary>
-public sealed record RoomRetryStep(long Sequence, string Text, Guid? AgentRunId);
+/// <summary>One supervisor RETRY beat — the tape sequence it landed at, its user-facing line, the fresh agent it staged, and the model's STRUCTURED rationale (why it retried + the evidence it acted on) when authored. Rendered as a narrative step (with the rationale as its detail) + that agent's own card, so a reader sees the decision, not just that it retried. <see cref="AgentRunId"/> is null for a no-op retry; <see cref="Rationale"/> is null when the model gave none.</summary>
+public sealed record RoomRetryStep(long Sequence, string Text, Guid? AgentRunId, string? Rationale = null);
 
 /// <summary>One bucket of the tool-call histogram — a tool kind and how many times the turn's agents called it.</summary>
 public sealed record ToolKindCount(string Kind, int Count);
