@@ -99,11 +99,12 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
     private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, IReadOnlyList<Guid>> subtaskAttempts, AgentRollup rollup)
     {
-        // Flatten EVERY attempt of each subtask (the spawn's original first, then each retry's fresh agent), so a
-        // retried subtask surfaces BOTH its failed original AND the retry — the room shows the real trajectory, not just
-        // the latest winner. PhaseStatusFromAgents then honestly folds to Failed while a failed attempt is present.
+        // The authored group shows only the INITIAL spawn — the FIRST attempt per subtask (which IS the failed original
+        // for a retried subtask, so failures stay visible and the phase still folds to Failed). The retries render
+        // CHRONOLOGICALLY as their own cards after each "Supervisor retried a subtask" step, so this group reads
+        // "N agents" = the plan's subtask count (not a lump of every attempt).
         var agents = phase.SubtaskIds
-            .SelectMany(id => subtaskAttempts.GetValueOrDefault(id) ?? Array.Empty<Guid>())
+            .Select(id => (subtaskAttempts.GetValueOrDefault(id) ?? Array.Empty<Guid>()).FirstOrDefault())
             .Where(id => id != Guid.Empty && rollup.Knows(id))
             .Select(rollup.RefFor)
             .ToList();

@@ -512,32 +512,37 @@ public class RoomNarrativeTests
     }
 
     [Fact]
-    public void A_supervisor_retry_emits_a_retried_step_after_the_agent_group_on_the_authored_path()
+    public void A_supervisor_retry_emits_its_own_card_after_the_retry_step_on_the_authored_path()
     {
-        // The goal's branch: a phased (authored) round whose Research phase carries a failed original + its retry.
+        var retryAgentId = Guid.NewGuid();
+
+        // The authored "Research" group shows only the INITIAL spawn (the failed original) — the retry is NOT lumped in.
         var authored = new RunPhase
         {
             Id = "phase-0", Label = "Research", Kind = SupervisorPhaseSource.AuthoredPhaseKind, Status = PhaseStatus.Failed,
             Order = SupervisorPhaseSource.OrderBase + 10, SourceKey = SupervisorPhaseSource.Key,
-            Agents = new[]
-            {
-                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Failed), AssignedSubtask = "Analyze repos" },
-                new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Analyze repos" },
-            },
-            Metrics = new PhaseMetrics { AgentCount = 2, FailedCount = 1, SucceededCount = 1 },
+            Agents = new[] { new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Failed), AssignedSubtask = "Analyze repos" } },
+            Metrics = new PhaseMetrics { AgentCount = 1, FailedCount = 1 },
+        };
+        // The retry's fresh agent rides the per-decision Retry tape phase — that's where agentById finds it to build the card.
+        var retryTape = new RunPhase
+        {
+            Id = "decision-3", Label = "Retry", Kind = "retry", Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 20, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = retryAgentId, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Analyze repos" } },
+            Metrics = new PhaseMetrics { AgentCount = 1, SucceededCount = 1 },
         };
 
-        var facts = new RoomTurnFacts { RetrySteps = new[] { new RoomRetryStep(3, "Supervisor retried a subtask") } };
+        var facts = new RoomTurnFacts { RetrySteps = new[] { new RoomRetryStep(3, "Supervisor retried a subtask", retryAgentId) } };
 
-        var n = Build(new[] { authored }, WorkflowRunStatus.Success, facts: facts);
-        var kinds = n.Blocks.ToList();
+        var blocks = Build(new[] { authored, retryTape }, WorkflowRunStatus.Success, facts: facts).Blocks.ToList();
 
-        n.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor retried a subtask" && s.Tone == NarrativeTone.Info,
-            "the retry beat renders as a step even on the authored-phase path (the branch the goal hits)");
+        var retryIdx = blocks.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor retried a subtask");
+        retryIdx.ShouldBeGreaterThanOrEqualTo(0, "the retry beat renders as a step");
 
-        var groupIdx = kinds.FindIndex(b => b is AgentGroupBlock);
-        var retryIdx = kinds.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor retried a subtask");
-        retryIdx.ShouldBeGreaterThan(groupIdx, "the retry step reads AFTER the agent cards (the failed original + retry are already visible above)");
+        var retryCard = blocks.Skip(retryIdx + 1).OfType<AgentGroupBlock>().FirstOrDefault();
+        retryCard.ShouldNotBeNull("the retry's fresh agent renders as its OWN single-agent card, chronologically after the step");
+        retryCard!.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgentId, "the card is the retry's agent (self-labeled with its subtask), not lumped into the initial group");
     }
 
     [Fact]

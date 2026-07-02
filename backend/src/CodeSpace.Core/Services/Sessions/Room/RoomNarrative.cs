@@ -172,7 +172,7 @@ public static class RoomNarrative
                     blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:think{i}", Seq = seq, Text = $"Supervisor reviewed {AgentWord(authored[i].Agents.Count)}' results · planning the next step", Tone = NarrativeTone.Info });
             }
 
-            EmitRetrySteps(blocks, idPrefix, seq, facts);
+            EmitRetrySteps(blocks, idPrefix, seq, facts, agentById);
 
             // Authored phases don't carry the supervisor's closing operation — surface it from the tape.
             foreach (var op in facts.Rounds.Select(r => r.Operation).Where(o => o != null).Select(o => o!).DistinctBy(o => o.Text))
@@ -183,7 +183,7 @@ public static class RoomNarrative
             foreach (var round in facts.Rounds)
                 EmitTapeRound(blocks, idPrefix, seq, status, round, facts, agentById);
 
-            EmitRetrySteps(blocks, idPrefix, seq, facts);
+            EmitRetrySteps(blocks, idPrefix, seq, facts, agentById);
         }
         else if (AgentGroup(idPrefix, seq, status, facts, narrativePhases) is { } fanout)
         {
@@ -230,7 +230,11 @@ public static class RoomNarrative
         if (r.Subtasks.Count > 0 && facts.Checklist == null)
             blocks.Add(new StatBlock { Id = $"{idPrefix}:r{r.Index}:plan", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(r.Subtasks.Count, "subtask"), Items = r.Subtasks.Select(t => new StatItem { Text = t }).ToList() });
 
-        var agents = r.AgentRunIds.Distinct().Select(id => agentById.GetValueOrDefault(id)).Where(a => a != null).Select(a => a!).ToList();
+        // Exclude the retry agents — they render CHRONOLOGICALLY as their own cards after each retry step (EmitRetrySteps),
+        // so this round group is the INITIAL spawn only. Without this, a retried subtask's fresh agent would render twice
+        // (here in the round bag AND in its retry card).
+        var retryIds = RetryAgentIds(facts);
+        var agents = r.AgentRunIds.Distinct().Where(id => !retryIds.Contains(id)).Select(id => agentById.GetValueOrDefault(id)).Where(a => a != null).Select(a => a!).ToList();
 
         if (agents.Count > 0)
             blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:r{r.Index}:agents", Seq = seq, Title = IsActive(status) ? "Work" : "Agents", Agents = agents.Select(a => ToCard(a, facts)).ToList() });
@@ -239,12 +243,27 @@ public static class RoomNarrative
             blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:r{r.Index}:op", Seq = seq, Text = op.Text, Tone = op.Tone });
     }
 
-    /// <summary>The supervisor's retry beats — one "Supervisor retried a subtask" step per retry, rendered after the agent work so a failed-then-retried subtask reads as the recovery it was (its retry agent already shows as a card above, this is the connective line). No-op when the turn had no retries.</summary>
-    private static void EmitRetrySteps(List<RoomBlock> blocks, string idPrefix, long seq, RoomTurnFacts facts)
+    /// <summary>
+    /// The supervisor's retry beats, in tape order — each a "Supervisor retried a subtask" step followed by that retry's
+    /// OWN single-agent card (the fresh agent, self-labeled with the subtask it re-ran via <c>AssignedSubtask</c>), so a
+    /// failed-then-retried subtask reads as the chronological recovery it was, not a lump in the initial group. The card
+    /// is looked up in <paramref name="agentById"/> (the retry agent rides the per-decision Retry tape phase); a no-op
+    /// retry (nothing staged) is just the line. No-op when the turn had no retries.
+    /// </summary>
+    private static void EmitRetrySteps(List<RoomBlock> blocks, string idPrefix, long seq, RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
     {
         foreach (var step in facts.RetrySteps)
+        {
             blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:retry:{step.Sequence}", Seq = seq, Text = step.Text, Tone = NarrativeTone.Info });
+
+            if (step.AgentRunId is { } id && agentById.TryGetValue(id, out var agent))
+                blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:retry:{step.Sequence}:agent", Seq = seq, Title = "Retry", Agents = new[] { ToCard(agent, facts) } });
+        }
     }
+
+    /// <summary>The set of retry-staged agent ids — kept out of the round/phase groups so a retry's fresh agent renders ONCE, as its own chronological card.</summary>
+    private static HashSet<Guid> RetryAgentIds(RoomTurnFacts facts) =>
+        facts.RetrySteps.Where(s => s.AgentRunId is not null).Select(s => s.AgentRunId!.Value).ToHashSet();
 
     /// <summary>The rich final answer — the closing text + typed attachments (files / PR / images), each rendered distinctly.</summary>
     private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers) => new()

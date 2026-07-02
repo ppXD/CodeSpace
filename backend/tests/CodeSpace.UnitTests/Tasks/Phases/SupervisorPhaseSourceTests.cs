@@ -262,7 +262,7 @@ public class SupervisorPhaseSourceTests
     }
 
     [Fact]
-    public void A_retried_subtask_phase_shows_both_the_failed_original_and_the_retry()
+    public void A_retried_subtask_phase_shows_the_initial_attempt_the_retry_renders_as_its_own_card()
     {
         var failedAgent = Guid.NewGuid();
         var retryAgent = Guid.NewGuid();
@@ -279,12 +279,12 @@ public class SupervisorPhaseSourceTests
 
         var implement = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn, retry }, statuses).Single(p => p.Kind == "phase");
 
-        implement.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { failedAgent, retryAgent }, "both attempts show — the failed original first, then the retry — so the room renders the real trajectory, not just the surviving agent");
-        implement.Status.ShouldBe(PhaseStatus.Failed, "a failed attempt is present → the phase honestly reads failed (matching the run detail's failed-phase step), even though the retry ultimately recovered the subtask");
+        implement.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { failedAgent }, "the authored group shows the INITIAL spawn (the failed original); the retry renders chronologically as its own card, not lumped into the group");
+        implement.Status.ShouldBe(PhaseStatus.Failed, "the failed original is the first attempt → the phase honestly reads failed (matching the run detail's failed-phase step)");
     }
 
     [Fact]
-    public void A_multi_agent_phase_with_two_failures_and_two_retries_reads_two_failed()
+    public void A_multi_agent_phase_shows_the_initial_spawn_not_the_retries()
     {
         var okA = Guid.NewGuid();
         var okB = Guid.NewGuid();
@@ -312,10 +312,10 @@ public class SupervisorPhaseSourceTests
 
         var research = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn, retry1, retry2 }, statuses).Single(p => p.Kind == "phase");
 
-        research.Agents.Count.ShouldBe(6, "the 4 spawned agents + the 2 retry agents all show — the full trajectory");
-        research.Metrics.FailedCount.ShouldBe(2, "the 2 failed originals are surfaced, not hidden behind their retries");
-        research.Metrics.SucceededCount.ShouldBe(4, "2 clean originals + 2 recovered retries");
-        research.Status.ShouldBe(PhaseStatus.Failed, "any failed attempt makes the phase read failed");
+        research.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { okA, okB, failedC, failedD }, "the group is the initial spawn (one per subtask) — the retries are chronological cards elsewhere, not lumped here");
+        research.Metrics.FailedCount.ShouldBe(2, "the 2 failed originals are surfaced honestly");
+        research.Metrics.SucceededCount.ShouldBe(2, "the 2 clean originals; the recovered retries are their own cards, not in this group");
+        research.Status.ShouldBe(PhaseStatus.Failed, "a failed original makes the phase read failed");
     }
 
     [Fact]

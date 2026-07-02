@@ -257,8 +257,12 @@ public class RoomProjectorFlowTests
         var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
 
         var cards = turn.Blocks.OfType<AgentGroupBlock>().SelectMany(g => g.Agents).ToList();
-        cards.ShouldContain(c => c.AgentRunId == failedAgent && c.Status == nameof(AgentRunStatus.Failed), "the failed original is a Failed card, not hidden behind its retry");
-        cards.ShouldContain(c => c.AgentRunId == retryAgent, "the retry agent shows too — the full trajectory");
+        cards.ShouldContain(c => c.AgentRunId == failedAgent && c.Status == nameof(AgentRunStatus.Failed), "the failed original is a Failed card in the initial group, not hidden behind its retry");
+        cards.Count(c => c.AgentRunId == retryAgent).ShouldBe(1, "the retry agent renders EXACTLY once — as its own chronological card, never also lumped into the round group");
+
+        // The retry's card is its OWN 'Retry' group, distinct from the initial-spawn group (chronological, not a lump).
+        var retryGroup = turn.Blocks.OfType<AgentGroupBlock>().Single(g => g.Agents.Any(a => a.AgentRunId == retryAgent));
+        retryGroup.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgent);
 
         turn.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor retried a subtask", "the room shows the retry beat as a narrative step");
     }

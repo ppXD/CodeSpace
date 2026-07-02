@@ -247,12 +247,18 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var finalAnswerText = SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson)
             ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
-        // The retry beats — one narrative step per retry decision, so a failed-then-retried subtask reads as the
-        // trajectory it was (not just its surviving agent). Reuses the shared timeline copy authority for the one line.
+        // The retry beats — one per retry decision, in tape order — each carrying its FRESH agent so the narrative can
+        // render "Supervisor retried a subtask" + that agent's own card, chronologically. Reuses the shared timeline
+        // copy authority for the line; a no-op retry (nothing staged) carries no agent.
         var retrySteps = decisions
             .Where(d => d.DecisionKind == SupervisorDecisionKinds.Retry)
             .OrderBy(d => d.Sequence)
-            .Select(d => new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d)))
+            .Select(d =>
+            {
+                var agentId = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson).FirstOrDefault();
+
+                return new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d), agentId == Guid.Empty ? null : agentId);
+            })
             .ToList();
 
         // The turn's tool-call TOTAL — summed from the already-projected per-agent counts (no extra query; the same
