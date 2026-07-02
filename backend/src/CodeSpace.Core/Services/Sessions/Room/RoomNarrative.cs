@@ -201,7 +201,9 @@ public static class RoomNarrative
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
 
-        if (IsTerminal(status) && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa, FileProducers(facts, agentById)));
+        // The green "RESULT" card is a SUCCESS artifact — only a succeeded run delivers an answer. A failed / cancelled
+        // run's outcome is the error diagnostic above, never a green Result echoing the failure text.
+        if (status == WorkflowRunStatus.Success && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa, FileProducers(facts, agentById)));
 
         if (IsActive(status) && LiveActivity(idPrefix, seq, facts) is { } live) blocks.Add(live);
 
@@ -388,14 +390,15 @@ public static class RoomNarrative
     /// The turn's agents as one group — the design's "Agents · N ran in parallel" (collapsed) / "Work · N agents"
     /// (live) section. Folds EVERY phase that carries agents (a supervisor spawn AND a flow.map fan-out), with the
     /// already-projected <see cref="PhaseAgentRef"/> meta (zero extra read) + the per-agent result summary the projector
-    /// gathered. Null below 2 agents — the group represents PARALLEL work; a single-agent turn IS that agent (no card).
+    /// gathered. Renders for ANY agent — a single-agent turn still gets its ONE card so its terminal + output are
+    /// reachable (not just the execution dots). Null only when no phase carried an agent.
     /// </summary>
     private static AgentGroupBlock? AgentGroup(string idPrefix, long seq, WorkflowRunStatus status, RoomTurnFacts facts, IReadOnlyList<RunPhase> phases)
     {
         var agents = phases.SelectMany(p => p.Agents)
             .GroupBy(a => a.AgentRunId).Select(g => g.First()).ToList();
 
-        if (agents.Count < 2) return null;
+        if (agents.Count == 0) return null;
 
         var active = status is WorkflowRunStatus.Pending or WorkflowRunStatus.Enqueued or WorkflowRunStatus.Running or WorkflowRunStatus.Suspended;
 

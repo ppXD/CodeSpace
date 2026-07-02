@@ -206,12 +206,26 @@ public class RoomNarrativeTests
     }
 
     [Fact]
-    public void A_single_agent_run_uses_the_structural_node_as_the_map()
+    public void A_single_agent_run_uses_the_structural_node_as_the_map_and_shows_its_one_card()
     {
         var n = Build(new[] { Structural("agent", "Run the agent", order: 1, agentCount: 1) });
 
         n.Map!.Steps.ShouldHaveSingleItem().Label.ShouldBe("Run the agent");
-        n.Blocks.ShouldBeEmpty("no facts → no stat rows; no narrative-line / agent-card chatter in the body");
+        n.Blocks.OfType<AgentGroupBlock>().ShouldHaveSingleItem().Agents.Count.ShouldBe(1,
+            "a single-agent turn still gets its ONE card so its terminal + output are reachable, not just the execution dots");
+        n.Blocks.Count.ShouldBe(1, "just the card — no stat rows / narrative chatter with no facts");
+    }
+
+    [Fact]
+    public void The_green_result_card_is_a_success_only_artifact()
+    {
+        var answer = new RoomTurnFacts { FinalAnswer = new RoomFinalAnswer { Text = "Done." } };
+
+        Build(new[] { Structural("agent", "Run", 1) }, WorkflowRunStatus.Success, facts: answer)
+            .Blocks.OfType<FinalAnswerBlock>().ShouldHaveSingleItem("a succeeded run delivers its RESULT");
+
+        Build(new[] { Structural("agent", "Run", 1) }, WorkflowRunStatus.Failure, error: "boom", facts: answer)
+            .Blocks.OfType<FinalAnswerBlock>().ShouldBeEmpty("a failed run's outcome is the error diagnostic — never a green RESULT echoing the failure text");
     }
 
     [Fact]
