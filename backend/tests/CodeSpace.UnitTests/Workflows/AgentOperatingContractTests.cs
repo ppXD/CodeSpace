@@ -20,4 +20,17 @@ public class AgentOperatingContractTests
         directive.ShouldContain("decision tool", Case.Insensitive);
         directive.ShouldContain("question", Case.Insensitive);
     }
+
+    [Fact]
+    public void Compose_appends_the_contract_after_the_persona_and_bares_it_when_no_persona()
+    {
+        // B1: the system-prompt text a harness projects natively = persona THEN the always-on contract (contract last so
+        // it can't be diluted). A blank/null persona ⇒ the bare contract (byte-identical to a pre-persona run).
+        AgentOperatingContract.Compose("You are a reviewer.")
+            .ShouldBe("You are a reviewer.\n\n" + AgentOperatingContract.SystemDirective);
+
+        AgentOperatingContract.Compose(null).ShouldBe(AgentOperatingContract.SystemDirective, "no persona → the bare contract");
+        AgentOperatingContract.Compose("   ").ShouldBe(AgentOperatingContract.SystemDirective, "a blank persona is the bare contract too");
+        AgentOperatingContract.Compose("  You are X.  ").ShouldBe("You are X.\n\n" + AgentOperatingContract.SystemDirective, "the persona is trimmed before composing");
+    }
 }

@@ -14,8 +14,18 @@ namespace CodeSpace.Messages.Agents;
 /// </summary>
 public sealed record AgentTask
 {
-    /// <summary>Natural-language goal / prompt for the agent.</summary>
+    /// <summary>Natural-language goal / prompt for the agent — the TASK (the user turn), never the persona.</summary>
     public required string Goal { get; init; }
+
+    /// <summary>
+    /// B1: the agent's PERSONA / system prompt (its identity + standing instructions), distinct from the task <see cref="Goal"/>.
+    /// The resolver stamps it from the bound persona; each harness projects it through its NATIVE system-prompt channel
+    /// (Claude Code: <c>--append-system-prompt</c>; Codex: an <c>AGENTS.md</c> in its config home), NOT prepended to the
+    /// goal — Anthropic's own guidance is that a system-prompt persona outweighs the same text in the user message. Null
+    /// (an inline run with no persona) ⇒ only the always-on operating contract is injected; task_json byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SystemPrompt { get; init; }
 
     /// <summary>Harness kind to run this task — resolved via <see cref="IAgentHarnessRegistry"/> (e.g. "codex-cli").</summary>
     public required string Harness { get; init; }

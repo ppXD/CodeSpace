@@ -40,7 +40,7 @@ public class AgentDefinitionResolverFlowTests
     }
 
     [Fact]
-    public async Task Persona_prompt_prepends_the_goal_and_its_model_fills_in()
+    public async Task Persona_prompt_rides_the_system_channel_and_its_model_fills_in()
     {
         var teamId = await SeedTeamAsync();
         var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: "gpt-5.4");
@@ -48,7 +48,9 @@ public class AgentDefinitionResolverFlowTests
 
         var resolved = await ResolveAsync(task, teamId);
 
-        resolved.Goal.ShouldBe("You are a reviewer.\n\nReview PR #42.");
+        // B1: the persona is stamped on SystemPrompt (its own native channel), NOT prepended to the goal.
+        resolved.Goal.ShouldBe("Review PR #42.", "the goal stays the clean task");
+        resolved.SystemPrompt.ShouldBe("You are a reviewer.", "the persona goes to the system-prompt channel");
         resolved.Model.ShouldBe("gpt-5.4", "no inline model → the persona's model");
         resolved.AgentDefinitionId.ShouldBe(id, "provenance is preserved on the merged task");
     }
@@ -62,13 +64,14 @@ public class AgentDefinitionResolverFlowTests
 
         var resolved = await ResolveAsync(task, teamId);
 
-        // Both axes at once: the model override wins AND the persona prompt still prepends the goal.
-        resolved.Goal.ShouldBe("You are a reviewer.\n\nReview.", "the persona prompt still prepends even when the node overrides the model");
+        // Both axes at once: the model override wins AND the persona still rides its own SYSTEM channel (not the goal).
+        resolved.Goal.ShouldBe("Review.", "the goal stays the clean task even when the node overrides the model");
+        resolved.SystemPrompt.ShouldBe("You are a reviewer.", "the persona goes to the system-prompt channel");
         resolved.Model.ShouldBe("gpt-5.3-codex", "a non-blank inline model overrides the persona's");
     }
 
     [Fact]
-    public async Task Persona_with_no_goal_runs_on_the_system_prompt_alone()
+    public async Task Persona_with_no_goal_keeps_the_persona_as_the_goal()
     {
         var teamId = await SeedTeamAsync();
         var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null);
@@ -76,7 +79,10 @@ public class AgentDefinitionResolverFlowTests
 
         var resolved = await ResolveAsync(task, teamId);
 
-        resolved.Goal.ShouldBe("You are a reviewer.");
+        // B1 degenerate case: a persona with NO node goal keeps the persona AS the goal (byte-identical to pre-B1) —
+        // there'd otherwise be no user turn to run — so the system-prompt channel stays empty.
+        resolved.Goal.ShouldBe("You are a reviewer.", "the persona is the only instruction → it stays the goal");
+        resolved.SystemPrompt.ShouldBeNull("no separate goal → nothing to route to the system channel");
         resolved.Model.ShouldBeNull("neither node nor persona set a model → null = harness default");
     }
 

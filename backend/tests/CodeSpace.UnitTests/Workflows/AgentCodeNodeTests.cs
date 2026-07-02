@@ -306,7 +306,7 @@ public class AgentCodeNodeTests
         result.Status.ShouldBe(NodeStatus.Suspended);
         var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
         task.AgentDefinitionId.ShouldBe(agentId);
-        task.Goal.ShouldBe("", "the node carries the raw (empty) goal — the resolver composes persona prompt + goal at dispatch");
+        task.Goal.ShouldBe("", "the node carries the raw (empty) goal — the resolver routes the persona to its own SystemPrompt channel at dispatch");
         task.Model.ShouldBeNull();
     }
 

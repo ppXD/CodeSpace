@@ -70,6 +70,9 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     /// </summary>
     public const string SessionsRoot = "sessions";
 
+    /// <summary>The config-home-relative instruction file Codex reads as its persona/base guidance — <c>$CODEX_HOME/AGENTS.md</c>, merged with any workspace <c>AGENTS.md</c> (verified against codex 0.142.2). B1 writes the persona + operating contract here (Codex <c>exec</c> has no system-prompt flag). Pinned by a test (Rule 8).</summary>
+    public const string AgentsFile = "AGENTS.md";
+
     /// <summary>The pinned Codex CLI version — MUST match <c>CODEX_CLI_VERSION</c> in <c>backend/Dockerfile.worker</c> (the single source of truth); a pin test fails if they drift.</summary>
     internal const string DefaultVersion = "0.142.2";
 
@@ -111,9 +114,9 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         AppendModelProviderConfig(args, task);
         AppendTelemetryConfig(args, task);
 
-        // B1 asymmetry: Codex exec has NO native system-prompt flag (Claude uses --append-system-prompt). Prepending the
-        // operating contract to the prompt positional conflates it with the goal (and pollutes goal-reading consumers),
-        // so the Codex projection is deferred to a proper non-goal channel (AGENTS.md / a config key) — see the B1 follow-up.
+        // B1: Codex exec has NO system-prompt flag, so the persona + operating contract ride an AGENTS.md in the config
+        // home (see BuildConfigHomeFiles) — verified against codex 0.142.2 that it loads $CODEX_HOME/AGENTS.md (and merges
+        // it with any workspace AGENTS.md). So the Goal positional stays the CLEAN task, never conflated with the persona.
         args.Add(task.Goal);
 
         return new SandboxSpec
@@ -166,25 +169,25 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     }
 
     /// <summary>
-    /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
-    /// session's restored rollout at <c>sessions/rollout-&lt;sessionId&gt;.jsonl</c> where <c>codex exec resume</c> finds
-    /// it. Unlike Claude, the restore path needs no cwd and no original timestamp — codex resume scans <c>sessions/</c>
-    /// at any depth and matches the id in the <c>rollout-…</c> filename (verified against codex 0.142.2), so a
-    /// deterministic id-named rollout suffices. Added ONLY when the run carries both the session id AND the captured
-    /// bytes — otherwise the skills list is returned unchanged (byte-identical for a fresh run).
+    /// The config-home files the runner materializes: (1) B1 — <c>AGENTS.md</c> carrying the persona + the always-on
+    /// operating contract (Codex's native instruction channel, since <c>exec</c> has no system-prompt flag; codex loads
+    /// <c>$CODEX_HOME/AGENTS.md</c> and merges it with any workspace AGENTS.md — verified against 0.142.2), ALWAYS present;
+    /// (2) the persona's projected skills; PLUS (3) — on a CONTINUE — the prior session's restored rollout at
+    /// <c>sessions/rollout-&lt;sessionId&gt;.jsonl</c> where <c>codex exec resume</c> finds it (codex scans <c>sessions/</c>
+    /// at any depth and matches the id in the <c>rollout-…</c> filename, so a deterministic id-named rollout suffices).
     /// </summary>
     private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
     {
-        var skills = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot);
-
-        if (task.ResumeFromSessionId is not { Length: > 0 } sessionId || task.RestoredTranscript is not { Length: > 0 } transcript)
-            return skills;
-
-        return skills.Append(new ConfigHomeFile
+        var files = new List<ConfigHomeFile>(SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot))
         {
-            RelativePath = $"{SessionsRoot}/rollout-{sessionId}.jsonl",
-            Content = transcript,
-        }).ToList();
+            new() { RelativePath = AgentsFile, Content = AgentOperatingContract.Compose(task.SystemPrompt) },
+        };
+
+        // On a CONTINUE, restore the prior rollout so `codex exec resume` re-opens the thread.
+        if (task.ResumeFromSessionId is { Length: > 0 } sessionId && task.RestoredTranscript is { Length: > 0 } transcript)
+            files.Add(new ConfigHomeFile { RelativePath = $"{SessionsRoot}/rollout-{sessionId}.jsonl", Content = transcript });
+
+        return files;
     }
 
     public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)

@@ -43,7 +43,7 @@ public class AgentMetricsReaderTests
 
     [Theory]
     [InlineData("Refactor the auth module", "Refactor the auth module")]                                  // inline goal → verbatim
-    [InlineData("You are a backend engineer.\n\nImplement the login endpoint", "Implement the login endpoint")]  // persona-composed → the TASK half, not the shared system prompt
+    [InlineData("Implement the login endpoint\n\nUse OAuth2 with PKCE", "Implement the login endpoint")]  // B1: the goal is the CLEAN task → its FIRST block/line (the persona is no longer prepended)
     [InlineData("First line of the task\nsecond line", "First line of the task")]                          // multi-line → first line only
     [InlineData("   ", null)]                                                                               // blank goal → null, so the row keeps its structural fallback
     public void Names_the_agent_by_a_concise_title_from_its_goal(string goal, string? expected)

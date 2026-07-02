@@ -120,17 +120,16 @@ public sealed class AgentMetricsReader : IScopedDependency
 
     /// <summary>
     /// A concise one-line display TITLE from an agent's goal — so a fan-out branch reads as its subtask rather than a
-    /// structural <c>map#N</c> key. A persona-resolved goal is <c>"&lt;systemPrompt&gt;\n\n&lt;task&gt;"</c>
-    /// (see <c>AgentDefinitionResolver.ComposeGoal</c>), so take the LAST blank-line block (the task half), its first
-    /// non-empty line, trimmed and capped. A null/empty/whitespace goal → null (the row keeps its structural fallback).
+    /// structural <c>map#N</c> key. Since B1 the goal is the CLEAN task (the persona rides its own SystemPrompt channel,
+    /// not prepended), so the title is simply its FIRST non-empty line, trimmed and capped. A null/empty/whitespace
+    /// goal → null (the row keeps its structural fallback).
     /// </summary>
     internal static string? DeriveTitle(string? goal)
     {
         if (string.IsNullOrWhiteSpace(goal)) return null;
 
         var normalized = goal.Replace("\r\n", "\n").Replace('\r', '\n');
-        var block = normalized.Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? normalized;
-        var line = block.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        var line = normalized.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
 
         if (string.IsNullOrEmpty(line)) return null;
 
