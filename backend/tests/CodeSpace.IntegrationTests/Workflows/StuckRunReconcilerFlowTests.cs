@@ -599,6 +599,40 @@ public class StuckRunReconcilerFlowTests
         await db.SaveChangesAsync();
     }
 
+    [Fact]
+    public async Task A_stranded_timer_wait_past_its_wake_is_re_fired_by_the_reconciler()
+    {
+        // The dropped-schedule signature: a Timer wake overdue past the grace, on a Suspended run — the ONE stranding
+        // case with no backstop before this sweep (the stranded-Suspended sweep excludes it — it HAS a pending wait).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedTimerWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.TimerWakeLostAfter - TimeSpan.FromMinutes(1));
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedTimerWait.ShouldBe(1, "a Timer wake overdue past the grace on a Suspended run is re-fired — the automated backstop for a dropped Hangfire schedule");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued, exactly as the scheduled job would");
+    }
+
+    [Fact]
+    public async Task A_timer_wait_whose_wake_has_not_come_due_is_left_alone()
+    {
+        // A healthy timer — its wake is still in the future, so the real scheduled job will fire it. The sweep must not
+        // wake a run early (that would collapse every future delay to fire-now).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedTimerWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow.AddMinutes(30));
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedTimerWait.ShouldBe(0, "a Timer whose wake hasn't come due is healthy — never re-fired early");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the healthy timer's run stays parked until its real wake");
+    }
+
     /// <summary>
     /// Backdate a run's LastModifiedDate via raw SQL (EF's audit hook would otherwise re-stamp it to now),
     /// so a genuinely-suspended run looks stale to the stranded-Suspended sweep's grace-window check.
@@ -628,6 +662,28 @@ public class StuckRunReconcilerFlowTests
             PayloadJson = status == WorkflowWaitStatuses.Resolved ? "{}" : null,
             CreatedAt = DateTimeOffset.UtcNow,
             ResolvedAt = status == WorkflowWaitStatuses.Resolved ? DateTimeOffset.UtcNow : null,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedTimerWaitAsync(Guid runId, DateTimeOffset wakeAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = "delay",
+            IterationKey = string.Empty,
+            WaitKind = WorkflowWaitKinds.Timer,
+            Token = Guid.NewGuid().ToString("N"),
+            WakeAt = wakeAt,
+            Status = WorkflowWaitStatuses.Pending,
+            PayloadJson = null,
+            CreatedAt = DateTimeOffset.UtcNow,
         });
 
         await db.SaveChangesAsync();

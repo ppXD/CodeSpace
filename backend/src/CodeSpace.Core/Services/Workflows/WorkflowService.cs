@@ -781,6 +781,37 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return resumed;
     }
 
+    public async Task<ReissueWaitOutcome> ReissueWaitAsync(Guid runId, Guid waitId, Guid teamId, Guid actorUserId, string? payloadJson, CancellationToken cancellationToken)
+    {
+        // Tenancy — the wait's run must belong to the caller's team (404 conflated with not-yours / not-found). Load THIS
+        // wait (by id, on this run) with its kind + status + cell, so the reissue targets exactly the operator's choice.
+        var wait = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.Id == waitId && w.RunId == runId && _db.WorkflowRun.Any(r => r.Id == runId && r.TeamId == teamId))
+            .Select(w => new { w.WaitKind, w.Status, w.NodeId, w.IterationKey })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (wait is null) throw new KeyNotFoundException($"WorkflowRunWait {waitId} not found on run {runId} in team {teamId}.");
+
+        if (wait.Status != WorkflowWaitStatuses.Pending) return ReissueWaitOutcome.AlreadyResolved;
+
+        if (!WorkflowWaitKinds.IsOperatorReissuable(wait.WaitKind)) return ReissueWaitOutcome.UnsupportedKind;
+
+        // Timer → fire the wake NOW (null → ResumeWaitAsync stamps the standard wake marker, exactly as the scheduled
+        // job would); Callback → the operator-supplied body, or an empty object. Then the SAME idempotent resolve-first
+        // CAS every real signal uses — a real (late) signal that won the race between our read and here yields false.
+        var payload = wait.WaitKind == WorkflowWaitKinds.Timer ? null : (payloadJson ?? "{}");
+
+        var resolved = await _resumeService.ResumeWaitAsync(runId, waitId, payload, cancellationToken).ConfigureAwait(false);
+
+        if (!resolved) return ReissueWaitOutcome.AlreadyResolved;
+
+        await _recordLogger.WaitReissuedAsync(runId, wait.NodeId, wait.IterationKey, wait.WaitKind, waitId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Workflow wait re-issued by operator. RunId={RunId} WaitId={WaitId} Kind={Kind} By={Actor}", runId, waitId, wait.WaitKind, actorUserId);
+
+        return ReissueWaitOutcome.Reissued;
+    }
+
     public async Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         // Tenancy + fail-closed: a foreign / phantom run is a clean 404 (the same KeyNotFoundException ApproveRunAsync
@@ -1463,6 +1494,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
             {
+                Id = pending.Id,
                 NodeId = pending.NodeId,
                 Kind = pending.WaitKind,
                 Token = pending.Token,

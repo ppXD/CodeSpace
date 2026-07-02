@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Sessions;
 using CodeSpace.Messages.Queries.Tasks;
 using CodeSpace.Messages.Queries.Workflows;
@@ -162,6 +163,17 @@ public class WorkflowRunsController : ControllerBase
     {
         var resumed = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
         return Ok(new { resumed });
+    }
+
+    /// <summary>Operator override: force-resolve a STRANDED signal-driven wait (a dropped Timer wake / dead Callback) on a Suspended run to un-strand it. Refuses a decision/completion wait (409). Team-scoped; foreign → 404. Returns <c>{ outcome, reissued }</c>.</summary>
+    [HttpPost("{runId:guid}/waits/{waitId:guid}/reissue")]
+    public async Task<IActionResult> ReissueWait([FromRoute] Guid runId, [FromRoute] Guid waitId, [FromBody] ReissueWaitCommand command, CancellationToken cancellationToken)
+    {
+        var outcome = await _mediator.Send(command with { RunId = runId, WaitId = waitId }, cancellationToken).ConfigureAwait(false);
+
+        return outcome == ReissueWaitOutcome.UnsupportedKind
+            ? Conflict(new { outcome = outcome.ToString(), reissued = false })
+            : Ok(new { outcome = outcome.ToString(), reissued = outcome == ReissueWaitOutcome.Reissued });
     }
 
     /// <summary>Continue a STRANDED Suspended run (no pending wait) on demand — the user-triggered twin of the reconciler's re-dispatch. Team-scoped; foreign → 404. Returns <c>{ continued }</c>.</summary>

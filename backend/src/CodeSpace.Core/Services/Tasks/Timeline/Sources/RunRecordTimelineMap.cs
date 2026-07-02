@@ -71,6 +71,10 @@ public static class RunRecordTimelineMap
             WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, TimelineLevel.Detail, ReadString(r, "reason")),
             WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
 
+            // An operator force-resolved a stranded wait — a manual intervention that explains WHY a parked run resumed,
+            // so it's a story MILESTONE (Warning-toned: it's an override of the normal signal path).
+            WorkflowRunRecordTypes.WaitReissued  => Event(r, "Wait re-issued", TimelineSeverity.Warning, TimelineLevel.Milestone, ReadString(r, "wait_kind")),
+
             // A model call is the SUBSTANCE of an AI workflow (which model decided what, at what token cost), so — unlike
             // the external_call.* http plumbing left to Trace — its OUTCOME is narrative, folded to Detail: the completed
             // record carries the kind + model + token usage; the failed one the error. The interaction.started open

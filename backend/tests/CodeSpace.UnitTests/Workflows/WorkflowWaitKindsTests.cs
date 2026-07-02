@@ -51,4 +51,27 @@ public class WorkflowWaitKindsTests
         ex.Message.ShouldContain("Telepathy");
         ex.Message.ShouldContain("SupervisorDecision", customMessage: "the error must list the admitted kinds so an author sees SupervisorDecision is now valid");
     }
+
+    // ── IsOperatorReissuable: the reissue-verb allow-list ─────────────────────
+    // Only the SIGNAL-driven waits that can strand with no backstop (a dropped Timer wake, a dead Callback) are
+    // operator-reissuable; every decision- / completion-driven kind is refused (they resolve via their own verb or a
+    // reconciler backstop, and a blind reissue would feed the node a bogus payload). Hard-pinned so WIDENING the set is
+    // a conscious decision — a new wait kind is fail-closed (not reissuable) until deliberately added.
+
+    [Theory]
+    [InlineData(WorkflowWaitKinds.Timer, true)]
+    [InlineData(WorkflowWaitKinds.Callback, true)]
+    [InlineData(WorkflowWaitKinds.Approval, false)]
+    [InlineData(WorkflowWaitKinds.Action, false)]
+    [InlineData(WorkflowWaitKinds.Decision, false)]
+    [InlineData(WorkflowWaitKinds.Subworkflow, false)]
+    [InlineData(WorkflowWaitKinds.AgentRun, false)]
+    [InlineData(WorkflowWaitKinds.SupervisorDecision, false)]
+    [InlineData(WorkflowWaitKinds.SupervisorAgentWaits, false)]
+    public void IsOperatorReissuable_allows_only_the_signal_driven_stranding_kinds(string waitKind, bool expected) =>
+        WorkflowWaitKinds.IsOperatorReissuable(waitKind).ShouldBe(expected);
+
+    [Fact]
+    public void IsOperatorReissuable_is_fail_closed_for_an_unknown_kind() =>
+        WorkflowWaitKinds.IsOperatorReissuable("SomeFutureKind").ShouldBeFalse("a new wait kind is NOT operator-reissuable until deliberately added to the allow-list");
 }

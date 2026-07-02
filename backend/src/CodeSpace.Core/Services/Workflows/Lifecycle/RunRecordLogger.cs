@@ -134,6 +134,12 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         await InsertAsync(runId, WorkflowRunRecordTypes.NodeSuspended, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new { wait_kind = waitKind, wait_id = waitId.ToString(), by = byUserId.ToString() });
+        await InsertAsync(runId, WorkflowRunRecordTypes.WaitReissued, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task IterationStartedAsync(Guid runId, string nodeId, int itemCount, CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Serialize(new { item_count = itemCount });

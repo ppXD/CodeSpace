@@ -73,5 +73,8 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Active-rerun leases freed because their fork reached a terminal state (the backstop for the inline release the engine does on completion).</summary>
     public int ReleasedRerunLeases { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases;
+    /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at) — the automated twin of the operator reissue verb. 0 when no timer wake is overdue.</summary>
+    public int RecoveredStrandedTimerWait { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait;
 }

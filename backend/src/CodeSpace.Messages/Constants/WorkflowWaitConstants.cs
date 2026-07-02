@@ -69,6 +69,20 @@ public static class WorkflowWaitKinds
     /// <see cref="Approval"/> — that is the binary special case (<c>decisionType=approve_action</c>).
     /// </summary>
     public const string Decision = "Decision";
+
+    /// <summary>
+    /// The wait kinds an operator may FORCE-REISSUE via the reissue verb — the SIGNAL-driven waits that can strand with
+    /// no backstop: a <see cref="Timer"/> whose scheduled wake was dropped (a lost Hangfire job — there is no reconciler
+    /// sweep for it, unlike <see cref="SupervisorDecision"/>), and a <see cref="Callback"/> whose external system never
+    /// posts. Everything else is deliberately EXCLUDED: the decision-driven waits (<see cref="Approval"/> /
+    /// <see cref="Action"/> / <see cref="Decision"/>) carry a human decision and resolve via their own verbs (a blind
+    /// reissue would feed the node a decision-less payload); the completion-driven waits (<see cref="Subworkflow"/> /
+    /// <see cref="AgentRun"/>) and the supervisor self-waits resolve only when their real work completes — faking their
+    /// result payload here would corrupt the node — so none is operator-reissuable. (<see cref="AgentRun"/> + the
+    /// supervisor self-waits also have a reconciler backstop; a stranded <see cref="Subworkflow"/> parent does NOT yet —
+    /// see the follow-up.) Pinned by a unit test so widening the set is a conscious, reviewed decision (Rule 8).
+    /// </summary>
+    public static bool IsOperatorReissuable(string waitKind) => waitKind is Timer or Callback;
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>
