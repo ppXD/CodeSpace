@@ -431,10 +431,14 @@ public static class RoomNarrative
     /// <summary>The turn's headline (the AI's reply lead) — the model's stop summary on success, else a lead composed from the agents' result summaries (so the reply is never voiceless); the humanized cause on failure; null while in-progress / waiting (the status word conveys that).</summary>
     private static string? SummaryFor(WorkflowRunStatus status, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> structural, string? error, RoomTurnFacts facts) => status switch
     {
-        WorkflowRunStatus.Success => StopSummary(tape) ?? ComposeLead(tape, facts.AgentSummaries) ?? FactualLead(facts),
+        WorkflowRunStatus.Success => StopSummary(tape) ?? ComposeLead(tape, facts.AgentSummaries) ?? SoleAgentSummary(facts.AgentSummaries) ?? FactualLead(facts),
         WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled => FailureText(status, tape.Count > 0 ? tape : structural, error),
         _ => null,
     };
+
+    /// <summary>A single-agent (non-supervisor) turn's lead — that one agent's own summary. The supervisor tape is empty, so <see cref="ComposeLead"/> sees nothing; this is the plain agent turn's voice. Null unless exactly one agent produced a summary.</summary>
+    private static string? SoleAgentSummary(IReadOnlyDictionary<Guid, string> summaries) =>
+        summaries.Count == 1 && summaries.Values.Single() is { Length: > 0 } s ? s : null;
 
     private static string? StopSummary(IReadOnlyList<RunPhase> tape) =>
         tape.LastOrDefault(p => p.Kind == SupervisorDecisionKinds.Stop)?.Summary is { Length: > 0 } s ? s : null;

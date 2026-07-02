@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -183,6 +184,57 @@ public class RoomProjectorFlowTests
         var agents = turn.Blocks.OfType<AgentGroupBlock>().Single();
         agents.Title.ShouldBe("Agents", "a terminal supervisor turn surfaces its spawned agents as one group");
         agents.Agents.Count.ShouldBe(2, "one card per spawned agent");
+    }
+
+    [Fact]
+    public async Task A_single_agent_run_surfaces_its_result_from_the_agent_output_even_without_a_supervisor()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Echo");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Print exactly: PONG", resultSummary: null);
+
+        // A plain single-agent run: one agent node (surfaced by the ledger view) linked to its AgentRun, whose persisted
+        // AgentRunResult carries the summary + a changed file. NO supervisor decisions — the tape is empty.
+        await SeedAgentNodeAsync(teamId, run, summary: "Printed PONG.", changedFiles: new[] { "out.txt" });
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var answer = turn.Blocks.OfType<FinalAnswerBlock>().Single();
+        answer.Text.ShouldBe("Printed PONG.", "a single-agent run's RESULT is its own agent's summary — read from AgentRun.ResultJson, not a supervisor stop");
+        answer.Attachments.ShouldContain(x => x.Label == "out.txt", "the agent's changed file rides the RESULT as an attachment");
+
+        turn.Summary.ShouldBe("Printed PONG.", "the turn headline falls back to the sole agent's summary when there is no supervisor tape");
+    }
+
+    /// <summary>Seed a plain single-agent (non-supervisor) run: a node.started/completed ledger pair for the "agent" node (the workflow_run_node view surfaces it), the AgentRun wait that links the node to its run, and the AgentRun row whose persisted AgentRunResult carries the summary + changed files. No supervisor decisions.</summary>
+    private async Task SeedAgentNodeAsync(Guid teamId, Guid runId, string summary, string[] changedFiles)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentId = Guid.NewGuid();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.started", NodeId = "agent", IterationKey = "", OccurredAt = now.AddSeconds(-5), PayloadJson = "{}" });
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.completed", NodeId = "agent", IterationKey = "", OccurredAt = now, PayloadJson = "{}" });
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = "agent", IterationKey = "",
+            WaitKind = WorkflowWaitKinds.AgentRun, Token = agentId.ToString(), WakeAt = now,
+            Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now,
+        });
+
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = "",
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+            ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     [Fact]
