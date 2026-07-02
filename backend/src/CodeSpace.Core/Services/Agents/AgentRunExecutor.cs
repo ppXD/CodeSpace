@@ -3,9 +3,12 @@ using System.Text.Json;
 using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -266,7 +269,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-            result = await ReviewOutputIfEnabledAsync(agentRunId, effectiveTask, result, run.TeamId, cancellationToken).ConfigureAwait(false);
+            result = await ReviewOutputIfEnabledAsync(effectiveTask, result, run, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -830,11 +833,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// consumes it; the captured work is preserved. FAILS OPEN — a failed review keeps the original result. Improve is
     /// treated as Gate in v1 (a produced diff is not cheaply re-derivable; the agent re-run loop is a later arc).
     /// </summary>
-    internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (task.OutputReviewMode == ReviewMode.None || !CriticToggle.Enabled) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
+
+        var runId = run.Id;
 
         // Defer to the A1 completion gate: a run that left a decision.request unanswered will be re-graded to
         // NeedsReview(NeedsDecision) at the completion choke point WITH the specific decision linkage (the stronger
@@ -846,15 +851,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (await ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false) is not null) return result;
         }
 
-        var verdict = await _critic.ReviewAsync(
+        var verdict = await ReviewRecordedAsync(
             new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
-            teamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed || verdict.Approved) return result;   // fail-open, or a clean pass ⇒ byte-identical
 
         await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
 
         return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged" };
+    }
+
+    /// <summary>
+    /// Run the output-review critic — the executor's one IN-PROCESS model call — WITH recording. The executor runs in a
+    /// Hangfire job OUTSIDE the engine's per-node <see cref="LlmCallContext"/> scope (which the engine pushes around every
+    /// node), so this call would otherwise record NOTHING. Mirror the engine: push the run's
+    /// <c>(WorkflowRunId, NodeId, IterationKey)</c> cell + a FRESH-scope ledger writer/offloader (the long-running-job
+    /// pattern above, not a ctor dep) around the call, so the recording decorator lands its <c>interaction.*</c> onto the
+    /// SAME <c>workflow_run_record</c> ledger as the rest of the run, keyed to the spawning agent.code node. A standalone
+    /// run (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger ⇒ no scope pushed ⇒ records nothing
+    /// (fail-open), and the critic runs byte-identically.
+    /// </summary>
+    private async Task<CriticVerdict> ReviewRecordedAsync(CriticRequest request, AgentRun run, Guid? reviewerModelId, CancellationToken cancellationToken)
+    {
+        if (run.WorkflowRunId is not { } workflowRunId)
+            return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
+
+        using var recordingScope = _scopeFactory.CreateScope();
+        var recordLogger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
+        var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
+
+        using (LlmCallContext.Push(new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", recordLogger, offloader)))
+            return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Render the produced change for the critic — the git unified diff (already capped), with the agent's summary + the changed-file list as context.</summary>
