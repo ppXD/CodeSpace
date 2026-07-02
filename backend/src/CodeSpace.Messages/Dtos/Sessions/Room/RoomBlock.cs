@@ -136,6 +136,9 @@ public sealed record RoomAgentCard
     public decimal? CostUsd { get; init; }
     public int? FilesChanged { get; init; }
 
+    /// <summary>This agent's OWN changed-file paths (bounded) — per-agent file attribution so a reader sees WHICH agent produced a file (open the agent to preview its exact version), not just the turn-level union. Empty for an agent that changed nothing.</summary>
+    public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
     /// <summary>Side-effecting tool calls the agent made — the card meta "3 files · 6 tool calls · 41s". Null when the agent row is absent (0 is a real "made none").</summary>
     public int? ToolCount { get; init; }
 

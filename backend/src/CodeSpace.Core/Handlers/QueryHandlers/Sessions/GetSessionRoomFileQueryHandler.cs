@@ -18,5 +18,5 @@ public sealed class GetSessionRoomFileQueryHandler : IRequestHandler<GetSessionR
     }
 
     public Task<RoomFilePreview?> Handle(GetSessionRoomFileQuery request, CancellationToken cancellationToken) =>
-        _preview.PreviewAsync(request.RunId, request.Path, _currentTeam.Id!.Value, cancellationToken);
+        _preview.PreviewAsync(request.RunId, request.Path, _currentTeam.Id!.Value, request.AgentRunId, cancellationToken);
 }

@@ -99,10 +99,26 @@ public class RoomFilePreviewFlowTests
         preview.Text.ShouldBe("ACCEPTED", "a failed agent's rejected diff must never win last-writer-wins");
     }
 
-    private async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId)
+    [Fact]
+    public async Task Scoping_to_an_agent_returns_that_agents_own_version_of_a_shared_path()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var now = DateTimeOffset.UtcNow;
+
+        // Two agents both add shared.md with DIFFERENT content — the turn-wide preview picks the newest, but scoping to
+        // an agent returns THAT agent's own version (per-agent attribution).
+        var older = await AddAgentAsync(teamId, runId, AgentRunStatus.Succeeded, new[] { "shared.md" }, AddedFile("shared.md", "OLDER"), now.AddMinutes(-3));
+        await AddAgentAsync(teamId, runId, AgentRunStatus.Succeeded, new[] { "shared.md" }, AddedFile("shared.md", "NEWER"), now);
+
+        (await PreviewAsync(runId, "shared.md", teamId))!.Text.ShouldBe("NEWER", "turn-wide resolves to the newest accepted writer");
+        (await PreviewAsync(runId, "shared.md", teamId, older))!.Text.ShouldBe("OLDER", "scoping to an agent returns ITS own version");
+    }
+
+    private async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IRoomFilePreviewService>().PreviewAsync(runId, path, teamId, CancellationToken.None);
+        return await scope.Resolve<IRoomFilePreviewService>().PreviewAsync(runId, path, teamId, agentRunId, CancellationToken.None);
     }
 
     private static string AddedFile(string path, string body) =>
@@ -140,11 +156,12 @@ public class RoomFilePreviewFlowTests
         return runId;
     }
 
-    private async Task AddAgentAsync(Guid teamId, Guid runId, AgentRunStatus status, IReadOnlyList<string> changedFiles, string patch, DateTimeOffset createdDate)
+    private async Task<Guid> AddAgentAsync(Guid teamId, Guid runId, AgentRunStatus status, IReadOnlyList<string> changedFiles, string patch, DateTimeOffset createdDate)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
+        var agentRunId = Guid.NewGuid();
         var result = new AgentRunResult
         {
             Status = status, ExitReason = status == AgentRunStatus.Succeeded ? "completed" : "non-zero-exit",
@@ -152,10 +169,11 @@ public class RoomFilePreviewFlowTests
         };
         db.AgentRun.Add(new AgentRun
         {
-            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Harness = "codex-cli",
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, Harness = "codex-cli",
             Status = status, CreatedDate = createdDate, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
         });
 
         await db.SaveChangesAsync();
+        return agentRunId;
     }
 }

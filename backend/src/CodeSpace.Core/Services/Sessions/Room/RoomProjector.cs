@@ -193,6 +193,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Where(r => !string.IsNullOrWhiteSpace(r.Summary))
             .ToDictionary(r => r.AgentRunId, r => r.Summary!.Trim());
 
+        // Per-agent file attribution (B): each agent's OWN changed files, so a card shows WHICH agent produced a file
+        // rather than the provenance-blind turn-level union. Bounded per agent; an agent that changed nothing is omitted.
+        var agentFiles = agentResults
+            .Where(r => r.ChangedFiles.Count > 0)
+            .ToDictionary(r => r.AgentRunId, r => (IReadOnlyList<string>)r.ChangedFiles.Take(MaxAgentFiles).ToList());
+
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
 
@@ -246,6 +252,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             Rounds = rounds,
             FinalAnswer = BuildFinalAnswer(SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson), changedFiles, delivery),
             LatestLines = latestLines,
+            AgentFiles = agentFiles,
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ToolCalls = toolCalls,
@@ -276,6 +283,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     private const int MaxChangedFiles = 200;
+    private const int MaxAgentFiles = 40;
     private const int MaxReasoningSteps = 40;
     private const int MaxLatestLineScan = 200;
     private const int MaxAnswerFiles = 40;

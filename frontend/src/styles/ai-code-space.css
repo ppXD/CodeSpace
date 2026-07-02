@@ -5528,6 +5528,17 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
 .room-drawer-term .agent-terminal { border-color: var(--line); box-shadow: none; }
 
+/* per-agent files (attribution) — the files THIS agent produced, above its terminal in the drawer */
+.room-agent-files { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.room-agent-files-head { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); padding: 1px 4px 6px; }
+.room-agent-file { display: flex; align-items: center; gap: 8px; width: 100%; font: inherit; font-size: 12px; text-align: left; background: transparent; border: 0; border-radius: 6px; padding: 5px 6px; cursor: pointer; }
+.room-agent-file:hover { background: var(--panel); }
+.room-agent-file-name { flex: 1; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.room-agent-file-caret { color: var(--muted-2); flex: none; opacity: 0; transition: opacity .12s; }
+.room-agent-file:hover .room-agent-file-caret { opacity: 1; }
+/* per-agent file-count chip on the compact agent row */
+.room-arow-files { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
 .room-fprev { display: flex; flex-direction: column; min-height: 100%; }
 .room-fprev-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--muted); padding: 32px 20px; }
 .room-fprev-empty > svg:first-child { color: var(--muted-2); }

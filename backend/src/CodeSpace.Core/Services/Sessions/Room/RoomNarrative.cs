@@ -304,6 +304,7 @@ public static class RoomNarrative
         Tokens = a.InputTokens is null && a.OutputTokens is null ? null : (a.InputTokens ?? 0) + (a.OutputTokens ?? 0),
         CostUsd = a.CostUsd,
         FilesChanged = a.FilesChanged,
+        ChangedFiles = facts.AgentFiles.TryGetValue(a.AgentRunId, out var files) ? files : Array.Empty<string>(),
         ToolCount = a.ToolCount,
         DurationMs = a.DurationMs,
         Summary = facts.AgentSummaries.TryGetValue(a.AgentRunId, out var s) ? s : null,

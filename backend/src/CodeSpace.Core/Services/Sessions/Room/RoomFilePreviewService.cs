@@ -32,7 +32,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         _offloader = offloader;
     }
 
-    public async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, CancellationToken cancellationToken)
+    public async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
 
@@ -42,7 +42,7 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         var target = path.Trim();
         var sourceUrl = await DeliveryUrlAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        var patchRef = await LocateFilePatchAsync(runId, teamId, target, cancellationToken).ConfigureAwait(false);
+        var patchRef = await LocateFilePatchAsync(runId, teamId, target, agentRunId, cancellationToken).ConfigureAwait(false);
         if (patchRef is null) return Unavailable(target, sourceUrl, "This file isn't part of the turn's change set.");
 
         var patch = await _offloader.ResolveAsync(teamId, patchRef.Value.Inline, patchRef.Value.ArtifactId, cancellationToken).ConfigureAwait(false);
@@ -54,16 +54,22 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     }
 
     /// <summary>
-    /// Scan the turn's ACCEPTED agent runs (a Failed / cancelled agent's rejected diff was never delivered), newest
-    /// first, and return the patch reference of the repo that changed <paramref name="path"/> — the newest accepted
-    /// writer wins (a retry's re-run supersedes the original). Newest-first ordering also keeps the <see cref="MaxAgentsScanned"/>
-    /// window on the LATEST agents, so a late agent's file isn't sliced off.
+    /// Return the patch reference of the repo that changed <paramref name="path"/>. When <paramref name="agentRunId"/>
+    /// is given, scope to THAT one agent's version (per-agent attribution — open an agent, preview ITS file, any terminal
+    /// status). Otherwise scan the turn's ACCEPTED agent runs (a Failed / cancelled agent's rejected diff was never
+    /// delivered) newest first — the newest accepted writer wins (a retry supersedes the original); newest-first also
+    /// keeps the <see cref="MaxAgentsScanned"/> window on the LATEST agents, so a late agent's file isn't sliced off.
     /// </summary>
-    private async Task<PatchRef?> LocateFilePatchAsync(Guid runId, Guid teamId, string path, CancellationToken cancellationToken)
+    private async Task<PatchRef?> LocateFilePatchAsync(Guid runId, Guid teamId, string path, Guid? agentRunId, CancellationToken cancellationToken)
     {
-        var results = await _db.AgentRun.AsNoTracking()
-            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.ResultJson != null
-                && (r.Status == AgentRunStatus.Succeeded || r.Status == AgentRunStatus.NeedsReview))
+        var query = _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.ResultJson != null);
+
+        if (agentRunId is { } id)
+            return MatchFile(Deserialize(await query.Where(r => r.Id == id).Select(r => r.ResultJson!).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? ""), path);
+
+        var results = await query
+            .Where(r => r.Status == AgentRunStatus.Succeeded || r.Status == AgentRunStatus.NeedsReview)
             .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
             .Select(r => r.ResultJson!)
             .Take(MaxAgentsScanned)

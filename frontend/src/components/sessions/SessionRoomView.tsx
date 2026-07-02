@@ -35,8 +35,8 @@ import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
-  | { kind: "agent"; agent: RoomAgentCard }
-  | { kind: "file"; runId: string; path: string };
+  | { kind: "agent"; agent: RoomAgentCard; runId: string }
+  | { kind: "file"; runId: string; path: string; agentRunId?: string };
 
 /** Open the unified preview drawer. Any row (an agent card, a changed file) calls this to preview on the right. */
 const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
@@ -148,14 +148,17 @@ function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => 
   return (
     <aside className="room-drawer">
       {target.kind === "agent"
-        ? <AgentDrawer agent={target.agent} onClose={onClose} />
+        ? <AgentDrawer agent={target.agent} runId={target.runId} onClose={onClose} />
         : <FileDrawer target={target} onClose={onClose} />}
     </aside>
   );
 }
 
-/** An agent's live terminal in the drawer. */
-function AgentDrawer({ agent, onClose }: { agent: RoomAgentCard; onClose: () => void }) {
+/** An agent in the drawer — the files IT produced (per-agent attribution) above its live terminal. */
+function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: string; onClose: () => void }) {
+  const openDrawer = useRoomDrawer();
+  const files = agent.changedFiles ?? [];
+
   return (
     <>
       <div className="room-drawer-head">
@@ -164,6 +167,17 @@ function AgentDrawer({ agent, onClose }: { agent: RoomAgentCard; onClose: () => 
         <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
       </div>
       <div className="room-drawer-body">
+        {files.length > 0 && (
+          <div className="room-agent-files">
+            <div className="room-agent-files-head"><Sym n="file" s={12} /> {files.length} file{files.length === 1 ? "" : "s"} changed</div>
+            {files.map((p) => (
+              <button className="room-agent-file" key={p} onClick={() => openDrawer({ kind: "file", runId, path: p, agentRunId: agent.agentRunId })}>
+                <span className="room-agent-file-name">{p}</span>
+                <Sym n="chevron-right" s={11} cls="room-agent-file-caret" />
+              </button>
+            ))}
+          </div>
+        )}
         <div className="room-drawer-term"><AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} /></div>
       </div>
     </>
@@ -173,8 +187,8 @@ function AgentDrawer({ agent, onClose }: { agent: RoomAgentCard; onClose: () => 
 /** A file preview in the drawer — the header carries a small download icon (only when there's content); the body renders content / diff / notice by kind. */
 function FileDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "file" }>; onClose: () => void }) {
   const q = useQuery({
-    queryKey: ["roomFile", target.runId, target.path],
-    queryFn: () => sessionsApi.getRoomFile(target.runId, target.path),
+    queryKey: ["roomFile", target.runId, target.path, target.agentRunId ?? ""],
+    queryFn: () => sessionsApi.getRoomFile(target.runId, target.path, target.agentRunId),
     staleTime: 60_000,
   });
 
@@ -562,19 +576,22 @@ function AgentSection({ group }: { group: AgentGroupBlock }) {
   );
 }
 
-/** One agent as a compact row — status dot · name · time · state word · quiet action; opens its terminal in the side drawer. */
+/** One agent as a compact row — status dot · name · files · time · state word · quiet action; opens the agent (its files + terminal) in the side drawer. */
 function AgentRow({ a }: { a: RoomAgentCard }) {
   const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
   const cls = agentTone(a.status);
   const running = a.status === "Running";
   const queued = a.status === "Queued" || a.status === "Pending";
   const action = running ? "Open terminal" : queued ? "View" : cls === "err" ? "View trace" : "Details";
+  const fileCount = a.changedFiles?.length ?? a.filesChanged ?? 0;
 
   return (
     <div className="room-arow-wrap">
-      <button className="room-arow" data-queued={queued || undefined} onClick={() => openDrawer({ kind: "agent", agent: a })}>
+      <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
+        {fileCount > 0 && <span className="room-arow-files"><Sym n="file" s={10} /> {fileCount}</span>}
         <span className="room-arow-time">{a.durationMs != null ? formatDurationMs(a.durationMs) : "—"}</span>
         <span className={`room-arow-state room-arow-state-${cls}`}>{agentStatusWord(a.status)}</span>
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
