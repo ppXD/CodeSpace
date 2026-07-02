@@ -143,44 +143,68 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
   );
 }
 
-/** The right-side preview drawer — one panel, format by target: an agent shows its live terminal, a file shows its preview + download. */
+/** The right-side preview drawer — a panel scoped inside the room, no dimming scrim (the main conversation stays live + full-colour). */
 function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => void }) {
   return (
+    <aside className="room-drawer">
+      {target.kind === "agent"
+        ? <AgentDrawer agent={target.agent} onClose={onClose} />
+        : <FileDrawer target={target} onClose={onClose} />}
+    </aside>
+  );
+}
+
+/** An agent's live terminal in the drawer. */
+function AgentDrawer({ agent, onClose }: { agent: RoomAgentCard; onClose: () => void }) {
+  return (
     <>
-      <div className="room-drawer-scrim" onClick={onClose} />
-      <aside className="room-drawer">
-        <div className="room-drawer-head">
-          <span className="room-drawer-ic"><Sym n={target.kind === "agent" ? "cpu" : "file"} s={15} /></span>
-          <span className="room-drawer-title" title={target.kind === "agent" ? target.agent.label : target.path}>{target.kind === "agent" ? target.agent.label : baseName(target.path)}</span>
-          <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
-        </div>
-        <div className="room-drawer-body">
-          {target.kind === "agent"
-            ? <div className="room-drawer-term"><AgentTerminal agent={toPhaseAgentRef(target.agent)} onClose={onClose} /></div>
-            : <FilePreview target={target} />}
-        </div>
-      </aside>
+      <div className="room-drawer-head">
+        <span className="room-drawer-ic"><Sym n="cpu" s={15} /></span>
+        <span className="room-drawer-title" title={agent.label}>{agent.label}</span>
+        <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
+      </div>
+      <div className="room-drawer-body">
+        <div className="room-drawer-term"><AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} /></div>
+      </div>
     </>
   );
 }
 
-/** A file preview in the drawer — fetches the backend-resolved preview and renders by kind: full content, a diff, or a notice; a download button serves the shown text. */
-function FilePreview({ target }: { target: Extract<DrawerTarget, { kind: "file" }> }) {
+/** A file preview in the drawer — the header carries a small download icon (only when there's content); the body renders content / diff / notice by kind. */
+function FileDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "file" }>; onClose: () => void }) {
   const q = useQuery({
     queryKey: ["roomFile", target.runId, target.path],
     queryFn: () => sessionsApi.getRoomFile(target.runId, target.path),
     staleTime: 60_000,
   });
 
-  if (q.isLoading) return <div className="room-fprev"><div className="room-fprev-empty"><span className="room-fprev-spin" /> <p className="room-fprev-note">Loading preview…</p></div></div>;
-
   const file = q.data;
-  if (!file) return <FilePreviewNotice icon="alert" title={baseName(target.path)} note={q.isError ? "Couldn't load this file." : "This file isn't part of the turn's change set."} />;
+  const downloadable = !!file && (file.kind === "text" || file.kind === "diff");
+  const download = () => file && downloadText(baseName(file.path) + (file.kind === "diff" ? ".diff" : ""), file.text ?? "");
+
+  return (
+    <>
+      <div className="room-drawer-head">
+        <span className="room-drawer-ic"><Sym n="file" s={15} /></span>
+        <span className="room-drawer-title" title={target.path}>{baseName(target.path)}</span>
+        {downloadable && <button className="room-drawer-act" onClick={download} title="Download file" aria-label="Download file"><Sym n="download" s={14} /></button>}
+        <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
+      </div>
+      <div className="room-drawer-body">
+        <FilePreviewBody file={file} loading={q.isLoading} error={q.isError} path={target.path} />
+      </div>
+    </>
+  );
+}
+
+/** The file preview body — content / diff / notice by kind. The download affordance lives in the drawer header. */
+function FilePreviewBody({ file, loading, error, path }: { file?: RoomFilePreview | null; loading: boolean; error: boolean; path: string }) {
+  if (loading) return <div className="room-fprev"><div className="room-fprev-empty"><span className="room-fprev-spin" /> <p className="room-fprev-note">Loading preview…</p></div></div>;
+
+  if (!file) return <FilePreviewNotice icon="alert" title={baseName(path)} note={error ? "Couldn't load this file." : "This file isn't part of the turn's change set."} />;
 
   if (file.kind === "binary" || file.kind === "unavailable")
     return <FilePreviewNotice icon={file.kind === "binary" ? "file" : "alert"} title={baseName(file.path)} note={file.note ?? "Preview isn't available for this file."} sourceUrl={file.sourceUrl} />;
-
-  const download = () => downloadText(baseName(file.path) + (file.kind === "diff" ? ".diff" : ""), file.text ?? "");
 
   return (
     <div className="room-fprev">
@@ -190,10 +214,7 @@ function FilePreview({ target }: { target: Extract<DrawerTarget, { kind: "file" 
         {file.truncated && <span className="room-fprev-trunc">truncated</span>}
       </div>
       <pre className={`room-fprev-body room-fprev-${file.kind}`}>{renderBody(file)}</pre>
-      <div className="room-fprev-foot">
-        <button className="room-btn" onClick={download}><Sym n="download" s={13} /> Download</button>
-        {file.sourceUrl && <a className="room-btn" href={file.sourceUrl} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a>}
-      </div>
+      {file.sourceUrl && <div className="room-fprev-foot"><a className="room-btn" href={file.sourceUrl} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a></div>}
     </div>
   );
 }
