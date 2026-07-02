@@ -120,12 +120,12 @@ public sealed class SupervisorPhaseProjectionFlowTests
 
         var started = DateTimeOffset.UtcNow.AddMinutes(-3);
 
-        // Agent A: terminal, ran 85s; made 2 GOVERNED tool calls + 1 decision.request (a HITL ask — must NOT count).
+        // Agent A: terminal, ran 85s; made 2 tool calls (its actual harness-native calls) + 1 non-tool event (reasoning, must NOT count).
         var agentA = Guid.NewGuid();
         await SeedAgentRunAsync(runId, teamId, agentA, AgentRunStatus.Succeeded, started, started.AddSeconds(85));
-        await SeedToolCallAsync(teamId, agentA, "git.open_pr");
-        await SeedToolCallAsync(teamId, agentA, "run_command");
-        await SeedToolCallAsync(teamId, agentA, DecisionToolKinds.DecisionRequest);
+        await SeedToolEventAsync(agentA, "WebSearch");
+        await SeedToolEventAsync(agentA, "Read");
+        await SeedReasoningEventAsync(agentA);
 
         // Agent B: still running (no CompletedAt) → live elapsed > 0; made no tool calls → a real 0.
         var agentB = Guid.NewGuid();
@@ -142,7 +142,7 @@ public sealed class SupervisorPhaseProjectionFlowTests
 
         var refA = agents.Single(a => a.AgentRunId == agentA);
         refA.DurationMs.ShouldBe(85_000, "a terminal agent's duration is CompletedAt − StartedAt, exact");
-        refA.ToolCount.ShouldBe(2, "the 2 governed calls count; the decision.request envelope is excluded");
+        refA.ToolCount.ShouldBe(2, "the 2 actual tool calls count; a non-tool (reasoning) event is excluded");
 
         var refB = agents.Single(a => a.AgentRunId == agentB);
         refB.DurationMs!.Value.ShouldBeGreaterThan(20_000, "a still-running agent carries live elapsed (now − StartedAt), not its final time");
@@ -190,17 +190,19 @@ public sealed class SupervisorPhaseProjectionFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedToolCallAsync(Guid teamId, Guid agentRunId, string toolKind)
+    private async Task SeedToolEventAsync(Guid agentRunId, string toolName)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var now = DateTimeOffset.UtcNow;
-        db.ToolCallLedger.Add(new ToolCallLedger
-        {
-            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, ToolKind = toolKind,
-            IdempotencyKey = $"{toolKind}:{Guid.NewGuid():N}", InputHash = new string('0', 64), Status = ToolCallLedgerStatus.Succeeded,
-            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
-        });
+        db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = agentRunId, Kind = AgentEventKind.ToolCall, Text = toolName });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedReasoningEventAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = agentRunId, Kind = AgentEventKind.Reasoning, Text = "thinking" });
         await db.SaveChangesAsync();
     }
 

@@ -17,9 +17,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// 🟢 Integration (real Postgres + the REAL <see cref="AgentMetricsReader"/> from DI): the per-agent metrics a plain
 /// agent.code / map agent surfaces — proving duration (off the persisted timestamps), tokens (off the real
-/// <c>ResultJson</c>), model (off <c>TaskJson</c>), and the side-effecting tool count (off <c>tool_call_ledger</c>,
-/// EXCLUDING the <c>decision.request</c> HITL envelopes) all read back team-scoped from the durable rows. A
-/// foreign-team agent is never returned.
+/// <c>ResultJson</c>), model (off <c>TaskJson</c>), and the actual tool count (off the <c>agent_run_event</c> log's
+/// <see cref="AgentEventKind.ToolCall"/> entries — the agent's real tool calls, not the governed ledger) all read back
+/// team-scoped from the durable rows. A foreign-team agent is never returned.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -29,10 +29,8 @@ public sealed class AgentMetricsReaderFlowTests
 
     public AgentMetricsReaderFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
-    private const string ZeroHash = "0000000000000000000000000000000000000000000000000000000000000000";
-
     [Fact]
-    public async Task Reads_duration_tokens_model_and_the_side_effecting_tool_count_team_scoped()
+    public async Task Reads_duration_tokens_model_and_the_actual_tool_count_team_scoped()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -40,10 +38,11 @@ public sealed class AgentMetricsReaderFlowTests
         var agentId = await SeedAgentRunAsync(teamId, AgentRunStatus.Succeeded, t0.AddSeconds(-40), t0.AddSeconds(-12),   // a 28s run
             taskJson: Task("claude-opus-4"), resultJson: Result(300, 120));
 
-        // Two side-effecting tool calls + one decision.request envelope (a HITL ask, which must NOT count).
-        await SeedToolAsync(teamId, agentId, "git.open_change_set");
-        await SeedToolAsync(teamId, agentId, "agent.run_command");
-        await SeedToolAsync(teamId, agentId, DecisionToolKinds.DecisionRequest);
+        // The agent's ACTUAL (harness-native) tool calls, off the event log — two tool calls + one non-tool event
+        // (reasoning) that must NOT count. A governed ledger row is NO longer what drives the count.
+        await SeedEventAsync(agentId, AgentEventKind.ToolCall, "WebSearch");
+        await SeedEventAsync(agentId, AgentEventKind.ToolCall, "Read");
+        await SeedEventAsync(agentId, AgentEventKind.Reasoning, "thinking about the plan");
 
         IReadOnlyDictionary<Guid, AgentRunMetrics> metrics;
         using (var scope = _fixture.BeginScope())
@@ -57,7 +56,7 @@ public sealed class AgentMetricsReaderFlowTests
         m.OutputTokens.ShouldBe(120);
         m.Model.ShouldBe("claude-opus-4");
         m.Goal.ShouldBe("g", "the agent's goal reads back off the real TaskJson as its display name");
-        m.ToolCount.ShouldBe(2, "the decision.request HITL envelope is excluded from the side-effecting tool count");
+        m.ToolCount.ShouldBe(2, "the count is the agent's actual ToolCall events; a non-tool (reasoning) event is excluded");
     }
 
     [Fact]
@@ -144,18 +143,11 @@ public sealed class AgentMetricsReaderFlowTests
         return id;
     }
 
-    private async Task SeedToolAsync(Guid teamId, Guid agentRunId, string toolKind)
+    private async Task SeedEventAsync(Guid agentRunId, AgentEventKind kind, string text)
     {
-        var id = Guid.NewGuid();
-
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        db.ToolCallLedger.Add(new ToolCallLedger
-        {
-            Id = id, TeamId = teamId, AgentRunId = agentRunId, ToolKind = toolKind,
-            IdempotencyKey = $"{toolKind}:{id:N}", InputHash = ZeroHash, Status = ToolCallLedgerStatus.Succeeded,
-            CreatedBy = Guid.Empty, LastModifiedBy = Guid.Empty,
-        });
+        db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = agentRunId, Kind = kind, Text = text });
         await db.SaveChangesAsync();
     }
 }
