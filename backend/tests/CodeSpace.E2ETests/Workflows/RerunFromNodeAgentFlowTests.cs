@@ -97,6 +97,155 @@ public class RerunFromNodeAgentFlowTests
         (await AgentRunCountAsync(originalRunId)).ShouldBe(2, "the original run's AgentRuns are unchanged by the fork");
     }
 
+    [Fact]
+    public async Task Rerun_from_an_agent_with_a_captured_session_carries_the_resume_hint_to_the_restaged_agent()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // 3.2c CONTINUE keystone, end-to-end through the REAL rerun: the lineage-prior agent captured a resumable
+        // session; the producer resolves it and stamps the resume hint onto the FRESH re-staged AgentRun's task, so the
+        // re-run agent RESUMES its earlier conversation instead of cold-starting. (The codex fake doesn't capture — only
+        // the Claude harness does — so we seed the captured session directly; the producer is harness-agnostic.)
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
+
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-b-7c3", inlineTranscript: "{\"role\":\"assistant\",\"text\":\"prior beta turn\"}\n", transcriptArtifactId: null);
+
+        var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await ResolveJobClient().WaitForPendingAsync();
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+
+        var task = await RestagedTaskAsync(rerunId, "b");
+        task.ResumeFromSessionId.ShouldBe("sess-b-7c3", "the re-staged agent resumes the lineage-prior run's conversation");
+        task.RestoredTranscript.ShouldBe("{\"role\":\"assistant\",\"text\":\"prior beta turn\"}\n", "a small prior transcript rides inline");
+        task.RestoredTranscriptArtifactId.ShouldBeNull("a small transcript needs no artifact ref");
+    }
+
+    [Fact]
+    public async Task Rerun_from_an_agent_whose_prior_captured_no_transcript_cold_starts()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Both-or-neither guard: a prior with a session id but NO captured transcript is NOT resumable (a --resume with
+        // no transcript would fail "No conversation found"), so the producer stamps nothing and the re-run cold-starts —
+        // byte-identical to a fresh run.
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
+
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-b-notranscript", inlineTranscript: "", transcriptArtifactId: null);
+
+        var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await ResolveJobClient().WaitForPendingAsync();
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+
+        var task = await RestagedTaskAsync(rerunId, "b");
+        task.ResumeFromSessionId.ShouldBeNull("a session id without its transcript is not resumable — the continue cold-starts");
+        task.RestoredTranscript.ShouldBeNull();
+        task.RestoredTranscriptArtifactId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Rerun_from_an_agent_with_a_large_offloaded_transcript_carries_the_ref_not_the_bytes()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The O(N²) guard: a LARGE prior transcript was offloaded (only its artifact ref lives in result_jsonb), so the
+        // producer stamps the REF onto the task — NOT the bytes — keeping task_jsonb bounded (the executor resolves the
+        // ref to bytes just-in-time before invocation). Inlining the bytes here would make a continue-chain O(N²).
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
+
+        var artifactId = Guid.NewGuid();
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-b-big", inlineTranscript: "", transcriptArtifactId: artifactId);
+
+        var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await ResolveJobClient().WaitForPendingAsync();
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+
+        var task = await RestagedTaskAsync(rerunId, "b");
+        task.ResumeFromSessionId.ShouldBe("sess-b-big");
+        task.RestoredTranscriptArtifactId.ShouldBe(artifactId, "a large prior transcript rides as a REF, keeping task_jsonb bounded");
+        task.RestoredTranscript.ShouldBeNull("the bytes are NOT inlined into task_jsonb (the O(N²) guard)");
+    }
+
+    [Fact]
+    public async Task A_sibling_rerun_resumes_its_ancestors_session_not_the_other_forks()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Anti-contamination (review Finding 1): re-running the SAME original twice makes two SIBLING forks. The second
+        // fork descends from the original A — NOT from the first fork B — so it must resume A's conversation, never B's.
+        // The old flat-lineage selection ("most-recent at the cell across the whole root group") would wrongly pick B.
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
+
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-A", inlineTranscript: "A-transcript\n", transcriptArtifactId: null);
+
+        var forkB = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
+        await RunEngineAsync(forkB);
+        await ResolveJobClient().WaitForPendingAsync();
+        await SeedCapturedSessionAsync(forkB, "b", "sess-B", inlineTranscript: "B-transcript\n", transcriptArtifactId: null);
+
+        var forkC = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);   // a SIBLING of B — ParentRunId == A
+        forkC.ShouldNotBe(forkB, "re-running the same original twice mints two distinct sibling forks");
+        await RunEngineAsync(forkC);
+        await ResolveJobClient().WaitForPendingAsync();
+        await AssertRunStatusAsync(forkC, WorkflowRunStatus.Success);
+
+        var task = await RestagedTaskAsync(forkC, "b");
+        task.ResumeFromSessionId.ShouldBe("sess-A", "a sibling fork resumes its ANCESTOR (A), never the other branch (B)");
+        task.RestoredTranscript.ShouldBe("A-transcript\n", "and it restores A's transcript, not B's");
+    }
+
+    [Fact]
+    public async Task Rerun_from_an_agent_with_a_corrupt_prior_result_cold_starts_without_failing()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Robustness (review Finding, security lens): a prior with a session id but an UNDESERIALIZABLE result_jsonb must
+        // degrade to cold-start — the contract — NOT throw and fail the whole re-run. result_jsonb is a Postgres jsonb
+        // column (syntactically-invalid JSON can't be stored), so the reachable corruption is VALID json with a wrong
+        // type — here a non-Guid string for the artifact-id field, which throws JsonException on deserialize.
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, userId, originalRunId) = await RunOriginalChainAsync();
+
+        await SeedRawResultAsync(originalRunId, "b", "sess-corrupt", "{\"sessionTranscriptArtifactId\":\"not-a-guid\"}");
+
+        var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await ResolveJobClient().WaitForPendingAsync();
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);   // NOT Failure — the corrupt prior is skipped, the re-run still runs
+
+        var task = await RestagedTaskAsync(rerunId, "b");
+        task.ResumeFromSessionId.ShouldBeNull("a corrupt prior result is not resumable — cold-start, never a hard failure");
+    }
+
+    [Fact]
+    public async Task Find_resumable_session_is_team_scoped_and_never_crosses_teams()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Tenancy (review Finding, security lens): a run can NEVER resume another team's captured session. Same-team
+        // resolves it (proving the cross-team null is a tenancy gate, not a dead lookup).
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, _, originalRunId) = await RunOriginalChainAsync();
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-team-a", inlineTranscript: "A-only\n", transcriptArtifactId: null);
+
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<Core.Services.Agents.IAgentRunService>();
+
+        (await svc.FindResumableSessionAsync(otherTeamId, originalRunId, "b", "", CancellationToken.None))
+            .ShouldBeNull("a run can never resume another team's captured session");
+
+        (await svc.FindResumableSessionAsync(teamId, originalRunId, "b", "", CancellationToken.None))!.SessionId
+            .ShouldBe("sess-team-a", "the same-team lookup DOES resolve the ancestor's session — the null above is tenancy, not a dead query");
+    }
+
     // ── Definition: start → agent(a) → agent(b) → end. Two top-level real agent.code nodes with distinct goals. ──
     private static WorkflowDefinition TwoAgentChainDef() => new()
     {
@@ -172,6 +321,59 @@ public class RerunFromNodeAgentFlowTests
 
     private static string AgentGoalOf(Core.Persistence.Entities.AgentRun run) =>
         JsonSerializer.Deserialize<Messages.Agents.AgentTask>(run.TaskJson, Core.Services.Agents.AgentJson.Options)!.Goal;
+
+    // Run the original start→a→b→end chain to Success (the caller holds the fake CLI), returning the ids the rerun needs.
+    private async Task<(Guid TeamId, Guid UserId, Guid OriginalRunId)> RunOriginalChainAsync()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TwoAgentChainDef());
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);
+        await jobClient.WaitForPendingAsync();
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        return (teamId, userId, originalRunId);
+    }
+
+    // Simulate a prior agent having CAPTURED a resumable session: set the session-id column + fold the transcript
+    // (inline OR an artifact ref) into result_jsonb — the exact state the CONTINUE producer reads from the lineage.
+    private async Task SeedCapturedSessionAsync(Guid runId, string nodeId, string sessionId, string inlineTranscript, Guid? transcriptArtifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.AgentRun.SingleAsync(r => r.WorkflowRunId == runId && r.NodeId == nodeId);
+        run.SessionId = sessionId;
+
+        var result = JsonSerializer.Deserialize<Messages.Agents.AgentRunResult>(run.ResultJson!, Core.Services.Agents.AgentJson.Options)!;
+        run.ResultJson = JsonSerializer.Serialize(result with { SessionTranscript = inlineTranscript, SessionTranscriptArtifactId = transcriptArtifactId }, Core.Services.Agents.AgentJson.Options);
+
+        await db.SaveChangesAsync();
+    }
+
+    // Seed a session-id column + a RAW (possibly malformed) result_jsonb — to prove a corrupt prior degrades to cold-start.
+    private async Task SeedRawResultAsync(Guid runId, string nodeId, string sessionId, string rawResultJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.AgentRun.SingleAsync(r => r.WorkflowRunId == runId && r.NodeId == nodeId);
+        run.SessionId = sessionId;
+        run.ResultJson = rawResultJson;
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Messages.Agents.AgentTask> RestagedTaskAsync(Guid rerunId, string nodeId)
+    {
+        var runs = await LoadAgentRunsAsync(rerunId);
+        return JsonSerializer.Deserialize<Messages.Agents.AgentTask>(runs.Single(r => r.NodeId == nodeId).TaskJson, Core.Services.Agents.AgentJson.Options)!;
+    }
 
     private async Task<int> NodeStartedCountAsync(Guid runId, string nodeId)
     {

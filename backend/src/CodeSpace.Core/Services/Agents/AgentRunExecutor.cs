@@ -5,6 +5,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Review;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -101,9 +102,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     // The generic adversarial-review critic — runs over the produced change at completion when output-review is opted in.
     private readonly IStructuredCritic _critic;
+    // Resolves a REFERENCED (offloaded) restored transcript back to bytes just before invocation (P3 continue).
+    private readonly IArtifactOffloader _offloader;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -116,6 +119,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _scopeFactory = scopeFactory;
         _db = db;
         _critic = critic;
+        _offloader = offloader;
         _logger = logger;
     }
 
@@ -202,6 +206,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var effectiveModel = string.IsNullOrWhiteSpace(task.Model) ? defaultModel : task.Model;
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
+
+            // P3 (3.2c): resolve a REFERENCED (offloaded) restored transcript to bytes NOW — the producer kept only the
+            // ref in task_jsonb to bound its size; the harness needs the bytes to lay down the resume file. Bounded: the
+            // stored transcript was captured under the capture cap, so this never fetches an unbounded blob.
+            effectiveTask = await ResolveRestoredTranscriptAsync(effectiveTask, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             // Mint the per-run socket + token ONCE so the endpoint listener and the harness's declaration agree by
             // construction (and so the token can be stamped on the durable handle for a re-attach to re-bind the same
@@ -502,6 +511,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             _logger.LogWarning(ex, "Agent run {RunId}: could not capture the session transcript for resume; a continue will cold-start", runId);
             return result;
         }
+    }
+
+    /// <summary>
+    /// P3 (3.2c): resolve a REFERENCED restored transcript (the producer stamped <c>RestoredTranscriptArtifactId</c> to
+    /// keep the bytes out of task_jsonb) to its bytes on <see cref="AgentTask.RestoredTranscript"/>, clearing the ref, so
+    /// the harness's <c>BuildConfigHomeFiles</c> stays a pure bytes consumer. A task with no ref (inline bytes, or no
+    /// resume at all) is returned unchanged. The offloader resolves inline-or-artifact transparently.
+    /// </summary>
+    private async Task<AgentTask> ResolveRestoredTranscriptAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (task.RestoredTranscriptArtifactId is not { } artifactId) return task;
+
+        var transcript = await _offloader.ResolveAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
+
+        return task with { RestoredTranscript = transcript, RestoredTranscriptArtifactId = null };
     }
 
     /// <summary>
