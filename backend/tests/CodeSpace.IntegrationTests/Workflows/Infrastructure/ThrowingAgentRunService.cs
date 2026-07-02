@@ -57,6 +57,8 @@ public sealed class ThrowingAgentRunService : IAgentRunService
 
     public Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken) => _inner.FindResumableSessionAsync(teamId, parentRunId, nodeId, iterationKey, cancellationToken);
 
+    public Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken) => _inner.FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, subtaskId, cancellationToken);
+
     public Task<AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => _inner.GetSummaryForTeamAsync(runId, teamId, cancellationToken);
 
     public Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken) => _inner.GetEventsAsync(runId, teamId, afterSequence, cancellationToken);

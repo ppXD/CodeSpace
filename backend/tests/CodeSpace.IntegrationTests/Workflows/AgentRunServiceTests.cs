@@ -1532,6 +1532,98 @@ public class AgentRunServiceTests
             customMessage: "the persona is promoted from the task onto the agent_run column at creation — the key the runs index filters by");
     }
 
+    [Fact]
+    public async Task FindResumableSubtaskAttempt_resumes_the_subtasks_prior_attempt_not_a_siblings()
+    {
+        // D1 retry-resume: the lookup finds the prior attempt of a SPECIFIC subtask in the same supervisor run (by the
+        // spawned agent's task SubtaskId), so a retry continues that subtask's conversation — never a sibling subtask's.
+        var teamId = await SeedTeamAsync();
+        var supervisorRunId = Guid.NewGuid();   // same-run agent scan — no WorkflowRun row needed
+
+        await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sa", "sess-sa", "alpha convo\n");
+        await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-sb", "beta convo\n");
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var resumable = await svc.FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, "sb", CancellationToken.None);
+        resumable.ShouldNotBeNull();
+        resumable!.SessionId.ShouldBe("sess-sb", "the retry resumes THIS subtask's prior attempt, not the sibling 'sa'");
+        resumable.InlineTranscript.ShouldBe("beta convo\n");
+
+        (await svc.FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, "never-attempted", CancellationToken.None))
+            .ShouldBeNull("a subtask with no prior attempt cold-starts");
+    }
+
+    [Fact]
+    public async Task FindResumableSubtaskAttempt_is_both_or_neither_skipping_a_transcript_less_attempt()
+    {
+        // Both-or-neither: an attempt that captured a session id but NO transcript is not resumable — it must not mask an
+        // older resumable attempt of the same subtask (the retried agent continues the conversation that actually exists).
+        var teamId = await SeedTeamAsync();
+        var supervisorRunId = Guid.NewGuid();
+
+        await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-resumable", "the beta conversation\n");
+        await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-no-transcript", inlineTranscript: "");
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var resumable = await svc.FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, "sb", CancellationToken.None);
+        resumable.ShouldNotBeNull();
+        resumable!.SessionId.ShouldBe("sess-resumable", "a transcript-less attempt is skipped; the resumable one is found — never a cold-start when a resumable attempt exists");
+
+        // Team-scoped: another team's id sees nothing.
+        (await svc.FindResumableSubtaskAttemptAsync(Guid.NewGuid(), supervisorRunId, "sb", CancellationToken.None))
+            .ShouldBeNull("the subtask-attempt lookup is team-scoped — no cross-team resume");
+    }
+
+    [Fact]
+    public async Task FindResumableSubtaskAttempt_resumes_the_NEWEST_attempt_for_a_retry_of_a_retry()
+    {
+        // Retry-of-retry: attempt1 → retry(attempt2, which resumed attempt1) → retry AGAIN. The third attempt must resume
+        // the NEWEST resumable prior attempt (attempt2, carrying the accumulated history), never the stale attempt1.
+        var teamId = await SeedTeamAsync();
+        var supervisorRunId = Guid.NewGuid();
+
+        var attempt1 = await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-attempt1", "attempt 1 convo\n");
+        var attempt2 = await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-attempt2", "attempt 1 + 2 convo\n");
+
+        // In production the two attempts are distinct supervisor turns (separate SaveChanges) so CreatedDate differs;
+        // pin it here so the newest-wins selection is deterministic rather than relying on same-run timing.
+        await SetCreatedDateAsync(attempt1, DateTimeOffset.UtcNow.AddMinutes(-2));
+        await SetCreatedDateAsync(attempt2, DateTimeOffset.UtcNow.AddMinutes(-1));
+
+        using var scope = _fixture.BeginScope();
+        var resumable = await scope.Resolve<IAgentRunService>().FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, "sb", CancellationToken.None);
+
+        resumable.ShouldNotBeNull();
+        resumable!.SessionId.ShouldBe("sess-attempt2", "a retry-of-retry resumes the NEWEST attempt (accumulated history), not the stale first attempt");
+        resumable.InlineTranscript.ShouldBe("attempt 1 + 2 convo\n");
+    }
+
+    private async Task SetCreatedDateAsync(Guid agentRunId, DateTimeOffset createdDate)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+        run.CreatedDate = createdDate;   // the audit interceptor sets CreatedDate only on Added, so this Modified update sticks
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, string sessionId, string inlineTranscript)
+    {
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var run = await svc.CreateAsync(BuildTask() with { SubtaskId = subtaskId }, teamId, supervisorRunId, "sup", iterationKey: "sup#turn1", cancellationToken: CancellationToken.None);
+        await svc.MarkRunningAsync(run.Id, CancellationToken.None);
+        await svc.CompleteAsync(run.Id, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = sessionId, SessionTranscript = inlineTranscript }, CancellationToken.None);
+
+        return run.Id;
+    }
+
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
         new() { Goal = goal, Harness = "codex-cli", Model = "gpt-5.3-codex" };
 

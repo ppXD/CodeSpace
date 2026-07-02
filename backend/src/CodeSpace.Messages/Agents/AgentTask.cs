@@ -56,6 +56,16 @@ public sealed record AgentTask
     public Guid? RestoredTranscriptArtifactId { get; init; }
 
     /// <summary>
+    /// P3 (D1): the supervisor SUBTASK id this agent was spawned for — the linking key for retry-resume. When the
+    /// supervisor RETRIES a subtask, the producer finds the prior attempt at the SAME subtask in the same run and
+    /// resumes its conversation. Only the supervisor's spawn/retry stamps it; a top-level agent.code run leaves it null
+    /// (its continuity keys on the fork-cell lineage instead). <c>[JsonIgnore(WhenWritingNull)]</c> so a non-supervisor
+    /// task's task_json is byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SubtaskId { get; init; }
+
+    /// <summary>
     /// Optional Agent persona (<c>AgentDefinition</c>) this run resolves from — null = a pure-inline run (no persona).
     /// When set, the dispatch-time <c>IAgentDefinitionResolver</c> merges the persona's system prompt + model into this
     /// task before the run is persisted; the id is preserved here as run provenance.
