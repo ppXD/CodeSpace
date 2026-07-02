@@ -63,11 +63,17 @@ public sealed record RoomTurnFacts
     /// <summary>The supervisor's RETRY beats in tape order — one per retry decision ("Supervisor retried a subtask"). The narrative renders each as a step so the room shows the recovery flow, not just the surviving agents. Empty when the turn had no retries.</summary>
     public IReadOnlyList<RoomRetryStep> RetrySteps { get; init; } = Array.Empty<RoomRetryStep>();
 
+    /// <summary>The supervisor's RE-SPAWN waves in tape order — each additional Spawn decision that re-dispatched an already-spawned subtask (a second/third wave). The authored phase group anchors only each subtask's FIRST attempt, so a later wave (and its failed agent) is otherwise dropped; the narrative renders each as its own chronological wave, mirroring <see cref="RetrySteps"/>. Empty when every subtask was spawned once.</summary>
+    public IReadOnlyList<RoomRespawnStep> RespawnSteps { get; init; } = Array.Empty<RoomRespawnStep>();
+
     public static readonly RoomTurnFacts Empty = new();
 }
 
 /// <summary>One supervisor RETRY beat — the tape sequence it landed at, its user-facing line, the fresh agent it staged, and the model's STRUCTURED rationale (why it retried + the evidence it acted on) when authored. Rendered as a narrative step (with the rationale as its detail) + that agent's own card, so a reader sees the decision, not just that it retried. <see cref="AgentRunId"/> is null for a no-op retry; <see cref="Rationale"/> is null when the model gave none.</summary>
 public sealed record RoomRetryStep(long Sequence, string Text, Guid? AgentRunId, string? Rationale = null);
+
+/// <summary>One supervisor RE-SPAWN wave — the tape sequence the additional Spawn decision landed at and the agent-run ids it staged for already-spawned subtasks (wave ≥ 2). Rendered as a narrative step ("Supervisor spawned N agents again") + that wave's agent cards, so the room shows EVERY spawn wave the run really ran, not just the first. Empty <see cref="AgentRunIds"/> can't occur (a wave with no re-spawned agent isn't emitted).</summary>
+public sealed record RoomRespawnStep(long Sequence, IReadOnlyList<Guid> AgentRunIds);
 
 /// <summary>One bucket of the tool-call histogram — a tool kind and how many times the turn's agents called it.</summary>
 public sealed record ToolKindCount(string Kind, int Count);

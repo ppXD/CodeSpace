@@ -328,6 +328,74 @@ public class RoomProjectorFlowTests
     };
 
     [Fact]
+    public async Task A_re_spawned_wave_and_the_deep_error_both_surface_in_the_room()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Investigate");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Investigate", resultSummary: null, status: WorkflowRunStatus.Failure);
+
+        var (w1a, w1b, w2a, w2b) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        await SeedRespawnScenarioAsync(teamId, run, (w1a, w1b), (w2a, w2b));
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        // (a) the SECOND spawn wave renders as its own group — not collapsed into the first (the authored group anchors wave 1).
+        turn.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor spawned 2 agents again", "the re-spawn wave Activity shows must render in the room too");
+
+        var waveGroup = turn.Blocks.OfType<AgentGroupBlock>().Single(g => g.Agents.Any(a => a.AgentRunId == w2b));
+        waveGroup.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { w2a, w2b }, "the second wave shows exactly its own agents");
+        waveGroup.Agents.Single(a => a.AgentRunId == w2b).Status.ShouldBe(nameof(AgentRunStatus.Failed), "the wave's FAILED agent is visible, as Activity shows");
+
+        var allCards = turn.Blocks.OfType<AgentGroupBlock>().SelectMany(g => g.Agents).ToList();
+        allCards.Count(a => a.AgentRunId == w2a).ShouldBe(1, "each re-spawned agent renders EXACTLY once — never also lumped into the authored group");
+        allCards.ShouldContain(a => a.AgentRunId == w1a, "wave 1's agents stay anchored in the authored 'Investigate' group");
+
+        // (b) the diagnostic surfaces the SPECIFIC deep error (node.failed), not the generic "Node 'sup' failed." run message.
+        turn.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem()
+            .Text.ShouldBe("OpenAI API error (no-status, Transient): the request timed out before the gateway responded");
+    }
+
+    /// <summary>Seed the user's failing scenario: a plan that grouped sa+sb into one authored "Investigate" phase, a FIRST spawn wave (both agents succeed), a SECOND spawn wave re-dispatching the same subtasks (one agent fails), plus the deep failure the engine wrote onto the node.failed ledger record (the run row's Error is only the generic node message).</summary>
+    private async Task SeedRespawnScenarioAsync(Guid teamId, Guid runId, (Guid A, Guid B) wave1, (Guid A, Guid B) wave2)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        // Explicit sequence: plan(1) → wave-1 spawn(2) → wave-2 spawn(3) — the room reads the tape in sequence order,
+        // and the wave-2 detection scopes to spawns AFTER the latest plan, so the plan must precede both spawns.
+        db.SupervisorDecisionRecord.Add(SupDecision(teamId, runId, 1, SupervisorDecisionKinds.Plan, "{}",
+            """{"planned":[],"count":2,"phases":[{"id":"inv","title":"Investigate","subtaskIds":["sa","sb"]}]}"""));
+
+        db.SupervisorDecisionRecord.Add(SupDecision(teamId, runId, 2, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["sa","sb"]}""",
+            JsonSerializer.Serialize(new { agentCount = 2, agentRunIds = new[] { wave1.A, wave1.B } })));
+        db.SupervisorDecisionRecord.Add(SupDecision(teamId, runId, 3, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["sa","sb"]}""",
+            JsonSerializer.Serialize(new { agentCount = 2, agentRunIds = new[] { wave2.A, wave2.B } })));
+
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, wave1.A, AgentRunStatus.Succeeded, now));
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, wave1.B, AgentRunStatus.Succeeded, now));
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, wave2.A, AgentRunStatus.Succeeded, now));
+        db.AgentRun.Add(RetryAgentRow(teamId, runId, wave2.B, AgentRunStatus.Failed, now));
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.NodeFailed, NodeId = "sup", IterationKey = "", OccurredAt = now,
+            PayloadJson = JsonSerializer.Serialize(new { error = "OpenAI API error (no-status, Transient): the request timed out before the gateway responded" }),
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private static SupervisorDecisionRecord SupDecision(Guid teamId, Guid runId, long sequence, string kind, string payloadJson, string? outcomeJson) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
+        DecisionKind = kind, IdempotencyKey = $"{kind}:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+        Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
+        CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+    };
+
+    [Fact]
     public async Task A_single_agent_run_surfaces_its_result_from_the_agent_output_even_without_a_supervisor()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

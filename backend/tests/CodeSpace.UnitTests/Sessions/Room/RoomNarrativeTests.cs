@@ -554,6 +554,77 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A_re_spawn_wave_emits_its_own_group_after_the_first_wave_on_the_authored_path()
+    {
+        var wave2a = Guid.NewGuid();
+        var wave2b = Guid.NewGuid();
+
+        // The authored "Investigate" group anchors only the FIRST wave (both done) — the second wave can't live in it.
+        var authored = new RunPhase
+        {
+            Id = "phase-0", Label = "Investigate", Kind = SupervisorPhaseSource.AuthoredPhaseKind, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 10, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = Guid.NewGuid(), Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Scan A" } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+        };
+        // The re-spawn wave's fresh agents ride the per-decision Spawn tape phase — that's where agentById finds them.
+        var spawn2 = new RunPhase
+        {
+            Id = "decision-5", Label = "Spawn 2 agents", Kind = "spawn", Status = PhaseStatus.Failed,
+            Order = SupervisorPhaseSource.OrderBase + 50, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[]
+            {
+                new PhaseAgentRef { AgentRunId = wave2a, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Scan A" },
+                new PhaseAgentRef { AgentRunId = wave2b, Status = nameof(AgentRunStatus.Failed), AssignedSubtask = "Scan B" },
+            },
+            Metrics = new PhaseMetrics { AgentCount = 2, FailedCount = 1 },
+        };
+
+        var facts = new RoomTurnFacts { RespawnSteps = new[] { new RoomRespawnStep(5, new[] { wave2a, wave2b }) } };
+
+        var blocks = Build(new[] { authored, spawn2 }, WorkflowRunStatus.Failure, facts: facts).Blocks.ToList();
+
+        var waveIdx = blocks.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor spawned 2 agents again");
+        waveIdx.ShouldBeGreaterThanOrEqualTo(0, "the second spawn wave renders as its own step, not silently dropped");
+
+        var waveCard = blocks.Skip(waveIdx + 1).OfType<AgentGroupBlock>().FirstOrDefault();
+        waveCard.ShouldNotBeNull("the second wave's agents render as their OWN group after the wave step");
+        waveCard!.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { wave2a, wave2b }, "the wave shows exactly the re-spawned agents (including the one that failed)");
+    }
+
+    [Fact]
+    public void No_re_spawn_waves_render_no_extra_group()
+    {
+        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Success);
+
+        n.Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("again"), "no re-spawn → no wave step (byte-identity floor)");
+    }
+
+    [Fact]
+    public void The_failure_diagnostic_surfaces_the_deep_error_over_the_generic_run_message()
+    {
+        const string deep = "OpenAI API error (no-status, Transient): the request timed out before the gateway responded";
+
+        // The projector folds the deep node.failed error into RawError; the run row Error is the generic node message.
+        var facts = new RoomTurnFacts { RawError = deep };
+
+        var n = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed.", facts: facts);
+
+        var diag = n.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+        diag.Text.ShouldBe(deep, "the headline is the SPECIFIC cause, not the 'This turn ended with an error.' placeholder");
+        diag.RawDetail.ShouldBeNull("the headline already IS the raw error — no redundant 'Show raw error'");
+        n.Summary.ShouldBe(deep, "the turn headline mirrors the specific cause too");
+    }
+
+    [Fact]
+    public void Without_a_deep_error_the_generic_node_message_still_collapses_to_the_placeholder()
+    {
+        // Byte-identity floor: a run whose only error is the generic "Node 'X' failed." (no deep record) reads exactly as before.
+        Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, error: "Node 'sup' failed.")
+            .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn ended with an error.");
+    }
+
+    [Fact]
     public void Checklist_questions_render_with_the_recommended_option_flagged()
     {
         var checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending)) with

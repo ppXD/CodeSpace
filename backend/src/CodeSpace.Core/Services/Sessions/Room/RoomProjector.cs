@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
@@ -8,6 +9,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
@@ -286,6 +288,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             })
             .ToList();
 
+        // The re-spawn waves — an additional Spawn decision that re-dispatched an ALREADY-spawned subtask (a second
+        // wave, e.g. after a no-op retry the supervisor re-ran the work). The authored phase group anchors only each
+        // subtask's FIRST attempt, so a later wave (and its failed agent) is otherwise dropped — Activity shows it, the
+        // room didn't. Surface each such wave so the room renders the whole trajectory. Empty for a single-wave run.
+        var respawnSteps = RespawnWaves(decisions);
+
         // The turn's tool-call TOTAL — summed from the already-projected per-agent counts (no extra query; the same
         // figure the agent cards show). Dedup by agent (an agent can appear in both a decision + an authored phase).
         int? toolCalls = agentIds.Count == 0 ? null : phases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).Sum(g => g.First().ToolCount ?? 0);
@@ -337,6 +345,14 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         // project exactly as before (the per-round plan stat rows carry the story).
         var checklist = await _checklists.GetCurrentAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
+        // The DEEPEST failure error — the run row's Error is a generic "Node 'sup' failed."; the real cause (an OpenAI
+        // timeout, a rejected credential) lives on the node.failed / interaction.failed ledger record the engine wrote.
+        // Only read it on a failed / cancelled turn (the only case the diagnostic renders), so a live / successful turn
+        // pays zero extra query — the diagnostic then shows the SPECIFIC error Activity does, not the placeholder.
+        var deepError = status is Messages.Enums.WorkflowRunStatus.Failure or Messages.Enums.WorkflowRunStatus.Cancelled
+            ? await DeepFailureErrorAsync(runId, cancellationToken).ConfigureAwait(false)
+            : null;
+
         return new RoomTurnFacts
         {
             Rounds = rounds,
@@ -353,9 +369,72 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             AgentSummaries = agentSummaries,
             AcceptancePassed = acceptance,
             Delivery = delivery,
-            RawError = error,
+            RawError = deepError ?? error,
             RetrySteps = retrySteps,
+            RespawnSteps = respawnSteps,
         };
+    }
+
+    /// <summary>
+    /// The RE-SPAWN waves — walking the run's Spawn decisions (after the latest plan, since subtask ids are plan-local)
+    /// in tape order and flagging each subtask's SECOND-and-later spawn. The first spawn of a subtask anchors the
+    /// authored phase group; a later spawn is a fresh wave the group can't hold, so each additional Spawn decision that
+    /// re-dispatched an already-seen subtask becomes one <see cref="RoomRespawnStep"/> carrying just the re-spawned agents
+    /// (a subtask's first-ever spawn in a mixed wave stays in its phase group, never double-rendered). Empty when every
+    /// subtask ran once. Mirrors <see cref="SupervisorPhaseSource"/>'s attempt walk so the two can't disagree on "wave 1".
+    /// </summary>
+    private static IReadOnlyList<RoomRespawnStep> RespawnWaves(IReadOnlyList<SupervisorDecisionRecord> decisions)
+    {
+        var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+
+        if (plan == null) return Array.Empty<RoomRespawnStep>();
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var waves = new List<RoomRespawnStep>();
+
+        foreach (var d in decisions.Where(d => d.Sequence > plan.Sequence && d.DecisionKind == SupervisorDecisionKinds.Spawn).OrderBy(d => d.Sequence))
+        {
+            var subtaskIds = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
+            var agentIds = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson);
+
+            var respawned = new List<Guid>();
+
+            for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
+                if (!seen.Add(subtaskIds[i]) && agentIds[i] != Guid.Empty)   // Add == false → this subtask was already spawned → a re-spawn
+                    respawned.Add(agentIds[i]);
+
+            if (respawned.Count > 0) waves.Add(new RoomRespawnStep(d.Sequence, respawned));
+        }
+
+        return waves;
+    }
+
+    /// <summary>The deepest specific failure error — the newest node.failed / interaction.failed ledger record's <c>error</c>, preferring a TOP-LEVEL failure (empty iteration key — the node that actually failed the run) over a fanned-out branch's per-iteration error. Null when no such record carries an error (the caller then falls back to the generic run error).</summary>
+    private async Task<string?> DeepFailureErrorAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && (r.RecordType == WorkflowRunRecordTypes.NodeFailed || r.RecordType == WorkflowRunRecordTypes.InteractionFailed))
+            .OrderByDescending(r => r.Sequence)
+            .Select(r => new { r.IterationKey, r.PayloadJson })
+            .Take(MaxFailureScan)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var best = rows.FirstOrDefault(r => string.IsNullOrEmpty(r.IterationKey)) ?? rows.FirstOrDefault();
+
+        return best is null ? null : ReadRecordError(best.PayloadJson);
+    }
+
+    /// <summary>Parse the <c>error</c> string out of a ledger record's payload — the deep failure message. Null for a missing / non-string / malformed payload.</summary>
+    private static string? ReadRecordError(string? payloadJson)
+    {
+        if (string.IsNullOrEmpty(payloadJson)) return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String && e.GetString() is { Length: > 0 } s ? s : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver.</summary>
@@ -416,6 +495,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private const int MaxLatestLineScan = 200;
     private const int MaxAnswerFiles = 40;
     private const int MaxToolScan = 2000;
+    private const int MaxFailureScan = 50;
 
     /// <summary>The tool NAME from a ToolCall event's payload (<c>data.name</c>, e.g. "Read" / "WebSearch") — the clean grouping key for the histogram. Falls back to "tool" for a missing / malformed payload.</summary>
     private static string ToolName(string? dataJson)
