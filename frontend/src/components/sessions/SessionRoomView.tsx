@@ -1007,10 +1007,22 @@ function pillLabel(status: WorkflowRunStatus, live: boolean): string {
   return live ? "Working" : status;
 }
 
-/** " · 2m 41s" (final duration), " · running 38s" (live), or " · 9h ago" (age fallback). */
+/** The turn's meta line after "Turn N" — the start time (when it ran) then the duration: " · Jun 29, 13:47 · 28m" (or " · running 38s" live). */
 function turnMeta(turn: AssistantTurnBlock, nowMs: number, live: boolean): string {
-  if (turn.durationMs != null) return live ? ` · running ${formatDurationMs(turn.durationMs)}` : ` · ${formatDurationMs(turn.durationMs)}`;
-  return turn.at ? ` · ${compactAge(turn.at, nowMs)}` : "";
+  const parts: string[] = [];
+  if (turn.at) parts.push(formatStartTime(turn.at, nowMs));
+  if (turn.durationMs != null) parts.push(live ? `running ${formatDurationMs(turn.durationMs)}` : formatDurationMs(turn.durationMs));
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
+/** The turn's start instant — "13:47" when it's today, else "Jun 29, 13:47" (with the year only when it isn't the current one). */
+function formatStartTime(at: string, nowMs: number): string {
+  const d = new Date(at);
+  const now = new Date(nowMs);
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return time;
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) });
+  return `${date}, ${time}`;
 }
 
 function formatDurationMs(ms: number): string {
