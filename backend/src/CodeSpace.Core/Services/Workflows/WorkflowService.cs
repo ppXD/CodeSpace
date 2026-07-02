@@ -1282,6 +1282,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         RootRunId = r.RootRunId ?? r.Id,
         AttemptCount = _db.WorkflowRun.Count(o => o.TeamId == r.TeamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (o.RootRunId ?? o.Id) == (r.RootRunId ?? r.Id)),
         RootSourceType = _db.WorkflowRun.Where(o => o.Id == (r.RootRunId ?? r.Id)).Select(o => o.SourceType).FirstOrDefault() ?? r.SourceType,
+        HasSession = r.SessionId != null,
     };
 
     public async Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)

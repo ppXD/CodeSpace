@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, ...o };
+  const r = { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 
@@ -102,10 +102,10 @@ describe("CockpitBoard", () => {
     const { container } = board({ attention: attn([run("s1", "Suspended")]), history: hist([run("r1", "Success")]), onOpen });
 
     fireEvent.click(screen.getByText("Review →"));
-    expect(onOpen).toHaveBeenCalledWith("s1");
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ rootRunId: "s1" }));
 
     fireEvent.click(container.querySelector(".run-row2")!);
-    expect(onOpen).toHaveBeenCalledWith("r1");
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ rootRunId: "r1" }));
   });
 
   it("a reran row shows the ORIGINAL run's id + title and opens the original, not the fork", () => {
@@ -118,7 +118,7 @@ describe("CockpitBoard", () => {
     expect(container.querySelector(".run-row2-attempts")?.textContent).toContain("3 attempts");
 
     fireEvent.click(container.querySelector(".run-row2")!);
-    expect(onOpen).toHaveBeenCalledWith("origrun1");                                  // opens the original — no "Replay of …"
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ rootRunId: "origrun1" }));   // opens the original — no "Replay of …"
   });
 
   it("a live rerun shows a 'rerunning · attempt N' brief and opens the original", () => {
@@ -130,7 +130,7 @@ describe("CockpitBoard", () => {
     expect(brief).toContain("attempt 2");
 
     fireEvent.click(container.querySelector(".cockpit-live-row")!);
-    expect(onOpen).toHaveBeenCalledWith("origin01");
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ rootRunId: "origin01" }));
   });
 
   it("a non-rerun live run shows no rerunning brief", () => {

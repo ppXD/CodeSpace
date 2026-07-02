@@ -38,6 +38,12 @@ public sealed record WorkflowRunSummary
     public required int AttemptCount { get; init; }
 
     /// <summary>
+    /// Whether the run belongs to a work session (its <c>WorkflowRun.SessionId</c> is set). The index opens a
+    /// session-backed run as the full-page Session room and a session-less run as the raw-detail modal over the list.
+    /// </summary>
+    public required bool HasSession { get; init; }
+
+    /// <summary>
     /// The lineage ROOT's source type — equal to <see cref="SourceType"/> for a never-rerun run, but the ORIGINAL's
     /// source for a rerun representative (whose own <see cref="SourceType"/> is "replay"/"rerun"). The row shows the
     /// root's identity, so a task lineage's title reads as the original task, not "Replay".

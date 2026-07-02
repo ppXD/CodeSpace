@@ -397,6 +397,23 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Index_row_flags_whether_the_run_has_a_session()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var withSession = await InsertRunAsync(teamId, parentRunId: null, createdDate: t, workflowId: null, sessionId: Guid.NewGuid());
+        var sessionLess = await InsertRunAsync(teamId, parentRunId: null, createdDate: t.AddMinutes(-1), workflowId: null);
+
+        var rows = await ListAsync(teamId, 50);
+
+        rows.Single(r => r.Id == withSession).HasSession.ShouldBeTrue(
+            "a run whose WorkflowRun.SessionId is set belongs to a session → the index opens it as the full Session room page");
+        rows.Single(r => r.Id == sessionLess).HasSession.ShouldBeFalse(
+            "a session-less run has no SessionId → the index opens its raw detail in a modal over the list");
+    }
+
+    [Fact]
     public async Task Filters_by_status()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -910,7 +927,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null, Guid? sessionId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -943,6 +960,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
             RunRequestId = requestId,
             SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
+            SessionId = sessionId,   // FK-free session pointer; non-null → the run belongs to a work session (drives HasSession)
             RootRunId = rootRunId,   // a production fork carries its lineage root; null = its own root (group key = own Id)
             RerunFromNodeId = rerunFromNodeId,   // the node a rerun fork re-ran from; null for the original / a replay
             Status = status,
