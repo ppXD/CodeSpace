@@ -7,9 +7,11 @@ namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
 
 /// <summary>
 /// Pure mapping from ONE <c>workflow_run_record</c> ledger row to a narrative timeline event (or <c>null</c> to drop
-/// it). Only the NARRATIVE-worthy lifecycle records map; Trace-level noise (release / scope / variables snapshots,
-/// log lines, iteration + external-call detail) returns null and is left to the Trace tab. Extracted from the
-/// source so the per-record-type decision is unit-testable without a database.
+/// it). The NARRATIVE-worthy lifecycle records map, plus a model call's OUTCOME (<c>interaction.completed</c>/<c>failed</c>)
+/// folded to a Detail event carrying its kind + model + token cost — the substance of an AI workflow. Trace-level noise
+/// (release / scope / variables snapshots, log lines, iteration + external-call http detail, the interaction.started open
+/// bracket) returns null and is left to the Trace tab. Extracted from the source so the per-record-type decision is
+/// unit-testable without a database.
 /// </summary>
 public static class RunRecordTimelineMap
 {
@@ -68,8 +70,57 @@ public static class RunRecordTimelineMap
             WorkflowRunRecordTypes.NodeSuspended => Event(r, $"{node} waiting", TimelineSeverity.Warning, TimelineLevel.Detail, ReadString(r, "wait_kind")),
             WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, TimelineLevel.Detail, ReadString(r, "reason")),
             WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
+
+            // A model call is the SUBSTANCE of an AI workflow (which model decided what, at what token cost), so — unlike
+            // the external_call.* http plumbing left to Trace — its OUTCOME is narrative, folded to Detail: the completed
+            // record carries the kind + model + token usage; the failed one the error. The interaction.started open
+            // bracket stays Trace-only (it adds no outcome). Generic over EVERY in-process call kind (llm.complete, a
+            // plan-author's planner/critic, the supervisor's decision, the agent run's output-review critic).
+            WorkflowRunRecordTypes.InteractionCompleted => Event(r, "Model call", TimelineSeverity.Info, TimelineLevel.Detail, ModelCallSummary(r)),
+            WorkflowRunRecordTypes.InteractionFailed    => Event(r, "Model call failed", TimelineSeverity.Error, TimelineLevel.Detail, Join(ReadString(r, "kind"), ReadString(r, "error"))),
+
             _ => null,
         };
+    }
+
+    /// <summary>Fold a completed model call's kind + model + total token usage into the summary — the per-call attribution + cost the timeline previously dropped. Absent fields are omitted (a null model / unpriced usage leaves no dangling separator). e.g. "llm.complete · claude-opus-4-8 · 36 tokens".</summary>
+    private static string? ModelCallSummary(WorkflowRunRecord r)
+    {
+        var tokens = ReadUsageTotalTokens(r);
+
+        return JoinParts(ReadString(r, "kind"), ReadString(r, "model"), tokens != null ? $"{tokens} tokens" : null);
+    }
+
+    /// <summary>Total tokens (input + output) off the completion's nested <c>usage</c> object, or null when absent — a model that reported no usage adds no token clause rather than a bogus "0 tokens".</summary>
+    private static int? ReadUsageTotalTokens(WorkflowRunRecord r)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(r.PayloadJson);
+
+            if (!doc.RootElement.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object) return null;
+
+            var input = usage.TryGetProperty("inputTokens", out var i) && i.TryGetInt32(out var iv) ? iv : 0;
+            var output = usage.TryGetProperty("outputTokens", out var o) && o.TryGetInt32(out var ov) ? ov : 0;
+            var total = input + output;
+
+            return total > 0 ? total : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Join the non-empty parts with " · ", dropping absent fields so a missing model/usage never leaves a dangling separator. Null when nothing is present.</summary>
+    private static string? JoinParts(params string?[] parts)
+    {
+        var present = new List<string>();
+
+        foreach (var p in parts)
+            if (!string.IsNullOrEmpty(p)) present.Add(p!);
+
+        return present.Count == 0 ? null : string.Join(" · ", present);
     }
 
     /// <summary>

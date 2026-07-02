@@ -50,6 +50,7 @@ public class RunRecordTimelineMapTests
     [InlineData(WorkflowRunRecordTypes.VariablesSnapshotted)]
     [InlineData(WorkflowRunRecordTypes.ReleaseLoaded)]
     [InlineData(WorkflowRunRecordTypes.ExternalCallStarted)]
+    [InlineData(WorkflowRunRecordTypes.InteractionStarted)]   // the model-call OPEN bracket adds no outcome — Trace has it; the completed/failed record carries the narrative
     public void Drops_trace_level_noise_to_null(string recordType)
     {
         RunRecordTimelineMap.ToEvent(Record(recordType)).ShouldBeNull("Trace-level records are the audit line, not the human narrative");
@@ -97,9 +98,43 @@ public class RunRecordTimelineMapTests
     [InlineData(WorkflowRunRecordTypes.NodeCompleted, TimelineLevel.Detail)]
     [InlineData(WorkflowRunRecordTypes.NodeSuspended, TimelineLevel.Detail)]
     [InlineData(WorkflowRunRecordTypes.NodeSkipped, TimelineLevel.Detail)]
+    [InlineData(WorkflowRunRecordTypes.InteractionCompleted, TimelineLevel.Detail)]   // a model call is per-call cost detail, not a story beat — folded like node churn
     public void Levels_milestones_above_structural_node_churn(string recordType, TimelineLevel expected)
     {
         RunRecordTimelineMap.ToEvent(Record(recordType, nodeId: "code")).ShouldNotBeNull().Level.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_completed_model_call_folds_its_kind_model_and_token_cost_into_a_detail_event()
+    {
+        var payload = """{"kind":"agent.critic","provider":"anthropic","model":"claude-opus-4-8","usage":{"inputTokens":17,"outputTokens":19,"finishReason":"stop"}}""";
+
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionCompleted, nodeId: "review", payloadJson: payload)).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Model call");
+        ev.Severity.ShouldBe(TimelineSeverity.Info);
+        ev.Level.ShouldBe(TimelineLevel.Detail, "per-call cost is folded detail, not a milestone");
+        ev.NodeId.ShouldBe("review");
+        ev.Summary.ShouldBe("agent.critic · claude-opus-4-8 · 36 tokens", "the kind + model + total token cost — the attribution the timeline previously dropped");
+    }
+
+    [Fact]
+    public void A_completed_model_call_with_no_usage_omits_the_token_clause_rather_than_showing_zero()
+    {
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionCompleted, nodeId: "gen", payloadJson: """{"kind":"llm.complete","model":"metis-coder"}""")).ShouldNotBeNull();
+
+        ev.Summary.ShouldBe("llm.complete · metis-coder", "an unpriced / usage-less completion adds no '0 tokens' noise — the absent field is simply omitted");
+    }
+
+    [Fact]
+    public void A_failed_model_call_is_a_detail_error_carrying_the_kind_and_error()
+    {
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionFailed, nodeId: "gen", payloadJson: """{"kind":"llm.complete","provider":"anthropic","error":"gateway timed out"}""")).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Model call failed");
+        ev.Severity.ShouldBe(TimelineSeverity.Error);
+        ev.Level.ShouldBe(TimelineLevel.Detail);
+        ev.Summary.ShouldBe("llm.complete: gateway timed out");
     }
 
     [Fact]
