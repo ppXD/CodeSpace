@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -80,6 +81,47 @@ public class SubworkflowFlowTests
             var outputs = System.Text.Json.JsonDocument.Parse(parent.OutputsJson).RootElement;
             outputs.GetProperty("final").GetString().ShouldBe("hello-sub");
         }
+    }
+
+    [Fact]
+    public async Task Rerun_from_a_subworkflow_node_restages_a_fresh_child_and_completes()
+    {
+        // D2: the flow.subworkflow node is now an admitted from-node rerun ROOT. A rerun re-executes the node on the
+        // fork, staging a FRESH child run (parent_run_id = the fork) — unique by construction like the agent.code
+        // re-stage — that runs to completion; the ORIGINAL run + its child are untouched (no cross-run mutation).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var childId = await CreateWorkflowAsync(teamId, userId, EchoChildDefinition());
+        var parentId = await CreateWorkflowAsync(teamId, userId, ParentDefinition(childId, inputValue: "hello-sub", withErrorBranch: false, childFails: false));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, parentId, teamId);
+
+        // Original: parent → child → Success.
+        await RunEngineAsync(originalRunId);
+        var originalChildId = await ChildRunIdAsync(originalRunId);
+        await RunEngineAsync(originalChildId);
+        await RunEngineAsync(originalRunId);
+        await AssertStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        // Rerun FROM the "sub" node — before D2 this was RefuseSuspendable; now it re-stages.
+        var forkRunId = await RerunFromNodeAsync(originalRunId, "sub", teamId, userId);
+        forkRunId.ShouldNotBe(originalRunId, "the rerun mints a fresh forked parent run");
+
+        // The fork re-executes "sub" → a FRESH child under the fork, distinct from the original's child.
+        await RunEngineAsync(forkRunId);
+        var forkChildId = await ChildRunIdAsync(forkRunId);
+        forkChildId.ShouldNotBe(originalChildId, "the rerun stages a FRESH child under the fork — it never reuses the original's child");
+
+        await RunEngineAsync(forkChildId);
+        await RunEngineAsync(forkRunId);
+
+        await AssertStatusAsync(forkRunId, WorkflowRunStatus.Success, "the re-run parent completes once its fresh child returns");
+        await AssertStatusAsync(originalChildId, WorkflowRunStatus.Success);
+
+        // The original's SUBWORKFLOW child is untouched — exactly one child-workflow run under the original (the fork
+        // also has ParentRunId == original in the rerun lineage, so filter to the child-workflow source to isolate it).
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking()
+            .CountAsync(r => r.ParentRunId == originalRunId && r.SourceType == WorkflowRunSourceTypes.ChildWorkflow))
+            .ShouldBe(1, "the original run still has exactly its one subworkflow child — the rerun didn't mutate the original lineage");
     }
 
     [Fact]
@@ -182,6 +224,41 @@ public class SubworkflowFlowTests
 
             await Should.ThrowAsync<SubworkflowStartException>(
                 async () => await svc.StageChildRunAsync(deepest, workflowId, null, "{}", CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task Successive_reruns_do_not_inflate_the_nesting_depth_guard()
+    {
+        // D2 regression: a from-node RERUN fork links via parent_run_id as rerun LINEAGE, not subworkflow nesting.
+        // A chain of (MaxDepth + 2) such forks — deeper than the cap — must NOT trip the recursion guard, else N
+        // successive reruns of a subworkflow node would spuriously fail on ZERO real nesting. (Contrast
+        // Nesting_deeper_than_the_cap_is_refused, which DOES trip on a real parent-run nesting chain.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, EchoChildDefinition());
+
+        var chain = new List<Guid>();
+        for (var i = 0; i < SubworkflowService.MaxDepth + 2; i++)
+            chain.Add(await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            // Link the chain + mark every non-root run a RERUN fork (rerun lineage, not nesting).
+            for (var i = 1; i < chain.Count; i++)
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_run SET parent_run_id = {chain[i - 1]}, source_type = {WorkflowRunSourceTypes.Rerun} WHERE id = {chain[i]}");
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var svc = scope.Resolve<ISubworkflowService>();
+            var deepestId = chain[^1];
+            var deepest = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == deepestId);
+
+            // No throw: every ancestor hop is rerun lineage, so the nesting depth stays 0 and the child stages fine.
+            var childRunId = await svc.StageChildRunAsync(deepest, workflowId, null, "{}", CancellationToken.None);
+            childRunId.ShouldNotBe(Guid.Empty, "a deep rerun-lineage chain stages a child fine — rerun hops are NOT nesting levels");
         }
     }
 
@@ -419,6 +496,19 @@ public class SubworkflowFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    private async Task<Guid> RerunFromNodeAsync(Guid originalRunId, string fromNodeId, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().RerunFromNodeAsync(originalRunId, fromNodeId, teamId, userId, CancellationToken.None);
+    }
+
+    private async Task AssertStatusAsync(Guid runId, WorkflowRunStatus expected, string? because = null)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(expected, because ?? $"run {runId}; error={run.Error}");
     }
 
     // Child: echoes the payload's `x` to output `result`.
