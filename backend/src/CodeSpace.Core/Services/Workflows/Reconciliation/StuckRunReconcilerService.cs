@@ -55,6 +55,16 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// </summary>
     public static readonly TimeSpan SupervisorAdvanceLostAfter = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// Threshold for "timer wake lost" — a Timer wait still Pending past its <c>wake_at</c> by this grace, on a
+    /// Suspended run. Unlike <see cref="SupervisorDecision"/>, a dropped Timer wake (a lost Hangfire job scheduled at
+    /// wake_at) has had NO backstop: the Stranded sweep excludes it (it HAS a pending wait) and nothing else re-fires
+    /// it, so a crash between the Suspended commit and the schedule — or a purged Hangfire job — strands the run
+    /// forever. 2 min dwarfs normal Hangfire fire latency (seconds after wake_at), so a healthy timer that just came
+    /// due is never re-fired prematurely; the resume's own wait CAS makes a re-fire racing the real (late) job a no-op.
+    /// </summary>
+    public static readonly TimeSpan TimerWakeLostAfter = TimeSpan.FromMinutes(2);
+
     /// <summary>Batch size per sweep — bounds the work the reconciler can do in one tick so a backlog doesn't run forever.</summary>
     public const int BatchSize = 50;
 
@@ -107,6 +117,8 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         var supervisorAdvances = await RecoverSupervisorAdvancesAsync(cancellationToken).ConfigureAwait(false);
 
+        var recoveredTimerWaits = await RecoverStrandedTimerWaitsAsync(cancellationToken).ConfigureAwait(false);
+
         var summary = new StuckRunReconcileSummary
         {
             RedispatchedFromPending = redispatched,
@@ -116,12 +128,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RecoveredSupervisorAdvance = supervisorAdvances,
             RecoveredAbandonedSupervisorRun = recoveredSupervisorRuns,
             ReleasedRerunLeases = releasedLeases,
+            RecoveredStrandedTimerWait = recoveredTimerWaits,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait);
 
         return summary;
     }
@@ -365,6 +378,51 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             {
                 // Per-row resilience: one stuck supervisor wait's failure doesn't abort the sweep.
                 _logger.LogWarning(ex, "StuckRunReconciler: supervisor self-advance recovery for run {RunId} wait {WaitId} failed; will retry next tick", wait.RunId, wait.Id);
+            }
+        }
+
+        return recovered;
+    }
+
+    /// <summary>
+    /// Stranded-Timer recovery — the automated twin of the operator reissue verb. A Timer wait still Pending past its
+    /// <c>wake_at</c> by <see cref="TimerWakeLostAfter"/>, on a Suspended run, means the scheduled Hangfire wake was
+    /// lost (a crash between the Suspended commit and the schedule, or a purged job). Unlike every other backstopped
+    /// wait it had no safety net (the Stranded sweep excludes it — it HAS a pending wait; and there's no equivalent of
+    /// the <see cref="SupervisorDecision"/> self-advance sweep for it), so it would strand forever. Re-fire the wake
+    /// exactly as the engine's scheduled job would — <see cref="IWorkflowResumeService.ResumeWaitAsync"/> with a null
+    /// payload stamps the wake marker + resolves + re-dispatches — and the resume's own wait CAS makes a re-fire racing
+    /// the real (late) job an idempotent no-op. Bounded by <see cref="BatchSize"/> per tick.
+    /// </summary>
+    private async Task<int> RecoverStrandedTimerWaitsAsync(CancellationToken cancellationToken)
+    {
+        var threshold = DateTimeOffset.UtcNow - TimerWakeLostAfter;
+
+        var stale = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.WaitKind == WorkflowWaitKinds.Timer
+                        && w.Status == WorkflowWaitStatuses.Pending
+                        && w.WakeAt != null
+                        && w.WakeAt < threshold
+                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+            .OrderBy(w => w.WakeAt)
+            .Take(BatchSize)
+            .Select(w => new { w.RunId, w.Id })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var recovered = 0;
+        foreach (var wait in stale)
+        {
+            try
+            {
+                // Re-fire the timer wake exactly as the engine's scheduled job would. ResumeWaitAsync's wait CAS no-ops
+                // a wake already resolved by a still-live (late) original, so a re-fire is safe.
+                if (await _resumeService.ResumeWaitAsync(wait.RunId, wait.Id, null, cancellationToken).ConfigureAwait(false)) recovered++;
+            }
+            catch (Exception ex)
+            {
+                // Per-row resilience: one stranded timer's failure doesn't abort the sweep.
+                _logger.LogWarning(ex, "StuckRunReconciler: stranded-timer recovery for run {RunId} wait {WaitId} failed; will retry next tick", wait.RunId, wait.Id);
             }
         }
 

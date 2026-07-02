@@ -189,6 +189,7 @@ public class NodeObservabilityTests
         public Task IterationStartedAsync(Guid runId, string nodeId, int itemCount, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task IterationCompletedAsync(Guid runId, string nodeId, int itemCount, TimeSpan duration, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task LogAsync(Guid runId, string? nodeId, LogLevel level, string message, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class RecordingArtifactStore : IArtifactStore

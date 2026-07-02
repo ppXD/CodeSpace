@@ -122,6 +122,11 @@ public static class WorkflowRunRecordTypes
     /// <summary>A model call threw. Payload: {"kind":"...","provider":"...","error":"...","category"?:"..."}.</summary>
     public const string InteractionFailed = "interaction.failed";
 
+    // ─── Wait control (operator overrides) ────────────────────────────────────
+
+    /// <summary>An operator force-resolved a STRANDED signal-driven wait — a Timer whose scheduled wake was dropped, or a Callback whose external system never posted — to un-strand the run. The audit trail for the override. Payload: {"wait_kind":"Timer|Callback","wait_id":"...","by":"<userId>"}.</summary>
+    public const string WaitReissued = "wait.reissued";
+
     // ─── Log lines ────────────────────────────────────────────────────────────
 
     /// <summary>Free-form log line emitted by a node. Payload: {"level":"info|warn|error","message":"..."}.</summary>

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Workflows;
 
@@ -114,6 +115,18 @@ public interface IWorkflowService
     /// parked on a different signal (timer / callback).
     /// </summary>
     Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Operator override: force-resolve a STRANDED signal-driven wait — a <c>Timer</c> whose scheduled wake was dropped
+    /// (fired now with the standard wake marker) or a <c>Callback</c> whose external system never posts (resolved with
+    /// <paramref name="payloadJson"/> as the body, or empty) — so the run un-strands, reusing the same idempotent
+    /// resolve-first CAS every real resume signal funnels through. TEAM-SCOPED: a foreign / absent run or wait throws
+    /// <see cref="KeyNotFoundException"/> (404). Returns <see cref="ReissueWaitOutcome.UnsupportedKind"/> for a
+    /// decision- / completion-driven wait (those resolve via their own verb or a reconciler backstop),
+    /// <see cref="ReissueWaitOutcome.AlreadyResolved"/> when a real signal / deadline / concurrent reissue won the CAS,
+    /// and <see cref="ReissueWaitOutcome.Reissued"/> on success (which also writes a <c>wait.reissued</c> audit record).
+    /// </summary>
+    Task<ReissueWaitOutcome> ReissueWaitAsync(Guid runId, Guid waitId, Guid teamId, Guid actorUserId, string? payloadJson, CancellationToken cancellationToken);
 
     /// <summary>
     /// Operator-triggered cancel: CAS the run from any non-terminal state (Pending/Enqueued/Running/Suspended)

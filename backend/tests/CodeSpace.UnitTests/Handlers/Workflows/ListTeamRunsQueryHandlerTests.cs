@@ -88,6 +88,7 @@ public class ListTeamRunsQueryHandlerTests
         public Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<CodeSpace.Messages.Enums.ReissueWaitOutcome> ReissueWaitAsync(Guid runId, Guid waitId, Guid teamId, Guid actorUserId, string? payloadJson, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public IReadOnlyList<NodeManifestDto> ListNodeManifests() => throw new NotImplementedException();
         public IReadOnlyList<SystemVariableDto> ListSystemVariables() => throw new NotImplementedException();

@@ -26,4 +26,7 @@ public sealed record ReconcileStuckRunsResponse
 
     /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when no abandoned run had a recoverable supervisor decision.</summary>
     public required int RecoveredAbandonedSupervisorRun { get; init; }
+
+    /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at). 0 when no timer wake is overdue.</summary>
+    public required int RecoveredStrandedTimerWait { get; init; }
 }

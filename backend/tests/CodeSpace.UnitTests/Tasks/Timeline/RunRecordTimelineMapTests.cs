@@ -127,6 +127,19 @@ public class RunRecordTimelineMapTests
     }
 
     [Fact]
+    public void A_wait_reissue_is_a_warning_milestone_naming_the_kind()
+    {
+        // An operator override that explains WHY a parked run resumed — a story milestone, warning-toned.
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.WaitReissued, nodeId: "delay", payloadJson: """{"wait_kind":"Timer","wait_id":"w1","by":"u1"}""")).ShouldNotBeNull();
+
+        ev.Title.ShouldBe("Wait re-issued");
+        ev.Severity.ShouldBe(TimelineSeverity.Warning);
+        ev.Level.ShouldBe(TimelineLevel.Milestone, "a manual override is a story beat, not folded detail");
+        ev.Summary.ShouldBe("Timer", "the summary names the reissued wait kind");
+        ev.NodeId.ShouldBe("delay");
+    }
+
+    [Fact]
     public void A_failed_model_call_is_a_detail_error_carrying_the_kind_and_error()
     {
         var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionFailed, nodeId: "gen", payloadJson: """{"kind":"llm.complete","provider":"anthropic","error":"gateway timed out"}""")).ShouldNotBeNull();

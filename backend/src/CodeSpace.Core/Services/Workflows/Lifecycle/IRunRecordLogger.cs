@@ -115,6 +115,9 @@ public interface IRunRecordLogger
     /// <summary>Emit a free-form <c>log</c> entry tied to a node or to the run as a whole (nodeId=null).</summary>
     Task LogAsync(Guid runId, string? nodeId, LogLevel level, string message, CancellationToken cancellationToken);
 
+    /// <summary>Emit <c>wait.reissued</c> — an operator force-resolved a stranded signal-driven wait (a dropped Timer wake / dead Callback) to un-strand the run. The audit trail for the override: names the wait kind + id + the operator, keyed to the suspended node's cell.</summary>
+    Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken cancellationToken);
+
     /// <summary>
     /// The ONE generic low-level writer for the <c>interaction.*</c> family — every model-touching step (a supervisor
     /// decision, a planner plan, an llm.complete node, any future caller) rides it. The CALLER mints the correlation id

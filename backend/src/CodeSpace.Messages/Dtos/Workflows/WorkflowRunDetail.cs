@@ -67,6 +67,9 @@ public sealed record WorkflowRunDetail
 /// <summary>The pending wait a Suspended run is parked on. Drives the run-detail resume affordance.</summary>
 public sealed record WorkflowRunWaitInfo
 {
+    /// <summary>The wait row's id — the target of the operator reissue verb (<c>POST runs/{runId}/waits/{waitId}/reissue</c>) for a stranded Timer/Callback.</summary>
+    public required Guid Id { get; init; }
+
     /// <summary>The node that suspended.</summary>
     public required string NodeId { get; init; }
 
