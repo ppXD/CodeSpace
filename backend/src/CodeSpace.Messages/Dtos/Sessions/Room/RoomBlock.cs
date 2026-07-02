@@ -64,6 +64,25 @@ public sealed record AssistantTurnBlock : RoomBlock
 
     /// <summary>The turn's wall-clock so far — final once terminal, else live elapsed at projection time. Null before it starts.</summary>
     public long? DurationMs { get; init; }
+
+    /// <summary>The turn's rerun / replay ATTEMPTS, oldest → newest — the header's "N attempts" timeline, each openable to view that attempt's run. EMPTY for a never-rerun turn (a lone attempt needs no history).</summary>
+    public IReadOnlyList<RoomTurnAttempt> Attempts { get; init; } = Array.Empty<RoomTurnAttempt>();
+}
+
+/// <summary>One attempt of a turn (the original + each rerun / replay fork) — a row in the turn's attempt timeline. <see cref="RunId"/> is the run to open to view that attempt; <see cref="IsCurrent"/> marks the one the turn currently shows (the latest).</summary>
+public sealed record RoomTurnAttempt
+{
+    public required Guid RunId { get; init; }
+
+    /// <summary>1-based ordinal within the turn (1 = the original run).</summary>
+    public required int AttemptNumber { get; init; }
+
+    public required WorkflowRunStatus Status { get; init; }
+
+    public required DateTimeOffset At { get; init; }
+
+    /// <summary>True for the attempt the turn currently shows (the newest) — rendered as "shown", not an open link.</summary>
+    public required bool IsCurrent { get; init; }
 }
 
 /// <summary>The tidy node-graph stepper on top of a turn — backend-ordered lifecycle stages as labeled steps, each with a status + an optional one-word detail.</summary>

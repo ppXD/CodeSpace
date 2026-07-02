@@ -259,6 +259,18 @@ export interface AssistantTurnBlock extends RoomBlockBase {
   at?: string | null;
   /// Wall-clock so far — final once terminal, else live elapsed. Null before it starts.
   durationMs?: number | null;
+  /// The turn's rerun/replay attempts (oldest → newest) — the header's "N attempts" timeline. Empty for a never-rerun turn.
+  attempts?: RoomTurnAttempt[];
+}
+
+/// One attempt of a turn (the original + each rerun/replay fork). Mirrors backend `RoomTurnAttempt`.
+export interface RoomTurnAttempt {
+  runId: string;
+  attemptNumber: number;
+  status: WorkflowRunStatus;
+  at: string;
+  /// The attempt the turn currently shows (the newest) — rendered as "shown", not an open link.
+  isCurrent: boolean;
 }
 
 export type RoomBlock =
