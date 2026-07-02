@@ -173,6 +173,7 @@ public static class RoomNarrative
             }
 
             EmitRetrySteps(blocks, idPrefix, seq, facts, agentById);
+            EmitRespawnSteps(blocks, idPrefix, seq, facts, agentById);
 
             // Authored phases don't carry the supervisor's closing operation — surface it from the tape.
             foreach (var op in facts.Rounds.Select(r => r.Operation).Where(o => o != null).Select(o => o!).DistinctBy(o => o.Text))
@@ -258,6 +259,26 @@ public static class RoomNarrative
 
             if (step.AgentRunId is { } id && agentById.TryGetValue(id, out var agent))
                 blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:retry:{step.Sequence}:agent", Seq = seq, Title = "Retry", Agents = new[] { ToCard(agent, facts) } });
+        }
+    }
+
+    /// <summary>
+    /// The supervisor's re-spawn waves, in tape order — each a "Supervisor spawned N agents again" step followed by that
+    /// wave's OWN agent cards (the fresh agents the second/third spawn staged, one of which may have failed). The authored
+    /// phase group anchors only each subtask's FIRST attempt, so without this a later wave (and its failed agent) vanishes
+    /// from the room though Activity shows it. The cards are looked up in <paramref name="agentById"/> (the re-spawn agents
+    /// ride the per-decision Spawn tape phase); a wave whose agents didn't resolve is skipped. No-op when the turn had none.
+    /// </summary>
+    private static void EmitRespawnSteps(List<RoomBlock> blocks, string idPrefix, long seq, RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
+    {
+        foreach (var wave in facts.RespawnSteps)
+        {
+            var agents = wave.AgentRunIds.Select(id => agentById.GetValueOrDefault(id)).Where(a => a != null).Select(a => a!).ToList();
+
+            if (agents.Count == 0) continue;
+
+            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:respawn:{wave.Sequence}", Seq = seq, Text = $"Supervisor spawned {AgentWord(agents.Count)} again", Tone = NarrativeTone.Info });
+            blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:respawn:{wave.Sequence}:agents", Seq = seq, Title = "Work", Agents = agents.Select(a => ToCard(a, facts)).ToList() });
         }
     }
 
@@ -467,7 +488,7 @@ public static class RoomNarrative
     private static string? SummaryFor(WorkflowRunStatus status, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> structural, string? error, RoomTurnFacts facts) => status switch
     {
         WorkflowRunStatus.Success => StopSummary(tape) ?? ComposeLead(tape, facts.AgentSummaries) ?? SoleAgentSummary(facts.AgentSummaries) ?? FactualLead(facts),
-        WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled => FailureText(status, tape.Count > 0 ? tape : structural, error),
+        WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled => FailureText(status, tape.Count > 0 ? tape : structural, facts.RawError ?? error),
         _ => null,
     };
 
@@ -511,19 +532,24 @@ public static class RoomNarrative
         var raw = facts.RawError ?? error;
         var auth = IsAuthError(raw);
 
+        // Humanize the DEEP error (raw), not the generic run-row error — so the headline is the specific cause
+        // ("OpenAI API error … the request timed out") the projector surfaced, not the "Node 'sup' failed." placeholder.
+        // The auth case keeps its typed remediation copy; either way `text` is the DISPLAYED line the raw dedup compares to.
+        var text = auth
+            ? "CodeSpace couldn't reach the model provider — the credential was rejected. Update it and re-run this turn."
+            : FailureText(status, narrativePhases, raw);
+
         return new DiagnosticBlock
         {
             Id = $"{idPrefix}:diagnostic",
             Seq = seq,
             Tone = NarrativeTone.Error,
             Title = auth ? "Authentication failed" : null,
-            Text = auth
-                ? "CodeSpace couldn't reach the model provider — the credential was rejected. Update it and re-run this turn."
-                : FailureText(status, narrativePhases, error),
+            Text = text,
             Actions = auth
                 ? new[] { new RoomAction { Kind = RoomActionKind.FixCredentials, Label = "Fix credentials", Enabled = true } }
                 : Array.Empty<RoomAction>(),
-            RawDetail = raw is { Length: > 0 } r && r != FailureText(status, narrativePhases, error) ? r : null,
+            RawDetail = raw is { Length: > 0 } r && r != text ? r : null,
         };
     }
 
