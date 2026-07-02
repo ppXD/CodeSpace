@@ -428,9 +428,10 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
       {files.length > 0 && (
         <div className="room-final-files">
           {files.map((a, i) => (
-            <button className="room-final-file" key={i} disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: a.label })}>
+            <button className="room-final-file" key={i} disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: a.label, agentRunId: a.agentRunId ?? undefined })}>
               <Sym n="file" s={13} cls="room-final-file-ic" />
               <span className="room-final-file-name">{a.label}</span>
+              {a.producer && <span className="room-final-file-by">· from {a.producer}</span>}
               <Sym n="chevron-right" s={12} cls="room-final-file-caret" />
             </button>
           ))}

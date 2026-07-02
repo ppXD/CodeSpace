@@ -274,6 +274,12 @@ public sealed record AnswerAttachment
 
     /// <summary>Download url. Null when not downloadable.</summary>
     public string? DownloadUrl { get; init; }
+
+    /// <summary>For a file: the run id of the agent that PRODUCED it — so the preview opens THAT agent's exact version (per-agent attribution), disambiguating a file that a round-1 agent produced from the final answer. Null when unattributed / not a file.</summary>
+    public Guid? AgentRunId { get; init; }
+
+    /// <summary>For a file: a short label of the producing agent (its role / subtask) — the "· from &lt;agent&gt;" provenance cue so a reader never mistakes an intermediate agent's file for the final deliverable. Null when unattributed.</summary>
+    public string? Producer { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
