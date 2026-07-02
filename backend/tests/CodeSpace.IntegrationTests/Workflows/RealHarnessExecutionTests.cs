@@ -289,6 +289,37 @@ public class RealHarnessExecutionTests
     }
 
     [Fact]
+    public async Task Real_executor_captures_the_codex_session_rollout_by_globbing_the_config_home()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // P3 (Codex continue producer) end-to-end: the REAL CodexHarness (it IS the IAgentSessionTranscript) runs a fake
+        // codex that WRITES a date-nested rollout into its per-run CODEX_HOME/sessions — with a timestamp not known ahead
+        // of time, exactly like the real CLI — and the REAL executor CAPTURES it by GLOBBING sessions/ for the id-bearing
+        // rollout (there is no cwd-computable path as Claude has). This proves the search-based capture shape works
+        // through the production executor, not just a unit glob. The fixture's thread.started carries the id the glob keys on.
+        const string sid = "thr-codex-realexec";   // matches CodexSessionFixture's thread.started
+        const string rolloutContent = "{\"session_meta\":{\"id\":\"thr-codex-realexec\"}}\n{\"type\":\"turn\",\"text\":\"the prior turn the continue restores\"}\n";
+
+        // A realistic date-nested rollout whose FILENAME carries the id (the timestamp is arbitrary — the executor globs, never computes it).
+        var relPath = $"{CodexHarness.SessionsRoot}/2026/07/02/rollout-2026-07-02T00-00-00-{sid}.jsonl";
+
+        using var cli = new FakeCli(CodexHarness.CommandEnvVar, CodexSessionFixture);
+        var teamId = await SeedTeamAsync();
+        var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_SESSION_REL"] = relPath, ["FAKE_SESSION_CONTENT"] = rolloutContent };
+        var runId = await CreateRunAsync(teamId, "codex-cli", env);   // no workspaceDirectory — Codex keys the session on the id, not the cwd
+
+        await ExecuteRealAsync(runId);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the real codex harness streamed the fixture and the run folded to Succeeded");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.SessionTranscript.ShouldBe(rolloutContent, "the executor GLOBBED CODEX_HOME/sessions for the id-bearing rollout the fake codex wrote and captured it — the search-based capture shape, no cwd-computed path");
+    }
+
+    [Fact]
     public async Task Real_executor_captures_the_session_transcript_even_when_the_run_fails()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -543,10 +574,12 @@ public class RealHarnessExecutionTests
             var script = Path.Combine(_dir, "fake-cli.sh");
             // When FAKE_ARGV_OUT is set, dump the spawned process's args ($@) there first — lets a test prove the REAL
             // executor→runner carried a built flag (e.g. --resume) all the way to the process argv. Inert otherwise.
-            // When FAKE_SESSION_REL is set, write FAKE_SESSION_CONTENT into the per-run CLAUDE_CONFIG_DIR at that
+            // When FAKE_SESSION_REL is set, write FAKE_SESSION_CONTENT into the per-run config home at that
             // config-home-relative path — simulates the CLI persisting its resumable session file, so the REAL executor's
-            // P3 capture has a real on-disk file to read. Inert otherwise.
-            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\n[ -n \"$FAKE_SESSION_REL\" ] && { mkdir -p \"$CLAUDE_CONFIG_DIR/$(dirname \"$FAKE_SESSION_REL\")\"; printf '%s' \"$FAKE_SESSION_CONTENT\" > \"$CLAUDE_CONFIG_DIR/$FAKE_SESSION_REL\"; }\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
+            // P3 capture has a real on-disk file to read. The config home is whichever env var the harness isolates
+            // (CLAUDE_CONFIG_DIR for claude, CODEX_HOME for codex — exactly one is set per run), so one script serves both.
+            // Inert otherwise.
+            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\nCFG=\"${CLAUDE_CONFIG_DIR:-$CODEX_HOME}\"\n[ -n \"$FAKE_SESSION_REL\" ] && { mkdir -p \"$CFG/$(dirname \"$FAKE_SESSION_REL\")\"; printf '%s' \"$FAKE_SESSION_CONTENT\" > \"$CFG/$FAKE_SESSION_REL\"; }\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             _original = Environment.GetEnvironmentVariable(commandEnvVar);

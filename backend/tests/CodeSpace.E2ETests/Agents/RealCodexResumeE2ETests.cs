@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -67,26 +68,25 @@ public sealed class RealCodexResumeE2ETests
             var threadId = Harness.BuildResult(ParseAll(fresh.Stdout), exitCode: 0).SessionId;   // only SessionId is read; the kill makes the real exit code irrelevant
             threadId.ShouldNotBeNullOrEmpty("the production harness captured a thread_id from the REAL codex exec --json stream");
 
-            // The binary wrote a rollout under sessions/ — the on-disk artefact a restore must reproduce, keyed by thread id.
-            var rollout = Directory.GetFiles(Path.Combine(freshHome, "sessions"), "*.jsonl", SearchOption.AllDirectories).Single();
-            new FileInfo(rollout).Length.ShouldBeGreaterThan(0, "the fresh run flushed a NON-EMPTY rollout before the kill — a truncated file would make the restore's resume fail confusingly with 'no rollout found'");
-            var rolloutRel = Path.GetRelativePath(freshHome, rollout);
-            rolloutRel.ShouldContain(threadId!, Case.Sensitive, "the rollout filename carries the thread id — the on-disk contract a restore reproduces");
+            // PRODUCTION capture-locate: the harness GLOBS its sessions/ for the id-bearing rollout the real binary wrote
+            // (its timestamp is unknowable ahead of time) — the exact seam the executor uses. Read those bytes to restore.
+            var captureRel = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath(freshHome, cwd, threadId!);
+            captureRel.ShouldNotBeNull("the production capture-locate globbed CODEX_HOME/sessions and found the real rollout by its thread id");
+            captureRel!.ShouldContain(threadId!, Case.Sensitive, "the located rollout's filename carries the thread id");
+            var rolloutBytes = await File.ReadAllTextAsync(Path.Combine(freshHome, captureRel));
+            rolloutBytes.ShouldNotBeNullOrEmpty("the located rollout was flushed non-empty before the kill");
 
             // ── 2) CONTROL: resume against a FRESH EMPTY CODEX_HOME → the real binary REJECTS ("no rollout found"). ──
-            var control = await RunCodexUntilAsync(Harness.BuildInvocation(ContinueTask(cwd, threadId!)), NewDir(), line => line.Contains("no rollout"));
+            var control = await RunCodexUntilAsync(Harness.BuildInvocation(ContinueTask(cwd, threadId!, restoredTranscript: null)), NewDir(), line => line.Contains("no rollout"));
 
             (control.Stdout + control.Stderr).ShouldContain("no rollout found for thread", Case.Insensitive,
                 "without the restored rollout the real binary cannot resolve the thread — the negative control the restore must flip");
 
-            // ── 3) RESTORE + CONTINUE: copy ONLY the rollout into a fresh CODEX_HOME at its sessions/ relative path →
-            //    the resume is ACCEPTED (thread.started with the SAME id; never "no rollout found"). ──
+            // ── 3) RESTORE + CONTINUE via the PRODUCTION path: the harness's BuildConfigHomeFiles lays the captured
+            //    transcript at its deterministic sessions/rollout-<id>.jsonl, the production WriteConfigHomeFiles
+            //    materializes it into a fresh CODEX_HOME (in RunCodexUntilAsync), and the resume is ACCEPTED. ──
             var restoredHome = NewDir();
-            var dest = Path.Combine(restoredHome, rolloutRel);
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            File.Copy(rollout, dest);
-
-            var resumed = await RunCodexUntilAsync(Harness.BuildInvocation(ContinueTask(cwd, threadId!)), restoredHome, line => line.Contains("thread.started"));
+            var resumed = await RunCodexUntilAsync(Harness.BuildInvocation(ContinueTask(cwd, threadId!, restoredTranscript: rolloutBytes)), restoredHome, line => line.Contains("thread.started"));
 
             (resumed.Stdout + resumed.Stderr).ShouldNotContain("no rollout found", Case.Insensitive,
                 "with the rollout restored under sessions/, the binary FOUND the thread — the restore flipped the control");
@@ -112,10 +112,11 @@ public sealed class RealCodexResumeE2ETests
         TimeoutSeconds = 120,
     };
 
-    private static AgentTask ContinueTask(string cwd, string threadId) => FreshTask(cwd) with
+    private static AgentTask ContinueTask(string cwd, string threadId, string? restoredTranscript) => FreshTask(cwd) with
     {
         Goal = "Reply with the single word: again",
-        ResumeFromSessionId = threadId,   // → exec resume <id> --json -c sandbox_mode=read-only …
+        ResumeFromSessionId = threadId,     // → exec resume <id> --json -c sandbox_mode=read-only …
+        RestoredTranscript = restoredTranscript,   // → BuildConfigHomeFiles lays sessions/rollout-<id>.jsonl (null = the not-found control)
     };
 
     // ─── Real-process driver ──────────────────────────────────────────────────────
@@ -137,6 +138,8 @@ public sealed class RealCodexResumeE2ETests
             RedirectStandardInput = true,
             UseShellExecute = false,
         };
+
+        LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, codexHome);   // production materializer: lays the restored rollout (+ any skills) into CODEX_HOME
 
         foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
         psi.Environment[CodexHarness.ConfigHomeEnvVar] = codexHome;                 // per-run isolated ~/.codex

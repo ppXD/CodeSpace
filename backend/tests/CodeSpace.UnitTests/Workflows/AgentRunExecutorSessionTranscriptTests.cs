@@ -70,6 +70,35 @@ public class AgentRunExecutorSessionTranscriptTests
     }
 
     [Fact]
+    public void An_intermediate_directory_symlink_that_escapes_the_config_home_is_rejected()
+    {
+        if (OperatingSystem.IsWindows()) return;   // symlink creation needs privileges on Windows; the guard is Linux/macOS-relevant
+
+        // The escape a SEARCH-based locate (Codex's sessions/ glob) surfaces that a LEAF-only resolve MISSES: the agent
+        // plants an intermediate DIRECTORY symlink ("ln -s <secretDir> sessions/leak") and a REAL rollout under the linked
+        // target. The leaf (rollout-<id>.jsonl) is a genuine file, not a symlink, so a leaf-only check passes — the clamp
+        // must walk EVERY component and fail-close on the symlinked directory. This is the HIGH-severity capture-exfil vector.
+        var home = Path.Combine(Path.GetTempPath(), "cs-cfg-home-" + Guid.NewGuid().ToString("N"));
+        var secretDir = Path.Combine(Path.GetTempPath(), "cs-secret-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(home, "sessions"));
+            Directory.CreateDirectory(secretDir);
+            File.WriteAllText(Path.Combine(secretDir, "rollout-abc.jsonl"), "HOST OPERATOR SECRET");
+
+            Directory.CreateSymbolicLink(Path.Combine(home, "sessions", "leak"), secretDir);   // intermediate DIR symlink pointing OUT
+
+            AgentRunExecutor.ResolveSessionTranscriptPath(home, "sessions/leak/rollout-abc.jsonl")
+                .ShouldBeNull("an intermediate directory symlink escaping the config home must be refused — a leaf-only resolve would miss it");
+        }
+        finally
+        {
+            if (Directory.Exists(home)) Directory.Delete(home, recursive: true);
+            if (Directory.Exists(secretDir)) Directory.Delete(secretDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void A_regular_in_bounds_file_that_exists_is_accepted()
     {
         // The benign happy path with a REAL file present: a regular (non-symlink) in-bounds file resolves to itself —

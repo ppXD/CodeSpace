@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -60,6 +60,15 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     /// E2E, not added in this slice, so re-verify this path on a Codex upgrade.)
     /// </summary>
     public const string SkillsRoot = "skills";
+
+    /// <summary>
+    /// The config-home-relative directory Codex persists session rollouts under — <c>$CODEX_HOME/sessions/&lt;date&gt;/rollout-&lt;ts&gt;-&lt;id&gt;.jsonl</c>,
+    /// the transcript <c>codex exec resume</c> reads. Capture GLOBS here (the timestamp isn't known ahead of time);
+    /// restore writes a deterministic <c>rollout-&lt;id&gt;.jsonl</c> here (verified against codex 0.142.2: resume scans
+    /// <c>sessions/</c> at any depth and matches the id in the <c>rollout-…</c> filename — the original timestamp is not
+    /// needed). Pinned by a test (Rule 8) so an accidental edit is a visible, deliberate change.
+    /// </summary>
+    public const string SessionsRoot = "sessions";
 
     /// <summary>The pinned Codex CLI version — MUST match <c>CODEX_CLI_VERSION</c> in <c>backend/Dockerfile.worker</c> (the single source of truth); a pin test fails if they drift.</summary>
     internal const string DefaultVersion = "0.142.2";
@@ -118,11 +127,64 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
             ConfigHomeEnvVars = new[] { ConfigHomeEnvVar },
             // Project the persona's skills as SKILL.md files the runner writes under CODEX_HOME/skills/<slug>/;
             // Codex's native loader discovers them there (the same Agent-Skills format + SkillProjection as Claude —
-            // only the root differs, which is why it's CODEX_HOME's, not CLAUDE_CONFIG_DIR's).
-            ConfigHomeFiles = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot),
+            // only the root differs, which is why it's CODEX_HOME's, not CLAUDE_CONFIG_DIR's). On a CONTINUE the prior
+            // session's rollout is restored alongside them under sessions/ (see BuildConfigHomeFiles).
+            ConfigHomeFiles = BuildConfigHomeFiles(task),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
+    }
+
+    /// <summary>
+    /// P3 (IAgentSessionTranscript) — CAPTURE-locate: Codex writes each session to
+    /// <c>$CODEX_HOME/sessions/&lt;date&gt;/rollout-&lt;ts&gt;-&lt;id&gt;.jsonl</c>. The timestamp + date aren't known ahead of
+    /// time, so — unlike Claude's computable path — the file is FOUND by globbing <paramref name="configHome"/>'s
+    /// <see cref="SessionsRoot"/> for the id-bearing rollout the CLI wrote (cwd is irrelevant; Codex keys the session on
+    /// the id, not the cwd). Returns the config-home-relative path (the executor security-clamps it), or null when there
+    /// is no session id or no matching file (→ a continue cold-starts).
+    /// </summary>
+    public string? SessionTranscriptRelativePath(string configHome, string? workspaceDirectory, string? sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return null;
+
+        var sessionsDir = Path.Combine(configHome, SessionsRoot);
+        if (!Directory.Exists(sessionsDir)) return null;
+
+        // Skip symlinked entries + dirs during the walk (AttributesToSkip = ReparsePoint) so a hostile planted symlink is
+        // never surfaced or traversed — the executor's clamp is the backstop, this is defense in depth.
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System };
+
+        // Among the id-bearing rollouts pick the FRESHEST: codex appends the resumed turn IN PLACE (one file, verified vs
+        // 0.142.2), but were a version ever to write a NEW rollout on resume, the newest carries the latest turn — never
+        // the stale restored copy. A full session id (UUID) can't be a substring of another distinct id, so this is an exact match.
+        var match = Directory.EnumerateFiles(sessionsDir, "rollout-*.jsonl", options)
+            .Where(f => Path.GetFileName(f).Contains(sessionId, StringComparison.Ordinal))
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+
+        return match is null ? null : Path.GetRelativePath(configHome, match);
+    }
+
+    /// <summary>
+    /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
+    /// session's restored rollout at <c>sessions/rollout-&lt;sessionId&gt;.jsonl</c> where <c>codex exec resume</c> finds
+    /// it. Unlike Claude, the restore path needs no cwd and no original timestamp — codex resume scans <c>sessions/</c>
+    /// at any depth and matches the id in the <c>rollout-…</c> filename (verified against codex 0.142.2), so a
+    /// deterministic id-named rollout suffices. Added ONLY when the run carries both the session id AND the captured
+    /// bytes — otherwise the skills list is returned unchanged (byte-identical for a fresh run).
+    /// </summary>
+    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
+    {
+        var skills = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot);
+
+        if (task.ResumeFromSessionId is not { Length: > 0 } sessionId || task.RestoredTranscript is not { Length: > 0 } transcript)
+            return skills;
+
+        return skills.Append(new ConfigHomeFile
+        {
+            RelativePath = $"{SessionsRoot}/rollout-{sessionId}.jsonl",
+            Content = transcript,
+        }).ToList();
     }
 
     public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
