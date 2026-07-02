@@ -20,8 +20,8 @@ import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivit
  * STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The full raw
  * ledger lives in the Trace tab.
  */
-export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode }) {
-  const [tab, setTab] = useState<"output" | "tools">("output");
+export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: PhaseAgentRef; onClose?: () => void; rerun?: ReactNode; onOpenFile?: (path: string) => void }) {
+  const [tab, setTab] = useState<"output" | "tools" | "files">("output");
 
   // Per-cell rerun history: every attempt that ran THIS (node, branch) cell. Picking an earlier one shows that
   // attempt's own record (the agent that ran then), so you can look back at e.g. the run that failed before a rerun.
@@ -40,6 +40,11 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const evts = events.data ?? [];
+
+  // This agent's own changed files (per-agent attribution) — a Files tab, shown only when it produced any. The
+  // assigned-subtask strip is suppressed when it merely repeats the title (the terminal bar already leads with it).
+  const files = viewingLatest ? agent.changedFiles ?? [] : [];
+  const showSubtask = !!agent.assignedSubtask && agent.assignedSubtask !== name;
 
   // The metrics shown describe the ACTIVE attempt: the ref carries the merged-latest figures, while an earlier
   // attempt carries its OWN (from its agent run) — so switching to a failed/older attempt shows that attempt's
@@ -67,10 +72,10 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
 
       {/* The model's allocation for this agent — its authored role + the subtask it was assigned. Absent for a
           homogeneous spawn / non-supervisor agent (both fields null). */}
-      {(agent.role || agent.assignedSubtask) && (
+      {(agent.role || showSubtask) && (
         <div className="agent-terminal-alloc">
           {agent.role && <span className="agent-terminal-role">{agent.role}</span>}
-          {agent.assignedSubtask && <span className="agent-terminal-subtask">{agent.assignedSubtask}</span>}
+          {showSubtask && <span className="agent-terminal-subtask">{agent.assignedSubtask}</span>}
         </div>
       )}
 
@@ -110,7 +115,10 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
       )}
 
       <div className="agent-terminal-body">
-        {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} /> : <AgentToolCalls agentRunId={activeAgentRunId} />}
+        {tab === "output"
+          ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} />
+          : tab === "tools" ? <AgentToolCalls agentRunId={activeAgentRunId} />
+          : <AgentFiles files={files} onOpenFile={onOpenFile} />}
       </div>
 
       <div className="agent-terminal-footer">
@@ -122,6 +130,7 @@ export function AgentTerminal({ agent, onClose, rerun }: { agent: PhaseAgentRef;
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>
           <button type="button" data-active={tab === "tools" || undefined} onClick={() => setTab("tools")}>Tool calls</button>
+          {files.length > 0 && <button type="button" data-active={tab === "files" || undefined} onClick={() => setTab("files")}>Files</button>}
         </div>
       </div>
     </div>
@@ -141,6 +150,23 @@ function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; lo
       {events.map((e) => (
         <li key={e.sequence} className="agent-terminal-row" data-kind={lineKind(e.kind)}>
           {isCommand(e.kind) && <span className="agent-terminal-prompt">❯ </span>}{e.text || humanize(e.kind)}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** The Files tab — the files THIS agent changed. Each is openable (a preview) when the host provides `onOpenFile`, else a plain listing. */
+function AgentFiles({ files, onOpenFile }: { files: string[]; onOpenFile?: (path: string) => void }) {
+  if (files.length === 0) return <div className="agent-terminal-empty">No files changed.</div>;
+
+  return (
+    <ol className="agent-terminal-files">
+      {files.map((p) => (
+        <li key={p}>
+          {onOpenFile
+            ? <button type="button" className="agent-terminal-file" onClick={() => onOpenFile(p)}><Ic.File size={12} aria-hidden="true" /><span>{p}</span></button>
+            : <span className="agent-terminal-file" data-static="true"><Ic.File size={12} aria-hidden="true" /><span>{p}</span></span>}
         </li>
       ))}
     </ol>

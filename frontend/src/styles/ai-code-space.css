@@ -2666,6 +2666,15 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-goal > summary:hover { color: var(--ink-2); }
 .acs-root .agent-terminal-goal-task { padding: 7px 12px; font-size: 12px; font-weight: 550; line-height: 1.5; color: var(--ink); background: var(--panel-2); border-bottom: 1px solid var(--line); word-break: break-word; }
 .acs-root .agent-terminal-goal-prompt { padding: 0 12px 10px 12px; font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
+/* Instruction body (expanded) — inset + left-accented so the prompt reads as a clean quoted block, not flush to the edge. */
+.acs-root .agent-terminal-goal-body { margin: 0 12px 12px; padding: 9px 13px; border-left: 2px solid var(--line-2); background: var(--bg); border-radius: 0 7px 7px 0; font-size: 12px; line-height: 1.65; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+/* Files tab — the files THIS agent changed, each openable to a scoped preview. */
+.acs-root .agent-terminal-files { list-style: none; margin: 0; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.acs-root .agent-terminal-file { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-2); background: transparent; border: 0; border-radius: 6px; padding: 6px 8px; cursor: pointer; }
+.acs-root .agent-terminal-file:hover { background: var(--panel-2); color: var(--ink); }
+.acs-root .agent-terminal-file[data-static] { cursor: default; }
+.acs-root .agent-terminal-file[data-static]:hover { background: transparent; color: var(--ink-2); }
+.acs-root .agent-terminal-file > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Per-cell rerun history — pick an earlier attempt of THIS node/branch to read that run's record. */
 .acs-root .agent-terminal-attempts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-terminal-attempts-label { font-size: 11px; color: var(--muted); margin-right: 1px; }
@@ -5527,15 +5536,6 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-drawer-close:hover { background: var(--panel-2); color: var(--ink-2); }
 .room-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
 .room-drawer-term .agent-terminal { border-color: var(--line); box-shadow: none; }
-
-/* per-agent files (attribution) — the files THIS agent produced, above its terminal in the drawer */
-.room-agent-files { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
-.room-agent-files-head { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); padding: 1px 4px 6px; }
-.room-agent-file { display: flex; align-items: center; gap: 8px; width: 100%; font: inherit; font-size: 12px; text-align: left; background: transparent; border: 0; border-radius: 6px; padding: 5px 6px; cursor: pointer; }
-.room-agent-file:hover { background: var(--panel); }
-.room-agent-file-name { flex: 1; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.room-agent-file-caret { color: var(--muted-2); flex: none; opacity: 0; transition: opacity .12s; }
-.room-agent-file:hover .room-agent-file-caret { opacity: 1; }
 /* per-agent file-count chip on the compact agent row */
 .room-arow-files { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 

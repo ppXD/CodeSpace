@@ -154,10 +154,9 @@ function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => 
   );
 }
 
-/** An agent in the drawer — the files IT produced (per-agent attribution) above its live terminal. */
+/** An agent in the drawer — its live terminal, whose Files tab lists the files IT produced (each opens a scoped preview). */
 function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: string; onClose: () => void }) {
   const openDrawer = useRoomDrawer();
-  const files = agent.changedFiles ?? [];
 
   return (
     <>
@@ -167,18 +166,9 @@ function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: s
         <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
       </div>
       <div className="room-drawer-body">
-        {files.length > 0 && (
-          <div className="room-agent-files">
-            <div className="room-agent-files-head"><Sym n="file" s={12} /> {files.length} file{files.length === 1 ? "" : "s"} changed</div>
-            {files.map((p) => (
-              <button className="room-agent-file" key={p} onClick={() => openDrawer({ kind: "file", runId, path: p, agentRunId: agent.agentRunId })}>
-                <span className="room-agent-file-name">{p}</span>
-                <Sym n="chevron-right" s={11} cls="room-agent-file-caret" />
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="room-drawer-term"><AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} /></div>
+        <div className="room-drawer-term">
+          <AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} onOpenFile={(path) => openDrawer({ kind: "file", runId, path, agentRunId: agent.agentRunId })} />
+        </div>
       </div>
     </>
   );
@@ -756,6 +746,7 @@ function toPhaseAgentRef(c: RoomAgentCard): PhaseAgentRef {
     agentRunId: c.agentRunId, nodeId: null, iterationKey: "", status: c.status, label: c.label, role: c.role ?? null,
     assignedSubtask: c.assignedSubtask ?? null, model: c.model ?? null, inputTokens: null, outputTokens: null,
     durationMs: c.durationMs ?? null, toolCount: c.toolCount ?? null, costUsd: c.costUsd ?? null, filesChanged: c.filesChanged ?? null,
+    changedFiles: c.changedFiles ?? null,
   };
 }
 
