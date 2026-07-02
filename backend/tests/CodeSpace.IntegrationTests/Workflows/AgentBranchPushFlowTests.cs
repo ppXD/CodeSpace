@@ -249,6 +249,7 @@ public sealed class AgentBranchPushFlowTests
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);

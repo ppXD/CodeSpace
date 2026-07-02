@@ -127,7 +127,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var runs = new StubRuns(runId);
         var critic = new RecordingCritic { Verdict = verdict };
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision));
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs, critic);
     }
 
@@ -193,6 +193,8 @@ public sealed class AgentRunExecutorOutputReviewTests
         }
 
         public Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
         public Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();

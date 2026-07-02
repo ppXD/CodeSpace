@@ -2736,12 +2736,33 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             throw new NodeFailureException($"Node '{node.Id}': {ex.Message}");
         }
 
+        // P3 (3.2c CONTINUE): when this run descends from a prior run that already drove this EXACT cell (a from-node
+        // rerun / map-branch fork), resume that agent's conversation instead of cold-starting — stamp the resume hint
+        // (session id + transcript ref) onto the task before it is persisted. A first run / no prior session ⇒ no hint,
+        // byte-identical to a fresh run.
+        task = await ApplyResumeHintAsync(task, run, node.Id, iterationKey, cancellationToken).ConfigureAwait(false);
+
         // iterationKey is the engine's authoritative effective cell key for this suspension (computed in
         // SuspendNodeAsync from the branch key ?? the token's own key) — identical to the value stamped on the
         // wait row + workflow_run_node cell, so the agent run joins back to its EXACT cell (D4).
         var agentRun = await _agentRunService.CreateAsync(task, run.TeamId, run.Id, node.Id, iterationKey, cancellationToken).ConfigureAwait(false);
 
         return agentRun.Id;
+    }
+
+    /// <summary>
+    /// P3 (3.2c): stamp the CONTINUE resume hint onto <paramref name="task"/> from the lineage-prior agent run at this
+    /// cell, if one exists with a resumable session. Carries the transcript as a REF (<c>RestoredTranscriptArtifactId</c>)
+    /// when the prior offloaded it, or inline bytes when it was small — never inlines a large transcript into task_jsonb.
+    /// Both-or-neither (the service returns null unless a transcript is present), so a resume never lands without its
+    /// transcript. A no-lineage / no-prior stage returns the task unchanged (byte-identical fresh run).
+    /// </summary>
+    private async Task<AgentTask> ApplyResumeHintAsync(AgentTask task, WorkflowRun run, string nodeId, string iterationKey, CancellationToken cancellationToken)
+    {
+        if (await _agentRunService.FindResumableSessionAsync(run.TeamId, run.ParentRunId, nodeId, iterationKey, cancellationToken).ConfigureAwait(false) is not { } prior)
+            return task;
+
+        return task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
     }
 
     /// <summary>

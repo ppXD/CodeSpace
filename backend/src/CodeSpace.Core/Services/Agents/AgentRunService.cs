@@ -105,6 +105,17 @@ public interface IAgentRunService
     Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// P3 (3.2c): the RESUMABLE session of the nearest ANCESTOR agent run at the same cell (<paramref name="nodeId"/>,
+    /// <paramref name="iterationKey"/>) along this run's fork ancestry — walking <c>ParentRunId</c> up from
+    /// <paramref name="parentRunId"/> (the run being forked from), NOT the flat root group, so a SIBLING rerun of the
+    /// same original never resumes the other branch's conversation. Skips any ancestor that captured a session id but no
+    /// transcript (not resumable), so a transcript-less nearer run never masks an older resumable one. Null when
+    /// <paramref name="parentRunId"/> is null (a first run), no ancestor has a resumable session at the cell, or a
+    /// prior's result is unreadable. Team-scoped on every hop. The CONTINUE producer stamps the result onto the new task.
+    /// </summary>
+    Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken);
+
+    /// <summary>
     /// TEAM-SCOPED operator read of a run's live status (null when the run isn't <paramref name="teamId"/>'s,
     /// so a foreign id leaks nothing) — distinct from <see cref="GetAsync"/>, which is the un-scoped execution
     /// path. Backs the run-detail's live status header.
@@ -549,6 +560,51 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     public async Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) =>
         await _db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == runId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
+
+    public async Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken)
+    {
+        if (parentRunId is null) return null;   // a first run has no ancestor to resume — cold-start, zero queries
+
+        // Walk the ANCESTOR chain (parent → grandparent → … → root), team-scoped, nearest-first. NOT the flat root group:
+        // a sibling rerun of the same original is off this chain, so it can never contaminate this run's resume. Shallow
+        // (rerun depth); each hop is a PK lookup. The Contains guard is a defensive stop against a corrupt parent cycle.
+        var chain = new List<Guid>();
+
+        for (Guid? cursor = parentRunId; cursor is { } id && !chain.Contains(id); )
+        {
+            chain.Add(id);
+            cursor = await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == id && r.TeamId == teamId).Select(r => r.ParentRunId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var chainIds = chain.Select(id => (Guid?)id).ToList();
+
+        // Every agent run at this cell anywhere in the chain that captured a session id (team-scoped; served by idx_agent_run_workflow_run).
+        var candidates = await _db.AgentRun.AsNoTracking()
+            .Where(a => a.TeamId == teamId && chainIds.Contains(a.WorkflowRunId) && a.NodeId == nodeId && a.IterationKey == iterationKey && a.SessionId != null)
+            .Select(a => new { a.WorkflowRunId, a.SessionId, a.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // The NEAREST ancestor's RESUMABLE session — chain order (nearest first), skipping a captured-but-transcript-less
+        // prior so it never masks an older resumable one, and treating a corrupt prior result as not-resumable (the
+        // contract is cold-start, never a hard failure). Both-or-neither: a session id is resumable ONLY with a transcript.
+        foreach (var runId in chain)
+        {
+            var candidate = candidates.FirstOrDefault(c => c.WorkflowRunId == runId);
+
+            if (candidate?.SessionId is not { Length: > 0 } sessionId || candidate.ResultJson is null) continue;
+
+            AgentRunResult? result;
+            try { result = JsonSerializer.Deserialize<AgentRunResult>(candidate.ResultJson, AgentJson.Options); }
+            catch (JsonException) { continue; }
+
+            var inline = result?.SessionTranscript is { Length: > 0 } t ? t : null;   // normalize "" (offloaded) → null so the ref case carries a clean null inline
+            var artifactId = result?.SessionTranscriptArtifactId;
+
+            if (inline is not null || artifactId is not null) return new ResumableSession(sessionId, inline, artifactId);
+        }
+
+        return null;
+    }
 
     public async Task<AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {

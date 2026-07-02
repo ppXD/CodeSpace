@@ -596,7 +596,7 @@ public sealed class AgentRunExecutorPushTests
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId, epoch);
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs);
     }
 
@@ -697,6 +697,8 @@ public sealed class AgentRunExecutorPushTests
             GetCalled = true;
             return Task.FromResult(new AgentRun { Id = _runId, FenceEpoch = _epoch });
         }
+
+        public Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
 
         public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
         {
