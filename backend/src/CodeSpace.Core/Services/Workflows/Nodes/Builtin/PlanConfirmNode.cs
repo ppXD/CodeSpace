@@ -79,7 +79,8 @@ public sealed class PlanConfirmNode : INodeRuntime
               "type": "object",
               "properties": {
                 "goal": { "type": "string", "minLength": 1, "description": "The task the plan serves — revisions re-plan this goal against the operator's feedback." },
-                "grounding": { "type": "string", "description": "Optional supplementary context folded into revision prompts (mirror the plan.author upstream)." }
+                "grounding": { "type": "string", "description": "Optional supplementary context folded into revision prompts (mirror the plan.author upstream)." },
+                "criteria": { "type": "array", "items": { "type": "string" }, "description": "The operator's acceptance criteria — revisions target the same definition of done as the original plan (mirror the plan.author upstream)." }
               },
               "required": ["goal"]
             }
@@ -166,7 +167,11 @@ public sealed class PlanConfirmNode : INodeRuntime
             return NodeResult.Fail($"The plan was revised {RevisionDepth(current)} time(s) and rejected again — refine the goal and relaunch. The feedback is recorded on the rejected plan versions.");
         }
 
-        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, goal, ReadString(context.Inputs, "grounding"), feedback: answer);
+        var criteria = context.Inputs.TryGetValue("criteria", out var cv) && cv.ValueKind == JsonValueKind.Array
+            ? cv.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString() ?? "").ToList()
+            : (IReadOnlyList<string>)Array.Empty<string>();
+
+        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, PlanAuthorNode.ComposeGoalWithCriteria(goal, criteria), ReadString(context.Inputs, "grounding"), feedback: answer);
 
         PlannedWorkflow plan;
         try

@@ -36,7 +36,7 @@ public class PlanConfirmNodeTests
         node.Manifest.IsSideEffecting.ShouldBeTrue("a revision is a billed planner call");
 
         ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan", "maxRevisions" }, ignoreOrder: true);
-        InputKeys(node).ShouldBe(new[] { "goal", "grounding" }, ignoreOrder: true);
+        InputKeys(node).ShouldBe(new[] { "goal", "grounding", "criteria" }, ignoreOrder: true);
         OutputKeys(node).ShouldBe(new[] { "planId", "version", "approved", "goal", "items", "json" }, ignoreOrder: true);
 
         node.Manifest.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())

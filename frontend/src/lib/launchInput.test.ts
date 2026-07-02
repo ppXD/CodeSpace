@@ -140,9 +140,11 @@ describe("buildLaunchInput — base fields", () => {
     expect(input.acceptanceCriteria).not.toBe(acceptanceCriteria);
   });
 
-  it("never sends acceptanceCriteria on a single-agent tier (inert)", () => {
-    expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
-    expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] }))).not.toHaveProperty("acceptanceCriteria");
+  it("sends changed acceptanceCriteria on EVERY tier — they steer the planner, supervisor, or agent prompt (S5b)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", acceptanceCriteria: ["custom"] })).acceptanceCriteria).toEqual(["custom"]);
+    expect(buildLaunchInput(form({ effort: "standard", acceptanceCriteria: ["custom"] })).acceptanceCriteria).toEqual(["custom"]);
+    // The unmodified default is still omitted everywhere (byte-identical).
+    expect(buildLaunchInput(form({ effort: "quick" }))).not.toHaveProperty("acceptanceCriteria");
   });
 
   it("omits workingDirMode at the auto default (byte-identical)", () => {

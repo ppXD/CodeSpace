@@ -52,7 +52,7 @@ export interface LaunchFormState {
   autonomyCeiling: string;
   /** Coordination "Integrate branches" — Deep only: opt in to integrating the spawned agents' diffs into one reviewable branch at merge. Default false ⇒ defer to the ambient flag. */
   integrateBranches: boolean;
-  /** Evaluation "Acceptance criteria" — Deep only: free-text criteria the supervisor targets (rendered into its prompt). Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
+  /** Evaluation "Acceptance criteria" — every tier (S5b): Deep renders them into the supervisor prompt, Standard into the planner prompt (per-item contracts target them), Quick into the agent's goal. Sent only when changed from {@link DEFAULT_ACCEPTANCE} (unmodified ⇒ omitted, byte-identical). */
   acceptanceCriteria: string[];
   /** Evaluation "Acceptance checks" — the EXECUTABLE argv floor (one element per token, e.g. ["sh","check.sh"]): Deep runs it at the terminal stop; Quick grades the single agent's produced branch (S5). Standard verifies per item via the plan's own contracts, so it never sends this. Sent only when non-empty (⇒ omitted, byte-identical). */
   acceptanceChecks: string[];
@@ -157,10 +157,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // byte-identical) and only on the tiers that expose Coordination (inert on a single-agent run).
   if (tierExposesCaps(state.effort) && state.integrateBranches) input.integrateBranches = true;
 
-  // Acceptance criteria are a Deep-only supervisor concern. Send only when the operator CHANGED them from the canonical
-  // default AND the set is non-empty — an unmodified default (or a cleared set) is omitted, keeping the supervisor
-  // prompt byte-identical. (The modal default is non-empty, so omit-when-empty alone would always send it.)
-  if (tierExposesCaps(state.effort) && state.acceptanceCriteria.length
+  // Acceptance criteria STEER on every tier (S5b: deep → the supervisor prompt, standard → the planner prompt so
+  // per-item contracts target them, quick → the agent's goal). Send only when the operator CHANGED them from the
+  // canonical default AND the set is non-empty — an unmodified default (or a cleared set) is omitted, byte-identical.
+  if (state.acceptanceCriteria.length
       && JSON.stringify(state.acceptanceCriteria) !== JSON.stringify(DEFAULT_ACCEPTANCE)) {
     input.acceptanceCriteria = [...state.acceptanceCriteria];
   }

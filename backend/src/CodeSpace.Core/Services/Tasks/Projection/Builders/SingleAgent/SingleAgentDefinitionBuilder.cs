@@ -41,7 +41,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
         new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
         new() { Id = "agent", TypeKey = "agent.code", Label = "Run the task",
-                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context)), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
                 Inputs = TerminalInputs(IsMultiRepo(context)) },

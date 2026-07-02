@@ -31,11 +31,11 @@ internal static class AgentNodeMapping
     /// when present it is PREPENDED to the goal (the agent's prompt) so a follow-up builds on earlier turns. Null
     /// (a fresh launch) leaves the goal byte-identical.</para>
     /// </summary>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null)
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null)
     {
         var config = new Dictionary<string, object?>
         {
-            ["goal"] = ComposeGoal(goal, grounding),
+            ["goal"] = ComposeGoalWithCriteria(ComposeGoal(goal, grounding), criteria),
             ["harness"] = Harness(profile),
         };
 
@@ -70,6 +70,20 @@ internal static class AgentNodeMapping
         AddIfPresent(config, "mode", NullIfBlank(mode));
 
         return JsonSerializer.SerializeToElement(config);
+    }
+
+    /// <summary>Append the operator's acceptance criteria to the agent's goal (S5b, the quick tier's steer — deep renders them into the supervisor prompt, standard into the planner prompt). Null / empty ⇒ verbatim (byte-identical).</summary>
+    private static string ComposeGoalWithCriteria(string goal, IReadOnlyList<string>? criteria)
+    {
+        var kept = criteria?.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+
+        if (kept is not { Count: > 0 }) return goal;
+
+        var builder = new System.Text.StringBuilder(goal);
+        builder.AppendLine().AppendLine().AppendLine("Acceptance criteria (the operator's definition of done):");
+        foreach (var c in kept) builder.AppendLine($"- {c.Trim()}");
+
+        return builder.ToString().TrimEnd();
     }
 
     /// <summary>

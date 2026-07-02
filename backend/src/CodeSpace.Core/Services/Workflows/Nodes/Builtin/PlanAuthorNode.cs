@@ -63,7 +63,8 @@ public sealed class PlanAuthorNode : INodeRuntime
               "properties": {
                 "goal": { "type": "string", "minLength": 1, "description": "The task to plan — free text, usually {{ref}}'d from the trigger." },
                 "grounding": { "type": "string", "description": "Optional supplementary context folded into the planner prompt (e.g. an upstream node's repo/summary output)." },
-                "feedback": { "type": "string", "description": "Optional operator feedback on a PRIOR plan version — bind it on the edit-loop edge so the re-plan revises against it." }
+                "feedback": { "type": "string", "description": "Optional operator feedback on a PRIOR plan version — bind it on the edit-loop edge so the re-plan revises against it." },
+                "criteria": { "type": "array", "items": { "type": "string" }, "description": "The operator's free-text acceptance criteria (definition of done) — folded into the planner prompt so the plan AND its per-item contracts target them (the standard tier's analogue of the supervisor's acceptanceCriteria)." }
               },
               "required": ["goal"]
             }
@@ -88,6 +89,7 @@ public sealed class PlanAuthorNode : INodeRuntime
         var goal = ReadString(context.Inputs, "goal");
         var grounding = ReadString(context.Inputs, "grounding");
         var feedback = ReadString(context.Inputs, "feedback");
+        var criteria = ReadStringArray(context.Inputs, "criteria");
 
         if (string.IsNullOrWhiteSpace(goal)) return NodeResult.Fail("Input 'goal' is required.");
 
@@ -97,7 +99,7 @@ public sealed class PlanAuthorNode : INodeRuntime
         if (!NodeScopeReader.TryReadWorkflowRunId(context, out var workflowRunId))
             return NodeResult.Fail("The run carries no run id — plan.author persists the plan against the run.");
 
-        var request = BuildPlanRequest(context.Config, teamId, goal, grounding, feedback);
+        var request = BuildPlanRequest(context.Config, teamId, ComposeGoalWithCriteria(goal, criteria), grounding, feedback);
 
         using var scope = _scopeFactory.CreateScope();
 
@@ -173,6 +175,28 @@ public sealed class PlanAuthorNode : INodeRuntime
         Review = ReadReviewMode(config),
         ReviewerModelId = ReadGuid(config, "reviewerModelId"),
     };
+
+    /// <summary>Fold the operator's acceptance criteria into the goal (S5b) — the plan AND its per-item contracts must target the operator's definition of done, and the plan critic judges against the same yardstick (its Goal is this task text). Empty ⇒ the goal verbatim (byte-identical). Pinned by a unit test.</summary>
+    internal static string ComposeGoalWithCriteria(string goal, IReadOnlyList<string> criteria)
+    {
+        var kept = criteria.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+
+        if (kept.Count == 0) return goal;
+
+        var builder = new System.Text.StringBuilder(goal);
+        builder.AppendLine().AppendLine().AppendLine("Acceptance criteria (the operator's definition of done — author subtasks and their acceptance contracts to satisfy these):");
+        foreach (var c in kept) builder.AppendLine($"- {c.Trim()}");
+
+        return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>The optional string-array input (e.g. criteria) — defensive: absent / non-array / non-string entries read as empty.</summary>
+    private static IReadOnlyList<string> ReadStringArray(IReadOnlyDictionary<string, JsonElement> bag, string key)
+    {
+        if (!bag.TryGetValue(key, out var v) || v.ValueKind != JsonValueKind.Array) return Array.Empty<string>();
+
+        return v.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString() ?? "").ToList();
+    }
 
     /// <summary>The edit-loop fold: operator feedback is appended to the goal as an explicit revision instruction (mirrors how the critic's critique folds into the planner prompt).</summary>
     internal static string ComposeTaskText(string goal, string feedback) =>

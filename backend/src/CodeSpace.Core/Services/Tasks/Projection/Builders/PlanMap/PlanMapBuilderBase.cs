@@ -109,7 +109,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         return JsonSerializer.SerializeToElement(config);
     }
 
-    /// <summary>The plan.author Inputs — the seed goal (+ the launch grounding when present, so a continue's prior-turn digest steers the plan).</summary>
+    /// <summary>The plan.author Inputs — the seed goal (+ the launch grounding when present, so a continue's prior-turn digest steers the plan; + the operator's acceptance criteria, so the plan and its per-item contracts target the definition of done — S5b).</summary>
     private static JsonElement PlannerInputs(TaskBuildContext context)
     {
         var inputs = new Dictionary<string, object?>
@@ -118,6 +118,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         };
 
         AddIfPresent(inputs, "grounding", NullIfBlank(context.GroundingContext));
+        AddIfPresent(inputs, "criteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
 
         return JsonSerializer.SerializeToElement(inputs);
     }
