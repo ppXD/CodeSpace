@@ -8,13 +8,16 @@ import { AgentToolCalls } from "./AgentToolCalls";
 const state = vi.hoisted(() => ({
   run: { status: "Succeeded" as string },
   toolCalls: [] as ToolCallView[],
+  events: [] as { sequence: number; kind: string; text: string; data: string | null; occurredAt: string }[],
   isLoading: false,
+  eventsLoading: false,
   identities: new Map<string, TeamMemberSummary>(),
 }));
 
 vi.mock("@/hooks/use-agents", () => ({
   useAgentRun: () => ({ data: state.run }),
   useToolCalls: () => ({ data: state.toolCalls, isLoading: state.isLoading }),
+  useAgentRunEvents: () => ({ data: state.events, isLoading: state.eventsLoading }),
 }));
 
 vi.mock("@/hooks/use-team-members", () => ({
@@ -83,22 +86,48 @@ describe("AgentToolCalls", () => {
     expect(screen.getByText(/403 Forbidden: insufficient scope/)).toBeInTheDocument();
   });
 
-  it("shows the empty state when there are no governed tool calls", () => {
+  it("falls back to the agent's actual tool calls when the governed ledger is empty", () => {
+    // A Codex / Claude-Code run uses its own harness tools — the governed ledger is empty, but the event stream
+    // carries the real ToolCall events. The tab shows those (name + a compact arg preview) rather than "none".
     state.run = { status: "Succeeded" };
     state.isLoading = false;
+    state.eventsLoading = false;
     state.identities = new Map();
     state.toolCalls = [];
+    state.events = [
+      { sequence: 1, kind: "ToolCall", text: "WebSearch", data: '{"id":"c1","name":"WebSearch","query":"ai coding agents"}', occurredAt: "2026-06-11T11:15:00Z" },
+      { sequence: 2, kind: "Reasoning", text: "thinking", data: null, occurredAt: "2026-06-11T11:15:01Z" },
+      { sequence: 3, kind: "ToolCall", text: "Read", data: '{"id":"c2","name":"Read","path":"src/app.ts"}', occurredAt: "2026-06-11T11:15:02Z" },
+    ];
 
     render(<AgentToolCalls agentRunId="r1" />);
 
-    expect(screen.getByText("No governed tool calls for this run")).toBeInTheDocument();
+    expect(screen.getByText("WebSearch")).toBeInTheDocument();
+    expect(screen.getByText("Read")).toBeInTheDocument();
+    expect(screen.queryByText("thinking")).toBeNull();   // a non-tool event is excluded
+    expect(screen.getByText(/"query":"ai coding agents"/)).toBeInTheDocument();   // the arg preview, minus id/name
+  });
+
+  it("shows the empty state when there are no tool calls at all", () => {
+    state.run = { status: "Succeeded" };
+    state.isLoading = false;
+    state.eventsLoading = false;
+    state.identities = new Map();
+    state.toolCalls = [];
+    state.events = [];
+
+    render(<AgentToolCalls agentRunId="r1" />);
+
+    expect(screen.getByText("No tool calls for this run")).toBeInTheDocument();
   });
 
   it("renders nothing while the audit is still loading (the timeline already carries the live state)", () => {
     state.run = { status: "Running" };
     state.isLoading = true;
+    state.eventsLoading = false;
     state.identities = new Map();
     state.toolCalls = [];
+    state.events = [];
 
     const { container } = render(<AgentToolCalls agentRunId="r1" />);
 

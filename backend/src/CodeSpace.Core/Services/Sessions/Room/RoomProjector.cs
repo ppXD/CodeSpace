@@ -225,11 +225,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Take(MaxReasoningSteps)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // The per-kind tool histogram (read · edit · test) — one GROUP BY scoped to the turn's agents, side-effecting
-        // rows only (DecisionEnvelopeJson == null), matching the ToolCount semantics. No N+1.
-        var toolHistogram = agentIds.Count == 0 ? new List<ToolKindCount>() : (await _db.ToolCallLedger.AsNoTracking()
-            .Where(t => agentIds.Contains(t.AgentRunId) && t.TeamId == teamId && t.DecisionEnvelopeJson == null)
-            .GroupBy(t => t.ToolKind)
+        // The per-kind tool histogram (WebSearch · read · edit · …) — one GROUP BY over the turn's agents' actual tool
+        // calls (the ToolCall event log's tool name), matching the ToolCount semantics (both now off the harness-native
+        // events, not the governed ledger). No N+1.
+        var toolHistogram = agentIds.Count == 0 ? new List<ToolKindCount>() : (await _db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.ToolCall && e.Text != null && e.Text != "")
+            .GroupBy(e => e.Text!)
             .Select(g => new { Kind = g.Key, Count = g.Count() })
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .Select(x => new ToolKindCount(x.Kind, x.Count))

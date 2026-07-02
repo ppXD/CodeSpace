@@ -46,14 +46,21 @@ public sealed class AgentMetricsReader : IScopedDependency
         return rows.ToDictionary(r => r.Id, r => Build(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson, toolCounts.GetValueOrDefault(r.Id), now));
     }
 
-    /// <summary>How many SIDE-EFFECTING tool calls each agent made — its <c>tool_call_ledger</c> rows team-scoped, EXCLUDING the <c>decision.request</c> HITL envelopes. An agent with no rows is absent → 0 downstream. The ONE place both phase sources (node + supervisor) count tool calls, so the figure can't diverge.</summary>
+    /// <summary>
+    /// How many tool calls each agent ACTUALLY made — its harness-native tool invocations (Read / Edit / Bash / WebSearch
+    /// …) off the append-only <c>agent_run_event</c> log (<see cref="AgentEventKind.ToolCall"/>), NOT the governed
+    /// <c>tool_call_ledger</c> (which is empty unless a run routed side-effecting calls through the MCP governance fabric —
+    /// so a plain Codex / Claude-Code run that used its own tools would otherwise read a misleading "0 tools"). The passed
+    /// ids are already team-scoped by the caller (same trust the reasoning-count query relies on), so the log is keyed by
+    /// agent run id. An agent with no tool events is absent → 0 downstream. The ONE place both phase sources count tools.
+    /// </summary>
     public static async Task<IReadOnlyDictionary<Guid, int>> ToolCountsByAgentAsync(CodeSpaceDbContext db, Guid teamId, IReadOnlyList<Guid> agentRunIds, CancellationToken cancellationToken)
     {
         if (agentRunIds.Count == 0) return EmptyCounts;
 
-        return await db.ToolCallLedger.AsNoTracking()
-            .Where(t => t.TeamId == teamId && agentRunIds.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
-            .GroupBy(t => t.AgentRunId)
+        return await db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentRunIds.Contains(e.AgentRunId) && e.Kind == AgentEventKind.ToolCall)
+            .GroupBy(e => e.AgentRunId)
             .Select(g => new { AgentRunId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
     }
