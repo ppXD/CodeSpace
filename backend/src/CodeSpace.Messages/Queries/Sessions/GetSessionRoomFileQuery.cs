@@ -14,4 +14,7 @@ public sealed record GetSessionRoomFileQuery : IQuery<RoomFilePreview?>, IRequir
     public Guid RunId { get; init; }
 
     public string Path { get; init; } = "";
+
+    /// <summary>Optional: scope the preview to ONE specific agent's version of the file (per-agent attribution — open an agent, preview ITS file). Absent ⇒ the turn-wide newest-accepted-writer version.</summary>
+    public Guid? AgentRunId { get; init; }
 }

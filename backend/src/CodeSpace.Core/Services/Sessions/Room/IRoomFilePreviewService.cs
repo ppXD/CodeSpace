@@ -10,5 +10,5 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public interface IRoomFilePreviewService
 {
-    Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, CancellationToken cancellationToken);
+    Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId, CancellationToken cancellationToken);
 }

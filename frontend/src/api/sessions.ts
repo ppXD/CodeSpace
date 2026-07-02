@@ -127,6 +127,9 @@ export interface RoomAgentCard {
   tokens?: number | null;
   costUsd?: number | null;
   filesChanged?: number | null;
+  /// This agent's OWN changed-file paths (bounded) — per-agent attribution so the UI shows WHICH agent produced a file
+  /// (open the agent → preview its exact version). Empty for an agent that changed nothing.
+  changedFiles?: string[] | null;
   /// Tool calls the agent made — for the card meta "3 files · 6 tool calls · 41s". Null when unknown.
   toolCount?: number | null;
   /// Wall-clock for the agent — final once terminal, else live elapsed. Null before it starts.
@@ -283,10 +286,12 @@ export const sessionsApi = {
   getSessionRoom: (sessionId: string, focusRunId?: string) =>
     fetchJson<RoomView>(`/api/sessions/${sessionId}/room${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
 
-  /// A generic preview of one file a run's turn produced, keyed by repo-relative path — null when the run is foreign / missing (404).
-  getRoomFile: async (runId: string, path: string): Promise<RoomFilePreview | null> => {
+  /// A generic preview of one file a run's turn produced, keyed by repo-relative path. Pass `agentRunId` to scope to one
+  /// agent's version (per-agent attribution). Null when the run is foreign / missing (404).
+  getRoomFile: async (runId: string, path: string, agentRunId?: string): Promise<RoomFilePreview | null> => {
     try {
-      return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}`);
+      const scope = agentRunId ? `&agentRunId=${encodeURIComponent(agentRunId)}` : "";
+      return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}${scope}`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

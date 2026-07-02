@@ -38,6 +38,9 @@ public sealed record RoomTurnFacts
     /// <summary>Each spawned agent's one-line result summary, keyed by its run id — the agent cards' takeaway and the lead fallback when there's no stop summary. Empty when none produced one.</summary>
     public IReadOnlyDictionary<Guid, string> AgentSummaries { get; init; } = new Dictionary<Guid, string>();
 
+    /// <summary>Each agent's OWN changed-file paths, keyed by its run id (bounded per agent) — the per-agent file attribution the card renders, so a reader sees WHICH agent produced a file rather than the provenance-blind turn-level union. Empty for an agent that changed nothing.</summary>
+    public IReadOnlyDictionary<Guid, IReadOnlyList<string>> AgentFiles { get; init; } = new Dictionary<Guid, IReadOnlyList<string>>();
+
     /// <summary>How many reasoning entries the turn produced — the "Reasoning" row's count.</summary>
     public int ReasoningCount { get; init; }
 
