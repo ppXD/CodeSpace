@@ -15,11 +15,13 @@ import type {
   RoomAction,
   RoomAgentCard,
   RoomBlock,
+  RoomFilePreview,
   RoomView,
   StatBlock,
   StatItem,
 } from "@/api/sessions";
 import { sessionsApi } from "@/api/sessions";
+import { useQuery } from "@tanstack/react-query";
 import type { PendingDecision, PhaseAgentRef, WorkflowRunStatus } from "@/api/workflows";
 import { AgentTerminal } from "@/components/workflows/AgentTerminal";
 import { DecisionCard } from "@/components/workflows/DecisionCard";
@@ -34,7 +36,7 @@ import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
   | { kind: "agent"; agent: RoomAgentCard }
-  | { kind: "file"; label: string; url?: string | null; downloadUrl?: string | null };
+  | { kind: "file"; runId: string; path: string };
 
 /** Open the unified preview drawer. Any row (an agent card, a changed file) calls this to preview on the right. */
 const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
@@ -149,7 +151,7 @@ function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => 
       <aside className="room-drawer">
         <div className="room-drawer-head">
           <span className="room-drawer-ic"><Sym n={target.kind === "agent" ? "cpu" : "file"} s={15} /></span>
-          <span className="room-drawer-title" title={target.kind === "agent" ? target.agent.label : target.label}>{target.kind === "agent" ? target.agent.label : target.label}</span>
+          <span className="room-drawer-title" title={target.kind === "agent" ? target.agent.label : target.path}>{target.kind === "agent" ? target.agent.label : baseName(target.path)}</span>
           <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
         </div>
         <div className="room-drawer-body">
@@ -162,21 +164,79 @@ function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => 
   );
 }
 
-/** A file preview in the drawer — the path + open/download affordances. Inline content arrives once the file-content endpoint lands. */
+/** A file preview in the drawer — fetches the backend-resolved preview and renders by kind: full content, a diff, or a notice; a download button serves the shown text. */
 function FilePreview({ target }: { target: Extract<DrawerTarget, { kind: "file" }> }) {
+  const q = useQuery({
+    queryKey: ["roomFile", target.runId, target.path],
+    queryFn: () => sessionsApi.getRoomFile(target.runId, target.path),
+    staleTime: 60_000,
+  });
+
+  if (q.isLoading) return <div className="room-fprev"><div className="room-fprev-empty"><span className="room-fprev-spin" /> <p className="room-fprev-note">Loading preview…</p></div></div>;
+
+  const file = q.data;
+  if (!file) return <FilePreviewNotice icon="alert" title={baseName(target.path)} note={q.isError ? "Couldn't load this file." : "This file isn't part of the turn's change set."} />;
+
+  if (file.kind === "binary" || file.kind === "unavailable")
+    return <FilePreviewNotice icon={file.kind === "binary" ? "file" : "alert"} title={baseName(file.path)} note={file.note ?? "Preview isn't available for this file."} sourceUrl={file.sourceUrl} />;
+
+  const download = () => downloadText(baseName(file.path) + (file.kind === "diff" ? ".diff" : ""), file.text ?? "");
+
   return (
     <div className="room-fprev">
-      <div className="room-fprev-empty">
-        <Sym n="file" s={26} />
-        <div className="room-fprev-name">{target.label}</div>
-        <p className="room-fprev-note">Inline content preview is on the way — for now, open the change in the pull request or download the file.</p>
+      <div className="room-fprev-meta">
+        {file.changeKind && <span className="room-fprev-tag">{file.changeKind}</span>}
+        <span className="room-fprev-path">{file.path}</span>
+        {file.truncated && <span className="room-fprev-trunc">truncated</span>}
       </div>
+      <pre className={`room-fprev-body room-fprev-${file.kind}`}>{renderBody(file)}</pre>
       <div className="room-fprev-foot">
-        {target.url && <a className="room-btn" href={target.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a>}
-        {target.downloadUrl && <a className="room-btn" href={target.downloadUrl}><Sym n="download" s={13} /> Download</a>}
+        <button className="room-btn" onClick={download}><Sym n="download" s={13} /> Download</button>
+        {file.sourceUrl && <a className="room-btn" href={file.sourceUrl} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a>}
       </div>
     </div>
   );
+}
+
+/** A file body: a diff colourises its +/- lines; plain text renders verbatim. */
+function renderBody(file: RoomFilePreview): ReactNode {
+  const text = file.text ?? "";
+  if (file.kind !== "diff") return text;
+
+  return text.split("\n").map((line, i) => {
+    const tone = line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : line.startsWith("@@") ? "hunk" : "ctx";
+    return <span key={i} className={`room-diffline room-diffline-${tone}`}>{line || " "}{"\n"}</span>;
+  });
+}
+
+/** The degraded / notice state of the file drawer — a centered message with an optional PR link. */
+function FilePreviewNotice({ icon, title, note, sourceUrl }: { icon: SymName; title: string; note: string; sourceUrl?: string | null }) {
+  return (
+    <div className="room-fprev">
+      <div className="room-fprev-empty">
+        <Sym n={icon} s={26} />
+        <div className="room-fprev-name">{title}</div>
+        <p className="room-fprev-note">{note}</p>
+      </div>
+      {sourceUrl && <div className="room-fprev-foot"><a className="room-btn" href={sourceUrl} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a></div>}
+    </div>
+  );
+}
+
+/** Trigger a client-side download of in-memory text (the drawer serves the preview body, no extra round-trip). */
+function downloadText(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** The last path segment — the drawer title + download filename. */
+function baseName(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
 }
 
 /** A top-level block: the user's message bubble, an assistant turn, or a forward-compat fallback. */
@@ -315,6 +375,7 @@ function SupervisorStep({ step }: { step: NarrativeStepBlock }) {
 /** The rich final answer — the closing text, then attachments grouped by kind: inline images, file links (preview / download), and the PR. */
 function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
   const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
   const atts = answer.attachments ?? [];
   const images = atts.filter((a) => a.kind === "Image");
   const files = atts.filter((a) => a.kind === "FileLink");
@@ -332,7 +393,7 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
       {files.length > 0 && (
         <div className="room-final-files">
           {files.map((a, i) => (
-            <button className="room-final-file" key={i} onClick={() => openDrawer({ kind: "file", label: a.label, url: a.url, downloadUrl: a.downloadUrl })}>
+            <button className="room-final-file" key={i} disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: a.label })}>
               <Sym n="file" s={13} cls="room-final-file-ic" />
               <span className="room-final-file-name">{a.label}</span>
               <Sym n="chevron-right" s={12} cls="room-final-file-caret" />
@@ -436,8 +497,9 @@ function StatRow({ stat }: { stat: StatBlock }) {
 /** One changed-file row in the Files-changed panel — path + per-file +/− (color-split), degrading when absent. */
 function FileRow({ item }: { item: StatItem }) {
   const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
   return (
-    <button className="room-file" onClick={() => openDrawer({ kind: "file", label: item.text })}>
+    <button className="room-file" disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: item.text })}>
       <span className="room-file-path">{item.text}</span>
       {item.detail && <span className="room-file-stat"><DiffStat text={item.detail} /></span>}
       <Sym n="chevron-right" s={11} cls="room-file-caret" />

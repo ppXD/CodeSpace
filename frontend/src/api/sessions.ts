@@ -230,6 +230,20 @@ export type RoomBlock =
   | FinalAnswerBlock
   | LiveActivityBlock;
 
+/// A generic preview of one file a turn produced — resolved backend-side from the producing agent's captured diff.
+/// The frontend renders by `kind`: `text` (full content), `diff` (unified-diff section), `binary` / `unavailable`
+/// (a notice + optional source link). Mirrors backend `RoomFilePreview`.
+export interface RoomFilePreview {
+  path: string;
+  kind: "text" | "diff" | "binary" | "unavailable";
+  changeKind?: string | null;
+  text?: string | null;
+  sizeBytes?: number | null;
+  truncated: boolean;
+  sourceUrl?: string | null;
+  note?: string | null;
+}
+
 /// One session as a backend-authored transcript. Mirrors backend `RoomView`.
 export interface RoomView {
   sessionId: string;
@@ -268,6 +282,16 @@ export const sessionsApi = {
   /// The Session Room for a session, focused on `focusRunId`'s turn when given (else the latest turn).
   getSessionRoom: (sessionId: string, focusRunId?: string) =>
     fetchJson<RoomView>(`/api/sessions/${sessionId}/room${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
+
+  /// A generic preview of one file a run's turn produced, keyed by repo-relative path — null when the run is foreign / missing (404).
+  getRoomFile: async (runId: string, path: string): Promise<RoomFilePreview | null> => {
+    try {
+      return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
 
   /// The thread a run belongs to, anchored at that run's turn — null when the run has no session (404). For the
   /// run-detail → session entry: any run (a turn or a rerun attempt) resolves to the same thread.
