@@ -155,4 +155,20 @@ public class WorkPlanChecklistTests
 
         json.ShouldBe("""{"id":"q1","question":"Which direction?","options":[{"id":"a","label":"Fast"},{"id":"b","label":"Thorough"}],"allowFreeText":false}""");
     }
+
+    // ── S5: the map#i branch-index parse the plan-map checklist join rides ──
+
+    [Theory]
+    [InlineData("map#0", true, 0)]
+    [InlineData("map#7", true, 7)]
+    [InlineData("map#-1", false, 0)]                 // a negative ordinal is nonsense
+    [InlineData("outer#0/map#1", false, 0)]          // a NESTED branch key must not join top-level items
+    [InlineData("fanout#2", false, 0)]               // a differently-id'd map stays honestly Pending
+    [InlineData("", false, 0)]
+    public void Branch_index_parses_only_top_level_map_keys(string key, bool ok, int expected)
+    {
+        CodeSpace.Core.Services.Plans.WorkPlanChecklistService.TryParseBranchIndex(key, out var index).ShouldBe(ok);
+
+        if (ok) index.ShouldBe(expected);
+    }
 }

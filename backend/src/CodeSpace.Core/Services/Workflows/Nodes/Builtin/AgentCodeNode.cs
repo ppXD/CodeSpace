@@ -160,6 +160,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode);
 
+        if (!TryReadAcceptance(context.Config, out var acceptance, out var acceptanceError)) return Fail(acceptanceError!);
+
         var task = new AgentTask
         {
             Goal = goal,
@@ -179,14 +181,18 @@ public sealed class AgentCodeNode : INodeRuntime
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
-            PushProducedBranch = ResolvePushBranch(context.Config, mode),
+            PushProducedBranch = acceptance != null ? true : ResolvePushBranch(context.Config, mode),
             EnableMcpEndpoint = ReadOptionalBool(context.Config, "enableMcp"),
             // The output-review mode + its reviewer model — the executor runs an independent critic over the produced
             // change at completion. Absent ⇒ None ⇒ no review ⇒ byte-identical. Read as the enum int (the schema offers
             // 0=None / 1=Gate; v1 supports Gate only).
             OutputReviewMode = ReadInt(context.Config, "outputReviewMode") is { } rm ? (ReviewMode)rm : ReviewMode.None,
             ReviewerModelId = ReadOptionalGuid(context.Config, "reviewerModelId"),
-            Acceptance = ReadAcceptance(context.Config),
+            // F4 (S5 review): a contract implies a GRADABLE branch — force the publish opt-in ON whenever an
+            // acceptance is bound (the resolve verb's forcePushBranch precedent; the pushBranch key is an OR-gate,
+            // so this can only widen). Without it, a stock deployment (push flag off) would fail every contract
+            // "no-branch-or-repo" even when the work and the check are both perfect.
+            Acceptance = acceptance,
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
@@ -196,20 +202,42 @@ public sealed class AgentCodeNode : INodeRuntime
         }));
     }
 
-    /// <summary>The task's objective acceptance spec — defensive: a missing key, a JSON null (an item without a contract in a fan-out), a template that resolved to nothing, or a malformed object all read as "no oracle" rather than failing the node.</summary>
-    private static SupervisorAcceptanceSpec? ReadAcceptance(IReadOnlyDictionary<string, JsonElement> config)
+    /// <summary>
+    /// The task's objective acceptance spec. A MISSING key or a JSON null (an item without a contract in a
+    /// fan-out — the {{item.acceptance}} no-contract resolution) reads as "no oracle"; but a PRESENT value that
+    /// is not a valid spec (a non-object, a typo'd command key, garbage kind) FAILS the node — the operator
+    /// authored a contract, and silently dropping it would invert the gate's fail-closed philosophy.
+    /// </summary>
+    private static bool TryReadAcceptance(IReadOnlyDictionary<string, JsonElement> config, out SupervisorAcceptanceSpec? acceptance, out string? error)
     {
-        if (!config.TryGetValue("acceptance", out var v) || v.ValueKind != JsonValueKind.Object) return null;
+        acceptance = null;
+        error = null;
+
+        if (!config.TryGetValue("acceptance", out var v) || v.ValueKind == JsonValueKind.Null || v.ValueKind == JsonValueKind.Undefined) return true;
+
+        if (v.ValueKind != JsonValueKind.Object)
+        {
+            error = "Config 'acceptance' must be an object: { command: [argv...], kind?, description? }.";
+            return false;
+        }
 
         try
         {
             var spec = v.Deserialize<SupervisorAcceptanceSpec>(AgentJson.Options);
 
-            return spec is { Command.Count: > 0 } && spec.Command.Any(c => !string.IsNullOrWhiteSpace(c)) ? spec : null;
+            if (spec is not { Command.Count: > 0 } || spec.Command.All(string.IsNullOrWhiteSpace))
+            {
+                error = "Config 'acceptance' needs a non-empty 'command' argv (e.g. [\"sh\", \"check.sh\"]).";
+                return false;
+            }
+
+            acceptance = spec;
+            return true;
         }
         catch (JsonException)
         {
-            return null;
+            error = "Config 'acceptance' is not a valid spec: { command: [argv...], kind?: TestsPass|ArtifactPresent, description? }.";
+            return false;
         }
     }
 

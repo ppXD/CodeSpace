@@ -388,6 +388,24 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// reconciler can't decrypt the run's secret to redact it, so it persists only the exit code; the redacted
     /// events the live observer streamed before it died are already in the log.
     /// </summary>
+    /// <summary>The run's frozen task envelope (for the S5 contract check) — null on a missing / unparseable payload (fail-open here would be wrong, but an unparseable task also cannot have been graded on the happy path; log-and-null keeps recovery alive).</summary>
+    private async Task<AgentTask?> ReadTaskAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var taskJson = await _db.AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.TaskJson).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrEmpty(taskJson)) return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "AgentRunReconciler: agent run {RunId} has an unparseable TaskJson — skipping the acceptance-contract check", runId);
+            return null;
+        }
+    }
+
     private async Task<StaleOutcome> RecoverFromSpoolAsync(Guid runId, int exitCode, CancellationToken cancellationToken)
     {
         var result = new AgentRunResult { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}." };
@@ -399,6 +417,17 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         {
             var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
             result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+        }
+
+        // Acceptance contract (S5): the same every-terminal-path mirror — a contract-bearing task recovered from the
+        // spool has no published branch to grade (the workspace died with the worker), so it fails CLOSED rather than
+        // landing Succeeded ungraded because the backend restarted at the right moment. A1 above still wins (a
+        // NeedsDecision re-grade is no longer a would-be Succeeded).
+        if (result.Status == AgentRunStatus.Succeeded && await ReadTaskAsync(runId, cancellationToken).ConfigureAwait(false) is { } spoolTask && AgentAcceptanceContract.RequiresGrade(spoolTask))
+        {
+            _logger.LogWarning("AgentRunReconciler: agent run {RunId} carries an acceptance contract but was recovered from the spool with no gradable branch — failing closed", runId);
+
+            result = AgentAcceptanceContract.FailClosed(result, "no-branch-or-repo (recovered from spool — the branch never published)");
         }
 
         var status = result.Status;

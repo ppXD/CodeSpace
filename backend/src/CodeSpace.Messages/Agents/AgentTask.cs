@@ -190,6 +190,7 @@ public sealed record AgentTask
     /// quick-tier checks floor. Null ⇒ no oracle (byte-identical). Supervisor-dispatched units deliberately do
     /// NOT carry it — their per-unit gate grades at the fold (one grade, not two).
     /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 
     /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>

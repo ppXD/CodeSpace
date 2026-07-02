@@ -7,7 +7,6 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Supervisor;
-using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -18,6 +17,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
@@ -354,6 +354,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var result = await ReattachAndFoldAsync(agentRunId, durable, handle, task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
 
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
+
+            // S5: the acceptance invariant holds on THIS terminal path too — a contract-bearing run that completed
+            // across a worker restart has no published branch to grade (see the no-push note above), so it fails
+            // CLOSED rather than landing Succeeded ungraded because a crash happened at the right moment.
+            result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -840,10 +845,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
     {
-        if (task.Acceptance is not { } spec || spec.Command.All(string.IsNullOrWhiteSpace)) return result;
+        if (!AgentAcceptanceContract.RequiresGrade(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (result.RepositoryResults.Count > 0) return result;   // multi-repo → deferred, exactly like the supervisor's unit gate
 
+        // A1 always takes precedence (the same defer the output critic honours): a run that left a decision.request
+        // unanswered re-grades to NeedsReview(NeedsDecision) WITH the decision linkage at the completion choke point
+        // — flunking it here first would strand the decision unlinked and skip the retry-resume loop. The answered,
+        // resumed attempt gets graded at ITS completion.
+        using (var ledgerScope = _scopeFactory.CreateScope())
+        {
+            var ledger = ledgerScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
+            if (await ledger.FindBlockingDecisionIdAsync(run.Id, cancellationToken).ConfigureAwait(false) is not null) return result;
+        }
+
+        var spec = task.Acceptance!;
         var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
 
         if (string.IsNullOrEmpty(result.ProducedBranch) || task.RepositoryId is not { } repositoryId)
@@ -879,16 +895,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return AcceptanceFailed(result, grade.Detail);
     }
 
-    /// <summary>The fail-closed re-grade: the work is preserved, the STATUS tells the truth — the contract was not met.</summary>
-    private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => result with
-    {
-        Status = AgentRunStatus.Failed,
-        CompletionDisposition = CompletionDisposition.Completed,
-        ExitReason = "acceptance-failed",
-        Error = $"The acceptance check did not pass: {detail}",
-        AcceptancePassed = false,
-        AcceptanceDetail = detail,
-    };
+    private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => AgentAcceptanceContract.FailClosed(result, detail);
 
     /// <summary>
     /// v1 GATE: review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical

@@ -88,8 +88,10 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
     /// <summary>
     /// The PLAN-MAP tiers' execution linkage (S5): the fan-out stages one agent run per plan item under the map
     /// branch iteration key <c>map#i</c>, and the map fans out the plan's items IN ORDER — so <c>map#i ↔ items[i]</c>
-    /// is the same positional contract the supervisor fold rides. The latest run per branch index (a branch
-    /// rerun supersedes) carries the live status + the S5 oracle verdict off its folded result. Runs whose
+    /// is the same positional contract the supervisor fold rides. The latest run per branch index carries the
+    /// live status + the S5 oracle verdict off its folded result (latest-wins covers SAME-RUN re-stagings — an
+    /// at-least-once re-execution or retry policy; a map-branch RERUN mints a NEW lineage run whose rows carry
+    /// the new run id, so it surfaces on that run's own view, not here). Runs whose
     /// iteration key is not a map branch (a single-agent graph, a nested shape) contribute nothing — those
     /// items stay honestly Pending.
     /// </summary>
@@ -120,8 +122,12 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
     }
 
     /// <summary>The branch ordinal out of a <c>map#i</c> iteration key (top-level fan-outs only — a combined/nested key does not parse and is skipped).</summary>
-    private static bool TryParseBranchIndex(string iterationKey, out int index) =>
-        int.TryParse(iterationKey.AsSpan("map#".Length), out index) && index >= 0;
+    internal static bool TryParseBranchIndex(string iterationKey, out int index)
+    {
+        index = 0;
+
+        return iterationKey.StartsWith("map#", StringComparison.Ordinal) && int.TryParse(iterationKey.AsSpan("map#".Length), out index) && index >= 0;
+    }
 
     /// <summary>The S5 oracle verdict off the run's folded result — null/null when the task carried no contract (or the run has no result yet).</summary>
     private static (bool? Passed, string? Detail) ReadAcceptanceVerdict(string? resultJson)

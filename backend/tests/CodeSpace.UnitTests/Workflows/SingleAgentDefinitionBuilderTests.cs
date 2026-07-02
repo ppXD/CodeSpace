@@ -271,4 +271,23 @@ public class SingleAgentDefinitionBuilderTests
     private static JsonElement AgentConfigOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "agent").Config;
     private static JsonElement AgentInputsOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "agent").Inputs;
     private static JsonElement TerminalInputsOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "done").Inputs;
+
+    // ── S5: the quick tier's operator checks floor becomes the single agent's contract ──
+
+    [Fact]
+    public void The_operator_checks_floor_bakes_as_the_agents_acceptance_with_blanks_dropped()
+    {
+        var def = Builder.Build(Context(Seed(), profile: null) with { AcceptanceChecks = new[] { "sh", " ", "check.sh" } });
+
+        var acceptance = def.Nodes.Single(n => n.TypeKey == "agent.code").Config.GetProperty("acceptance");
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
+        acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass");
+    }
+
+    [Fact]
+    public void No_checks_floor_omits_the_acceptance_key_byte_identically()
+    {
+        Builder.Build(Context(Seed(), profile: null)).Nodes.Single(n => n.TypeKey == "agent.code").Config.TryGetProperty("acceptance", out _)
+            .ShouldBeFalse("no floor ⇒ no oracle ⇒ byte-identical");
+    }
 }

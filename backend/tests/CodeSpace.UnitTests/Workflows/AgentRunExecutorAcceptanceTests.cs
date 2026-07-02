@@ -1,5 +1,8 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -23,7 +26,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(acceptance: null), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(acceptance: null), Succeeded(), CancellationToken.None);
 
         result.AcceptancePassed.ShouldBeNull();
         grader.Calls.ShouldBe(0, "no contract ⇒ the grader is never invoked");
@@ -34,7 +37,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec(" ", "")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec(" ", "")), Succeeded(), CancellationToken.None);
 
         result.AcceptancePassed.ShouldBeNull();
         grader.Calls.ShouldBe(0);
@@ -46,7 +49,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var failed = Succeeded() with { Status = AgentRunStatus.Failed };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), failed, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), failed, CancellationToken.None);
 
         result.ShouldBe(failed, "a failed run is already the truth — nothing to gate");
         grader.Calls.ShouldBe(0);
@@ -58,7 +61,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var multi = Succeeded() with { RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "other" } } };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), multi, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
 
         result.AcceptancePassed.ShouldBeNull("per-repo grading is a follow-on — deferred, never a blind primary-only grade");
         grader.Calls.ShouldBe(0);
@@ -70,7 +73,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var noBranch = Succeeded() with { ProducedBranch = null };
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), noBranch, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), noBranch, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -84,7 +87,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.AcceptancePassed.ShouldBe(true);
@@ -99,7 +102,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "exit 1" });
 
         var succeeded = Succeeded();
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), succeeded, CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), succeeded, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed, "an objective oracle failing means the contract was NOT met — Failed is the truth");
         result.ExitReason.ShouldBe("acceptance-failed");
@@ -115,7 +118,7 @@ public class AgentRunExecutorAcceptanceTests
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
         grader.Throw = new InvalidOperationException("clone exploded");
 
-        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptanceDetail.ShouldStartWith("grade-error:");
@@ -126,7 +129,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
-        await executor.GradeAcceptanceIfPresentAsync(Run(), Task(Spec("sh", " ", "check.sh", "")), Succeeded(), CancellationToken.None);
+        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", " ", "check.sh", "")), Succeeded(), CancellationToken.None);
 
         grader.LastCommand.ShouldBe(new[] { "sh", "check.sh" });
     }
@@ -135,7 +138,7 @@ public class AgentRunExecutorAcceptanceTests
 
     private static AgentRun Run() => new() { Id = Guid.NewGuid(), TeamId = Guid.NewGuid() };
 
-    private static AgentTask Task(SupervisorAcceptanceSpec? acceptance) =>
+    private static AgentTask TaskWith(SupervisorAcceptanceSpec? acceptance) =>
         new() { Goal = "g", Harness = "codex-cli", RepositoryId = Guid.NewGuid(), Acceptance = acceptance };
 
     private static SupervisorAcceptanceSpec Spec(params string[] command) => new() { Command = command };
@@ -180,7 +183,30 @@ public class AgentRunExecutorAcceptanceTests
 
         public IServiceScope CreateScope() => this;
         public IServiceProvider ServiceProvider => this;
-        public object? GetService(Type serviceType) => serviceType == typeof(ISupervisorAcceptanceGrader) ? _grader : null;
+        public object? GetService(Type serviceType) =>
+            serviceType == typeof(ISupervisorAcceptanceGrader) ? _grader
+            : serviceType == typeof(CodeSpace.Core.Services.Agents.Mcp.IToolCallLedgerService) ? new NoBlockingLedger()
+            : null;
         public void Dispose() { }
+    }
+
+    /// <summary>No blocking decision — the gate's A1 defer falls through to the grade (mirrors the output-review test's ledger fake).</summary>
+    private sealed class NoBlockingLedger : IToolCallLedgerService
+    {
+        public Task<Guid?> FindBlockingDecisionIdAsync(Guid agentRunId, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+
+        public Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> CountPendingDecisionsAsync(Guid agentRunId, Guid teamId, string excludeIdempotencyKey, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 }
