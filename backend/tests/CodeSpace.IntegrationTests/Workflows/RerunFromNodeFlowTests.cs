@@ -763,6 +763,58 @@ public class RerunFromNodeFlowTests
     }
 
     [Fact]
+    public async Task Rerun_from_a_sleep_node_re_arms_a_fresh_timer_on_the_fork_then_completes()
+    {
+        // D3 made flow.sleep an ADMITTED from-node root — the last CanSuspend node whose re-execution is a clean
+        // re-stage (its "external run" is just the engine's OWN self-woken Timer, keyed to the run id). start →
+        // sleep(60s) → end. The original suspends on the timer, resumes to Success. Rerun FROM "sleep": the fork
+        // RE-EXECUTES the sleep, parking a FRESH Timer wait keyed to the FORK's run id (a fresh wait row) while the
+        // original's resolved wait is untouched; resolving the fork's wait drives it to Success. Proves the admission
+        // is real (no 422), the timer is self-contained per-run, and the original is immutable.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SleepThenEndDef(seconds: 60));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(originalRunId);                       // original parks on the sleep timer
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended, "the original parks on the sleep timer");
+        (await ResolvePendingWaitAsync(originalRunId)).ShouldBeTrue("resolving the original's timer wait succeeds");
+        await RunEngineAsync(originalRunId);                       // original resumes → Success
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success, "the original completes so it is rerunnable");
+
+        var rerunId = await RerunAsync(originalRunId, "sleep", teamId, userId);   // flow.sleep admitted as a from-node root
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended, "the fork re-executes the sleep and parks on a FRESH timer");
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+
+            var forkWait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == rerunId);
+            forkWait.NodeId.ShouldBe("sleep");
+            forkWait.WaitKind.ShouldBe(WorkflowWaitKinds.Timer, "the re-staged wait is a fresh self-woken Timer, not an external-signal wait");
+            forkWait.Status.ShouldBe(WorkflowWaitStatuses.Pending);
+            forkWait.RunId.ShouldBe(rerunId, "the fresh timer is keyed to the FORK's run id — self-contained, no external re-issue");
+
+            var fork = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == rerunId);
+            fork.ParentRunId.ShouldBe(originalRunId, "the rerun fork parents the original (rerun lineage)");
+
+            (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == originalRunId)).Status
+                .ShouldBe(WorkflowWaitStatuses.Resolved, "the original run's timer wait is untouched by the fork");
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == originalRunId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the original run is immutable");
+        }
+
+        (await NodeStartedCountAsync(rerunId, "sleep")).ShouldBe(1, "the sleep node re-ran exactly once on the fork");
+        (await NodeStartedCountAsync(rerunId, "start")).ShouldBe(0, "the upstream trigger was reused, not re-run");
+
+        (await ResolvePendingWaitAsync(rerunId)).ShouldBeTrue("resolving the fork's fresh timer succeeds");
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "the fork completes after its own timer resolves");
+        (await NodeStartedCountAsync(rerunId, "end")).ShouldBe(1, "the previously-blocked terminal re-ran on the fork");
+    }
+
+    [Fact]
     public async Task The_run_detail_RerunnableFromHere_flag_matches_what_the_endpoint_accepts_per_node()
     {
         // P1.1 honest gating: the run-detail RerunnableFromHere flag is computed by the SAME gate the rerun endpoint
@@ -901,6 +953,23 @@ public class RerunFromNodeFlowTests
             new() { From = "start", To = "mutator" },
             new() { From = "mutator", To = "transform" },
             new() { From = "transform", To = "end" },
+        },
+    };
+
+    // start → sleep(seconds) → end. The suspend/resume node whose re-execution is a clean self-woken re-stage (D3).
+    private static WorkflowDefinition SleepThenEndDef(int seconds) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sleep", TypeKey = "flow.sleep", Config = WorkflowsTestSeed.Json($$"""{"seconds":{{seconds}}}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "sleep" },
+            new() { From = "sleep", To = "end" },
         },
     };
 
@@ -1258,6 +1327,15 @@ public class RerunFromNodeFlowTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         run.Status.ShouldBe(expected, $"{because} (run {runId} status; error={run.Error})");
+    }
+
+    /// <summary>Resolve a run's single pending wait via the REAL <see cref="IWorkflowResumeService"/> — the path a scheduled Timer job invokes when the delay elapses.</summary>
+    private async Task<bool> ResolvePendingWaitAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var waitId = (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)).Id;
+        return await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
     }
 
     /// <summary>Resolve the rerun gate's pending Approval wait through the REAL ResumeRunCommand chain (→ ApproveRunAsync), as an operator would.</summary>

@@ -683,10 +683,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>
     /// FAIL-CLOSED rerun-capability gate: a re-run node whose re-execution isn't supported yet is refused —
     /// a SUSPENDABLE node that did NOT opt in (<c>CanSuspend</c> &amp;&amp; !<c>IsRerunnableWhenSuspendable</c> —
-    /// supervisor / flow.wait_* / flow.sleep / chat.post_message with waitForResponse, which would re-stage a
-    /// decision / interactive / timed wait) or a CONTAINER (a Map/Loop/Try, which would re-run its whole body).
-    /// agent.code and flow.subworkflow OPT IN (IsRerunnableWhenSuspendable) and re-stage a fresh agent run / child,
-    /// so they are admitted. A purely SIDE-EFFECTING node (IsSideEffecting but not
+    /// supervisor / flow.wait_* (approval/callback/action, which re-stage a wait that STRANDS because no external party
+    /// re-issues the signal) / decision (re-prompts a human or self-wakes to a stale default — not a faithful re-stage) /
+    /// chat.post_message with waitForResponse) or a CONTAINER (a Map/Loop/Try, which would re-run its whole body).
+    /// agent.code, flow.subworkflow and flow.sleep OPT IN (IsRerunnableWhenSuspendable) and re-stage a fresh agent run /
+    /// child / timer, so they are admitted. A purely SIDE-EFFECTING node (IsSideEffecting but not
     /// CanSuspend) is NOT refused here: the engine approval-gates it at runtime (D7-3); a node that is BOTH
     /// side-effecting and suspendable is refused via the CanSuspend arm (fail-closed wins). A node UPSTREAM
     /// (kept + reused, never re-executed) is always fine; only the re-run closure is scanned.
