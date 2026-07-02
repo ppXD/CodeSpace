@@ -6,9 +6,11 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
+using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Plans;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor.Executors;
@@ -51,9 +53,10 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly ILLMClientRegistry _llm;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
+    private readonly IWorkPlanService _workPlans;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -66,12 +69,13 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _llm = llm;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
+        _workPlans = workPlans;
         _logger = logger;
     }
 
     public Task<SupervisorExecution> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken) => decision.Kind switch
     {
-        SupervisorDecisionKinds.Plan => Task.FromResult(ExecutePlan(decision)),
+        SupervisorDecisionKinds.Plan => ExecutePlanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Spawn => ExecuteSpawnAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Merge => ExecuteMergeAsync(decision, context, cancellationToken),
@@ -81,10 +85,17 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),
     };
 
-    /// <summary>Record the decider's planned subtasks as the decision outcome (the spawn/merge read them back). The decider already produced the plan — the executor does not re-plan. SYNCHRONOUS → self-advance.</summary>
-    private SupervisorExecution ExecutePlan(SupervisorDecision decision)
+    /// <summary>
+    /// Record the decider's planned subtasks as the decision outcome (the spawn/merge read them back) AND
+    /// persist them as the run's next durable <c>work_plan</c> version — the same producer-agnostic artifact
+    /// the <c>plan.author</c> node writes, so the confirmation/checklist surfaces read ONE store. The decider
+    /// already produced the plan — the executor does not re-plan. SYNCHRONOUS → self-advance.
+    /// </summary>
+    private async Task<SupervisorExecution> ExecutePlanAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         var plan = Deserialize<SupervisorPlanPayload>(decision.PayloadJson) ?? new SupervisorPlanPayload();
+
+        await PersistWorkPlanAsync(plan, context, cancellationToken).ConfigureAwait(false);
 
         // L4 arc C: a plan that authored semantic phases records them alongside the subtasks (the scorecard / tasks-phases
         // surface projects them); a flat plan records only planned/count → byte-identical to before.
@@ -95,6 +106,27 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s)", plan.Subtasks.Count, plan.Phases?.Count ?? 0);
 
         return SupervisorExecution.Synchronous(outcome);
+    }
+
+    /// <summary>
+    /// The loop-tier work-plan write. Exactly-once per decision via the per-turn origin key — a crash-replayed
+    /// in-flight plan decision re-executes this and lands on the SAME row (the store returns the existing
+    /// version); a LATER re-plan is a different turn → a new key → the run's next version. A pure-unit context
+    /// (no run/team — nothing to own the row) skips, keeping unit-tier executors DB-free.
+    /// </summary>
+    private async Task PersistWorkPlanAsync(SupervisorPlanPayload plan, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (context.SupervisorRunId == Guid.Empty || context.TeamId == Guid.Empty) return;
+
+        await _workPlans.SaveVersionAsync(new WorkPlanDraft
+        {
+            TeamId = context.TeamId,
+            WorkflowRunId = context.SupervisorRunId,
+            OriginKind = WorkPlanOrigins.Supervisor,
+            OriginKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}",
+            Goal = string.IsNullOrWhiteSpace(plan.Goal) ? context.Goal : plan.Goal,
+            Items = plan.Subtasks.Select(WorkPlanItem.From).ToList(),
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>A terminal stop records its outcome marker; the turn service finishes the loop (this never re-suspends).</summary>

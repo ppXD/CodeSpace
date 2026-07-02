@@ -1,0 +1,175 @@
+using System.Text.Json;
+using Autofac;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Plans;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using Shouldly;
+
+namespace CodeSpace.IntegrationTests.Workflows;
+
+/// <summary>
+/// 🟢 The <c>plan.author</c> node end-to-end through the REAL engine over real Postgres (triad S1): the node
+/// runs the production <c>LlmWorkflowPlanner</c> (real registry + pool resolution by the pinned row id, real
+/// structured call, real <c>PlannerSchema.Options</c> deserialization), persists a durable <c>work_plan</c>
+/// version through the real store, and surfaces planId/items/executionNeeded on its outputs. Faked at the
+/// honest <c>IStructuredLLMClient</c> seam only (<see cref="DeterministicWorkPlanLlmClient"/>).
+/// </summary>
+[Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
+public class PlanAuthorNodeFlowTests : IDisposable
+{
+    private readonly PostgresFixture _fixture;
+
+    public PlanAuthorNodeFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    public void Dispose()
+    {
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<WorkPlanPlanScript>().Reset();   // the knob is fixture-shared — never leak into sibling tests
+    }
+
+    [Fact]
+    public async Task Plan_author_persists_the_contract_carrying_plan_and_binds_its_outputs()
+    {
+        using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: true);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "the plan node authored + persisted and the run completed; if not, inspect the failed WorkflowRunNode rows for this runId");
+
+        // ── The durable artifact: one work_plan version, produced by the node, carrying the FULL contract. ──
+        var plan = await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == runId);
+        plan.TeamId.ShouldBe(teamId);
+        plan.Version.ShouldBe(1);
+        plan.OriginKind.ShouldBe(WorkPlanOrigins.Node);
+        plan.OriginKey.ShouldBeNull("the node path is version-per-execution — no exactly-once key");
+        plan.Goal.ShouldBe(DeterministicWorkPlanLlmClient.PlannedGoal);
+        plan.Status.ShouldBe(WorkPlanStatuses.Authored);
+
+        var items = JsonDocument.Parse(plan.ItemsJson).RootElement;
+        items.GetArrayLength().ShouldBe(2);
+        items[0].GetProperty("id").GetString().ShouldBe("s1");
+        items[1].TryGetProperty("dependsOn", out var deps).ShouldBeTrue(customMessage: $"the persisted items_json was: {plan.ItemsJson}");
+        deps[0].GetString().ShouldBe("s1", "the model-authored DAG edge survives into the persisted item");
+        var acceptance = items[1].GetProperty("acceptance");
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(DeterministicWorkPlanLlmClient.AcceptanceCommand,
+            "the per-item objective acceptance — the sprint-contract half of the plan — survives into the persisted item");
+        acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass", "the enum serializes as its NAME (AgentJson string enums), matching the supervisor tape vocabulary");
+        items[0].TryGetProperty("acceptance", out _).ShouldBeFalse("an uncontracted item omits acceptance entirely — null-omitted, not null-valued");
+
+        // ── The node outputs: planId/version bind the artifact; items mirrors the persisted bytes; executionNeeded=true. ──
+        var node = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan" && n.IterationKey == "");
+        var outputs = JsonDocument.Parse(node.OutputsJson!).RootElement;
+        outputs.GetProperty("planId").GetString().ShouldBe(plan.Id.ToString());
+        outputs.GetProperty("version").GetInt32().ShouldBe(1);
+        outputs.GetProperty("executionNeeded").GetBoolean().ShouldBeTrue();
+        outputs.GetProperty("items").GetArrayLength().ShouldBe(2);
+        outputs.GetProperty("json").GetProperty("subtasks").GetArrayLength().ShouldBe(2, "the raw plan rides 'json' — binding-compatible with a structured llm.complete");
+    }
+
+    [Fact]
+    public async Task A_second_plan_author_execution_appends_the_runs_next_version()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: false);   // plan → plan2 → end
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var plans = await db.WorkPlan.AsNoTracking().Where(p => p.WorkflowRunId == runId).OrderBy(p => p.Version).ToListAsync();
+        plans.Count.ShouldBe(2, "each plan.author execution persists the run's NEXT version — the edit-loop contract");
+        plans.Select(p => p.Version).ShouldBe(new[] { 1, 2 });
+        plans[0].Id.ShouldNotBe(plans[1].Id);
+
+        var second = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan2" && n.IterationKey == "");
+        JsonDocument.Parse(second.OutputsJson!).RootElement.GetProperty("version").GetInt32().ShouldBe(2, "the second node's outputs carry ITS version");
+    }
+
+    [Fact]
+    public async Task Has_enough_context_surfaces_execution_not_needed()
+    {
+        using (var s = _fixture.BeginScope()) s.Resolve<WorkPlanPlanScript>().HasEnoughContext = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: true);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var node = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan" && n.IterationKey == "");
+        JsonDocument.Parse(node.OutputsJson!).RootElement.GetProperty("executionNeeded").GetBoolean()
+            .ShouldBeFalse("the planner's self-bypass (hasEnoughContext) surfaces as executionNeeded=false for a downstream logic.if");
+
+        (await db.WorkPlan.AsNoTracking().CountAsync(p => p.WorkflowRunId == runId)).ShouldBe(1, "the plan is persisted either way — the bypass routes execution, it doesn't skip the artifact");
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    /// <summary>manual → plan (plan.author, planner pinned to the fake's pool row) [→ plan2] → terminal.</summary>
+    private async Task<Guid> CreatePlanWorkflowAsync(Guid teamId, Guid userId, Guid plannerRowId, bool singleNode)
+    {
+        var config = WorkflowsTestSeed.Json($$"""{"plannerModelId":"{{plannerRowId}}"}""");
+
+        var nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "plan", TypeKey = "plan.author", Config = config, Inputs = WorkflowsTestSeed.Json("""{"goal":"ship the feature"}""") },
+        };
+        var edges = new List<EdgeDefinition> { new() { From = "start", To = "plan" } };
+
+        if (!singleNode)
+        {
+            nodes.Add(new() { Id = "plan2", TypeKey = "plan.author", Config = config, Inputs = WorkflowsTestSeed.Json("""{"goal":"ship the feature","feedback":"tighten the second step"}""") });
+            edges.Add(new() { From = "plan", To = "plan2" });
+        }
+
+        nodes.Add(new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() });
+        edges.Add(new() { From = singleNode ? "plan" : "plan2", To = "end" });
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "plan-author-" + Guid.NewGuid().ToString("N")[..8],
+            Description = null,
+            Definition = new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges },
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+}

@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using CodeSpace.Messages.Agents;
+
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
 
 /// <summary>
@@ -32,6 +35,14 @@ public sealed record PlannedWorkflow
     /// <c>llm.complete</c> body node. The projector switches on this — the model never names a node type.
     /// </summary>
     public string RecommendedWorkflowKind { get; init; } = "analysis";
+
+    /// <summary>
+    /// The planner's SELF-BYPASS: <c>true</c> means the goal needs no execution at all — the plan itself
+    /// answers it (deliberately strict criteria in the prompt; the default <c>false</c> keeps every prior
+    /// plan's behaviour). Surfaced by the <c>plan.author</c> node as <c>executionNeeded = !hasEnoughContext</c>
+    /// so a downstream <c>logic.if</c> can route straight to synthesis.
+    /// </summary>
+    public bool HasEnoughContext { get; init; }
 }
 
 /// <summary>One unit of work in a <see cref="PlannedWorkflow"/>. A data noun (Rule 18.1).</summary>
@@ -54,4 +65,20 @@ public sealed record PlannedSubtask
 
     /// <summary>P2 allocation — the model the planner picked for THIS subtask from the run's pool. Carried into the branch body as <c>{{item.model}}</c>. Null → the harness default. The catalog steers the planner to a model whose provider the chosen harness can drive.</summary>
     public string? Model { get; init; }
+
+    /// <summary>
+    /// Optional plan-local subtask ids this subtask DEPENDS ON — the plan's DAG edges, the same vocabulary the
+    /// supervisor's planned subtasks carry. Null-omitted so a dependency-free subtask serializes byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? DependsOn { get; init; }
+
+    /// <summary>
+    /// Optional OBJECTIVE per-subtask acceptance — the unit's definition of done, authored WITH the task (the
+    /// sprint-contract move: the plan is where the oracle is written). Reuses the supervisor's acceptance noun
+    /// (<see cref="SupervisorAcceptanceSpec"/>: a TestsPass argv or ArtifactPresent deliverable paths) so both
+    /// plan producers speak one acceptance vocabulary. Null-omitted — byte-identical when unauthored.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
 }

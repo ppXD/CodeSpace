@@ -1,0 +1,87 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Messages.Enums;
+using Shouldly;
+
+namespace CodeSpace.UnitTests.Workflows;
+
+/// <summary>
+/// The plan.author node's static contract (triad S1): the manifest pins (type key, side-effect flag, the
+/// config/input/output schema keys the frontend + validator drive off) and the pure config→request mapping
+/// (edit-loop feedback fold, defensive reviewMode read, model pins).
+/// </summary>
+[Trait("Category", "Unit")]
+public class PlanAuthorNodeTests
+{
+    private static PlanAuthorNode Node() => new(scopeFactory: null!);   // manifest + statics only — RunAsync is integration-covered
+
+    [Fact]
+    public void Manifest_pins_the_node_contract()
+    {
+        var node = Node();
+
+        node.TypeKey.ShouldBe("plan.author");
+        node.Manifest.IsSideEffecting.ShouldBeTrue("one structured LLM call per execution — billing, like llm.complete");
+
+        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId" }, ignoreOrder: true);
+        InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback" }, ignoreOrder: true);
+        OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
+
+        node.Manifest.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "goal" }, "only the goal is required — grounding/feedback are optional binds");
+    }
+
+    [Fact]
+    public void Model_pins_and_review_mode_map_into_the_planner_request()
+    {
+        var plannerRow = Guid.NewGuid();
+        var reviewerRow = Guid.NewGuid();
+        var config = Config($$"""{"plannerModelId":"{{plannerRow}}","reviewMode":2,"reviewerModelId":"{{reviewerRow}}"}""");
+
+        var request = PlanAuthorNode.BuildPlanRequest(config, teamId: Guid.NewGuid(), goal: "ship it", grounding: "repo layout", feedback: "");
+
+        request.TaskText.ShouldBe("ship it");
+        request.GroundingContext.ShouldBe("repo layout");
+        request.BrainModelId.ShouldBe(plannerRow);
+        request.Review.ShouldBe(ReviewMode.Improve);
+        request.ReviewerModelId.ShouldBe(reviewerRow);
+    }
+
+    [Theory]
+    [InlineData("""{"reviewMode":99}""")]     // out-of-range int → off, never a throw
+    [InlineData("""{"reviewMode":"Gate"}""")] // wrong JSON type → off (nodes read defensively)
+    [InlineData("""{}""")]                    // absent → off
+    public void An_unusable_review_mode_degrades_to_off(string configJson)
+    {
+        var request = PlanAuthorNode.BuildPlanRequest(Config(configJson), Guid.NewGuid(), "goal", "", "");
+
+        request.Review.ShouldBe(ReviewMode.None);
+        request.BrainModelId.ShouldBeNull();
+        request.GroundingContext.ShouldBeNull("a blank grounding is omitted, not an empty string");
+    }
+
+    [Fact]
+    public void Feedback_folds_into_the_task_text_as_an_explicit_revision_instruction()
+    {
+        var composed = PlanAuthorNode.ComposeTaskText("ship it", "drop step 3");
+
+        composed.ShouldStartWith("ship it");
+        composed.ShouldContain("Revise the plan to address this feedback:");
+        composed.ShouldContain("drop step 3");
+
+        PlanAuthorNode.ComposeTaskText("ship it", "").ShouldBe("ship it", "no feedback → the goal verbatim (byte-identical first pass)");
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private static IReadOnlyDictionary<string, JsonElement> Config(string json) =>
+        JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!;
+
+    private static string[] ConfigKeys(PlanAuthorNode node) => Keys(node.Manifest.ConfigSchema);
+
+    private static string[] InputKeys(PlanAuthorNode node) => Keys(node.Manifest.InputSchema);
+
+    private static string[] OutputKeys(PlanAuthorNode node) => Keys(node.Manifest.OutputSchema);
+
+    private static string[] Keys(JsonElement schema) => schema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray();
+}

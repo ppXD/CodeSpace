@@ -59,7 +59,42 @@ public class WorkflowPlannerTests
         var item = subtasks.GetProperty("items");
         item.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse();
         var itemRequired = item.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList();
+        // The contract fields (dependsOn/acceptance) are OPTIONAL — required is unchanged so every prior plan stays schema-valid.
         itemRequired.ShouldBe(new[] { "id", "title", "instruction" });
+
+        // Triad S1: the plan authors its own verification contract — the DAG edges + per-subtask objective
+        // acceptance (same shape as the supervisor's plan schema) + the plan-level self-bypass.
+        var itemProps = item.GetProperty("properties");
+        itemProps.TryGetProperty("dependsOn", out _).ShouldBeTrue();
+        var acceptance = itemProps.GetProperty("acceptance");
+        acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "command" });
+        acceptance.GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "TestsPass", "ArtifactPresent" }, "the acceptance oracle vocabulary matches the supervisor plan schema verbatim");
+        root.GetProperty("properties").TryGetProperty("hasEnoughContext", out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void The_authored_contract_round_trips_from_a_schema_valid_object()
+    {
+        var schemaValid = JsonSerializer.SerializeToElement(new
+        {
+            goal = "Ship the feature",
+            subtasks = new object[]
+            {
+                new { id = "s1", title = "Design", instruction = "Sketch the API" },
+                new { id = "s2", title = "Build", instruction = "Implement it", dependsOn = new[] { "s1" }, acceptance = new { command = new[] { "dotnet", "test" }, kind = "TestsPass", description = "unit gate" } },
+            },
+            hasEnoughContext = true,
+        });
+
+        var plan = schemaValid.Deserialize<PlannedWorkflow>(PlannerSchema.Options)!;
+
+        plan.HasEnoughContext.ShouldBeTrue();
+        plan.Subtasks[0].DependsOn.ShouldBeNull("an uncontracted subtask stays contract-free — absent, never defaulted");
+        plan.Subtasks[0].Acceptance.ShouldBeNull();
+        plan.Subtasks[1].DependsOn.ShouldBe(new[] { "s1" });
+        plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "dotnet", "test" });
+        plan.Subtasks[1].Acceptance!.Kind.ShouldBe(CodeSpace.Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, "the string kind binds through the planner options' enum converter");
     }
 
     [Fact]

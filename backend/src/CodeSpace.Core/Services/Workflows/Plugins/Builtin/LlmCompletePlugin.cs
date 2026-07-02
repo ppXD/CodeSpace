@@ -3,9 +3,9 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 namespace CodeSpace.Core.Services.Workflows.Plugins.Builtin;
 
 /// <summary>
-/// LLM-completion node + (in future) embedding / vision / structured-output nodes that all
-/// ride on the <c>ILLMClientRegistry</c>. Removing this plugin disables AI features cleanly
-/// but the engine still runs git / http / logic flows.
+/// The in-process AI nodes — LLM completion + the AI planning node — that ride on the LLM plane
+/// (<c>ILLMClientRegistry</c> / the structured-output clients). Removing this plugin disables AI features
+/// cleanly but the engine still runs git / http / logic flows.
 /// </summary>
 public sealed class LlmCompletePlugin : IPluginModule
 {
@@ -14,6 +14,7 @@ public sealed class LlmCompletePlugin : IPluginModule
     public IReadOnlyList<Type> Nodes { get; } = new[]
     {
         typeof(LlmCompleteNode),
+        typeof(PlanAuthorNode),
     };
 
     public IReadOnlyList<Type> RunSourceMatchers { get; } = Array.Empty<Type>();

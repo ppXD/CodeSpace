@@ -22,4 +22,17 @@ public static class NodeScopeReader
         if (!context.Scope.Sys.TryGetValue(SystemScopeKeys.TeamId, out var value) || value.ValueKind != JsonValueKind.String) return false;
         return Guid.TryParse(value.GetString(), out teamId);
     }
+
+    /// <summary>
+    /// The run's id from <c>{{sys.workflow_run_id}}</c> — same population/absence semantics as
+    /// <see cref="TryReadTeamId"/>: a real engine run always resolves it; a synthetic no-scope context returns
+    /// false so run-linked persistence (e.g. the plan.author node's work-plan row) fails closed instead of
+    /// writing an unowned row.
+    /// </summary>
+    public static bool TryReadWorkflowRunId(NodeRunContext context, out Guid workflowRunId)
+    {
+        workflowRunId = Guid.Empty;
+        if (!context.Scope.Sys.TryGetValue(SystemScopeKeys.WorkflowRunId, out var value) || value.ValueKind != JsonValueKind.String) return false;
+        return Guid.TryParse(value.GetString(), out workflowRunId);
+    }
 }
