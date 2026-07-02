@@ -48,7 +48,8 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         var detail = await _sessions.GetByRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return detail == null ? null : await BuildAsync(detail, detail.AnchorTurnIndex, teamId, cancellationToken).ConfigureAwait(false);
+        // The requested run IS the anchor — so opening a prior attempt's run focuses THAT attempt's flow, not the latest.
+        return detail == null ? null : await BuildAsync(detail, detail.AnchorTurnIndex, runId, teamId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<RoomView?> ProjectAsync(Guid sessionId, Guid? focusRunId, Guid teamId, CancellationToken cancellationToken)
@@ -59,14 +60,14 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var focus = focusRunId is { } fr ? TurnIndexOf(detail, fr) : null;
 
-        return await BuildAsync(detail, focus, teamId, cancellationToken).ConfigureAwait(false);
+        return await BuildAsync(detail, focus, focusRunId, teamId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The turn a run belongs to — its identity, the latest attempt, or any nested attempt. Null when the run isn't a turn here.</summary>
     private static int? TurnIndexOf(SessionDetail detail, Guid runId) =>
         detail.Turns.FirstOrDefault(t => t.TurnRunId == runId || t.RunId == runId || (t.Attempts?.Any(a => a.RunId == runId) ?? false))?.TurnIndex;
 
-    private async Task<RoomView> BuildAsync(SessionDetail detail, int? focusTurnIndex, Guid teamId, CancellationToken cancellationToken)
+    private async Task<RoomView> BuildAsync(SessionDetail detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var focused = (focusTurnIndex is { } fi ? detail.Turns.FirstOrDefault(t => t.TurnIndex == fi) : null) ?? detail.Turns.LastOrDefault();
 
@@ -79,7 +80,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
                 blocks.Add(new UserMessageBlock { Id = $"turn-{turn.TurnIndex}:user", Seq = 0, Text = message, At = turn.CreatedDate });
 
             var assistant = focused != null && turn.TurnIndex == focused.TurnIndex
-                ? await BuildFocusedTurnAsync(turn, teamId, cancellationToken).ConfigureAwait(false)
+                ? await BuildFocusedTurnAsync(turn, anchorRunId, teamId, cancellationToken).ConfigureAwait(false)
                 : BuildCollapsedTurn(turn);
 
             cursor = Math.Max(cursor, assistant.Seq);
@@ -98,22 +99,25 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         };
     }
 
-    private async Task<AssistantTurnBlock> BuildFocusedTurnAsync(SessionTurn turn, Guid teamId, CancellationToken cancellationToken)
+    private async Task<AssistantTurnBlock> BuildFocusedTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
-        var runId = turn.RunId;   // the latest attempt — what's current
+        // Focus the REQUESTED attempt (the anchor run), so the header switcher can show ANY attempt's whole flow — not
+        // always the latest. A prior attempt carries its own status / error / timing (the turn skeleton has the latest's).
+        var focus = await FocusAsync(turn, anchorRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var runId = focus.RunId;
 
         var phases = await _phases.ProjectAsync(runId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<RunPhase>();
         var watermark = await WatermarkAsync(runId, cancellationToken).ConfigureAwait(false);
 
         // Skip the pending-decision read entirely in the common case — the turn skeleton already knows whether this
         // run is parked on one (computed over both park backends), so a non-waiting turn pays zero query + zero parse.
-        var decisions = turn.HasPendingDecision
+        var decisions = turn.HasPendingDecision && focus.IsLatest
             ? await DecisionBlocksAsync(runId, teamId, watermark, cancellationToken).ConfigureAwait(false)
             : Array.Empty<DecisionBlock>();
 
-        var facts = await GatherFactsAsync(runId, teamId, phases, turn.RunStatus, turn.Error, cancellationToken).ConfigureAwait(false);
+        var facts = await GatherFactsAsync(runId, teamId, phases, focus.Status, focus.Error, cancellationToken).ConfigureAwait(false);
 
-        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, turn.RunStatus, turn.Error, decisions, facts);
+        var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, focus.Status, focus.Error, decisions, facts);
 
         return new AssistantTurnBlock
         {
@@ -122,15 +126,33 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             TurnIndex = turn.TurnIndex,
             TurnRunId = turn.TurnRunId,
             RunId = runId,
-            Status = turn.RunStatus,
+            Status = focus.Status,
             Summary = narrative.Summary,
             Map = narrative.Map,
             Blocks = narrative.Blocks,
-            Actions = _actions.ResolveTurnActions(runId, turn.RunStatus),
-            At = turn.CreatedDate,
-            DurationMs = DurationMs(turn),
-            Attempts = AttemptsOf(turn),
+            Actions = _actions.ResolveTurnActions(runId, focus.Status),
+            At = focus.CreatedDate,
+            DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
+            Attempts = AttemptsOf(turn, runId),
         };
+    }
+
+    private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, bool IsLatest);
+
+    /// <summary>Resolve which attempt to focus. The latest (or a run that isn't one of this turn's attempts) reuses the turn skeleton — no extra read. A specific PRIOR attempt reads its OWN status / error / timing so its whole flow renders faithfully.</summary>
+    private async Task<FocusRun> FocusAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var latest = new FocusRun(turn.RunId, turn.RunStatus, turn.Error, turn.CreatedDate, turn.StartedAt, turn.CompletedAt, IsLatest: true);
+
+        if (anchorRunId is not { } anchor || anchor == turn.RunId || (turn.Attempts?.All(a => a.RunId != anchor) ?? true))
+            return latest;
+
+        var row = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == anchor && r.TeamId == teamId)
+            .Select(r => new { r.Status, r.Error, r.CreatedDate, r.StartedAt, r.CompletedAt })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, IsLatest: false);
     }
 
     /// <summary>A light card for a non-focused turn — summary + status + actions, no map / inner blocks (the frontend re-focuses by navigating to the run).</summary>
@@ -148,11 +170,11 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         Actions = _actions.ResolveTurnActions(turn.RunId, turn.RunStatus),
         At = turn.CreatedDate,
         DurationMs = DurationMs(turn),
-        Attempts = AttemptsOf(turn),
+        Attempts = AttemptsOf(turn, turn.RunId),
     };
 
-    /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt); a lone attempt needs no history, so it stays empty and the frontend shows nothing.</summary>
-    private static IReadOnlyList<RoomTurnAttempt> AttemptsOf(SessionTurn turn)
+    /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt). <paramref name="focusRunId"/> marks the shown one (the attempt the room is currently focused on), so switching to a prior attempt re-marks it "shown".</summary>
+    private static IReadOnlyList<RoomTurnAttempt> AttemptsOf(SessionTurn turn, Guid focusRunId)
     {
         var attempts = turn.Attempts ?? Array.Empty<SessionTurnAttempt>();
 
@@ -160,7 +182,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return attempts
             .OrderBy(a => a.AttemptNumber)
-            .Select(a => new RoomTurnAttempt { RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.IsLatest })
+            .Select(a => new RoomTurnAttempt { RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.RunId == focusRunId })
             .ToList();
     }
 
@@ -170,15 +192,17 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// StartedAt to its final leg, which would under-report the whole-turn elapsed (28m read as 36s). A LIVE turn shows
     /// elapsed since it actually started (null before then, so a queued turn shows no growing time).
     /// </summary>
-    private static long? DurationMs(SessionTurn turn)
+    private static long? DurationMs(SessionTurn turn) => DurationOf(turn.CreatedDate, turn.StartedAt, turn.CompletedAt);
+
+    private static long? DurationOf(DateTimeOffset createdDate, DateTimeOffset? startedAt, DateTimeOffset? completedAt)
     {
-        if (turn.CompletedAt is { } end)
+        if (completedAt is { } end)
         {
-            var span = (long)(end - turn.CreatedDate).TotalMilliseconds;
+            var span = (long)(end - createdDate).TotalMilliseconds;
             return span >= 0 ? span : null;
         }
 
-        if (turn.StartedAt is not { } start) return null;
+        if (startedAt is not { } start) return null;
 
         var ms = (long)(DateTimeOffset.UtcNow - start).TotalMilliseconds;
         return ms >= 0 ? ms : null;

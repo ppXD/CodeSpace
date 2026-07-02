@@ -5672,13 +5672,15 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-final-file:hover .room-final-file-caret { opacity: 1; }
 .room-final-pr { align-self: flex-start; }
 
-/* Turn attempt timeline — the "N attempts" toggle + the vertical per-attempt rows. */
-.room-attempts { display: flex; flex-direction: column; }
-.room-attempts-toggle { display: inline-flex; align-items: center; gap: 5px; align-self: flex-start; font: inherit; font-size: 12px; color: var(--muted); background: none; border: none; padding: 2px 0; cursor: pointer; }
-.room-attempts-toggle:hover { color: var(--ink-2); }
-.room-attempts-list { list-style: none; margin: 5px 0 2px; padding: 0 0 0 6px; display: flex; flex-direction: column; gap: 2px; border-left: 1.5px solid var(--line); }
-.room-attempt { display: flex; align-items: center; gap: 8px; padding: 5px 9px; margin-left: -1px; border-radius: 7px; font-size: 12px; }
-.room-attempt[data-current] { background: var(--rm-good-bg); }
+/* Turn attempt switcher — the header "attempt N of M ▾" chip + its dropdown menu of attempts. */
+.room-attempts-hd { position: relative; display: inline-flex; }
+.room-attempts-chip { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: 11.5px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
+.room-attempts-chip:hover { color: var(--ink-2); border-color: var(--line-2); }
+.room-attempts-mask { position: fixed; inset: 0; z-index: 40; }
+.room-attempts-menu { position: absolute; top: calc(100% + 5px); right: 0; z-index: 41; min-width: 240px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgba(20,15,8,.13); padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.room-attempts-item { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px; font: inherit; font-size: 12px; background: none; border: none; text-align: left; cursor: pointer; width: 100%; }
+.room-attempts-item:not([data-current]):hover { background: var(--panel-2); }
+.room-attempts-item[data-current] { background: var(--rm-good-bg); cursor: default; }
 .room-attempt-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted-2); }
 .room-attempt-ok .room-attempt-dot { background: var(--rm-good); }
 .room-attempt-err .room-attempt-dot { background: var(--rm-danger); }
@@ -5690,8 +5692,6 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-attempt-err .room-attempt-status { color: var(--rm-danger); }
 .room-attempt-when { color: var(--muted-2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .room-attempt-shown { color: var(--rm-good); font-size: 11px; font-weight: 500; flex: none; }
-.room-attempt-open { display: inline-flex; align-items: center; gap: 2px; font: inherit; font-size: 11.5px; color: var(--rm-blue); background: none; border: none; padding: 0; cursor: pointer; flex: none; }
-.room-attempt-open:hover { text-decoration: underline; }
 
 /* live "working…" indicator */
 .room-live { display: inline-flex; align-items: center; gap: 9px; align-self: flex-start; padding: 7px 13px; border: 1px solid #C5D9F5; border-radius: 999px; background: #EAF1FC; font-size: 12px; color: var(--rm-blue); }
