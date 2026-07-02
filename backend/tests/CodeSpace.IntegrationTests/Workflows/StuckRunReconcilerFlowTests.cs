@@ -313,17 +313,36 @@ public class StuckRunReconcilerFlowTests
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "it stays parked on its wait");
     }
 
-    [Fact]
-    public async Task Continue_is_a_no_op_for_a_terminal_run()
+    [Theory]
+    [InlineData(WorkflowRunStatus.Success)]
+    [InlineData(WorkflowRunStatus.Cancelled)]
+    public async Task Continue_is_a_no_op_for_a_succeeded_or_cancelled_run(WorkflowRunStatus terminal)
     {
-        // A terminal Failure can't continue IN PLACE — it is revived by replay / rerun-from-node, never here.
+        // Success / Cancelled are truly terminal — there is nothing to revive in place. (A FAILURE run CAN continue in
+        // place when it has a resettable unhandled-failed node — see the flaky-node E2E in RerunFromNodeFlowTests; a
+        // Failure with no recorded failed cell is a no-op, covered below.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: terminal, createdAgo: TimeSpan.FromMinutes(1));
+
+        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a Success / Cancelled run cannot continue in place");
+        (await ReadStatusAsync(runId)).ShouldBe(terminal, "it stays terminal, untouched");
+    }
+
+    [Fact]
+    public async Task Continue_is_a_no_op_for_a_failure_with_no_recorded_failed_node()
+    {
+        // A Failure run whose ledger records NO failed top-level node cell (only a bare status) has nothing to reset →
+        // continue is a clean no-op (false), leaving it terminal. Guards that ContinueFailedRunAsync never flips a run
+        // it can't actually re-run — the operator falls back to replay / rerun-from-node.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
 
         var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Failure, createdAgo: TimeSpan.FromMinutes(1));
 
-        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a terminal run cannot continue in place");
-        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure, "it stays terminal");
+        (await ContinueAsync(runId, teamId)).ShouldBeFalse("a Failure with no resettable failed-node cell can't continue in place");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure, "it stays terminal — nothing was flipped");
     }
 
     [Fact]
