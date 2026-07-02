@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { ApiError } from "@/api/request";
-import type { RunListFilterInput, RunPhasesResponse, WorkflowRunStatus } from "@/api/workflows";
+import type { RunListFilterInput, RunPhasesResponse, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 import { CockpitBoard } from "@/components/workflows/CockpitBoard";
+import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
 import { RunFilterBar } from "@/components/workflows/RunFilterBar";
 import { summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
@@ -34,6 +35,9 @@ function TeamRunsPage() {
   const [scope, setScope] = useState<RunListFilterInput>({});
   const [filter, setFilter] = useState<CockpitFilter>(null);
   const [historyPage, setHistoryPage] = useState(1);
+  // A session-less run has no Session room to navigate to, so it opens its raw detail in a modal OVER this list (the
+  // list stays mounted behind it, closing returns you to the exact same scroll/page). null = no run open.
+  const [modalRunId, setModalRunId] = useState<string | null>(null);
 
   // A slow clock so the relative ages ("oldest 14m", "waiting 2d") and today's window stay fresh without churning.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -90,7 +94,14 @@ function TeamRunsPage() {
     suspended: s?.suspended ?? 0,
     today: { count: s?.today ?? 0, hourly: summarizeToday(runList, nowMs).hourly },
   };
-  const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
+  // Open the LINEAGE ROOT (the original), so the attempt switcher lands there — never the fork. A session-backed run
+  // opens the full-page Session room; a session-less run (legacy) opens its raw detail in a modal over this list so the
+  // list never changes. hasSession is undefined against an older backend → treat as "has session" and navigate (keeps
+  // the prior behavior rather than modal-ing every run).
+  const openRun = (run: WorkflowRunSummary) => {
+    if (run.hasSession === false) setModalRunId(run.rootRunId);
+    else navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.rootRunId } });
+  };
 
   const errorBanner = runs.error instanceof ApiError ? (
     <div className="cn-banner cn-banner-err">
@@ -100,6 +111,7 @@ function TeamRunsPage() {
   ) : null;
 
   return (
+    <>
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs"><span className="cur">Runs</span></div>
@@ -157,5 +169,10 @@ function TeamRunsPage() {
         )}
       </div>
     </section>
+
+    {/* A session-less run's raw detail, over the list. The list stays mounted behind the fixed-position modal, so
+        closing returns you to the exact same scroll/page (no navigation, no reset to page 1). */}
+    {modalRunId && <RunViewerDialog runId={modalRunId} onClose={() => setModalRunId(null)} defaultView="trace" />}
+    </>
   );
 }

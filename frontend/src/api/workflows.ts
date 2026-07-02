@@ -169,6 +169,8 @@ export interface WorkflowRunSummary {
   rootRunId: string;
   /** How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip. */
   attemptCount: number;
+  /** Whether the run belongs to a work session (`WorkflowRun.SessionId` set). The index opens a session-backed run as the full-page Session room and a session-less run as the raw-detail modal over the list. */
+  hasSession: boolean;
   /** The ORIGINAL run's source type (= `sourceType` for a never-rerun run). The row shows the root's identity, so a rerun titles as the original, not "Replay". */
   rootSourceType: WorkflowRunSourceType;
 }
