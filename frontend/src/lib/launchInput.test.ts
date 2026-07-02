@@ -374,7 +374,11 @@ describe("triad launch fields (S4)", () => {
 
     const quick = buildLaunchInput(form({ effort: "quick", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
     expect(quick.requirePlanConfirmation).toBeUndefined();
-    expect(quick.acceptanceChecks).toBeUndefined();
+    // Quick DOES take the checks floor (S5): the single agent's produced branch is graded against it.
+    expect(quick.acceptanceChecks).toEqual(["sh", "check.sh"]);
+
+    const standardChecks = buildLaunchInput(form({ effort: "standard", acceptanceChecks: ["sh", "check.sh"] }));
+    expect(standardChecks.acceptanceChecks).toBeUndefined();
 
     const off = buildLaunchInput(form({ effort: "deep" }));
     expect(off.requirePlanConfirmation).toBeUndefined();

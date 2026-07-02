@@ -18,8 +18,10 @@ namespace CodeSpace.Core.Services.Plans;
 ///         same order the fold + per-unit acceptance rely on); a LATER attempt (retry) supersedes the item's
 ///         state; folded results carry the terminal status + acceptance verdict, and a still-in-flight
 ///         staging (no fold yet) reads the live <c>agent_run</c> status.</item>
-///   <item>Other producers (the plan.author graph tier today) — no execution linkage exists yet, so every
-///         item is honestly <c>Pending</c> (the S3 confirm-gate + fan-out wiring adds the linkage).</item>
+///   <item>PLAN-MAP plans (plan.author / plan.confirm origins) — the fan-out stages one agent run per item
+///         under the map branch key <c>map#i</c>, joined POSITIONALLY onto <c>items[i]</c> (the map fans the
+///         plan's items out in order); the latest run per branch carries the live status + the S5 oracle
+///         verdict. Shapes without a map fan-out keep their items honestly <c>Pending</c>.</item>
 /// </list>
 /// READ-ONLY: recomputed per request, never persisted.
 ///
@@ -50,7 +52,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
 
         var attempts = plan.OriginKind == WorkPlanOrigins.Supervisor
             ? await DeriveSupervisorAttemptsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false)
-            : new Dictionary<string, WorkPlanItemAttempt>(StringComparer.Ordinal);
+            : await DerivePlanMapAttemptsAsync(workflowRunId, teamId, items, cancellationToken).ConfigureAwait(false);
 
         return new WorkPlanChecklist
         {
@@ -81,6 +83,64 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
             AcceptanceDetail = attempt?.AcceptanceDetail,
             Attempts = attempt?.Count ?? 0,
         };
+    }
+
+    /// <summary>
+    /// The PLAN-MAP tiers' execution linkage (S5): the fan-out stages one agent run per plan item under the map
+    /// branch iteration key <c>map#i</c>, and the map fans out the plan's items IN ORDER — so <c>map#i ↔ items[i]</c>
+    /// is the same positional contract the supervisor fold rides. The latest run per branch index (a branch
+    /// rerun supersedes) carries the live status + the S5 oracle verdict off its folded result. Runs whose
+    /// iteration key is not a map branch (a single-agent graph, a nested shape) contribute nothing — those
+    /// items stay honestly Pending.
+    /// </summary>
+    private async Task<Dictionary<string, WorkPlanItemAttempt>> DerivePlanMapAttemptsAsync(Guid runId, Guid teamId, IReadOnlyList<WorkPlanItem> items, CancellationToken cancellationToken)
+    {
+        var attempts = new Dictionary<string, WorkPlanItemAttempt>(StringComparer.Ordinal);
+
+        if (items.Count == 0) return attempts;
+
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.IterationKey.StartsWith("map#"))
+            .OrderBy(r => r.CreatedDate)
+            .Select(r => new { r.Id, r.IterationKey, r.Status, r.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var row in rows)
+        {
+            if (!TryParseBranchIndex(row.IterationKey, out var index) || index >= items.Count) continue;
+
+            var itemId = items[index].Id;
+            var (passed, detail) = ReadAcceptanceVerdict(row.ResultJson);
+            var prior = attempts.TryGetValue(itemId, out var p) ? p : null;
+
+            attempts[itemId] = new WorkPlanItemAttempt(row.Id, row.Status.ToString(), passed, detail, (prior?.Count ?? 0) + 1);
+        }
+
+        return attempts;
+    }
+
+    /// <summary>The branch ordinal out of a <c>map#i</c> iteration key (top-level fan-outs only — a combined/nested key does not parse and is skipped).</summary>
+    private static bool TryParseBranchIndex(string iterationKey, out int index) =>
+        int.TryParse(iterationKey.AsSpan("map#".Length), out index) && index >= 0;
+
+    /// <summary>The S5 oracle verdict off the run's folded result — null/null when the task carried no contract (or the run has no result yet).</summary>
+    private static (bool? Passed, string? Detail) ReadAcceptanceVerdict(string? resultJson)
+    {
+        if (string.IsNullOrEmpty(resultJson)) return (null, null);
+
+        try
+        {
+            var root = JsonDocument.Parse(resultJson).RootElement;
+
+            var passed = root.TryGetProperty("acceptancePassed", out var ap) && ap.ValueKind is JsonValueKind.True or JsonValueKind.False ? ap.GetBoolean() : (bool?)null;
+            var detail = root.TryGetProperty("acceptanceDetail", out var ad) && ad.ValueKind == JsonValueKind.String ? ad.GetString() : null;
+
+            return (passed, detail);
+        }
+        catch (JsonException)
+        {
+            return (null, null);
+        }
     }
 
     /// <summary>

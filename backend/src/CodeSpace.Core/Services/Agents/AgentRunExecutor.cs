@@ -6,6 +6,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Review;
+using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -268,6 +270,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, effectiveTask, result, workspace, cancellationToken).ConfigureAwait(false);
 
             result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+            result = await GradeAcceptanceIfPresentAsync(run, effectiveTask, result, cancellationToken).ConfigureAwait(false);
 
             result = await ReviewOutputIfEnabledAsync(effectiveTask, result, run, cancellationToken).ConfigureAwait(false);
 
@@ -823,6 +827,68 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the branch-push failure warning event", runId);
         }
     }
+
+    /// <summary>
+    /// The OBJECTIVE oracle gate (triad S5): grade <c>AgentTask.Acceptance</c> against the produced branch at
+    /// completion — the single-agent twin of the supervisor's per-unit fold gate, on the SAME grader (a server-run
+    /// check on an agent-independent clone, never a model self-report). FAIL-CLOSED: a failing check — or a
+    /// contract with no branch/repo to grade — re-grades the would-be Succeeded run to Failed
+    /// ("acceptance-failed"); the captured work (branch, diff, transcript) is preserved for diagnosis. Runs BEFORE
+    /// the subjective output critic, so a failed oracle never bills a review. Deferred (verdict null, run intact):
+    /// no contract, a non-success result, or a multi-repo result (per-repo grading is a follow-on, mirroring the
+    /// supervisor fold's same deferral). Grader errors record not-accepted rather than crashing the completion.
+    /// </summary>
+    internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (task.Acceptance is not { } spec || spec.Command.All(string.IsNullOrWhiteSpace)) return result;
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (result.RepositoryResults.Count > 0) return result;   // multi-repo → deferred, exactly like the supervisor's unit gate
+
+        var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+
+        if (string.IsNullOrEmpty(result.ProducedBranch) || task.RepositoryId is not { } repositoryId)
+        {
+            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no produced branch/repo to grade — failing closed", run.Id);
+
+            return AcceptanceFailed(result, "no-branch-or-repo");
+        }
+
+        BenchmarkGrade grade;
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            grade = await scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>()
+                .GradeAsync(repositoryId, run.TeamId, result.ProducedBranch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken, spec.Kind ?? BenchmarkGradingKind.TestsPass).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: the acceptance grade failed unexpectedly; recording not-accepted", run.Id);
+
+            grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+        }
+
+        if (grade.Passed)
+        {
+            _logger.LogInformation("Agent run {RunId}: the acceptance check passed ({Detail})", run.Id, grade.Detail);
+
+            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail };
+        }
+
+        _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
+
+        return AcceptanceFailed(result, grade.Detail);
+    }
+
+    /// <summary>The fail-closed re-grade: the work is preserved, the STATUS tells the truth — the contract was not met.</summary>
+    private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => result with
+    {
+        Status = AgentRunStatus.Failed,
+        CompletionDisposition = CompletionDisposition.Completed,
+        ExitReason = "acceptance-failed",
+        Error = $"The acceptance check did not pass: {detail}",
+        AcceptancePassed = false,
+        AcceptanceDetail = detail,
+    };
 
     /// <summary>
     /// v1 GATE: review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical

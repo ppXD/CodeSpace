@@ -483,9 +483,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               </>}
 
               {customizeTab === "evaluation" && <>
-                <div className="lt3-cnote">How the result is judged. Criteria STEER — free text rendered into the prompt, never executed. Checks VERIFY — a command that must exit 0 at the end, or the result is withheld.</div>
+                <div className="lt3-cnote">How the result is judged. Criteria STEER — free text rendered into the prompt, never executed. Checks VERIFY — a command that must exit 0, or the result fails: Deep runs it at the terminal stop, Quick against the agent's produced branch; Standard verifies per item via the plan's own contracts.</div>
                 {!deepTier && <TierRow label="Acceptance criteria" tier="Deep only" />}
-                {!deepTier && <TierRow label="Acceptance checks" tier="Deep only" />}
+                {effort === "standard" && <TierRow label="Acceptance checks" tier="Per item — the plan authors each subtask's check" />}
                 {deepTier && <RowPop label="Acceptance criteria" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>
                   <div className="lt3-chips2">
                     {cfg.acceptance.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptance: cfg.acceptance.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
@@ -499,7 +499,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                       }} />
                   </div>
                 </RowPop>}
-                {deepTier && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : "None"}>
+                {effort !== "standard" && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : "None"}>
                   <div className="lt3-chips2">
                     {cfg.acceptanceChecks.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptanceChecks: cfg.acceptanceChecks.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
                     <input className="lt3-chip2-add" placeholder="+ command, e.g. sh check.sh" value={checksDraft} onChange={e => setChecksDraft(e.target.value)}
