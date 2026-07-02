@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useState } from "react";
+import { createContext, Fragment, type ReactNode, useContext, useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
@@ -9,6 +9,9 @@ import type {
   DiagnosticBlock,
   ExecutionMapStep,
   ExecutionStepStatus,
+  FinalAnswerBlock,
+  LiveActivityBlock,
+  NarrativeStepBlock,
   RoomAction,
   RoomAgentCard,
   RoomBlock,
@@ -27,6 +30,15 @@ import { compactAge } from "@/components/workflows/cockpit";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+
+/** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
+type DrawerTarget =
+  | { kind: "agent"; agent: RoomAgentCard }
+  | { kind: "file"; label: string; url?: string | null; downloadUrl?: string | null };
+
+/** Open the unified preview drawer. Any row (an agent card, a changed file) calls this to preview on the right. */
+const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
+const useRoomDrawer = () => useContext(RoomDrawerContext);
 
 /**
  * The Session room — run-detail rendered from the backend-authored Session Room projection (`RoomView`) as a
@@ -66,8 +78,11 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
     try { await sessionsApi.renameSession(room.sessionId, next); } catch { setTitle(room.title); }
   };
 
+  const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
+
   return (
-    <section className="room-room">
+    <RoomDrawerContext.Provider value={setDrawer}>
+    <section className="room-room" data-drawer={drawer ? true : undefined}>
       <header className="room-head">
         <div className="room-head-top">
           <nav className="room-crumbs">
@@ -119,7 +134,48 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
           <LaunchTaskModal inline surface="chat" sessionId={room.sessionId} placeholder="Reply to continue this session…" onClose={() => {}} onLaunched={openRun} />
         </div>
       </div>
+
+      {drawer && <RoomDrawer target={drawer} onClose={() => setDrawer(null)} />}
     </section>
+    </RoomDrawerContext.Provider>
+  );
+}
+
+/** The right-side preview drawer — one panel, format by target: an agent shows its live terminal, a file shows its preview + download. */
+function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => void }) {
+  return (
+    <>
+      <div className="room-drawer-scrim" onClick={onClose} />
+      <aside className="room-drawer">
+        <div className="room-drawer-head">
+          <span className="room-drawer-ic"><Sym n={target.kind === "agent" ? "cpu" : "file"} s={15} /></span>
+          <span className="room-drawer-title" title={target.kind === "agent" ? target.agent.label : target.label}>{target.kind === "agent" ? target.agent.label : target.label}</span>
+          <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
+        </div>
+        <div className="room-drawer-body">
+          {target.kind === "agent"
+            ? <div className="room-drawer-term"><AgentTerminal agent={toPhaseAgentRef(target.agent)} onClose={onClose} /></div>
+            : <FilePreview target={target} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/** A file preview in the drawer — the path + open/download affordances. Inline content arrives once the file-content endpoint lands. */
+function FilePreview({ target }: { target: Extract<DrawerTarget, { kind: "file" }> }) {
+  return (
+    <div className="room-fprev">
+      <div className="room-fprev-empty">
+        <Sym n="file" s={26} />
+        <div className="room-fprev-name">{target.label}</div>
+        <p className="room-fprev-note">Inline content preview is on the way — for now, open the change in the pull request or download the file.</p>
+      </div>
+      <div className="room-fprev-foot">
+        {target.url && <a className="room-btn" href={target.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> Open in PR</a>}
+        {target.downloadUrl && <a className="room-btn" href={target.downloadUrl}><Sym n="download" s={13} /> Download</a>}
+      </div>
+    </div>
   );
 }
 
@@ -232,7 +288,10 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
 function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: () => void }) {
   if (block.type === "stat") return <StatRow stat={block as StatBlock} />;
   if (block.type === "agent_group") return <AgentSection group={block as AgentGroupBlock} />;
+  if (block.type === "narrative_step") return <SupervisorStep step={block as NarrativeStepBlock} />;
   if (block.type === "delivery") return <PrCard delivery={block as DeliveryBlock} />;
+  if (block.type === "final_answer") return <FinalAnswer answer={block as FinalAnswerBlock} />;
+  if (block.type === "live_activity") return <LiveTicker live={block as LiveActivityBlock} />;
   if (block.type === "diagnostic") return <ErrorCard diag={block as DiagnosticBlock} onOpenRoom={onOpenRoom} />;
   if (block.type === "decision") {
     const d = block as DecisionBlock;
@@ -240,6 +299,62 @@ function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: M
     return liveD ? <div className="room-decision"><DecisionCard decision={liveD} /></div> : <DecisionPreview decision={d} />;
   }
   return <p className="room-para room-muted">{describeUnknown(block)}</p>;
+}
+
+/** A translated supervisor operation between rounds — a sparkle chip + the one-liner ("Merging results", "Deciding: X"). */
+function SupervisorStep({ step }: { step: NarrativeStepBlock }) {
+  const tone = step.tone === "Error" ? "err" : step.tone === "Success" ? "ok" : "info";
+  return (
+    <div className={`room-supstep room-supstep-${tone}`}>
+      <Sym n="sparkle" s={13} cls="room-supstep-ic" />
+      <span className="room-supstep-text"><Inline text={step.text} /></span>
+    </div>
+  );
+}
+
+/** The rich final answer — the closing text, then attachments grouped by kind: inline images, file links (preview / download), and the PR. */
+function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
+  const openDrawer = useRoomDrawer();
+  const atts = answer.attachments ?? [];
+  const images = atts.filter((a) => a.kind === "Image");
+  const files = atts.filter((a) => a.kind === "FileLink");
+  const prs = atts.filter((a) => a.kind === "Pr");
+
+  return (
+    <div className="room-final">
+      <div className="room-final-head"><Sym n="check" s={13} cls="room-final-ic" /> Result</div>
+      {answer.text && <p className="room-final-text"><Inline text={answer.text} /></p>}
+      {images.length > 0 && (
+        <div className="room-final-gallery">
+          {images.map((a, i) => <a key={i} href={a.url ?? a.previewUrl ?? "#"} target="_blank" rel="noreferrer"><img className="room-final-img" src={a.previewUrl ?? a.url ?? ""} alt={a.label} /></a>)}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="room-final-files">
+          {files.map((a, i) => (
+            <button className="room-final-file" key={i} onClick={() => openDrawer({ kind: "file", label: a.label, url: a.url, downloadUrl: a.downloadUrl })}>
+              <Sym n="file" s={13} cls="room-final-file-ic" />
+              <span className="room-final-file-name">{a.label}</span>
+              <Sym n="chevron-right" s={12} cls="room-final-file-caret" />
+            </button>
+          ))}
+        </div>
+      )}
+      {prs.map((a, i) => (
+        <a key={i} className="room-pr-btn room-final-pr" href={a.url ?? "#"} target="_blank" rel="noreferrer"><Sym n="pr" s={14} /> {a.label}</a>
+      ))}
+    </div>
+  );
+}
+
+/** The live "working…" indicator pinned at the bottom of an active turn — a pulsing dot + the streaming activity line. */
+function LiveTicker({ live }: { live: LiveActivityBlock }) {
+  return (
+    <div className="room-live">
+      <span className="room-live-dot" />
+      <span className="room-live-text">{live.text}</span>
+    </div>
+  );
 }
 
 /** The generic collapsible detail-row shell — icon + label · detail + chevron, with expandable children. */
@@ -320,11 +435,13 @@ function StatRow({ stat }: { stat: StatBlock }) {
 
 /** One changed-file row in the Files-changed panel — path + per-file +/− (color-split), degrading when absent. */
 function FileRow({ item }: { item: StatItem }) {
+  const openDrawer = useRoomDrawer();
   return (
-    <div className="room-file">
+    <button className="room-file" onClick={() => openDrawer({ kind: "file", label: item.text })}>
       <span className="room-file-path">{item.text}</span>
       {item.detail && <span className="room-file-stat"><DiffStat text={item.detail} /></span>}
-    </div>
+      <Sym n="chevron-right" s={11} cls="room-file-caret" />
+    </button>
   );
 }
 
@@ -333,7 +450,6 @@ const AGENT_PIN_LIMIT = 6;
 /** Agents — the design's compact "Work · N agents" panel: a counts header, then one row per agent (status dot · name ·
  *  time · state · quiet action). Failed / timed-out agents pin to the top; the rest collapse behind "Show N more". */
 function AgentSection({ group }: { group: AgentGroupBlock }) {
-  const [openId, setOpenId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
   const agents = [...group.agents].sort((a, b) => agentSortRank(a.status) - agentSortRank(b.status));
@@ -352,9 +468,7 @@ function AgentSection({ group }: { group: AgentGroupBlock }) {
         {counts && <span className="room-work-counts">{counts}</span>}
       </div>
       <div className="room-work-rows">
-        {shown.map((a) => (
-          <AgentRow key={a.agentRunId} a={a} open={openId === a.agentRunId} onToggle={() => setOpenId((o) => (o === a.agentRunId ? null : a.agentRunId))} />
-        ))}
+        {shown.map((a) => <AgentRow key={a.agentRunId} a={a} />)}
       </div>
       {collapsible && (
         <button className="room-work-more" onClick={() => setExpanded((v) => !v)}>
@@ -365,23 +479,23 @@ function AgentSection({ group }: { group: AgentGroupBlock }) {
   );
 }
 
-/** One agent as a compact row — status dot · name · time · state word · quiet action; expands to its terminal below. */
-function AgentRow({ a, open, onToggle }: { a: RoomAgentCard; open: boolean; onToggle: () => void }) {
+/** One agent as a compact row — status dot · name · time · state word · quiet action; opens its terminal in the side drawer. */
+function AgentRow({ a }: { a: RoomAgentCard }) {
+  const openDrawer = useRoomDrawer();
   const cls = agentTone(a.status);
   const running = a.status === "Running";
   const queued = a.status === "Queued" || a.status === "Pending";
   const action = running ? "Open terminal" : queued ? "View" : cls === "err" ? "View trace" : "Details";
 
   return (
-    <div className="room-arow-wrap" data-open={open || undefined}>
-      <button className="room-arow" data-queued={queued || undefined} onClick={onToggle} aria-expanded={open}>
+    <div className="room-arow-wrap">
+      <button className="room-arow" data-queued={queued || undefined} onClick={() => openDrawer({ kind: "agent", agent: a })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
         <span className="room-arow-time">{a.durationMs != null ? formatDurationMs(a.durationMs) : "—"}</span>
         <span className={`room-arow-state room-arow-state-${cls}`}>{agentStatusWord(a.status)}</span>
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
       </button>
-      {open && <div className="room-agent-term"><AgentTerminal agent={toPhaseAgentRef(a)} onClose={onToggle} /></div>}
     </div>
   );
 }
@@ -495,16 +609,17 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     if (ok) cancel.mutate();
   };
 
-  // The doing-actions render first; "View trace" is always last (a quiet ghost). The backend already gates enablement.
+  // The doing-actions render first; "View trace" is always last (a quiet ghost). Stop / Rerun show ONLY when the
+  // capability is enabled — a finished turn shows Rerun (no Stop); a running turn shows Stop (no Rerun).
   const trace = actions.find((a) => a.kind === "OpenTrace");
-  const doing = actions.filter((a) => a.kind !== "OpenTrace");
+  const doing = actions.filter((a) => a.kind !== "OpenTrace" && a.enabled);
 
   return (
     <div className="room-foot">
       {doing.map((a) => {
-        if (a.kind === "Stop") return <button key={a.kind} className="room-btn-stop" onClick={() => void onStop()} disabled={cancel.isPending}><i className="room-stop-pulse" /><Sym n="stop" s={12} /> {cancel.isPending ? "Stopping…" : "Stop"}</button>;
-        if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={!a.enabled || replay.isPending} title={a.disabledReason ?? undefined}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
-        if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" disabled={!a.enabled} title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
+        if (a.kind === "Stop") return <button key={a.kind} className="room-btn-stop" onClick={() => void onStop()} disabled={cancel.isPending}><i className="room-stop-pulse" /> {cancel.isPending ? "Stopping…" : "Stop"}</button>;
+        if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
+        if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
         return null;
       })}
       {trace && <button className="room-btn-ghost" onClick={onOpenRoom}><Sym n="terminal" s={13} /> {trace.label}</button>}
@@ -664,7 +779,7 @@ function describeUnknown(block: RoomBlock): string {
 type SymName =
   | "chevron-right" | "chevron-down" | "chevron-up" | "check" | "x" | "dot" | "file" | "terminal" | "sparkle"
   | "zap" | "lock" | "folder" | "send" | "rerun" | "more" | "alert" | "clock" | "link" | "branch"
-  | "pr" | "stop" | "edit" | "list" | "cpu";
+  | "pr" | "stop" | "edit" | "list" | "cpu" | "download";
 
 const ICONS: Record<SymName, { fill?: boolean; sw?: number; body: ReactNode }> = {
   "chevron-right": { sw: 1.9, body: <path d="M9 18l6-6-6-6" /> },
@@ -691,6 +806,7 @@ const ICONS: Record<SymName, { fill?: boolean; sw?: number; body: ReactNode }> =
   edit: { sw: 1.7, body: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></> },
   list: { sw: 1.8, body: <><line x1="8" y1="6" x2="20" y2="6" /><line x1="8" y1="12" x2="20" y2="12" /><line x1="8" y1="18" x2="20" y2="18" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></> },
   cpu: { sw: 1.7, body: <><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2" /></> },
+  download: { sw: 1.8, body: <><path d="M12 3v12" /><path d="M7 11l5 5 5-5" /><path d="M5 21h14" /></> },
 };
 
 function Sym({ n, s = 14, cls }: { n: SymName; s?: number; cls?: string }) {

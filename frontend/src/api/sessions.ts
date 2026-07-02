@@ -181,6 +181,27 @@ export interface DecisionBlock extends RoomBlockBase {
   risk?: string | null;
   deadline?: string | null;
 }
+export type AnswerAttachmentKind = "Image" | "FileLink" | "Pr";
+/// One typed attachment of the final answer — an image, a file link, or the PR.
+export interface AnswerAttachment {
+  kind: AnswerAttachmentKind;
+  label: string;
+  url?: string | null;
+  previewUrl?: string | null;
+  downloadUrl?: string | null;
+}
+/// The turn's rich final result — closing text + typed attachments (files / PR / images), rendered distinctly.
+export interface FinalAnswerBlock extends RoomBlockBase {
+  type: "final_answer";
+  text?: string | null;
+  attachments?: AnswerAttachment[] | null;
+}
+/// A live "working…" line pinned at the bottom of an active turn (latest public activity, never raw CoT).
+export interface LiveActivityBlock extends RoomBlockBase {
+  type: "live_activity";
+  text: string;
+  agentRunId?: string | null;
+}
 export interface AssistantTurnBlock extends RoomBlockBase {
   type: "assistant_turn";
   turnIndex: number;
@@ -205,7 +226,9 @@ export type RoomBlock =
   | StatBlock
   | DeliveryBlock
   | DecisionBlock
-  | DiagnosticBlock;
+  | DiagnosticBlock
+  | FinalAnswerBlock
+  | LiveActivityBlock;
 
 /// One session as a backend-authored transcript. Mirrors backend `RoomView`.
 export interface RoomView {

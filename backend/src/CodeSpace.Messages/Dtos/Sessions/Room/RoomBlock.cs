@@ -19,6 +19,8 @@ namespace CodeSpace.Messages.Dtos.Sessions.Room;
 [JsonDerivedType(typeof(DeliveryBlock), "delivery")]
 [JsonDerivedType(typeof(DecisionBlock), "decision")]
 [JsonDerivedType(typeof(DiagnosticBlock), "diagnostic")]
+[JsonDerivedType(typeof(FinalAnswerBlock), "final_answer")]
+[JsonDerivedType(typeof(LiveActivityBlock), "live_activity")]
 public abstract record RoomBlock
 {
     /// <summary>Stable id (e.g. <c>turn-1</c>, <c>turn-1:map</c>, <c>turn-1:step-3</c>, <c>decision-{guid}</c>) — the frontend keys + diffs on it.</summary>
@@ -240,4 +242,58 @@ public sealed record DiagnosticBlock : RoomBlock
 
     /// <summary>The raw engine error, hidden behind "Show raw error". Null when there's nothing rawer than <see cref="Text"/>.</summary>
     public string? RawDetail { get; init; }
+}
+
+/// <summary>
+/// The turn's RICH final result — the closing text plus typed attachments (file links, PR links, and — when a run ever
+/// produces them — images), each rendered distinctly. Emitted LAST on a terminal turn that produced a result.
+/// </summary>
+public sealed record FinalAnswerBlock : RoomBlock
+{
+    /// <summary>The closing answer text (the supervisor's stop summary). Null when the result is attachment-only.</summary>
+    public string? Text { get; init; }
+
+    /// <summary>Typed result attachments — file links, the PR, images. Empty when the turn produced only text.</summary>
+    public IReadOnlyList<AnswerAttachment> Attachments { get; init; } = Array.Empty<AnswerAttachment>();
+}
+
+/// <summary>One typed attachment of a <see cref="FinalAnswerBlock"/> — the frontend renders each <see cref="Kind"/> distinctly.</summary>
+public sealed record AnswerAttachment
+{
+    public required AnswerAttachmentKind Kind { get; init; }
+    public required string Label { get; init; }
+
+    /// <summary>Open link (the PR url, or a file's view url). Null when only a preview/download exists.</summary>
+    public string? Url { get; init; }
+
+    /// <summary>Inline-preview url (an image src, or a file preview endpoint). Null when not previewable.</summary>
+    public string? PreviewUrl { get; init; }
+
+    /// <summary>Download url. Null when not downloadable.</summary>
+    public string? DownloadUrl { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum AnswerAttachmentKind
+{
+    /// <summary>An image rendered inline. DEFINED but currently UNPOPULATED — no run output exposes user-facing images yet (a later artifact-capture source lights this up).</summary>
+    Image,
+
+    /// <summary>A changed / produced file — a path with optional preview + download.</summary>
+    FileLink,
+
+    /// <summary>The delivered pull request — an open link.</summary>
+    Pr,
+}
+
+/// <summary>
+/// A live "working…" line pinned at the bottom of an ACTIVE turn — the running agents' latest PUBLIC activity + a folded
+/// thinking tail (never raw chain-of-thought). Emitted only while the turn is active; its absence means the turn settled.
+/// </summary>
+public sealed record LiveActivityBlock : RoomBlock
+{
+    public required string Text { get; init; }
+
+    /// <summary>The agent whose activity this line reflects — lets the frontend deep-link its terminal. Null when turn-level.</summary>
+    public Guid? AgentRunId { get; init; }
 }
