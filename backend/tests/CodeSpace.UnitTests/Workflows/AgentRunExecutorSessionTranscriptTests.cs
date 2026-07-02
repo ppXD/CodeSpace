@@ -89,4 +89,33 @@ public class AgentRunExecutorSessionTranscriptTests
             if (Directory.Exists(home)) Directory.Delete(home, recursive: true);
         }
     }
+
+    // ─── A0: the capture cap (bound the whole-file read into memory) ────────────────────────────────
+
+    [Fact]
+    public void The_capture_cap_env_var_name_is_pinned()
+    {
+        // Rule 8: an air-gapped/large-context operator pins this env name to raise the cap; a silent rename would break
+        // their config. Hard-pin the literal so a rename is a compile-visible decision, not an invisible refactor.
+        AgentRunExecutor.MaxSessionTranscriptBytesEnvVar.ShouldBe("CODESPACE_AGENT_MAX_SESSION_TRANSCRIPT_BYTES");
+    }
+
+    [Fact]
+    public void The_default_capture_cap_is_32_mib()
+    {
+        AgentRunExecutor.DefaultMaxSessionTranscriptBytes.ShouldBe(32L * 1024 * 1024);
+    }
+
+    [Theory]
+    [InlineData("1048576", 1_048_576)]     // a valid positive override wins
+    [InlineData("999", 999)]
+    [InlineData(null, 42)]                  // absent → fallback
+    [InlineData("", 42)]                    // blank → fallback
+    [InlineData("not-a-number", 42)]        // garbage → fallback
+    [InlineData("0", 42)]                   // non-positive → fallback (a 0 cap would skip every capture)
+    [InlineData("-5", 42)]                  // negative → fallback
+    public void The_capture_cap_override_parses_a_positive_long_else_falls_back(string? raw, long expected)
+    {
+        AgentRunExecutor.ParseMaxSessionTranscriptBytes(raw, fallback: 42).ShouldBe(expected);
+    }
 }
