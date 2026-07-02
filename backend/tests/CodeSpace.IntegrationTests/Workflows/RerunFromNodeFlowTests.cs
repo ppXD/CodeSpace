@@ -681,6 +681,92 @@ public class RerunFromNodeFlowTests
         (await RunCountAsync(teamId)).ShouldBe(before, "a rerun over an in-flight (suspended) kept upstream must write nothing");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  C2 — continue a FAILED run IN PLACE (same run id): re-run the halting node where it died
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Continue_a_failed_run_reruns_the_halting_node_in_place_and_reaches_terminal()
+    {
+        // C2 crown: start → flaky(fails its 1st attempt, NO error edge) → end. The original run HALTS at flaky → Failure;
+        // end never runs. ContinueRunAsync revives it IN PLACE (same run id, NO fork): the halting node is reset + re-runs
+        // (attempt 2 → succeeds), the run walks to Success. Contrast rerun-from-node, which forks a new run id.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var flakyKey = "c2-continue-" + Guid.NewGuid().ToString("N");   // a fresh GUID key starts its attempt counter at 0
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FailOnceNoErrorEdgeDef(flakyKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure);
+        FlakyTestNode.AttemptsFor(flakyKey).ShouldBe(1, "the original run failed at the flaky node on its first attempt");
+        (await NodeStartedCountAsync(originalRunId, "end")).ShouldBe(0, "the terminal never ran — the run halted at the failure");
+
+        var before = await RunCountAsync(teamId);
+        (await ContinueAsync(originalRunId, teamId)).ShouldBeTrue("a Failure run with an unhandled-failed node continues in place");
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "continue-in-place forks NO new run — same run id (the whole point vs rerun-from-node)");
+
+        await RunEngineAsync(originalRunId);
+
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success, "the reset halting node re-ran (attempt 2, succeeds), downstream ran, the SAME run reached Success");
+        FlakyTestNode.AttemptsFor(flakyKey).ShouldBe(2, "the halting node re-ran exactly once on the in-place continue");
+        (await NodeStartedCountAsync(originalRunId, "end")).ShouldBe(1, "the previously-blocked terminal ran after the halting node recovered");
+    }
+
+    [Fact]
+    public async Task Continue_a_failed_run_does_not_re_fire_a_succeeded_side_effecting_upstream()
+    {
+        // The safety property that makes in-place continue narrower + safer than a full replay: continue re-runs ONLY the
+        // not-succeeded nodes. start → mutator(side-effecting, SUCCEEDS) → flaky(fails once) → end. The original: mutator
+        // fires once (count 1), flaky halts the run. On continue ONLY flaky is reset + re-runs; the mutator's Success cell
+        // is settled + REUSED, never re-fired — so its side-effect count stays 1 while the run completes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "c2-noreheat-" + Guid.NewGuid().ToString("N");
+        var flakyKey = "c2-noreheat-flaky-" + Guid.NewGuid().ToString("N");   // fresh GUID keys start their counters at 0
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SideEffectThenFlakyDef(probeKey, flakyKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the side-effecting upstream fired once on the original run");
+
+        (await ContinueAsync(originalRunId, teamId)).ShouldBeTrue();
+        await RunEngineAsync(originalRunId);
+
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the succeeded side-effecting upstream was REUSED, never re-fired — only the failed node re-ran");
+        // In-place continue keeps the SAME run id, so the mutator's ORIGINAL node.started stays in the ledger — the proof
+        // it wasn't re-run is that the count stays at 1 (a re-run would add a second node.started → 2).
+        (await NodeStartedCountAsync(originalRunId, "mutator")).ShouldBe(1, "the reused upstream started once (originally) and was NOT re-started on the in-place continue");
+    }
+
+    [Fact]
+    public async Task Continue_a_failed_run_resets_every_parallel_halting_node_and_completes()
+    {
+        // Multi-failure: start → {flakyA, flakyB}(both fail their 1st attempt, NO error edge) → end. BOTH branches fail in
+        // one ready wave → the run halts with TWO unhandled-failed top-level cells. Continue must reset BOTH (not just the
+        // first) so the re-walk re-runs both (attempt 2 → succeed) and the run reaches Success — pins that toReset covers
+        // every parallel failure, not one.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var keyA = "c2-diamondA-" + Guid.NewGuid().ToString("N");
+        var keyB = "c2-diamondB-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FailOnceDiamondDef(keyA, keyB));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure);
+        FlakyTestNode.AttemptsFor(keyA).ShouldBe(1, "branch A failed on its first attempt");
+        FlakyTestNode.AttemptsFor(keyB).ShouldBe(1, "branch B failed on its first attempt");
+
+        var before = await RunCountAsync(teamId);
+        (await ContinueAsync(originalRunId, teamId)).ShouldBeTrue("a Failure run with multiple unhandled-failed nodes continues in place");
+        (await RunCountAsync(teamId)).ShouldBe(before, "continue-in-place forks no new run");
+
+        await RunEngineAsync(originalRunId);
+
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success, "BOTH reset branches re-ran and succeeded → the run completed");
+        FlakyTestNode.AttemptsFor(keyA).ShouldBe(2, "branch A re-ran exactly once on the continue");
+        FlakyTestNode.AttemptsFor(keyB).ShouldBe(2, "branch B re-ran exactly once on the continue");
+    }
+
     [Fact]
     public async Task Rerun_with_a_container_in_the_closure_is_refused_and_writes_nothing()
     {
@@ -1077,6 +1163,65 @@ public class RerunFromNodeFlowTests
         },
     };
 
+    // start → flaky(fails its 1st attempt, succeeds its 2nd; NO error edge) → end. The original halts at flaky (Failure);
+    // an in-place continue re-runs flaky (attempt 2 → Success) and the run completes. (C2.)
+    private static WorkflowDefinition FailOnceNoErrorEdgeDef(string flakyKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flaky", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{flakyKey}}","failTimes":1}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "flaky" },
+            new() { From = "flaky", To = "end" },
+        },
+    };
+
+    // start → {flakyA, flakyB}(both fail once, NO error edge) → end. Both branches halt the run in one wave → an in-place
+    // continue resets BOTH and re-runs them to Success. (C2 multi-failure.)
+    private static WorkflowDefinition FailOnceDiamondDef(string keyA, string keyB) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flakyA", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyA}}","failTimes":1}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flakyB", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyB}}","failTimes":1}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "flakyA" },
+            new() { From = "start", To = "flakyB" },
+            new() { From = "flakyA", To = "end" },
+            new() { From = "flakyB", To = "end" },
+        },
+    };
+
+    // start → mutator(side-effecting, succeeds) → flaky(fails once) → end. Proves an in-place continue re-runs ONLY the
+    // failed node — the succeeded side-effecting upstream is settled + reused, never re-fired. (C2 safety.)
+    private static WorkflowDefinition SideEffectThenFlakyDef(string probeKey, string flakyKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "mutator", TypeKey = MutatingProbeNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flaky", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{flakyKey}}","failTimes":1}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "mutator" },
+            new() { From = "mutator", To = "flaky" },
+            new() { From = "flaky", To = "end" },
+        },
+    };
+
     // start → loop(1 pass; body: loop_start → mutator) → transform(json_emit) → end.
     private static WorkflowDefinition LoopBodyDef(string bodyKey) => new()
     {
@@ -1292,6 +1437,13 @@ public class RerunFromNodeFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IWorkflowService>().RerunFromNodeAsync(originalRunId, fromNodeId, teamId, userId, CancellationToken.None);
+    }
+
+    /// <summary>Drive the REAL in-place continue seam (same run id, no fork) — returns whether the run was revived.</summary>
+    private async Task<bool> ContinueAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)

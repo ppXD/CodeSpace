@@ -784,9 +784,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         // Tenancy + fail-closed: a foreign / phantom run is a clean 404 (the same KeyNotFoundException ApproveRunAsync
-        // throws), never a leak of existence. This is the user-triggered, single-run twin of the reconciler's
-        // stranded-Suspended re-dispatch (StuckRunReconcilerService.RedispatchStrandedSuspendedAsync) — it drives the
-        // EXACT same continuation a stranded run would otherwise wait for the ≤2-min sweep to perform.
+        // throws), never a leak of existence.
         var status = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == runId && r.TeamId == teamId)
             .Select(r => (WorkflowRunStatus?)r.Status)
@@ -794,12 +792,26 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (status is null) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
 
-        // Only a STRANDED Suspended run continues here: Suspended with NO pending wait. A run still parked on a pending
-        // wait (approval / timer / callback) is legitimately waiting → it resumes via /resume or its wait signal, not
-        // here. A terminal (Failure / Success / Cancelled) or Running run can't continue in place — a Failure is
-        // revived by replay / rerun-from-node, never in place.
-        if (status.Value != WorkflowRunStatus.Suspended) return false;
+        // Two IN-PLACE continues, both same-run-id revivals (never a fork, unlike replay / rerun-from-node): a STRANDED
+        // Suspended run (the reconciler twin) and a terminal FAILURE run (re-run the node[s] that halted it, where they
+        // died). Success / Cancelled / Running can't continue in place.
+        return status.Value switch
+        {
+            WorkflowRunStatus.Suspended => await ContinueStrandedSuspendedRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            WorkflowRunStatus.Failure => await ContinueFailedRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            _ => false,
+        };
+    }
 
+    /// <summary>
+    /// The user-triggered, single-run twin of the reconciler's stranded-Suspended re-dispatch
+    /// (<c>StuckRunReconcilerService.RedispatchStrandedSuspendedAsync</c>) — it drives the EXACT continuation a stranded
+    /// run would otherwise wait for the ≤2-min sweep to perform. Only a STRANDED Suspended run (Suspended with NO pending
+    /// wait) continues: one still parked on a pending wait (approval / timer / callback) is legitimately waiting and
+    /// resumes via /resume or its wait signal, not here.
+    /// </summary>
+    private async Task<bool> ContinueStrandedSuspendedRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
         var hasPendingWait = await _db.WorkflowRunWait
             .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending, cancellationToken).ConfigureAwait(false);
 
@@ -822,6 +834,56 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         return true;
     }
+
+    /// <summary>
+    /// Revive a terminal FAILURE run IN PLACE (same run id) — the "resume where it died" bridge across the Failure
+    /// boundary, the alternative to a forking replay / rerun-from-node. It RESETS the node(s) that halted the run — the
+    /// top-level cells that failed WITHOUT an <c>error</c> edge, which is exactly what the engine's rehydrate re-throws
+    /// on (an error-edged failure was HANDLED — its branch was taken — so it stays settled and is NOT re-run) — then
+    /// flips Failure → Pending and re-dispatches. The reset is a fresh <c>node.started</c>: the latest-record-wins view
+    /// projects it to <c>Running</c>, exactly the crash-recovery "Running → re-run" state the engine's rehydrate already
+    /// re-executes, so the halting node re-runs while every succeeded upstream cell stays settled + reused and the
+    /// never-run downstream runs after. Re-running the halting node is a manual RETRY (it never completed, so its side
+    /// effect never fully committed); a succeeded side-effecting node is settled → never re-fired. Returns false when
+    /// there is no unhandled failure to reset (e.g. the failure sits behind a handled branch) — use replay / rerun then.
+    /// </summary>
+    private async Task<bool> ContinueFailedRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId, cancellationToken).ConfigureAwait(false);
+        var definition = await LoadOriginalDefinitionAsync(run, cancellationToken).ConfigureAwait(false);
+
+        var failedNodeIds = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.IterationKey == WorkflowIterationKeys.TopLevel && n.Status == NodeStatus.Failure)
+            .Select(n => n.NodeId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var toReset = failedNodeIds
+            .Where(nodeId => !definition.Edges.Any(e => e.From == nodeId && e.SourceHandle == WorkflowHandles.Error))
+            .ToList();
+
+        if (toReset.Count == 0) return false;   // no unhandled failure to re-run in place → the caller falls back to replay / rerun
+
+        // CAS Failure → Pending: atomically claim the revive. 0 rows = a concurrent continue / replay already moved it.
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == WorkflowRunStatus.Failure)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0) return false;
+
+        // Reset each halting node so the re-walk RE-RUNS it (view → Running → rehydrate re-executes) instead of
+        // re-failing. In the command's transaction with the CAS above, committed together before the post-commit dispatch.
+        foreach (var nodeId in toReset)
+            await _recordLogger.NodeStartedAsync(runId, nodeId, WorkflowIterationKeys.TopLevel, EmptyNodeBag, EmptyNodeBag, cancellationToken).ConfigureAwait(false);
+
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Failed workflow run continued in place by operator. RunId={RunId} TeamId={TeamId} ResetNodes={ResetNodes}", runId, teamId, string.Join(",", toReset));
+
+        return true;
+    }
+
+    private static readonly IReadOnlyDictionary<string, JsonElement> EmptyNodeBag = new Dictionary<string, JsonElement>();
 
     public async Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
