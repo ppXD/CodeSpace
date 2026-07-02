@@ -86,6 +86,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
   const deepTier = effort === "deep" || effort === "auto";
   const planTier = effort === "standard" || effort === "auto";
+  const planCapable = effort !== "quick";   // every tier that authors a plan can park on it
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
     pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
@@ -373,9 +374,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
             <div className="lt3-ctabs">
               <button type="button" className="lt3-ctab" data-on={customizeTab === "planning"} onClick={() => setCustomizeTab("planning")}>Planning</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "execution"} onClick={() => setCustomizeTab("execution")}>Agent setup</button>
+              <button type="button" className="lt3-ctab" data-on={customizeTab === "evaluation"} onClick={() => setCustomizeTab("evaluation")}>Evaluation</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "supervisor"} onClick={() => setCustomizeTab("supervisor")}>Coordination</button>
               <button type="button" className="lt3-ctab" data-on={customizeTab === "safety"} onClick={() => setCustomizeTab("safety")}>Permissions</button>
-              <button type="button" className="lt3-ctab" data-on={customizeTab === "evaluation"} onClick={() => setCustomizeTab("evaluation")}>Evaluation</button>
               <button type="button" className="lt3-reset" onClick={resetTab}>Reset</button>
             </div>
 
@@ -469,15 +470,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               </>}
 
               {customizeTab === "planning" && <>
-                <div className="lt3-cnote">Think it through before any agent runs — the plan, its reviewer, and your say on it.</div>
-                {deepTier ? <SToggleRow label="Confirm plan first" on={cfg.requirePlanConfirmation} onToggle={() => setC({ requirePlanConfirmation: !cfg.requirePlanConfirmation })} /> : <TierRow label="Confirm plan first" tier="Deep only" />}
+                <div className="lt3-cnote">Think it through before any agent runs. Confirm-plan-first parks every plan for your approval (any answer that isn't "approve" becomes revision feedback). The plan critic reviews the PLAN itself; the decision critic reviews every supervisor step.</div>
+                {planCapable ? <SToggleRow label="Confirm plan first" on={cfg.requirePlanConfirmation} onToggle={() => setC({ requirePlanConfirmation: !cfg.requirePlanConfirmation })} /> : <TierRow label="Confirm plan first" tier="Quick runs without a plan" />}
                 {planTier ? <Combo label="Plan critic" value={cfg.plannerReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — annotate concerns onto the plan" }, { value: "Improve", label: "Improve — one revision against the critique" }]} onChange={v => setC({ plannerReview: v })} /> : <TierRow label="Plan critic" tier="Standard only" />}
                 {deepTier ? <Combo label="Decision critic" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} /> : <TierRow label="Decision critic" tier="Deep only" />}
-                <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
+                <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent", desc: "Prefers a different model than the producer; a one-model pool falls back to the same model, independently prompted" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
               </>}
 
               {customizeTab === "evaluation" && <>
-                <div className="lt3-cnote">How the result is judged — free-text criteria steer the work; the checks command verifies it.</div>
+                <div className="lt3-cnote">How the result is judged. Criteria STEER — free text rendered into the prompt, never executed. Checks VERIFY — a command that must exit 0 at the end, or the result is withheld.</div>
                 {!deepTier && <TierRow label="Acceptance criteria" tier="Deep only" />}
                 {!deepTier && <TierRow label="Acceptance checks" tier="Deep only" />}
                 {deepTier && <RowPop label="Acceptance criteria" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>

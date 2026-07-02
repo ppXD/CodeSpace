@@ -363,10 +363,14 @@ describe("buildLaunchInput — autonomy ceiling", () => {
 });
 
 describe("triad launch fields (S4)", () => {
-  it("sends the confirm gate + checks floor only on cap tiers and only when set", () => {
+  it("sends the confirm gate on every planning tier, the checks floor on cap tiers, nothing on quick", () => {
     const deep = buildLaunchInput(form({ effort: "deep", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
     expect(deep.requirePlanConfirmation).toBe(true);
     expect(deep.acceptanceChecks).toEqual(["sh", "check.sh"]);
+
+    // Standard authors a real plan (plan.author) — the gate parks its plan.confirm node (S4d).
+    const standard = buildLaunchInput(form({ effort: "standard", requirePlanConfirmation: true }));
+    expect(standard.requirePlanConfirmation).toBe(true);
 
     const quick = buildLaunchInput(form({ effort: "quick", requirePlanConfirmation: true, acceptanceChecks: ["sh", "check.sh"] }));
     expect(quick.requirePlanConfirmation).toBeUndefined();

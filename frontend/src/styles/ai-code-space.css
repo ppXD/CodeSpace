@@ -5683,7 +5683,7 @@ body.chat-resizing .acs-root .app { transition: none; }
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }
 .lt3-ctab[data-on="true"] { color: #8A4326; border-bottom-color: #E0A07F; }
-.lt3-cbody { min-height: 220px; display: flex; flex-direction: column; }
+.lt3-cbody { display: flex; flex-direction: column; padding-bottom: 4px; }
 /* One-line description band at the top of each Advanced tab — explains what the tab governs. */
 /* The tab's intro caption — left-aligned, italic + lighter, so it reads as description, not a setting row. */
 .lt3-cnote { padding: 11px 16px; font-size: 11px; font-style: italic; line-height: 1.45; color: var(--muted-2); border-bottom: 1px solid #eee8df; }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Enums;
@@ -83,4 +84,35 @@ public class LlmStructuredCriticTests
     }
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
+
+    // ── SelectReviewerRowIdAsync default member (S4d): fakes without an override inherit today's pick ──
+
+    [Fact]
+    public async Task A_selector_without_the_reviewer_override_delegates_to_the_brain_pick()
+    {
+        // Every test fake implementing IModelPoolSelector compiles UNCHANGED because the reviewer pick is a
+        // DEFAULT interface member — and behaviorally it must be today's brain pick (same-model allowed), so
+        // the ladder is an opt-in override of the real selector, never a silent behavior change for fakes.
+        var brainRow = Guid.NewGuid();
+        IModelPoolSelector selector = new BrainOnlySelector(brainRow);
+
+        (await selector.SelectReviewerRowIdAsync(Guid.NewGuid(), new[] { "Anthropic" }, producerRowId: brainRow, CancellationToken.None))
+            .ShouldBe(brainRow, "the default member delegates to SelectBrainRowIdAsync — the producer preference is the REAL selector's override");
+    }
+
+    private sealed class BrainOnlySelector : IModelPoolSelector
+    {
+        private readonly Guid _brainRow;
+
+        public BrainOnlySelector(Guid brainRow) { _brainRow = brainRow; }
+
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(_brainRow);
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
 }

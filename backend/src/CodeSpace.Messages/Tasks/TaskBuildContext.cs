@@ -45,7 +45,7 @@ public sealed record TaskBuildContext
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c>, rendered into the decider prompt (NOT executed). Null / empty ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
-    /// <summary>The S3 plan-confirmation gate — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>requirePlanConfirmation</c>, parking every authored plan version for the operator before any agent is created. False (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The plan-confirmation gate — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>requirePlanConfirmation</c> (S3); the plan-map builders insert a <c>plan.confirm</c> node after the planner and rebind the map to its APPROVED outputs (S4d). False (the default) ⇒ byte-identical ungated graphs. Inert on the quick tier.</summary>
     public bool RequirePlanConfirmation { get; init; }
 
     /// <summary>The session's chat surface (S4a) — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>conversationId</c>, giving the launched run's HITL cards (ask_human, plan confirmation, approvals) a real channel to post into. Null (single-agent / map launches, or a launch predating the surface) ⇒ the builder omits the key (byte-identical).</summary>

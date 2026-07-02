@@ -32,6 +32,7 @@ public class PlanMapSynthDefinitionBuilderTests
         new TriggerManualNode(),
         new LlmCompleteNode(new LLMClientRegistry(Array.Empty<ILLMClient>()), null!),
         new PlanAuthorNode(null!),
+        new PlanConfirmNode(null!),
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),
@@ -134,6 +135,34 @@ public class PlanMapSynthDefinitionBuilderTests
 
         planner.Config.TryGetProperty("reviewMode", out _).ShouldBeFalse("None ⇒ omitted ⇒ byte-identical");
         planner.Config.TryGetProperty("reviewerModelId", out _).ShouldBeFalse("a reviewer without a review would not be byte-identical");
+    }
+
+    [Fact]
+    public void The_confirm_gate_inserts_the_park_and_rebinds_the_map_to_the_approved_outputs()
+    {
+        var def = Builder.Build(Context() with { RequirePlanConfirmation = true, PlannerModelRowId = Guid.Parse("99999999-9999-9999-9999-999999999999") });
+
+        var confirm = def.Nodes.Single(n => n.Id == "confirm");
+        confirm.TypeKey.ShouldBe("plan.confirm");
+        confirm.Config.GetProperty("flatPlan").GetBoolean().ShouldBeTrue("revisions are as flat as the original — the parallel map cannot honor ordering");
+        confirm.Config.GetProperty("plannerModelId").GetString().ShouldBe("99999999-9999-9999-9999-999999999999", "revisions re-plan on the SAME pinned model as the planner");
+
+        def.Edges.Select(e => (e.From, e.To)).ShouldBe(
+            new[] { ("start", "planner"), ("planner", "confirm"), ("confirm", "map"), ("map", "synth"), ("synth", "done"), ("ms", "agent") }, ignoreOrder: true);
+
+        def.Nodes.Single(n => n.Id == "map").Inputs.GetProperty("items").GetString()
+            .ShouldBe("{{nodes.confirm.outputs.json.subtasks}}", "the map binds the CONFIRM node — always the APPROVED version, never a rejected one");
+
+        RealValidator().Validate(def).IsValid.ShouldBeTrue(customMessage: "the gated graph passes the real validator");
+    }
+
+    [Fact]
+    public void Without_the_gate_the_graph_has_no_confirm_node_and_binds_the_planner_directly()
+    {
+        var def = Builder.Build(Context());
+
+        def.Nodes.Any(n => n.Id == "confirm").ShouldBeFalse("gate off ⇒ byte-identical pre-gate graph");
+        def.Nodes.Single(n => n.Id == "map").Inputs.GetProperty("items").GetString().ShouldBe("{{nodes.planner.outputs.json.subtasks}}");
     }
 
     [Fact]

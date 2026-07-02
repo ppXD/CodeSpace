@@ -66,6 +66,14 @@ public interface IModelPoolSelector
     Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The REVIEWER pick (Rule 7 sibling; S4d) — prefers a model DISTINCT from the producer so the critique is a
+    /// second opinion, and FALLS BACK to the producer's own model when the pool has no alternative (a one-model
+    /// team still gets its critic — an independent call, never a silent no-review). Default implementation
+    /// delegates to <see cref="SelectBrainRowIdAsync"/> (same-model allowed), so fakes inherit today's behavior.
+    /// </summary>
+    Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken) => SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken);
+
+    /// <summary>
     /// Validate an OPERATOR-PINNED brain model (the Launch "Brain model" chip → one <c>ModelCredentialModel</c> row) for
     /// the Deep/Auto supervisor: returns <paramref name="modelCredentialModelId"/> verbatim IFF it is a real ENABLED row
     /// under an ACTIVE team credential whose provider a structured-LLM client serves (in <paramref name="eligibleProviders"/>);

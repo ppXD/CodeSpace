@@ -17,6 +17,9 @@ public sealed record CriticRequest
 
     /// <summary>The goal / task the artifact should serve — the yardstick the reviewer judges against. Optional.</summary>
     public string? Goal { get; init; }
+
+    /// <summary>The PRODUCER's credentialed-model row (when the caller knows it) — the auto reviewer pick prefers a DIFFERENT model for a real second opinion, falling back to this same model on a one-model pool. Null ⇒ no preference (today's pick).</summary>
+    public Guid? ProducerModelRowId { get; init; }
 }
 
 /// <summary>

@@ -2,7 +2,9 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
+using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Plans;
 using Microsoft.EntityFrameworkCore;
@@ -32,7 +34,8 @@ public sealed class WorkPlanConfirmationService : IWorkPlanConfirmationService, 
 
     public async Task<WorkPlanConfirmationOutcome?> AnswerAsync(Guid workflowRunId, Guid teamId, Guid actorUserId, bool approve, string? feedback, CancellationToken cancellationToken)
     {
-        var token = await FindPendingConfirmationTokenAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var token = await FindPendingConfirmationTokenAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false)
+            ?? await FindPendingGraphConfirmationTokenAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (token == null) return null;
 
@@ -61,6 +64,40 @@ public sealed class WorkPlanConfirmationService : IWorkPlanConfirmationService, 
         if (SupervisorOutcome.ReadAskHumanAnswer(last.OutcomeJson) != null) return null;
 
         return SupervisorOutcome.ReadHumanWaitToken(last.OutcomeJson);
+    }
+
+    /// <summary>
+    /// The GRAPH-TIER pending confirmation (S4d): a <c>plan.confirm</c> node's park — a Pending Action wait whose
+    /// suspend payload carries the <c>plan-confirm</c> discriminator (stamped by the node, so no definition parsing).
+    /// Team-scoped through the run row. Null when nothing is parked — the supervisor lookup above already ran, so
+    /// both tiers conflate to one 404.
+    /// </summary>
+    private async Task<string?> FindPendingGraphConfirmationTokenAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var candidates = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == workflowRunId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending && w.PayloadJson != null)
+            .Join(_db.WorkflowRun.AsNoTracking().Where(r => r.TeamId == teamId), w => w.RunId, r => r.Id, (w, r) => new { w.Token, w.PayloadJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var candidate in candidates)
+            if (IsPlanConfirmWait(candidate.PayloadJson!)) return candidate.Token;
+
+        return null;
+    }
+
+    private static bool IsPlanConfirmWait(string payloadJson)
+    {
+        try
+        {
+            var root = JsonDocument.Parse(payloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("kind", out var kind)
+                && kind.ValueKind == JsonValueKind.String && kind.GetString() == Workflows.Nodes.Builtin.PlanConfirmNode.WaitPayloadKind;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

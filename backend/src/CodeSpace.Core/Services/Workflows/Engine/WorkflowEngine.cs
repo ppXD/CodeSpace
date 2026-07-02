@@ -2798,8 +2798,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     private async Task LoadResolvedWaitsAsync(Guid runId, WalkerState state, CancellationToken cancellationToken)
     {
+        // ORDERED so the NodeId-keyed last-write is the FRESHEST resolution, not PostgreSQL heap order — a
+        // multi-park node (agent.supervisor, plan.confirm) accumulates resolved waits across its parks, and an
+        // unordered scan let a STALE answer win the slot. Payload-reading multi-park nodes should still read
+        // their OWN wait rows (the durable, iteration-scoped source); this makes the injected slot sane anyway.
         var resolved = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Resolved)
+            .OrderBy(w => w.ResolvedAt)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         foreach (var w in resolved)
