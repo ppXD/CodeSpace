@@ -448,9 +448,12 @@ function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: M
 function SupervisorStep({ step }: { step: NarrativeStepBlock }) {
   const tone = step.tone === "Error" ? "err" : step.tone === "Success" ? "ok" : "info";
   return (
-    <div className={`room-supstep room-supstep-${tone}`}>
+    <div className={`room-supstep room-supstep-${tone}${step.detail ? " room-supstep-2" : ""}`}>
       <Sym n="sparkle" s={13} cls="room-supstep-ic" />
-      <span className="room-supstep-text"><Inline text={step.text} /></span>
+      <span className="room-supstep-body">
+        <span className="room-supstep-text"><Inline text={step.text} /></span>
+        {step.detail && <span className="room-supstep-detail"><Inline text={step.detail} /></span>}
+      </span>
     </div>
   );
 }

@@ -282,7 +282,10 @@ public class RoomProjectorFlowTests
         var retryGroup = turn.Blocks.OfType<AgentGroupBlock>().Single(g => g.Agents.Any(a => a.AgentRunId == retryAgent));
         retryGroup.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgent);
 
-        turn.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor retried a subtask", "the room shows the retry beat as a narrative step");
+        var retryStep = turn.Blocks.OfType<NarrativeStepBlock>().Single(s => s.Text == "Supervisor retried a subtask");
+        retryStep.Detail.ShouldNotBeNull("the retry step carries the supervisor's structured rationale so a reader sees WHY");
+        retryStep.Detail!.ShouldContain("The first attempt missed the edge cases.", customMessage: "the why");
+        retryStep.Detail!.ShouldContain("attempt 1 failed its acceptance check.", customMessage: "the evidence");
     }
 
     /// <summary>Seed a supervisor turn that FAILED a subtask then RETRIED it: a spawn staging one FAILED agent for subtask "s0", then a retry staging a fresh SUCCEEDED agent — plus both AgentRun rows (ground-truth status). Flat plan (the tape path).</summary>
@@ -306,7 +309,7 @@ public class RoomProjectorFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Retry, IdempotencyKey = $"retry:{Guid.NewGuid():N}", InputHash = new string('0', 64),
             Status = SupervisorDecisionStatus.Succeeded,
-            PayloadJson = JsonSerializer.Serialize(new { subtaskId = "s0" }),
+            PayloadJson = JsonSerializer.Serialize(new { subtaskId = "s0", rationale = new { why = "The first attempt missed the edge cases.", evidence = "attempt 1 failed its acceptance check." } }),
             OutcomeJson = JsonSerializer.Serialize(new { agentCount = 1, agentRunIds = new[] { retryAgent } }),
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });

@@ -122,6 +122,9 @@ public sealed record NarrativeStepBlock : RoomBlock
     public required string Text { get; init; }
     public NarrativeTone Tone { get; init; } = NarrativeTone.Info;
     public DateTimeOffset? At { get; init; }
+
+    /// <summary>An optional second line under the step — the supervisor's structured rationale for a retry (why + evidence), so a reader sees the decision, not just the beat. Null for a plain step.</summary>
+    public string? Detail { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

@@ -254,7 +254,7 @@ public static class RoomNarrative
     {
         foreach (var step in facts.RetrySteps)
         {
-            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:retry:{step.Sequence}", Seq = seq, Text = step.Text, Tone = NarrativeTone.Info });
+            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:retry:{step.Sequence}", Seq = seq, Text = step.Text, Tone = NarrativeTone.Info, Detail = step.Rationale });
 
             if (step.AgentRunId is { } id && agentById.TryGetValue(id, out var agent))
                 blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:retry:{step.Sequence}:agent", Seq = seq, Title = "Retry", Agents = new[] { ToCard(agent, facts) } });
