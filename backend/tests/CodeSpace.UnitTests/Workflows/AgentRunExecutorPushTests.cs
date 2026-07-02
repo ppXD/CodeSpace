@@ -700,6 +700,8 @@ public sealed class AgentRunExecutorPushTests
 
         public Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
 
+        public Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
+
         public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
         {
             AppendedEvents.Add(@event);

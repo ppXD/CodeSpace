@@ -50,11 +50,24 @@ public sealed partial class RealSupervisorActionExecutor
         var retry = Deserialize<SupervisorRetryPayload>(decision.PayloadJson);
         var subtasks = ResolvePlannedSubtasks(context);
 
-        var tasks = retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId)
-            ? new List<(AgentTask, SupervisorAgentDispatch?)>()
-            : new List<(AgentTask, SupervisorAgentDispatch?)> { (BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context), null) };
+        if (retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId))
+            return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)>(), context, cancellationToken).ConfigureAwait(false);
 
-        return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
+        // D1 (retry-resume): a retry CONTINUES the failed attempt's conversation instead of restarting the subtask cold —
+        // find the prior attempt of THIS subtask in THIS run + stamp the resume hint (the executor resolves any ref, the
+        // Claude harness restores the transcript at the retry's own cwd). No prior resumable attempt ⇒ byte-identical cold-start.
+        var task = await ApplyRetryResumeHintAsync(BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context), retry.SubtaskId, context, cancellationToken).ConfigureAwait(false);
+
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stamp the retry-resume hint from the subtask's most-recent resumable prior attempt (the same session id + transcript ref/inline the executor consumes), or return the task unchanged when no prior attempt is resumable (cold-start).</summary>
+    private async Task<AgentTask> ApplyRetryResumeHintAsync(AgentTask task, string subtaskId, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (await _agentRuns.FindResumableSubtaskAttemptAsync(context.TeamId, context.SupervisorRunId, subtaskId, cancellationToken).ConfigureAwait(false) is not { } prior)
+            return task;
+
+        return task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
     }
 
     /// <summary>
@@ -334,7 +347,12 @@ public sealed partial class RealSupervisorActionExecutor
             : !string.IsNullOrWhiteSpace(planned?.Instruction) ? planned!.Instruction
             : context.Goal;
 
-        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, spec: spec);
+        // Stamp the subtask id (D1 retry-resume linking key) so a later RETRY of this subtask can find this attempt and
+        // resume its conversation. Blank id → null (byte-identical; the generic BuildTaskWithGoal never sets it).
+        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, spec: spec) with
+        {
+            SubtaskId = string.IsNullOrWhiteSpace(subtaskId) ? null : subtaskId,
+        };
     }
 
     /// <summary>Fold a model-authored role into the agent's GOAL so it runs in-role — the role's only sink (there is no <c>AgentTask.Role</c> field; it shapes the prompt, never a privilege). Blank role → the plain instruction (byte-identical to a no-dispatch spawn).</summary>

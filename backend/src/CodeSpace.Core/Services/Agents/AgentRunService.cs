@@ -116,6 +116,14 @@ public interface IAgentRunService
     Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken);
 
     /// <summary>
+    /// P3 (D1 retry-resume): the RESUMABLE session of the most-recent prior attempt of <paramref name="subtaskId"/> in
+    /// <paramref name="supervisorRunId"/> (matched via the spawned agent's <see cref="AgentTask.SubtaskId"/>) — so a
+    /// supervisor RETRY continues the failed attempt's conversation instead of restarting fresh. Null when there is no
+    /// prior attempt of the subtask that captured a resumable session (both-or-neither) — the retry then cold-starts.
+    /// </summary>
+    Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// TEAM-SCOPED operator read of a run's live status (null when the run isn't <paramref name="teamId"/>'s,
     /// so a foreign id leaks nothing) — distinct from <see cref="GetAsync"/>, which is the un-scoped execution
     /// path. Backs the run-detail's live status header.
@@ -591,19 +599,62 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         {
             var candidate = candidates.FirstOrDefault(c => c.WorkflowRunId == runId);
 
-            if (candidate?.SessionId is not { Length: > 0 } sessionId || candidate.ResultJson is null) continue;
-
-            AgentRunResult? result;
-            try { result = JsonSerializer.Deserialize<AgentRunResult>(candidate.ResultJson, AgentJson.Options); }
-            catch (JsonException) { continue; }
-
-            var inline = result?.SessionTranscript is { Length: > 0 } t ? t : null;   // normalize "" (offloaded) → null so the ref case carries a clean null inline
-            var artifactId = result?.SessionTranscriptArtifactId;
-
-            if (inline is not null || artifactId is not null) return new ResumableSession(sessionId, inline, artifactId);
+            if (candidate is not null && TryResumable(candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
         }
 
         return null;
+    }
+
+    public async Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(subtaskId)) return null;
+
+        // The prior attempts (session-bearing agent runs) in THIS supervisor run, newest first. The run's agent count is
+        // bounded (maxTotalSpawns), so this per-run scan + task_jsonb subtask match is cheap (served by
+        // idx_agent_run_workflow_run). The subtask id lives in task_jsonb; matched in memory after load.
+        var candidates = await _db.AgentRun.AsNoTracking()
+            .Where(a => a.TeamId == teamId && a.WorkflowRunId == supervisorRunId && a.SessionId != null)
+            .OrderByDescending(a => a.CreatedDate).ThenByDescending(a => a.Id)
+            .Select(a => new { a.SessionId, a.ResultJson, a.TaskJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // The most-recent RESUMABLE prior attempt of THIS subtask — skip a captured-but-transcript-less attempt so it
+        // never masks an older resumable one (the retried agent continues the subtask's conversation, else cold-starts).
+        foreach (var candidate in candidates)
+        {
+            if (SubtaskIdOf(candidate.TaskJson) != subtaskId) continue;
+
+            if (TryResumable(candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A prior agent run's (session id, result json) → its RESUMABLE session, or null when not resumable: no session id,
+    /// no transcript (both-or-neither — a resume without one fails "No conversation found"), or a corrupt/undeserializable
+    /// result (cold-start, NEVER a throw). Normalizes an offloaded <c>""</c> transcript to a null inline so the ref case
+    /// carries a clean null. Shared by the fork-cell lineage lookup and the supervisor subtask-attempt lookup.
+    /// </summary>
+    private static ResumableSession? TryResumable(string? sessionId, string? resultJson)
+    {
+        if (sessionId is not { Length: > 0 } sid || resultJson is null) return null;
+
+        AgentRunResult? result;
+        try { result = JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
+
+        var inline = result?.SessionTranscript is { Length: > 0 } t ? t : null;
+        var artifactId = result?.SessionTranscriptArtifactId;
+
+        return inline is not null || artifactId is not null ? new ResumableSession(sid, inline, artifactId) : null;
+    }
+
+    /// <summary>The <see cref="AgentTask.SubtaskId"/> a spawned agent's persisted task carries, or null (non-supervisor task / corrupt json).</summary>
+    private static string? SubtaskIdOf(string taskJson)
+    {
+        try { return JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options)?.SubtaskId; }
+        catch (JsonException) { return null; }
     }
 
     public async Task<AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)

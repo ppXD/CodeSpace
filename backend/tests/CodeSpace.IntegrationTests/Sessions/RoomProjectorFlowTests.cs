@@ -152,7 +152,7 @@ public class RoomProjectorFlowTests
         var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
 
         turn.Map.ShouldNotBeNull();
-        turn.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Work", "Review", "Deliver" }, "a supervisor turn (decision tape present) gets the canonical lifecycle map");
+        turn.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Start", "Plan", "Work", "Review", "Deliver" }, "a supervisor turn (decision tape present) gets the canonical lifecycle map");
 
         var subtasks = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "subtasks");
         subtasks.Label.ShouldBe("Plan");
