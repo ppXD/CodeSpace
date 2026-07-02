@@ -88,8 +88,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Per-row tier honesty (the Coordination tab's lt3-cdisabled pattern, at row grain — these two tabs mix tiers):
   // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
   const deepTier = effort === "deep" || effort === "auto";
-  const planTier = effort === "standard" || effort === "auto";
-  const planCapable = effort !== "quick";   // every tier that authors a plan can park on it
+  const planCapable = effort !== "quick";   // every tier that authors a plan can park on it + critique it
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
     pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
@@ -104,8 +103,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
-    else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", decisionReview: "None", reviewerModel: "" });
-    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "" });
+    else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
+    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", decisionReview: "None" });
     else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None" });
     else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -458,6 +457,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                 <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
                 <SToggleRow label="Integrate branches" on={cfg.integrateBranches} onToggle={() => setC({ integrateBranches: !cfg.integrateBranches })} />
+                <Combo label="Decision critic" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} />
               </> : (
                 <div className="lt3-cdisabled">Coordination runs in <b>Deep</b> mode. Switch Effort to Deep to configure how multiple agents coordinate, review, and retry.</div>
               )}
@@ -476,10 +476,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               </>}
 
               {customizeTab === "planning" && <>
-                <div className="lt3-cnote">Think it through before any agent runs. Confirm-plan-first parks every plan for your approval (any answer that isn't "approve" becomes revision feedback). The plan critic reviews the PLAN itself; the decision critic reviews every supervisor step.</div>
+                <div className="lt3-cnote">Think it through before any agent runs. Confirm-plan-first parks every plan for your approval (any answer that isn't "approve" becomes revision feedback). The plan critic reviews the PLAN itself on every tier; the reviewer model serves ALL critics (plan / decision / output).</div>
                 {planCapable ? <SToggleRow label="Confirm plan first" on={cfg.requirePlanConfirmation} onToggle={() => setC({ requirePlanConfirmation: !cfg.requirePlanConfirmation })} /> : <TierRow label="Confirm plan first" tier="Quick runs without a plan" />}
-                {planTier ? <Combo label="Plan critic" value={cfg.plannerReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — annotate concerns onto the plan" }, { value: "Improve", label: "Improve — one revision against the critique" }]} onChange={v => setC({ plannerReview: v })} /> : <TierRow label="Plan critic" tier="Standard only" />}
-                {deepTier ? <Combo label="Decision critic" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} /> : <TierRow label="Decision critic" tier="Deep only" />}
+                {planCapable ? <Combo label="Plan critic" value={cfg.plannerReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — annotate concerns onto the plan" }, { value: "Improve", label: "Improve — one revision against the critique" }]} onChange={v => setC({ plannerReview: v })} /> : <TierRow label="Plan critic" tier="Quick runs without a plan" />}
                 <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent", desc: "Prefers a different model than the producer; a one-model pool falls back to the same model, independently prompted" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
               </>}
 

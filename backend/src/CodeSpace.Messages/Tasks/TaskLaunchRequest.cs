@@ -64,7 +64,7 @@ public sealed record TaskLaunchRequest
     /// <summary>The plan-confirmation gate — every authored plan version parks the run for the operator's confirmation before any agent is created (supervisor in-loop on Deep; a <c>plan.confirm</c> node on the plan-map tiers). Null / false ⇒ omitted (byte-identical). Inert on the quick tier.</summary>
     public bool? RequirePlanConfirmation { get; init; }
 
-    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN on the plan-map tiers (S4b) — baked into the plan.author node's <c>reviewMode</c>. <see cref="ReviewMode.None"/> (default) ⇒ omitted (byte-identical). Inert elsewhere.</summary>
+    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): plan.author/plan.confirm <c>reviewMode</c> on the plan-map tiers, the supervisor's plan-scoped <c>planReviewMode</c> on Deep. <see cref="ReviewMode.None"/> (default) ⇒ omitted (byte-identical). Inert on quick.</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
 
     /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv baked into the supervisor node's <c>acceptanceChecks</c>, enforced at the terminal stop. Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>

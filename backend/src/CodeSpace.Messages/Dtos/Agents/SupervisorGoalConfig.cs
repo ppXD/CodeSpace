@@ -85,6 +85,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>How an INDEPENDENT critic reviews each turn's decision before its side effect. <c>None</c> (the default) ⇒ no critic (byte-identical); <c>Improve</c> ⇒ one bounded re-decide against the critique. Baked so every turn + replay of this frozen run reads the same mode.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 
+    /// <summary>The PLAN-scoped critic (S4e — the tier-generic "plan critic" on the Deep tier): reviews ONLY the supervisor's <c>plan</c> decisions, so the operator can critique plans without paying a critic call on every spawn/merge/stop. A plan decision uses THIS mode when set, else falls under <see cref="DecisionReviewMode"/>. None (default) ⇒ plans review like any other decision.</summary>
+    public ReviewMode PlanReviewMode { get; init; } = ReviewMode.None;
+
     /// <summary>The credentialed-model ROW the decision critic runs on (a <c>ModelCredentialModel</c> id) — the INDEPENDENT reviewer, ideally distinct from <see cref="SupervisorModelId"/>. Null ⇒ the critic auto-picks the team's strongest structured-eligible brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
 

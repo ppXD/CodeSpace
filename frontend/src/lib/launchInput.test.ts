@@ -381,10 +381,11 @@ describe("triad launch fields (S4)", () => {
     expect(off.acceptanceChecks).toBeUndefined();
   });
 
-  it("sends the plan critic only on the plan-map tiers and only when active", () => {
+  it("sends the plan critic on every planning tier and only when active", () => {
     expect(buildLaunchInput(form({ effort: "standard", plannerReview: "Improve" })).plannerReviewMode).toBe("Improve");
     expect(buildLaunchInput(form({ effort: "auto", plannerReview: "Gate" })).plannerReviewMode).toBe("Gate");
-    expect(buildLaunchInput(form({ effort: "deep", plannerReview: "Improve" })).plannerReviewMode).toBeUndefined();
+    // Deep scopes it to the supervisor's PLAN decisions (planReviewMode) — plan critique without a critic call per step.
+    expect(buildLaunchInput(form({ effort: "deep", plannerReview: "Improve" })).plannerReviewMode).toBe("Improve");
     expect(buildLaunchInput(form({ effort: "quick", plannerReview: "Improve" })).plannerReviewMode).toBeUndefined();
     expect(buildLaunchInput(form({ effort: "standard" })).plannerReviewMode).toBeUndefined();
   });

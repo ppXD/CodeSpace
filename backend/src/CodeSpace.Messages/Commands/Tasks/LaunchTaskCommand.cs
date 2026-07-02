@@ -130,7 +130,7 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public bool? RequirePlanConfirmation { get; init; }
 
-    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN on the plan-map tiers (S4b): None (default, byte-identical) / Gate (annotate concerns onto the plan's risks) / Improve (one bounded revision against the critique). Runs on <see cref="ReviewerModelId"/> when set. Inert on non-plan-map projections.</summary>
+    /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): the plan-map tiers bake it into plan.author/plan.confirm's <c>reviewMode</c>; Deep bakes it into the supervisor's plan-scoped <c>planReviewMode</c> (plans only — never a critic call on every spawn/merge/stop). None (default, byte-identical) / Gate / Improve. Runs on <see cref="ReviewerModelId"/> when set. Inert on quick (no plan).</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
 
     /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv (e.g. ["sh","check.sh"]) run against the run's reviewable head at the terminal stop; a non-zero exit fails the stop and withholds the branch. DISTINCT from the free-text <see cref="AcceptanceCriteria"/> (prompt-rendered, never executed). Null / empty ⇒ omitted ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
