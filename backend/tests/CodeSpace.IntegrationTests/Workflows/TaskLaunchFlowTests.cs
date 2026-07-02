@@ -1334,6 +1334,7 @@ public class TaskLaunchFlowTests
             {
                 TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
                 TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+                AcceptanceChecks = new[] { "sh", " ", "check.sh" },
             });
 
             using var scope = _fixture.BeginScope();
@@ -1354,6 +1355,49 @@ public class TaskLaunchFlowTests
             var run = await LoadRunAsync(result.RunId);
             ReadSupervisorConfigString(run.DefinitionSnapshotJson!, "conversationId")
                 .ShouldBe(session.ConversationId.ToString(), "the frozen supervisor node carries the surface — every turn + replay reads the same channel");
+
+            // The executable acceptance floor reached the frozen config with the blank entry dropped (S4b) —
+            // a verification control must never silently not-arrive.
+            var sup = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+            sup.GetProperty("config").GetProperty("acceptanceChecks").EnumerateArray().Select(e => e.GetString())
+                .ShouldBe(new[] { "sh", "check.sh" });
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_standard_launch_bakes_the_plan_critic_onto_the_plan_author_planner()
+    {
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var reviewerRow = Guid.NewGuid();
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Improve the onboarding module", RequestedEffort = TaskEffortModes.Standard, Autonomy = "Confined",
+                PlannerReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRow,
+            });
+
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth);
+
+            var run = await LoadRunAsync(result.RunId);
+            var planner = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "planner");
+            var config = planner.GetProperty("config");
+
+            planner.GetProperty("typeKey").GetString().ShouldBe("plan.author", "the standard tier's planner is the durable triad node");
+            config.GetProperty("flatPlan").GetBoolean().ShouldBeTrue();
+            config.GetProperty("reviewMode").GetInt32().ShouldBe((int)ReviewMode.Improve, "the operator's plan critic reached the frozen planner");
+            config.GetProperty("reviewerModelId").GetString().ShouldBe(reviewerRow.ToString());
+            config.GetProperty("plannerModelId").GetString().ShouldNotBeNull("the launch auto-resolved a structured planner row from the seeded pool");
         }
         finally
         {

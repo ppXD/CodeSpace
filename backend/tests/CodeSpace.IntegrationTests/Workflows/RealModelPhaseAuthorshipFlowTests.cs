@@ -169,6 +169,8 @@ public sealed class RealModelPhaseAuthorshipFlowTests
     /// <summary>Build via the REAL projection builder, retarget ONLY the planner llm.complete to the RecordReplay decorator's tag (the real/recorded model at the IStructuredLLMClient seam), then start the snapshot run via the REAL starter.</summary>
     private async Task<Guid> ProjectRetargetToRealModelAndStartAsync(RoutePlan route, Guid teamId, Guid userId)
     {
+        var plannerRowId = await RecordReplayPlannerRowAsync(teamId);
+
         using var scope = _fixture.BeginScope();
 
         var context = new TaskBuildContext
@@ -180,23 +182,42 @@ public sealed class RealModelPhaseAuthorshipFlowTests
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
 
-        var definition = RetargetPlannerToRealModel(builder.Build(context));
+        var definition = RetargetPlannerToRealModel(builder.Build(context), plannerRowId);
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite the PLANNER node's <c>llm.complete</c> provider to the RecordReplay decorator's tag (the real/recorded model — the ONLY real model under test), and the SYNTH node's to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's decision authorship is under test here. Retarget is BY NODE ID (the graph now has two llm.complete nodes). The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
-    private static WorkflowDefinition RetargetPlannerToRealModel(WorkflowDefinition definition) => definition with
+    /// <summary>Test-only adaptation: PIN the plan.author planner's model to the seeded RecordReplay pool row (the real/recorded model — the ONLY real model under test; pool-driven resolve lands on the record/replay client and pick.ModelId equals the drift mirror's DefaultModel), and retarget the SYNTH llm.complete to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's plan authorship is under test here. The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    private static WorkflowDefinition RetargetPlannerToRealModel(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
-        Nodes = definition.Nodes.Select(RetargetNode).ToList(),
+        Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node) => node.Id switch
+    private static NodeDefinition RetargetNode(NodeDefinition node, Guid plannerRowId) => node.Id switch
     {
-        "planner" => RetargetProvider(node, RecordReplayStructuredLLMClient.ProviderTag),
+        "planner" => PinPlannerModel(node, plannerRowId),
         "synth" => RetargetProvider(node, DeterministicSynthLlmClient.ProviderTag),
         _ => node,
     };
+
+    /// <summary>The planner is plan.author (pool-driven, no provider config) — pin its plannerModelId to the SEEDED RecordReplay pool row, so ResolveByRowIdAsync lands on the record/replay client and pick.ModelId equals the drift mirror's DefaultModel exactly.</summary>
+    private static NodeDefinition PinPlannerModel(NodeDefinition node, Guid plannerRowId)
+    {
+        var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
+        config["plannerModelId"] = JsonSerializer.SerializeToElement(plannerRowId.ToString());
+
+        return node with { Config = JsonSerializer.SerializeToElement(config) };
+    }
+
+    /// <summary>The RecordReplay provider's seeded credentialed-model row for this team — the row the planner pin targets.</summary>
+    private async Task<Guid> RecordReplayPlannerRowAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Credential.TeamId == teamId && m.Credential.Provider == RecordReplayStructuredLLMClient.ProviderTag)
+            .Select(m => m.Id)
+            .SingleAsync();
+    }
 
     private static NodeDefinition RetargetProvider(NodeDefinition node, string providerTag)
     {

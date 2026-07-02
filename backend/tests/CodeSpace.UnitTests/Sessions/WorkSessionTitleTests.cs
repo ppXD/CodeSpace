@@ -69,4 +69,28 @@ public class WorkSessionTitleTests
         // HasMaxLength(this). All three must agree; this pins the C# side so the SQL literal has a guarded partner.
         WorkSession.TitleMaxLength.ShouldBe(256);
     }
+
+    // ── SessionChannelName (S4a): the channel display name — clip must never split an astral pair ──
+
+    [Fact]
+    public void Channel_name_passes_short_titles_through_and_clips_long_ones()
+    {
+        WorkSessionService.SessionChannelName("Ship the feature").ShouldBe("Ship the feature");
+
+        var clipped = WorkSessionService.SessionChannelName(new string('x', 80));
+        clipped.Length.ShouldBe(60);
+        clipped.ShouldEndWith("…");
+    }
+
+    [Fact]
+    public void Channel_name_clip_never_splits_a_surrogate_pair()
+    {
+        // An emoji straddling the cut index must be dropped whole — a lone high surrogate renders as "�".
+        var title = new string('x', 58) + "🚀" + new string('y', 20);
+
+        var clipped = WorkSessionService.SessionChannelName(title);
+
+        clipped.ShouldBe(new string('x', 58) + "…", "the cut backed off one char rather than emitting half an emoji");
+        char.IsHighSurrogate(clipped[^2]).ShouldBeFalse();
+    }
 }

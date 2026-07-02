@@ -204,7 +204,7 @@ public class PlanMapSynthFanoutFlowTests
         return await scope.Resolve<IEffortRouter>().RouteAsync(request, CancellationToken.None);
     }
 
-    /// <summary>Build via the REAL projection builder (resolved by the route's kind), retarget ONLY the planner llm.complete to the deterministic fake, then start the snapshot run via the REAL starter.</summary>
+    /// <summary>Build via the REAL projection builder (resolved by the route's kind), pin the plan.author planner to the deterministic work-plan fake's row + retarget the synth llm.complete, then start the snapshot run via the REAL starter.</summary>
     private async Task<Guid> ProjectRetargetAndStartAsync(RoutePlan route, Guid teamId, Guid userId, Guid plannerRowId)
     {
         using var scope = _fixture.BeginScope();
@@ -223,7 +223,7 @@ public class PlanMapSynthFanoutFlowTests
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite the BOTH <c>llm.complete</c> providers — the PLANNER node to the structured planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID (the graph now has two llm.complete nodes); the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    /// <summary>Test-only adaptation: pin the plan.author PLANNER to the work-plan fake's pool row + rewrite the SYNTH llm.complete provider to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
     private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
         Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),

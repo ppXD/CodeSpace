@@ -155,7 +155,7 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
     private static string SessionChannelSlug(Guid sessionId) => $"task-{sessionId:N}"[..17];
 
     /// <summary>The channel's display name — the thread title, clipped to a chat-friendly width (surrogate-safe: never cuts an emoji mid-pair).</summary>
-    private static string SessionChannelName(string title)
+    internal static string SessionChannelName(string title)
     {
         if (title.Length <= 60) return title;
 

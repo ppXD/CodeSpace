@@ -160,10 +160,10 @@ public sealed class PlanAuthorNode : INodeRuntime
         return NodeResult.Ok(BuildOutputs(saved.Id, saved.Version, plan, saved.ItemsJson));
     }
 
-    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change; defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws).</summary>
     /// <summary>The flat-plan constraint line appended to the task text — the planner must author parallel-safe subtasks. Pinned by a unit test (the map projections depend on it).</summary>
     public const string FlatPlanConstraint = "Constraint: author INDEPENDENT subtasks only — they run in PARALLEL, so do NOT use dependsOn.";
 
+    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change (a flat plan additionally appends <see cref="FlatPlanConstraint"/>); defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws).</summary>
     internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, string goal, string grounding, string feedback) => new()
     {
         TaskText = ReadFlatPlan(config) ? $"{ComposeTaskText(goal, feedback)}\n\n{FlatPlanConstraint}" : ComposeTaskText(goal, feedback),

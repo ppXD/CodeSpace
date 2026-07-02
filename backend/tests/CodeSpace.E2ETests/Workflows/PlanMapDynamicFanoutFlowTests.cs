@@ -28,9 +28,9 @@ namespace CodeSpace.E2ETests.Workflows;
 /// out to MULTIPLE real agents whose PERMISSIONS + PUSH posture come from the planner's per-subtask
 /// <c>mode</c> choice.
 ///
-/// <para>The spec planner (<see cref="DeterministicSpecPlannerLlmClient"/>) authors a HETEROGENEOUS plan: one
-/// <c>research</c> subtask ("Work on alpha") + two <c>code</c> subtasks ("Work on beta", "Work on gamma"). The map
-/// binds <c>{{item.goal}}</c> + <c>{{item.mode}}</c> per branch; the agent.code node maps each mode to a base
+/// <para>The work-plan fake (<see cref="DeterministicWorkPlanLlmClient"/>, heterogeneous-kinds script) authors a HETEROGENEOUS plan: one
+/// <c>research</c> item ("Work on alpha") + two <c>code</c> items ("Work on beta", "Work on gamma"). The map
+/// binds <c>{{item.instruction}}</c> + <c>{{item.kind}}</c> per branch; the agent.code node maps each mode to a base
 /// (research = read-only + no produced branch; code = workspace write + push its own branch) UNDER the
 /// autonomy-tier + override precedence. The assertions read the PERSISTED <c>AgentRun.TaskJson</c> → <c>AgentTask</c>
 /// and prove the model→platform DECISION per branch: the research branch resolved to <c>WriteScope=ReadOnly</c> +
@@ -46,7 +46,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// RehydrateMapResults), real Postgres, the AgentRunService state machine, the real AgentRunExecutor, the real
 /// LocalProcessRunner SPAWNING A REAL OS PROCESS, the harness's real ParseEvent/BuildResult, and the reduce are
 /// ALL real. Two things are faked at honest boundaries: the LLM at the <c>IStructuredLLMClient</c> seam
-/// (<see cref="DeterministicSpecPlannerLlmClient"/>, a SEPARATE fake so the string-planner stays untouched) and the
+/// (<see cref="DeterministicWorkPlanLlmClient"/> under its heterogeneous-kinds script) and the
 /// CLI's intelligence at the binary (<see cref="SubtaskAwareFakeCli"/>). POSIX-only: the fake CLI is a /bin/sh
 /// script (Rule 12.1).</para>
 /// </summary>
@@ -82,8 +82,8 @@ public class PlanMapDynamicFanoutFlowTests
 
             using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorHeterogeneousKinds = true;
 
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
 
             var jobClient = ResolveJobClient();
             jobClient.Clear();
@@ -99,8 +99,8 @@ public class PlanMapDynamicFanoutFlowTests
             route.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanoutDynamic, "the explicit RequestedRecipe pinned the opt-in model-authored recipe");
             route.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapDynamic, "map-fanout-dynamic's default projection is the model-authored planner→map→synth graph");
 
-            // ── PROJECT + START: the real builder emits the graph; retarget the planner llm.complete to the SPEC
-            //    planner fake + the synth to the synth fake; the real starter freezes + dispatches the snapshot run. ──
+            // ── PROJECT + START: the real builder emits the graph; pin the plan.author planner to the work-plan
+            //    fake's row + retarget the synth to the synth fake; the real starter freezes + dispatches. ──
             var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
 
             // ── Pass 1: planner emits per-agent specs, the map fans out N real agent.code branches, each parks +

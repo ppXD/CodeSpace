@@ -29,7 +29,7 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
@@ -37,7 +37,21 @@ public class SupervisorDefinitionBuilderTests
         SupervisorBrainModelId = brainModelId,
         AllowedModelIds = allowedModelIds,
         AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
+        AcceptanceChecks = acceptanceChecks,
     };
+
+    [Fact]
+    public void The_acceptance_checks_floor_bakes_with_blanks_dropped_and_omits_when_empty()
+    {
+        // The floor is a VERIFICATION control — it must not silently not-arrive (S4b review finding).
+        var config = Builder.Build(Context(acceptanceChecks: new[] { "sh", " ", "check.sh", "" })).Nodes.Single(n => n.Id == "sup").Config;
+
+        config.GetProperty("acceptanceChecks").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" },
+            customMessage: "the argv floor bakes verbatim with blank entries dropped");
+
+        Builder.Build(Context()).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("no floor ⇒ key omitted (byte-identical)");
+        Builder.Build(Context(acceptanceChecks: new[] { " ", "" })).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("an all-blank floor collapses to omitted");
+    }
 
     [Fact]
     public void Reports_the_supervisor_projection_kind()

@@ -30,7 +30,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// <summary>The body agent's goal binding over the planner's subtask objects — e.g. <c>"{{item.instruction}}"</c>.</summary>
     protected abstract string BranchGoal { get; }
 
-    /// <summary>The body agent's per-branch mode binding (e.g. <c>"{{item.mode}}"</c>), or null when the variant authors no mode — then <see cref="AgentNodeMapping.BuildAgentConfig"/> omits it (byte-identical to a no-mode node).</summary>
+    /// <summary>The body agent's per-branch mode binding (e.g. <c>"{{item.kind}}"</c> — the plan item's open kind), or null when the variant authors no mode — then <see cref="AgentNodeMapping.BuildAgentConfig"/> omits it (byte-identical to a no-mode node).</summary>
     protected virtual string? BranchMode => null;
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
