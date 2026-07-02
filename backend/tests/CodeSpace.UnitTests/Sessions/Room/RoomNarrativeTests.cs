@@ -29,8 +29,8 @@ public class RoomNarrativeTests
         });
 
         n.Map.ShouldNotBeNull();
-        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Plan", "Work", "Review", "Deliver" }, "a supervisor turn maps to the canonical lifecycle, not the model's phase titles or the decision tape");
-        n.Map!.Steps.Select(s => s.Status).ShouldBe(new[] { ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done });
+        n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Start", "Plan", "Work", "Review", "Deliver" }, "the DYNAMIC map — a Start head, Plan, the work (a flat plan collapses to one Work step), Review, Deliver");
+        n.Map!.Steps.Select(s => s.Status).ShouldBe(new[] { ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done });
         n.Map!.Steps.Single(s => s.Label == "Work").Detail.ShouldBe("3 agents");
         n.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("passed");
 
@@ -111,11 +111,12 @@ public class RoomNarrativeTests
     }
 
     [Fact]
-    public void Stat_rows_surface_subtasks_files_tools_and_reasoning_from_the_facts()
+    public void Turn_level_stats_surface_files_and_tools_after_the_rounds()
     {
+        // Subtasks now live PER ROUND (not a flat stat), and the Reasoning stat is dropped (folded into the live indicator);
+        // the turn-level Files-changed + Tools rows remain, emitted after the per-round blocks.
         var facts = new RoomTurnFacts
         {
-            Subtasks = new[] { "Trace DI registration", "Analyze the template store" },
             ChangedFiles = new[] { "a.cs", "b.cs", "c.cs" },
             Additions = 148,
             Deletions = 32,
@@ -124,11 +125,6 @@ public class RoomNarrativeTests
         };
 
         var stats = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<StatBlock>().ToList();
-
-        var subtasks = stats.Single(s => s.Kind == "subtasks");
-        subtasks.Label.ShouldBe("Plan", "the design splits label · detail");
-        subtasks.Detail.ShouldBe("2 subtasks");
-        subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" });
 
         var files = stats.Single(s => s.Kind == "files");
         files.Label.ShouldBe("Files changed");
@@ -139,9 +135,7 @@ public class RoomNarrativeTests
         tools.Label.ShouldBe("Tools");
         tools.Detail.ShouldBe("14 calls", "no histogram captured → just the count");
 
-        var reasoning = stats.Single(s => s.Kind == "reasoning");
-        reasoning.Label.ShouldBe("Reasoning");
-        reasoning.Detail.ShouldBe("5 steps");
+        stats.ShouldNotContain(s => s.Kind == "reasoning", "the Reasoning stat is dropped — folded into the live indicator");
     }
 
     [Fact]

@@ -23,14 +23,16 @@ public static class RoomNarrative
     public static TurnNarrative Build(string idPrefix, long seq, IReadOnlyList<RunPhase> phases, WorkflowRunStatus status, string? error, IReadOnlyList<DecisionBlock> decisions, RoomTurnFacts facts)
     {
         var tape = phases.Where(p => p.SourceKey == SupervisorPhaseSource.Key && p.Kind != SupervisorPhaseSource.AuthoredPhaseKind).OrderBy(p => p.Order).ToList();
+        var authored = phases.Where(p => p.SourceKey == SupervisorPhaseSource.Key && p.Kind == SupervisorPhaseSource.AuthoredPhaseKind).OrderBy(p => p.Order).ToList();
         var structural = phases.Where(p => p.SourceKey == WorkflowNodePhaseSource.Key).OrderBy(p => p.Order).ToList();
 
-        // A supervisor turn maps to the canonical lifecycle; a non-supervisor run keeps its structural node spine.
+        // A supervisor turn draws a DYNAMIC map from its real phases (Start → Plan → each authored phase → Deliver);
+        // a non-supervisor run keeps its structural node spine.
         var map = tape.Count > 0
-            ? BuildCanonicalMap(idPrefix, seq, tape, status, facts.AcceptancePassed)
+            ? BuildDynamicMap(idPrefix, seq, tape, authored, status, facts.AcceptancePassed)
             : BuildMap(idPrefix, seq, structural);
 
-        var blocks = BuildBlocks(idPrefix, seq, status, error, decisions, facts, tape.Count > 0 ? tape : structural);
+        var blocks = BuildBlocks(idPrefix, seq, status, error, decisions, facts, tape.Count > 0 ? tape : structural, authored);
 
         return new TurnNarrative(SummaryFor(status, tape, structural, error, facts), map, blocks);
     }
@@ -38,12 +40,13 @@ public static class RoomNarrative
     // ─── execution map ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The canonical supervisor lifecycle as the execution map — Plan → Work → Review → Deliver — derived from the
-    /// decision tape + the run status (and the objective acceptance verdict for Review). The model's verbs fold onto
-    /// fixed stages; per-step detail is the plan duration, the agent count / live progress, and the review / deliver
-    /// outcome. The stage labels are the lifecycle vocabulary, not per-run copy.
+    /// The DYNAMIC supervisor map — derived from the run's real phases, so it GROWS with the work instead of a fixed
+    /// template: Start → Plan → one step PER authored phase (the model's own "调研与分析" / "综合与建议" grouping, or a
+    /// single "Work" step for a flat plan) → Review → Deliver. Per-step detail is the plan duration, each phase's live
+    /// agent progress ("k of N" / "N agents"), the acceptance verdict, and the deliver outcome. Labels are the real
+    /// phase titles, not per-run copy — the map GROWS as the supervisor re-plans / adds phases.
     /// </summary>
-    private static ExecutionMapBlock BuildCanonicalMap(string idPrefix, long seq, IReadOnlyList<RunPhase> tape, WorkflowRunStatus status, bool? acceptancePassed)
+    private static ExecutionMapBlock BuildDynamicMap(string idPrefix, long seq, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> authored, WorkflowRunStatus status, bool? acceptancePassed)
     {
         var plan = tape.FirstOrDefault(p => p.Kind == SupervisorDecisionKinds.Plan);
         var agents = tape.Where(p => SupervisorDecisionKinds.StagesAgents(p.Kind)).SelectMany(p => p.Agents).ToList();
@@ -52,18 +55,24 @@ public static class RoomNarrative
         var failed = status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
         var succeeded = status == WorkflowRunStatus.Success;
 
-        var planStatus = plan != null ? ExecutionStepStatus.Done : active ? ExecutionStepStatus.Running : ExecutionStepStatus.Pending;
-        var (workStatus, workDetail) = WorkStage(plan != null, agents, active);
-        var (reviewStatus, reviewDetail) = ReviewStage(succeeded, failed, workStatus, acceptancePassed);
-        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed);
+        var steps = new List<ExecutionMapStep> { Step($"{idPrefix}:start", "Start", ExecutionStepStatus.Done, null) };
 
-        var steps = new[]
+        steps.Add(Step($"{idPrefix}:plan", "Plan", plan != null ? ExecutionStepStatus.Done : active ? ExecutionStepStatus.Running : ExecutionStepStatus.Pending, plan != null ? PhaseDuration(plan) : null));
+
+        if (authored.Count > 0)
+            steps.AddRange(authored.Select((p, i) => { var (s, d) = WorkStage(true, p.Agents, active); return Step($"{idPrefix}:ph{i}", p.Label, MapStatus(p.Status) is var ms && ms != ExecutionStepStatus.Pending ? ms : s, d); }));
+        else
         {
-            Step($"{idPrefix}:plan", "Plan", planStatus, plan != null ? PhaseDuration(plan) : null),
-            Step($"{idPrefix}:work", "Work", workStatus, workDetail),
-            Step($"{idPrefix}:review", "Review", reviewStatus, reviewDetail),
-            Step($"{idPrefix}:deliver", "Deliver", deliverStatus, deliverDetail),
-        };
+            var (ws, wd) = WorkStage(plan != null, agents, active);
+            steps.Add(Step($"{idPrefix}:work", "Work", ws, wd));
+        }
+
+        var (workStatus, _) = WorkStage(plan != null, agents, active);
+        var (reviewStatus, reviewDetail) = ReviewStage(succeeded, failed, workStatus, acceptancePassed);
+        steps.Add(Step($"{idPrefix}:review", "Review", reviewStatus, reviewDetail));
+
+        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed);
+        steps.Add(Step($"{idPrefix}:deliver", "Deliver", deliverStatus, deliverDetail));
 
         return new ExecutionMapBlock { Id = $"{idPrefix}:map", Seq = seq, Steps = steps };
     }
@@ -132,21 +141,45 @@ public static class RoomNarrative
     // ─── inner blocks ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The turn's inner blocks in the design's render order — Plan (subtasks) → Agents → Files changed → Tools →
-    /// Reasoning → delivery (PR) → pending decisions → failure diagnostic. Each is emitted only when it has something to
-    /// say; large content (reasoning text, the per-call tool list) is fetched lazily on expand, never loaded here.
+    /// The turn's inner blocks as a REAL, SEQUENTIAL per-round narrative (never lumped): for each round —
+    /// "Plan · N subtasks" (that round's subtasks) → that round's Agent cards → the supervisor's operation — then the
+    /// turn-level aggregates (files / tools), the delivery, the pending decisions, the failure diagnostic, the rich final
+    /// answer, and — while active — the live "working…" indicator pinned last. Rounds come from the model's authored
+    /// phases (the natural grouping) when present, else the plan-segmented tape rounds, else a single fan-out group.
+    /// The frontend renders this list strictly in order — ordering is emission order, so there's no FE ordering logic.
     /// </summary>
-    private static IReadOnlyList<RoomBlock> BuildBlocks(string idPrefix, long seq, WorkflowRunStatus status, string? error, IReadOnlyList<DecisionBlock> decisions, RoomTurnFacts facts, IReadOnlyList<RunPhase> narrativePhases)
+    private static IReadOnlyList<RoomBlock> BuildBlocks(string idPrefix, long seq, WorkflowRunStatus status, string? error, IReadOnlyList<DecisionBlock> decisions, RoomTurnFacts facts, IReadOnlyList<RunPhase> narrativePhases, IReadOnlyList<RunPhase> authored)
     {
         var blocks = new List<RoomBlock>();
+        var agentById = narrativePhases.SelectMany(p => p.Agents).GroupBy(a => a.AgentRunId).ToDictionary(g => g.Key, g => g.First());
 
-        if (SubtasksStat(idPrefix, seq, facts) is { } subtasks) blocks.Add(subtasks);
+        if (authored.Count > 0)
+        {
+            for (var i = 0; i < authored.Count; i++)
+            {
+                EmitAuthoredRound(blocks, idPrefix, seq, authored[i], i + 1, facts);
 
-        if (AgentGroup(idPrefix, seq, status, facts, narrativePhases) is { } agents) blocks.Add(agents);
+                // Between rounds, a supervisor "thinking" step — the analyze-then-plan-next beat that makes the chain legible.
+                if (i < authored.Count - 1 && authored[i].Agents.Count > 0)
+                    blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:think{i}", Seq = seq, Text = $"Supervisor reviewed {AgentWord(authored[i].Agents.Count)}' results · planning the next step", Tone = NarrativeTone.Info });
+            }
+
+            // Authored phases don't carry the supervisor's closing operation — surface it from the tape.
+            foreach (var op in facts.Rounds.Select(r => r.Operation).Where(o => o != null).Select(o => o!).DistinctBy(o => o.Text))
+                blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:op:{op.Kind}", Seq = seq, Text = op.Text, Tone = op.Tone });
+        }
+        else if (facts.Rounds.Count > 0)
+        {
+            foreach (var round in facts.Rounds)
+                EmitTapeRound(blocks, idPrefix, seq, status, round, facts, agentById);
+        }
+        else if (AgentGroup(idPrefix, seq, status, facts, narrativePhases) is { } fanout)
+        {
+            blocks.Add(fanout);
+        }
 
         if (FilesStat(idPrefix, seq, facts) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
-        if (ReasoningStat(idPrefix, seq, facts) is { } reasoning) blocks.Add(reasoning);
 
         if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
 
@@ -156,22 +189,70 @@ public static class RoomNarrative
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
 
+        if (IsTerminal(status) && facts.FinalAnswer is { } fa) blocks.Add(FinalAnswerFrom(idPrefix, seq, fa));
+
+        if (IsActive(status) && LiveActivity(idPrefix, seq, facts) is { } live) blocks.Add(live);
+
         return blocks;
     }
 
-    // ─── stat rows (label · detail, design vocabulary) ──────────────────────────────
+    // ─── rounds (Plan · N subtasks → Agents → operation, in real execution order) ────
 
-    private static StatBlock? SubtasksStat(string idPrefix, long seq, RoomTurnFacts f) =>
-        f.Subtasks.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:subtasks", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(f.Subtasks.Count, "subtask"), Items = f.Subtasks.Select(t => new StatItem { Text = t }).ToList() };
+    /// <summary>One AUTHORED-phase round — the model's own subtask grouping (调研与分析 / 综合与建议): "Plan · N subtasks" (from the phase's agents' assigned subtasks) then that phase's Agent cards, titled by the phase.</summary>
+    private static void EmitAuthoredRound(List<RoomBlock> blocks, string idPrefix, long seq, RunPhase phase, int index, RoomTurnFacts facts)
+    {
+        var subtasks = phase.Agents.Select(a => a.AssignedSubtask ?? a.Goal).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s!).Distinct().ToList();
+
+        if (subtasks.Count > 0)
+            blocks.Add(new StatBlock { Id = $"{idPrefix}:r{index}:plan", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(subtasks.Count, "subtask"), Items = subtasks.Select(t => new StatItem { Text = t }).ToList() });
+
+        if (phase.Agents.Count > 0)
+            blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:r{index}:agents", Seq = seq, Title = phase.Label, Agents = phase.Agents.Select(a => ToCard(a, facts)).ToList() });
+    }
+
+    /// <summary>One TAPE round (a flat plan / a re-plan) — "Plan · N subtasks" (the round's plan) then its spawned Agent cards then the round's closing supervisor operation.</summary>
+    private static void EmitTapeRound(List<RoomBlock> blocks, string idPrefix, long seq, WorkflowRunStatus status, RoomRound r, RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
+    {
+        if (r.Subtasks.Count > 0)
+            blocks.Add(new StatBlock { Id = $"{idPrefix}:r{r.Index}:plan", Seq = seq, Kind = "subtasks", Label = "Plan", Detail = Count(r.Subtasks.Count, "subtask"), Items = r.Subtasks.Select(t => new StatItem { Text = t }).ToList() });
+
+        var agents = r.AgentRunIds.Distinct().Select(id => agentById.GetValueOrDefault(id)).Where(a => a != null).Select(a => a!).ToList();
+
+        if (agents.Count > 0)
+            blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:r{r.Index}:agents", Seq = seq, Title = IsActive(status) ? "Work" : "Agents", Agents = agents.Select(a => ToCard(a, facts)).ToList() });
+
+        if (r.Operation is { } op)
+            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:r{r.Index}:op", Seq = seq, Text = op.Text, Tone = op.Tone });
+    }
+
+    /// <summary>The rich final answer — the closing text + typed attachments (files / PR / images), each rendered distinctly.</summary>
+    private static FinalAnswerBlock FinalAnswerFrom(string idPrefix, long seq, RoomFinalAnswer fa) => new()
+    {
+        Id = $"{idPrefix}:final", Seq = seq,
+        Text = fa.Text,
+        Attachments = fa.Attachments.Select(a => new AnswerAttachment { Kind = a.Kind, Label = a.Label, Url = a.Url, PreviewUrl = a.PreviewUrl, DownloadUrl = a.DownloadUrl }).ToList(),
+    };
+
+    /// <summary>The live "working…" indicator pinned last on an active turn — the running agents' latest public activity, else the reasoning tail, else a generic "Working…".</summary>
+    private static LiveActivityBlock LiveActivity(string idPrefix, long seq, RoomTurnFacts facts)
+    {
+        var line = facts.LatestLines.Values.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s))
+            ?? (facts.ReasoningSteps.Count > 0 ? facts.ReasoningSteps[^1] : null);
+
+        return new LiveActivityBlock { Id = $"{idPrefix}:live", Seq = seq, Text = string.IsNullOrWhiteSpace(line) ? "Working…" : line!, AgentRunId = facts.LatestLines.Count > 0 ? facts.LatestLines.Keys.First() : null };
+    }
+
+    private static bool IsActive(WorkflowRunStatus status) => status is WorkflowRunStatus.Pending or WorkflowRunStatus.Enqueued or WorkflowRunStatus.Running or WorkflowRunStatus.Suspended;
+
+    private static bool IsTerminal(WorkflowRunStatus status) => status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
+
+    // ─── stat rows (label · detail, design vocabulary) ──────────────────────────────
 
     private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f) =>
         f.ChangedFiles.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, f.ChangedFiles.Count), Items = f.ChangedFiles.Select(p => new StatItem { Text = p }).ToList() };
 
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>
         f.ToolCalls is not > 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:tools", Seq = seq, Kind = "tools", Label = "Tools", Detail = ToolsDetail(f.ToolCalls.Value, f.ToolHistogram), Items = f.ToolHistogram.Select(h => new StatItem { Text = h.Kind, Detail = h.Count.ToString() }).ToList() };
-
-    private static StatBlock? ReasoningStat(string idPrefix, long seq, RoomTurnFacts f) =>
-        f.ReasoningCount == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:reasoning", Seq = seq, Kind = "reasoning", Label = "Reasoning", Detail = Count(f.ReasoningCount, "step"), Items = f.ReasoningSteps.Select(t => new StatItem { Text = t }).ToList() };
 
     /// <summary>"+148 −32 · 6 files" when the diff stat is captured, else just "6 files" (the line counts are a true gap → no "+X −Y").</summary>
     private static string FilesDetail(int? additions, int? deletions, int count)
@@ -208,11 +289,11 @@ public static class RoomNarrative
         {
             Id = $"{idPrefix}:agents", Seq = seq,
             Title = active ? "Work" : "Agents",
-            Agents = agents.Select(a => ToCard(a, facts.AgentSummaries)).ToList(),
+            Agents = agents.Select(a => ToCard(a, facts)).ToList(),
         };
     }
 
-    private static RoomAgentCard ToCard(PhaseAgentRef a, IReadOnlyDictionary<Guid, string> summaries) => new()
+    private static RoomAgentCard ToCard(PhaseAgentRef a, RoomTurnFacts facts) => new()
     {
         AgentRunId = a.AgentRunId,
         Label = a.Role ?? a.AssignedSubtask ?? a.Goal ?? a.Label ?? "Agent",
@@ -225,7 +306,8 @@ public static class RoomNarrative
         FilesChanged = a.FilesChanged,
         ToolCount = a.ToolCount,
         DurationMs = a.DurationMs,
-        Summary = summaries.TryGetValue(a.AgentRunId, out var s) ? s : null,
+        Summary = facts.AgentSummaries.TryGetValue(a.AgentRunId, out var s) ? s : null,
+        LatestLine = facts.LatestLines.TryGetValue(a.AgentRunId, out var l) ? l : null,
     };
 
     private static DeliveryBlock? DeliveryFrom(string idPrefix, long seq, RoomTurnFacts f)
@@ -345,7 +427,7 @@ public static class RoomNarrative
         if (p.StartedAt is not { } start) return null;
 
         var ms = (long)((p.CompletedAt ?? start) - start).TotalMilliseconds;
-        return ms > 0 ? FormatDuration(ms) : null;
+        return ms >= 1000 ? FormatDuration(ms) : null;   // sub-second is noise ("0s") — omit the detail
     }
 
     private static string FormatDuration(long ms)

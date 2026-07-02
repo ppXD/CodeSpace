@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Dtos.Sessions.Room;
+
 namespace CodeSpace.Core.Services.Sessions.Room;
 
 /// <summary>
@@ -8,7 +10,16 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public sealed record RoomTurnFacts
 {
-    /// <summary>The plan's subtask titles (bounded ≤ 20 by schema) — the "Planned N subtasks" row.</summary>
+    /// <summary>The supervisor ROUNDS in tape order — the projector segments the decision tape on each Plan; the narrative renders one Plan / Agents / Operation group PER round (never lumped). Empty for a non-supervisor turn.</summary>
+    public IReadOnlyList<RoomRound> Rounds { get; init; } = Array.Empty<RoomRound>();
+
+    /// <summary>The turn's rich final answer (closing text + typed attachments) — emitted last on a terminal turn. Null while in-progress / when there's nothing to deliver.</summary>
+    public RoomFinalAnswer? FinalAnswer { get; init; }
+
+    /// <summary>Each running agent's latest PUBLIC activity line, keyed by run id — feeds the live "working…" indicator (never raw CoT). Empty when nothing is running.</summary>
+    public IReadOnlyDictionary<Guid, string> LatestLines { get; init; } = new Dictionary<Guid, string>();
+
+    /// <summary>The plan's subtask titles (bounded ≤ 20 by schema) — the flat fallback lead's floor; the render source is <see cref="Rounds"/>.</summary>
     public IReadOnlyList<string> Subtasks { get; init; } = Array.Empty<string>();
 
     /// <summary>The distinct changed-file paths across the turn's agents — the "Changed N files" row.</summary>
@@ -47,6 +58,39 @@ public sealed record RoomTurnFacts
 
 /// <summary>One bucket of the tool-call histogram — a tool kind and how many times the turn's agents called it.</summary>
 public sealed record ToolKindCount(string Kind, int Count);
+
+/// <summary>
+/// One supervisor ROUND — a Plan decision and every decision up to the next Plan, in tape order. The projector segments
+/// the raw decision tape on <c>Kind == Plan</c> (a re-plan opens a new round); the narrative renders one Plan-stat + this
+/// round's agent group + the closing operation per round.
+/// </summary>
+public sealed record RoomRound
+{
+    /// <summary>1-based round number.</summary>
+    public required int Index { get; init; }
+
+    /// <summary>THIS round's plan subtask titles (not the whole run's) — the "Plan · N subtasks" row.</summary>
+    public IReadOnlyList<string> Subtasks { get; init; } = Array.Empty<string>();
+
+    /// <summary>This round's spawned / retried / resolved agent run ids, in tape (staging) order.</summary>
+    public IReadOnlyList<Guid> AgentRunIds { get; init; } = Array.Empty<Guid>();
+
+    /// <summary>The round's closing supervisor operation (merge / resolve / ask-human / stop), translated to friendly copy. Null while the round is still spawning.</summary>
+    public RoomOperation? Operation { get; init; }
+}
+
+/// <summary>A supervisor operation translated to a user-facing one-liner — the "Merging results" / "Deciding: X" narration between rounds.</summary>
+public sealed record RoomOperation(string Kind, string Text, NarrativeTone Tone);
+
+/// <summary>The turn's rich final result — the closing text plus typed attachments (files / PR / images).</summary>
+public sealed record RoomFinalAnswer
+{
+    public string? Text { get; init; }
+    public IReadOnlyList<RoomAttachment> Attachments { get; init; } = Array.Empty<RoomAttachment>();
+}
+
+/// <summary>One typed final-answer attachment (a file, the PR, or an image).</summary>
+public sealed record RoomAttachment(AnswerAttachmentKind Kind, string Label, string? Url, string? PreviewUrl, string? DownloadUrl);
 
 /// <summary>The PR / change set a turn produced — joined from the run's open-PR node. Provider-agnostic.</summary>
 public sealed record RoomDelivery

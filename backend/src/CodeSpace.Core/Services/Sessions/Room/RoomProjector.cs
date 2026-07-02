@@ -105,7 +105,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DecisionBlocksAsync(runId, teamId, watermark, cancellationToken).ConfigureAwait(false)
             : Array.Empty<DecisionBlock>();
 
-        var facts = await GatherFactsAsync(runId, teamId, phases, turn.Error, cancellationToken).ConfigureAwait(false);
+        var facts = await GatherFactsAsync(runId, teamId, phases, turn.RunStatus, turn.Error, cancellationToken).ConfigureAwait(false);
 
         var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, turn.RunStatus, turn.Error, decisions, facts);
 
@@ -167,9 +167,12 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// acceptance), one batched tool-count, one reasoning COUNT (never the text), and the PR node-join. All scoped to
     /// this run / its agents, so the cost scales with the turn, not the database. The pure narrative engine consumes these.
     /// </summary>
-    private async Task<RoomTurnFacts> GatherFactsAsync(Guid runId, Guid teamId, IReadOnlyList<RunPhase> phases, string? error, CancellationToken cancellationToken)
+    private async Task<RoomTurnFacts> GatherFactsAsync(Guid runId, Guid teamId, IReadOnlyList<RunPhase> phases, Messages.Enums.WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
     {
         var decisions = await _decisionLog.GetForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        // The supervisor rounds, segmented on each Plan (a re-plan opens a new round) — the render source (never lumped).
+        var rounds = RoomRounds.Segment(decisions);
 
         var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
         var subtasks = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson).Select(s => s.Title).ToList();
@@ -223,8 +226,26 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Select(x => new ToolKindCount(x.Kind, x.Count))
             .OrderByDescending(x => x.Count).ThenBy(x => x.Kind, StringComparer.Ordinal).ToList();
 
+        // The live "working…" indicator source — the latest PUBLIC activity line per agent (never reasoning). Only for an
+        // ACTIVE turn (a settled turn never renders the indicator), so a finished turn pays zero query.
+        var active = status is Messages.Enums.WorkflowRunStatus.Pending or Messages.Enums.WorkflowRunStatus.Enqueued or Messages.Enums.WorkflowRunStatus.Running or Messages.Enums.WorkflowRunStatus.Suspended;
+
+        var latestLines = !active || agentIds.Count == 0 ? new Dictionary<Guid, string>() : (await _db.AgentRunEvent.AsNoTracking()
+            .Where(e => agentIds.Contains(e.AgentRunId) && e.Kind != AgentEventKind.Reasoning && e.Text != null && e.Text != "")
+            .OrderByDescending(e => e.OccurredAt)
+            .Select(e => new { e.AgentRunId, e.Text })
+            .Take(MaxLatestLineScan)
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .GroupBy(e => e.AgentRunId)
+            .ToDictionary(g => g.Key, g => g.First().Text!.Trim());
+
+        var delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false);
+
         return new RoomTurnFacts
         {
+            Rounds = rounds,
+            FinalAnswer = BuildFinalAnswer(SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson), changedFiles, delivery),
+            LatestLines = latestLines,
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ToolCalls = toolCalls,
@@ -233,13 +254,31 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             ReasoningSteps = reasoningSteps,
             AgentSummaries = agentSummaries,
             AcceptancePassed = acceptance,
-            Delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false),
+            Delivery = delivery,
             RawError = error,
         };
     }
 
+    /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver.</summary>
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<string> files, RoomDelivery? pr)
+    {
+        var attachments = new List<RoomAttachment>();
+
+        foreach (var f in files.Take(MaxAnswerFiles))
+            attachments.Add(new RoomAttachment(AnswerAttachmentKind.FileLink, f, Url: null, PreviewUrl: null, DownloadUrl: null));
+
+        if (pr is { } d)
+            attachments.Add(new RoomAttachment(AnswerAttachmentKind.Pr, d.Reference is { Length: > 0 } r ? $"{d.Title} {r}" : d.Title, Url: d.Url, PreviewUrl: null, DownloadUrl: null));
+
+        var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+
+        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments };
+    }
+
     private const int MaxChangedFiles = 200;
     private const int MaxReasoningSteps = 40;
+    private const int MaxLatestLineScan = 200;
+    private const int MaxAnswerFiles = 40;
 
     /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches). Null when the turn opened none.</summary>
     private async Task<RoomDelivery?> DeliveryAsync(Guid runId, CancellationToken cancellationToken)
