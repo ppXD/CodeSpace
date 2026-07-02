@@ -309,7 +309,11 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
   const liveDecisions = decisions.data ? decisionsForRun(decisions.data, turn.runId, agentIds) : [];
   const pdById = new Map(liveDecisions.map((d) => [d.id, d]));
 
-  const lead = turn.summary && !GENERIC_SUMMARY.has(turn.summary) ? turn.summary : null;
+  // The final answer belongs at the END, in the RESULT card — not echoed at the top. When the turn carries a
+  // final_answer block (its summary IS that answer), drop the opening lead so the answer shows once, at the bottom.
+  // A live / failed turn has no RESULT card, so its lead still surfaces the one-line status.
+  const hasFinalAnswer = turn.blocks.some((b) => b.type === "final_answer");
+  const lead = turn.summary && !GENERIC_SUMMARY.has(turn.summary) && !hasFinalAnswer ? turn.summary : null;
 
   return (
     <RunActionsContext.Provider value={{ runId: turn.runId, isTerminal: !live }}>
