@@ -39,4 +39,7 @@ public sealed record AgentRunMetrics
 
     /// <summary>The git-truth per-file line diffstat (bounded) off the result — the same paths as <see cref="ChangedFiles"/> plus their +added / −removed counts (a binary file's counts are null). Empty for a pre-diffstat run / before the result lands, so a consumer degrades to the plain <see cref="ChangedFiles"/> list.</summary>
     public IReadOnlyList<FileDiffStat> ChangedFileStats { get; init; } = Array.Empty<FileDiffStat>();
+
+    /// <summary>Whether this agent CONTINUED a prior conversation (its task carried a resume session id) rather than starting fresh — the "⟳ resumed" provenance a retry's re-run agent shows. False for a first-run agent.</summary>
+    public bool Resumed { get; init; }
 }

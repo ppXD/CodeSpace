@@ -42,4 +42,7 @@ public sealed record JournalAgentCard
 
     /// <summary>The agent's changed files with their +added / −removed line counts (git ground truth; a binary file's counts are null) — the diffstat ROWS the journal shows under the card. Empty for a pre-diffstat run / before the result lands, where only <see cref="FilesChanged"/> is known.</summary>
     public IReadOnlyList<FileDiffStat> Files { get; init; } = Array.Empty<FileDiffStat>();
+
+    /// <summary>Whether this agent CONTINUED a prior conversation (a retry re-ran it resuming the earlier session) rather than starting fresh — the "⟳ resumed" chip the card shows. False for a first-run agent.</summary>
+    public bool Resumed { get; init; }
 }

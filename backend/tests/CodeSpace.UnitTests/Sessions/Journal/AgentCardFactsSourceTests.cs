@@ -21,7 +21,7 @@ public class AgentCardFactsSourceTests
         {
             Status = status, Goal = goal, DurationMs = durationMs, InputTokens = inTok, OutputTokens = outTok,
             ToolCount = tools, Model = model, CostUsd = cost, FilesChanged = files,
-            ChangedFileStats = new[] { new FileDiffStat("auth/session.ts", 42, 3) },
+            ChangedFileStats = new[] { new FileDiffStat("auth/session.ts", 42, 3) }, Resumed = true,
         };
 
     [Fact]
@@ -41,6 +41,7 @@ public class AgentCardFactsSourceTests
         card.CostUsd.ShouldBe(0.42m);
         card.FilesChanged.ShouldBe(3);
         card.Files.Select(f => (f.Path, f.Additions, f.Deletions)).ShouldBe(new[] { ("auth/session.ts", (int?)42, (int?)3) }, "the per-file diffstat rides onto the card");
+        card.Resumed.ShouldBeTrue("the resume provenance rides onto the card");
     }
 
     [Fact]

@@ -161,7 +161,7 @@ public sealed class JournalProjectorFlowTests
         var sessionId = await SeedSessionAsync(teamId, "Fan-out run");
         var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Build it", resultSummary: "done");
 
-        var agentA = await SeedAgentRunAsync(teamId, run1, goal: "Write the API", status: AgentRunStatus.Succeeded);
+        var agentA = await SeedAgentRunAsync(teamId, run1, goal: "Write the API", status: AgentRunStatus.Succeeded, resumeFromSessionId: "codex-thread-prior");
         var agentB = await SeedAgentRunAsync(teamId, run1, goal: "Write the UI", status: AgentRunStatus.Running);
 
         var t = DateTimeOffset.UtcNow;
@@ -175,6 +175,8 @@ public sealed class JournalProjectorFlowTests
         spawn.Agents.Count.ShouldBe(2, "one card per staged agent");
         spawn.Agents.Select(a => a.Label).ShouldBe(new[] { "Write the API", "Write the UI" }, ignoreOrder: true);
         spawn.Agents.Single(a => a.Label == "Write the API").AgentRunId.ShouldBe(agentA);
+        spawn.Agents.Single(a => a.Label == "Write the API").Resumed.ShouldBeTrue("agent A's task carried a resume session id — it continued a prior conversation");
+        spawn.Agents.Single(a => a.Label == "Write the UI").Resumed.ShouldBeFalse("agent B started fresh");
     }
 
     [Fact]
@@ -284,7 +286,7 @@ public sealed class JournalProjectorFlowTests
             },
         });
 
-    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status, string? resultJson = null)
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status, string? resultJson = null, string? resumeFromSessionId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -295,7 +297,7 @@ public sealed class JournalProjectorFlowTests
         {
             Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = $"agent#{agentRunId:N}",
             Harness = "codex-cli", Status = status, ResultJson = resultJson,
-            TaskJson = JsonSerializer.Serialize(new { goal, harness = "codex-cli", model = "claude-opus-4-8" }),
+            TaskJson = JsonSerializer.Serialize(new { goal, harness = "codex-cli", model = "claude-opus-4-8", resumeFromSessionId }),
             StartedAt = now, CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });
 
