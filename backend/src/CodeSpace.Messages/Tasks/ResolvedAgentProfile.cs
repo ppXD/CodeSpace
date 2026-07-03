@@ -53,6 +53,9 @@ public sealed record ResolvedAgentProfile
     /// <summary>The credentialed-model ROW the output critic runs on (written onto the node's <c>reviewerModelId</c>). Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
 
+    /// <summary>S6: the bounded revise budget written onto the node's <c>reviseRounds</c> — how many times the executor may feed an oracle failure / Improve-critic flag back to the same agent inside one run. Null → omitted → the executor's default (1 under Improve, else 0); clamped server-side.</summary>
+    public int? ReviseRounds { get; init; }
+
     /// <summary>Deep/supervisor only: per-run opt-in to integrating the spawned agents' diffs into one reviewable branch at merge. Null → defer to the ambient flag. Inert on a single-agent run.</summary>
     public bool? IntegrateBranches { get; init; }
 

@@ -86,10 +86,12 @@ export interface LaunchTaskInput {
   pushBranch?: boolean;
   /** How an independent critic reviews each supervisor decision (`"Gate"`/`"Improve"`). Omitted (no review) when None. Deep only. */
   decisionReviewMode?: string;
-  /** How an independent critic reviews each agent's output (`"Gate"`). Omitted (no review) when None. */
+  /** How an independent critic reviews each agent's output (`"Gate"` / `"Improve"` — Improve feeds the critique back for a bounded self-revision). Omitted (no review) when None. */
   outputReviewMode?: string;
   /** The credentialed-model ROW id the critic(s) run on. Omitted ⇒ auto-pick. Only sent when a review is active. */
   reviewerModelId?: string;
+  /** S6: how many self-revise rounds an agent gets when its acceptance check fails or the Improve critic flags it (0 disables — even Improve's implied round). Omitted ⇒ the backend default (1 under Improve, else 0). Clamped server-side. */
+  reviseRounds?: number;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

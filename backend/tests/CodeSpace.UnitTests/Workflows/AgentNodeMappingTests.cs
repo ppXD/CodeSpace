@@ -66,6 +66,26 @@ public class AgentNodeMappingTests
         config.GetProperty("timeoutSeconds").GetInt32().ShouldBe(timeout, "the per-agent wall-clock is emitted verbatim (incl. 0 = infinite) onto the agent.code config key the node reads");
     }
 
+    // ── reviseRounds: the S6 bounded revise budget mapped onto the agent.code config key the node reads. ──
+
+    [Fact]
+    public void BuildAgentConfig_omits_reviseRounds_when_the_profile_sets_none()
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli" });
+
+        config.TryGetProperty("reviseRounds", out _).ShouldBeFalse("an absent budget omits the key — the executor's default (1 under Improve, else 0) applies (byte-identical)");
+    }
+
+    [Theory]
+    [InlineData(0)]   // an explicit 0 is emitted verbatim — the operator turning the loop OFF must survive the mapping
+    [InlineData(2)]
+    public void BuildAgentConfig_emits_the_profile_reviseRounds_verbatim(int rounds)
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli", ReviseRounds = rounds });
+
+        config.GetProperty("reviseRounds").GetInt32().ShouldBe(rounds, "the revise budget is emitted verbatim onto the agent.code config key the node reads");
+    }
+
     // ── BuildAgentInputs: the Rule-16 single home that threads BaseRefs onto baseRef + relatedRepositories[].ref,
     //    shared by single-agent AND plan-map-synth — pinned directly here (both consumers go through this method). ──
 

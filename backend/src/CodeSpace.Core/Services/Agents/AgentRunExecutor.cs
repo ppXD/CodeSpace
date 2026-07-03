@@ -263,17 +263,36 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // points at it. Null when no endpoint → nothing to re-open.
             var mcpToken = mcp is null ? null : token;
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, cancellationToken).ConfigureAwait(false);
+            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
 
-            result = await CaptureSessionTranscriptAsync(agentRunId, effectiveTask, result, harness, handle: null, cancellationToken).ConfigureAwait(false);
+            result = await VerifyProducedWorkAsync(agentRunId, run, harness, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-            result = await EnrichWithWorkspaceChangesAsync(agentRunId, effectiveTask, result, workspace, cancellationToken).ConfigureAwait(false);
+            // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
+            // Improve-mode critic flagged the output, feed the failure detail back to the SAME agent (same workspace;
+            // the same conversation when the round captured a resumable session) and re-verify through the FULL chain.
+            // Each round re-pushes the same run-derived branch (a designed force overwrite) and re-grades against it,
+            // so a pass can never be a stale verdict. A blocking decision (A1) defers grade+review, so no revise reason
+            // surfaces and the completion choke point keeps precedence. A worker tear-down mid-round leaves the run for
+            // re-attach, whose own terminal path honours the acceptance contract fail-closed — never a phantom pass.
+            var reviseBudget = EffectiveReviseRounds(effectiveTask);
 
-            result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            for (var round = 1; round <= reviseBudget && ReviseReasonFor(effectiveTask, result) is { } reason; round++)
+            {
+                await AppendReviseEventAsync(agentRunId, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
-            result = await GradeAcceptanceIfPresentAsync(run, effectiveTask, result, cancellationToken).ConfigureAwait(false);
+                var reviseTask = BuildReviseTask(effectiveTask, result, reason);
+                var reviseSpec = ApplyEgressPolicy(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
 
-            result = await ReviewOutputIfEnabledAsync(effectiveTask, result, run, cancellationToken).ConfigureAwait(false);
+                var priorTranscript = result.Transcript;
+                var priorUsage = result.TokenUsage;
+                result = await RunHarnessAsync(agentRunId, harness, runner, reviseSpec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round), cancellationToken).ConfigureAwait(false);
+                result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
+
+                // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
+                // output critic must judge goal-alignment against what the task actually asked for, not the feedback
+                // wrapper (which quotes the failure and could bias or blind the reviewer).
+                result = await VerifyProducedWorkAsync(agentRunId, run, harness, reviseTask with { Goal = effectiveTask.Goal }, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            }
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -833,6 +852,108 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
+    /// <summary>The post-harness verification chain — capture the session for resume, capture the diff, publish the branch, then the OBJECTIVE oracle and the SUBJECTIVE critic. One named unit because the S6 revise loop re-runs it after every round: a revision is only ever judged by the same full chain that judged the first attempt.</summary>
+    private async Task<AgentRunResult> VerifyProducedWorkAsync(Guid runId, AgentRun run, IAgentHarness harness, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    {
+        result = await CaptureSessionTranscriptAsync(runId, task, result, harness, handle: null, cancellationToken).ConfigureAwait(false);
+
+        result = await EnrichWithWorkspaceChangesAsync(runId, task, result, workspace, cancellationToken).ConfigureAwait(false);
+
+        result = await PushProducedBranchIfEnabledAsync(runId, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+        result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
+
+        return await ReviewOutputIfEnabledAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Hard cap on S6 revise rounds — a runaway budget is clamped here, so a task can never buy more than this many billed re-runs inside one agent run.</summary>
+    internal const int MaxReviseRoundsCap = 3;
+
+    /// <summary>The composed revise instruction's fixed prefix — a pinned, operator-visible marker so a revise round is recognisable in any transcript regardless of harness (and a stable hook for deterministic test CLIs).</summary>
+    internal const string ReviseInstructionPrefix = "REVISE:";
+
+    /// <summary>The task's clamped revise budget: an explicit non-negative <see cref="AgentTask.MaxReviseRounds"/> wins (clamped to <see cref="MaxReviseRoundsCap"/>); null defaults to 1 under <see cref="ReviewMode.Improve"/> (Improve MEANS improve) and 0 otherwise — S5's hard-gate semantics unchanged.</summary>
+    internal static int EffectiveReviseRounds(AgentTask task) =>
+        task.MaxReviseRounds is { } explicitRounds ? Math.Clamp(explicitRounds, 0, MaxReviseRoundsCap)
+        : task.OutputReviewMode == ReviewMode.Improve ? 1 : 0;
+
+    /// <summary>
+    /// WHY this result deserves a revise round, or null when it doesn't: an oracle failure with an agent-fixable detail
+    /// (a <c>grade-error:</c> is infra — another round can't fix the grader), or an Improve-mode critic flag carrying its
+    /// feedback. A deferred gate (blocking decision / multi-repo grade) sets neither signal, so this stays null and the
+    /// A1 completion choke point keeps precedence; a Gate-mode flag stays a flag — only Improve buys a re-run.
+    /// </summary>
+    internal static string? ReviseReasonFor(AgentTask task, AgentRunResult result)
+    {
+        if (result is { Status: AgentRunStatus.Failed, ExitReason: "acceptance-failed", AcceptancePassed: false }
+            && result.AcceptanceDetail is { } detail && IsAgentFixableOracleFailure(result, detail))
+            return $"The objective acceptance check failed: {detail}";
+
+        if (task.OutputReviewMode == ReviewMode.Improve && result is { Status: AgentRunStatus.NeedsReview, ExitReason: "output-flagged", ReviewFeedback: { Length: > 0 } feedback })
+            return $"An independent reviewer flagged the change: {feedback}";
+
+        return null;
+    }
+
+    /// <summary>An oracle failure the agent can plausibly fix with another pass. A real check verdict always is. A <c>grade-error:</c> is the grader's own failure — infra. <c>no-branch-or-repo</c> is fixable ONLY when the run produced NO work (the fix is to do the work); when work EXISTS but no branch published, the PUBLISH failed (credential-less clone / push infra) and another agent pass would burn the whole budget without ever changing that.</summary>
+    private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
+        !detail.StartsWith("grade-error:", StringComparison.Ordinal)
+        && !(detail == "no-branch-or-repo" && (result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch)));
+
+    /// <summary>Sum the rounds' token usage — the final result must bill the WHOLE run (the cost plane prices <c>ResultJson.TokenUsage</c>), not just the last round. Null when neither round reported usage.</summary>
+    internal static AgentTokenUsage? SumTokenUsage(AgentTokenUsage? prior, AgentTokenUsage? current) =>
+        prior is null ? current
+        : current is null ? prior
+        : new AgentTokenUsage { InputTokens = prior.InputTokens + current.InputTokens, OutputTokens = prior.OutputTokens + current.OutputTokens };
+
+    /// <summary>
+    /// The task for one revise round: the SAME contract with the failure fed back as the goal. WARM when the finished
+    /// round captured a resumable session (id + transcript): the harness continues that conversation in a fresh config
+    /// home, so the instruction is just the delta. COLD otherwise: a fresh conversation in the same workspace, so the
+    /// instruction restates the original goal too. Any ancestor continue-resume riding the task is superseded by THIS
+    /// run's own session; a stale offloaded-transcript ref is dropped with it.
+    /// </summary>
+    internal static AgentTask BuildReviseTask(AgentTask task, AgentRunResult result, string reason)
+    {
+        var warm = result is { SessionId.Length: > 0, SessionTranscript.Length: > 0 };
+
+        return task with
+        {
+            Goal = ComposeReviseGoal(task.Goal, reason, warm),
+            ResumeFromSessionId = warm ? result.SessionId : null,
+            RestoredTranscript = warm ? result.SessionTranscript : null,
+            RestoredTranscriptArtifactId = null,
+        };
+    }
+
+    /// <summary>Compose the revise instruction. Warm (conversation continued): the failure + "fix it" — the session already holds the goal and the work. Cold (fresh conversation, same workspace): restate the original goal so the new session carries the full contract.</summary>
+    internal static string ComposeReviseGoal(string originalGoal, string reason, bool warmResume) =>
+        warmResume
+            ? $"{ReviseInstructionPrefix} Your previous attempt did not pass verification.\n\n{reason}\n\nRevise your work in this workspace so the verification passes. Do not start over, and do not change what the task is."
+            : $"{ReviseInstructionPrefix} A previous attempt at the goal below did not pass verification.\n\n{reason}\n\nOriginal goal:\n{originalGoal}\n\nThe previous attempt's work is already in this workspace. Revise it so the verification passes.";
+
+    /// <summary>Round-scoped durable spool key: round 0 (the first attempt) keeps the bare run key — byte-identical spool paths for every non-revised run — and each revise round gets its own suffixed directory, because a spool is single-use (its exit marker means THIS launch finished; reusing round 1's would complete round 2 instantly with a stale code). Re-attach is unaffected: it reads the ACTUAL spool path off the persisted handle, never recomputes it.</summary>
+    internal static string ReviseSpoolKey(Guid runId, int round) => round == 0 ? runId.ToString("N") : $"{runId:N}-r{round}";
+
+    /// <summary>Concatenate the rounds' faithful raw streams with a visible seam, so the final offloaded transcript holds the WHOLE run — every round — not just the last one.</summary>
+    internal static string? JoinTranscripts(string? prior, string? current) =>
+        string.IsNullOrEmpty(prior) ? current
+        : string.IsNullOrEmpty(current) ? prior
+        : $"{prior}\n--- revise round ---\n{current}";
+
+    /// <summary>Announce a revise round on the timeline — the operator sees WHY the run is taking another pass and which round of the budget this is. Best-effort like the other completion-tail events.</summary>
+    private async Task AppendReviseEventAsync(Guid runId, string reason, int round, int budget, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Verification failed — revising (round {round} of {budget}). {reason}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-round event", runId);
+        }
+    }
+
     /// <summary>
     /// The OBJECTIVE oracle gate (triad S5): grade <c>AgentTask.Acceptance</c> against the produced branch at
     /// completion — the single-agent twin of the supervisor's per-unit fold gate, on the SAME grader (a server-run
@@ -898,13 +1019,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => AgentAcceptanceContract.FailClosed(result, detail);
 
     /// <summary>
-    /// v1 GATE: review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical
+    /// Review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical
     /// (no per-run <c>OutputReviewMode</c> baked, OR the shared <see cref="CriticToggle"/> kill-switch is off). Self-skips
     /// when there's nothing to gate — a non-success, or a no-op / re-attach run with no captured diff. A DISAPPROVED change
     /// re-grades the would-be <see cref="AgentRunStatus.Succeeded"/> run to <see cref="AgentRunStatus.NeedsReview"/>
     /// (<see cref="CompletionDisposition.NeedsReview"/>) so a human looks before the downstream PR-open (Succeeded-gated)
-    /// consumes it; the captured work is preserved. FAILS OPEN — a failed review keeps the original result. Improve is
-    /// treated as Gate in v1 (a produced diff is not cheaply re-derivable; the agent re-run loop is a later arc).
+    /// consumes it; the captured work is preserved, and the critique rides <see cref="AgentRunResult.ReviewFeedback"/>.
+    /// FAILS OPEN — a failed review keeps the original result. Under <see cref="ReviewMode.Improve"/> the S6 revise loop
+    /// reads the flag + feedback and buys the agent a bounded re-run before the flag stands (Gate never re-runs).
     /// </summary>
     internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
@@ -932,7 +1054,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
 
-        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged" };
+        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = RenderReviewFeedback(verdict) };
     }
 
     /// <summary>
@@ -957,6 +1079,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         using (LlmCallContext.Push(new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", recordLogger, offloader)))
             return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The critic's verdict as one feedback string — persisted on the result (WHY the run was flagged) and fed back verbatim by an Improve revise round.</summary>
+    internal static string RenderReviewFeedback(CriticVerdict verdict) =>
+        verdict.Issues.Count > 0 ? $"{verdict.Rationale} Issues: {string.Join("; ", verdict.Issues)}" : verdict.Rationale;
 
     /// <summary>Render the produced change for the critic — the git unified diff (already capped), with the agent's summary + the changed-file list as context.</summary>
     private static string RenderChange(AgentRunResult result)
@@ -1291,7 +1417,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, string spoolKey, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
         var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
@@ -1320,7 +1446,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, spoolKey, cancellationToken).ConfigureAwait(false);
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
@@ -1362,10 +1488,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, CancellationToken cancellationToken)
     {
         if (runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, spoolKey, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
@@ -1377,12 +1503,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
         // the token lets it RE-OPEN the endpoint with the SAME socket+token the agent's declaration file already holds.
-        var handle = (await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken };
+        // The spool key is round-scoped (ReviseSpoolKey) — a revise round must never inherit a finished spool's exit marker.
+        var handle = (await durable.LaunchAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken };
 
         await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 

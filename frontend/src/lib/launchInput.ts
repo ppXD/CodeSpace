@@ -64,10 +64,12 @@ export interface LaunchFormState {
   timeLimit: string;
   /** Review "Decisions" — how an independent critic reviews each supervisor DECISION: `"None"` (default) / `"Gate"` / `"Improve"`. Deep only. Sent (as the enum name) only when not None. */
   decisionReview: string;
-  /** Review "Agent output" — how an independent critic reviews each agent's produced change: `"None"` (default) / `"Gate"`. All tiers. Sent only when not None. */
+  /** Review "Agent output" — how an independent critic reviews each agent's produced change: `"None"` (default) / `"Gate"` / `"Improve"` (feed the critique back for a bounded self-revision). All tiers. Sent only when not None. */
   outputReview: string;
   /** Review "Reviewer model" — the credentialed-model ROW id the critic(s) run on, or `""` (Auto). Sent only when a review mode is active. */
   reviewerModel: string;
+  /** Evaluation "Self-revise" (S6) — the bounded in-run revise budget when a check fails / the Improve critic flags: `""` (Auto — the backend default: 1 under Improve, else 0) / `"0"` (Off, kills even Improve's implied round) / `"1"` / `"2"`. Quick/standard/auto (deep units revise via the supervisor's own retry). Sent only when not Auto. */
+  reviseRounds: string;
 }
 
 /** The canonical default acceptance chips — shared by the modal seed/reset and the omit-check, so an UNMODIFIED set is
@@ -181,6 +183,14 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   if (decisionOn) input.decisionReviewMode = state.decisionReview;
   if (outputOn) input.outputReviewMode = state.outputReview;
   if (state.reviewerModel && (decisionOn || outputOn || plannerOn)) input.reviewerModelId = state.reviewerModel;
+
+  // The S6 self-revise budget — an explicit round count (incl. "0" = Off, which kills even Improve's implied round)
+  // is sent verbatim; "" (Auto) is omitted so the backend default applies (1 under Improve, else 0). Deep is excluded:
+  // supervisor units revise through the supervisor's own retry loop, and sending a knob the tab hid would be a lie.
+  if (state.effort !== "deep" && state.reviseRounds !== "") {
+    const rounds = Number.parseInt(state.reviseRounds, 10);
+    if (Number.isFinite(rounds) && rounds >= 0) input.reviseRounds = rounds;
+  }
 
   return input;
 }

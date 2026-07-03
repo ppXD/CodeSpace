@@ -61,6 +61,9 @@ internal static class AgentNodeMapping
         // the critic at completion. None ⇒ omitted (the enum int) ⇒ no review ⇒ byte-identical.
         AddIfPresent(config, "outputReviewMode", profile?.OutputReviewMode is { } orm && orm != ReviewMode.None ? (int)orm : (int?)null);
         AddIfPresent(config, "reviewerModelId", profile?.ReviewerModelId?.ToString());
+        // The bounded revise budget (S6) — how many oracle/critic failures may be fed back to the same agent in-run.
+        // Null ⇒ omitted ⇒ the executor's default (1 under Improve, else 0) ⇒ byte-identical.
+        AddIfPresent(config, "reviseRounds", profile?.ReviseRounds);
         // Multi-repo working-dir mode — the enum NAME ("WorkspaceRoot"/"PrimaryRepo"); null (Auto) ⇒ omitted ⇒ the
         // node's Auto default ⇒ byte-identical. AgentCodeNode reads it back via WorkspaceCwdModeWire.FromWire.
         AddIfPresent(config, "cwdMode", profile?.CwdMode?.ToString());

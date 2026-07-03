@@ -98,6 +98,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "a disapproved change blocks the clean-success path so a human looks");
         result.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
         result.ExitReason.ShouldBe("output-flagged");
+        result.ReviewFeedback.ShouldBe("incomplete Issues: no tests for the new path", "the critique persists on the result — WHY it was flagged, and the S6 Improve loop's food");
 
         runs.AppendedEvents.Count.ShouldBe(1, "the operator gets a timeline warning explaining why it's flagged");
         runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);

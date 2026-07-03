@@ -87,6 +87,12 @@ public sealed record AgentRunResult
     /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
     public string? AcceptanceDetail { get; init; }
 
+    /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, failed open, or never ran.</summary>
+    public string? ReviewFeedback { get; init; }
+
+    /// <summary>How many S6 revise rounds actually executed inside this run (0 = the first attempt stood). Each round is a same-session harness continuation after an oracle failure or an Improve-critic flag, re-verified through the full push→grade→review chain.</summary>
+    public int ReviseRounds { get; init; }
+
     /// <summary>
     /// When <see cref="CompletionDisposition"/> is <see cref="CompletionDisposition.NeedsDecision"/>, the ledger id of the
     /// still-unanswered <c>decision.request</c> the run raised — the handle a reviewer (or the "Needs decision" queue)

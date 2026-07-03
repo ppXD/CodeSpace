@@ -172,11 +172,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>How an INDEPENDENT critic reviews each supervisor DECISION (Deep only) before its side effect — baked into the supervisor node. <see cref="ReviewMode.None"/> (the default) ⇒ no critic ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 
-    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT (its produced change) at completion. <see cref="ReviewMode.None"/> (the default) ⇒ no review ⇒ byte-identical. v1 supports Gate (a flagged change → NeedsReview). Flows to the single-agent <c>agent.code</c> node + each supervisor-spawned agent.</summary>
+    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT (its produced change) at completion. <see cref="ReviewMode.None"/> (the default) ⇒ no review ⇒ byte-identical. Gate: a flagged change → NeedsReview. Improve (S6): a flagged change first buys the agent a bounded revise round (critique fed back, same conversation) before it can flag. Flows to the single-agent <c>agent.code</c> node + each supervisor-spawned agent.</summary>
     public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
 
     /// <summary>The credentialed-model ROW the review critic(s) run on — the shared reviewer for both the decision + output critics. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when a review mode is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>S6: the bounded revise budget — how many times the executor may feed an acceptance failure / Improve-critic flag back to the SAME agent inside one run (same conversation, same workspace, full re-verify) before the failure stands. Null ⇒ the executor's default (1 when <see cref="OutputReviewMode"/> is Improve, else 0); clamped server-side. Flows to the single-agent node + each plan-map branch.</summary>
+    public int? ReviseRounds { get; init; }
 
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;

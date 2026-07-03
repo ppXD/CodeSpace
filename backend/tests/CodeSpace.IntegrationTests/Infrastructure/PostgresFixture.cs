@@ -351,6 +351,17 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
 
+        // Content-keyed structured fake for the OUTPUT-REVIEW critic flows (triad S6): under its OWN provider tag
+        // (DeterministicCriticLlmClient.ProviderTag = "TestCritic"). The production LlmStructuredCritic resolves it
+        // through the test's pinned reviewer pool row; its verdict is a pure function of the diff under review
+        // (RejectMarker ⇒ disapprove), so revise-loop tests prove the critic flips ONLY when the flaw is really gone.
+        // The fixture-singleton CriticReviewScript counts calls (billing-order asserts); tests reset it.
+        builder.RegisterType<Workflows.Infrastructure.CriticReviewScript>().AsSelf().SingleInstance();
+        builder.RegisterType<Workflows.Infrastructure.DeterministicCriticLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
+
         // S0a real-model phase-authorship instrument: a RECORD/REPLAY decorator over the REAL AnthropicClient,
         // under its OWN provider tag (RecordReplayStructuredLLMClient.ProviderTag), so the LLMClientRegistry holds
         // it alongside the real client + the deterministic fakes without a duplicate-provider collision. The

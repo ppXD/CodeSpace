@@ -56,4 +56,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>The credentialed-model ROW the output critic runs on. Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>S6: the bounded revise budget — how many times the executor may feed an acceptance failure / Improve-critic flag back to the same agent inside one run (same conversation, same workspace, full re-verify). Null → the executor's default (1 under Improve, else 0); clamped server-side. Flows to the single-agent node + each plan-map branch.</summary>
+    public int? ReviseRounds { get; init; }
 }

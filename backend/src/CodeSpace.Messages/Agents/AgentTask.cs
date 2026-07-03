@@ -174,10 +174,12 @@ public sealed record AgentTask
 
     /// <summary>
     /// Per-run opt-in to reviewing the agent's OUTPUT (its produced change) with an INDEPENDENT critic at completion.
-    /// <see cref="ReviewMode.None"/> (the default) ⇒ no review (byte-identical). v1 supports the GATE shape only: a
-    /// disapproved change re-grades a would-be <c>Succeeded</c> run to <see cref="AgentRunStatus.NeedsReview"/> so a human
-    /// looks before the downstream PR-open (which only proceeds on Succeeded) consumes it — the captured work is preserved.
-    /// <c>[JsonIgnore(WhenWritingDefault)]</c> so an unconfigured task's persisted task_json is byte-identical.
+    /// <see cref="ReviewMode.None"/> (the default) ⇒ no review (byte-identical). GATE: a disapproved change re-grades a
+    /// would-be <c>Succeeded</c> run to <see cref="AgentRunStatus.NeedsReview"/> so a human looks before the downstream
+    /// PR-open (which only proceeds on Succeeded) consumes it — the captured work is preserved. IMPROVE (S6): the same
+    /// review, but a disapproval first buys the agent a bounded revise round (the critique fed back into the same
+    /// conversation) before the flag stands. <c>[JsonIgnore(WhenWritingDefault)]</c> so an unconfigured task's persisted
+    /// task_json is byte-identical.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
@@ -196,6 +198,19 @@ public sealed record AgentTask
     /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>
+    /// S6: how many bounded REVISE rounds the executor may run inside this run when the objective oracle fails or the
+    /// Improve-mode critic flags the output — each round feeds the failure detail back to the SAME agent (a same-session
+    /// harness continuation in the same workspace) and re-verifies through the full push→grade→review chain. Null ⇒ the
+    /// executor's default: 1 round under <see cref="ReviewMode.Improve"/> (Improve MEANS improve), else 0 (S5's hard-gate
+    /// semantics, byte-identical). Clamped server-side. Each round re-arms <see cref="TimeoutSeconds"/>, so the run's
+    /// wall-clock ceiling is (1 + rounds) × timeout. Supervisor-dispatched units pin this to an EXPLICIT 0 — the
+    /// supervisor's own retry loop owns their revision (a null would let Improve imply an in-run round and stack the
+    /// two loops). <c>[JsonIgnore(WhenWritingNull)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? MaxReviseRounds { get; init; }
 }
 
 /// <summary>What the agent may do — the declarative half of the sandbox policy a harness maps to its flags.</summary>
