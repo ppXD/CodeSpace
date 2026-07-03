@@ -15,11 +15,12 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// 🟢 Integration (real Postgres + the REAL timeline sources — run-record, agent-events, supervisor-ledger — resolved
-/// from DI): the narrative timeline end-to-end at the projector seam. A run's append-only <c>workflow_run_record</c>
-/// ledger, its agents' harness events, and its supervisor decision ledger all surface through the run-timeline
-/// projector as NARRATIVE-worthy events, chronologically merged, with Trace-level noise (log lines / chatter) dropped.
-/// Every read is team-scoped (a foreign row never leaks); a foreign / absent run resolves to null (fail-closed).
+/// 🟢 Integration (real Postgres + the REAL timeline sources — run-record, agent-events, supervisor-ledger, tool-calls —
+/// resolved from DI): the narrative timeline end-to-end at the projector seam. A run's append-only
+/// <c>workflow_run_record</c> ledger, its agents' harness events, its supervisor decision ledger, and its side-effecting
+/// tool-call ledger all surface through the run-timeline projector as NARRATIVE-worthy events, chronologically merged,
+/// with Trace-level noise (log lines / chatter) dropped. Every read is team-scoped (a foreign row never leaks); a
+/// foreign / absent run resolves to null (fail-closed). A new source is picked up purely by DI — no projector edit.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -250,6 +251,146 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         events!.ShouldNotContain(e => e.SourceKey == "supervisor", "a decision stamped to another team is filtered by the team-scoped ledger read");
+    }
+
+    [Fact]
+    public async Task Projects_a_runs_side_effecting_tool_calls_tagged_with_the_agent()
+    {
+        // The tool-call source is picked up PURELY by DI (no projector edit) — a run's side effects surface on the
+        // timeline, tagged with their agent + node, severity/level riding the ledger status.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedToolCallsAsync(teamId, agentId,
+            (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, t),
+            (ToolCallLedgerStatus.Failed, "git.commit", "remote rejected: protected branch", null, t.AddSeconds(1)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var tools = events!.Where(e => e.SourceKey == "tool-calls").ToList();
+        tools.Select(e => e.Title).ShouldBe(new[] { "Called git.open_pr", "Called git.commit" }, "the side-effecting tool calls surface chronologically, tagged");
+        tools.ShouldAllBe(e => e.AgentRunId == agentId.ToString());
+        tools.ShouldAllBe(e => e.NodeId == "code");
+
+        var failed = tools.Single(e => e.Title == "Called git.commit");
+        failed.Severity.ShouldBe(TimelineSeverity.Error);
+        failed.Level.ShouldBe(TimelineLevel.Milestone, "a failed side effect is a milestone the operator must see");
+        failed.Summary.ShouldBe("remote rejected: protected branch");
+    }
+
+    [Fact]
+    public async Task Excludes_decision_request_rows_by_kind_but_surfaces_a_real_awaiting_approval_side_effect()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+
+        // The discriminator is ToolKind, NOT the envelope: a decision.request row is a cross-grain decision the "Needs
+        // decision" queue surfaces — excluded EVEN WITH a null envelope (a decision row is INSERTed null-envelope, then
+        // stashes it in a SECOND write, so an envelope-null proxy would leak it during that window / after a crash). A
+        // REAL side-effecting approval is AwaitingApproval with a null envelope BY DESIGN (ToolCallLedger doc) → it must
+        // surface. This kills both a status-keyed mutant (would drop deploy.trigger) and an envelope-keyed one (would
+        // surface the null-envelope decision.request).
+        var t = DateTimeOffset.UtcNow;
+        await SeedToolCallsAsync(teamId, agentId,
+            (ToolCallLedgerStatus.Pending, "decision.request", null, null, t),                                 // decision, null envelope → excluded
+            (ToolCallLedgerStatus.AwaitingApproval, "decision.request", null, """{"question":"proceed?"}""", t.AddSeconds(1)),  // decision, envelope set → excluded
+            (ToolCallLedgerStatus.AwaitingApproval, "deploy.trigger", null, null, t.AddSeconds(2)));           // REAL side effect awaiting approval, null envelope → SURFACES
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var tools = events!.Where(e => e.SourceKey == "tool-calls").ToList();
+        tools.Select(e => e.Title).ShouldBe(new[] { "Called deploy.trigger" },
+            "only the real side effect surfaces; BOTH decision.request rows (null-envelope AND envelope-set) are excluded by ToolKind");
+        tools[0].Severity.ShouldBe(TimelineSeverity.Info, "an awaiting-approval real side effect is in-flight → Info");
+    }
+
+    [Fact]
+    public async Task A_multi_agent_runs_tool_calls_are_each_tagged_with_their_own_agent_and_node()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var backend = Guid.NewGuid();
+        var frontend = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, backend, "backend-fix");
+        await SeedAgentRunAsync(runId, teamId, frontend, "frontend-fix");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedToolCallsAsync(teamId, backend, (ToolCallLedgerStatus.Succeeded, "git.commit", null, null, t));
+        await SeedToolCallsAsync(teamId, frontend, (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, t.AddSeconds(1)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var byTitle = events!.Where(e => e.SourceKey == "tool-calls").ToDictionary(e => e.Title);
+        byTitle["Called git.commit"].AgentRunId.ShouldBe(backend.ToString());
+        byTitle["Called git.commit"].NodeId.ShouldBe("backend-fix", "each agent's tool call carries ITS OWN node, never another agent's");
+        byTitle["Called git.open_pr"].AgentRunId.ShouldBe(frontend.ToString());
+        byTitle["Called git.open_pr"].NodeId.ShouldBe("frontend-fix");
+    }
+
+    [Fact]
+    public async Task Merges_a_tool_call_between_the_lifecycle_records_by_time()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedRecordsAsync(runId,
+            (WorkflowRunRecordTypes.RunStarted, null, "{}", t),
+            (WorkflowRunRecordTypes.RunCompleted, null, "{}", t.AddSeconds(2)));
+        await SeedToolCallsAsync(teamId, agentId, (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, t.AddSeconds(1)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        events!.Select(e => e.Title).ShouldBe(new[] { "Run started", "Called git.open_pr", "Run completed" },
+            "the tool call interleaves between the lifecycle records by OccurredAt — the cross-source merge");
+    }
+
+    [Fact]
+    public async Task Excludes_a_tool_call_stamped_to_another_team()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+
+        // A tool-call row pointing at this run's agent but stamped to ANOTHER team — the team-scoped ledger read keeps it off.
+        await SeedToolCallsAsync(otherTeamId, agentId, (ToolCallLedgerStatus.Succeeded, "git.open_pr", null, null, DateTimeOffset.UtcNow));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        events!.ShouldNotContain(e => e.SourceKey == "tool-calls", "a tool call stamped to another team is filtered by the team-scoped ledger read");
+    }
+
+    private async Task SeedToolCallsAsync(Guid teamId, Guid agentRunId, params (ToolCallLedgerStatus Status, string ToolKind, string? Error, string? DecisionEnvelope, DateTimeOffset At)[] calls)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        foreach (var (status, toolKind, error, envelope, at) in calls)
+        {
+            db.ToolCallLedger.Add(new ToolCallLedger
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId,
+                ToolKind = toolKind, IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
+                Status = status, Error = error, DecisionEnvelopeJson = envelope,
+                CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     private static string StagedAgents(int count) =>
