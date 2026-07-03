@@ -89,6 +89,11 @@ public sealed class JournalProjectorFlowTests
         focused.RunId.ShouldBe(attempt1, "the anchored attempt is focused, not the newest");
         focused.Status.ShouldBe(WorkflowRunStatus.Failure, "attempt 1's OWN status, not attempt 2's Success");
         focused.Steps.Select(s => s.Title).ShouldBe(new[] { "Supervisor planned the work" }, "attempt 1's run was walked");
+
+        // The pager data flows end-to-end: the full 2-attempt ladder, with the anchored (deep-linked) attempt 1 focused.
+        focused.Attempts.Select(a => (a.AttemptNumber, a.Status)).ShouldBe(new[] { (1, WorkflowRunStatus.Failure), (2, WorkflowRunStatus.Success) });
+        focused.Attempts.Single(a => a.Focused).RunId.ShouldBe(attempt1, "the deep-linked attempt is flagged focused in the ladder");
+        focused.Attempts.Single(a => a.IsLatest).Status.ShouldBe(WorkflowRunStatus.Success, "the newest attempt is flagged latest");
     }
 
     [Fact]

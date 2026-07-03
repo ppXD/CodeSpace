@@ -117,6 +117,7 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         At = focus.CreatedDate,
         DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
         Focused = true,
+        Attempts = MapAttempts(turn, focusedRunId: focus.RunId),
         Steps = steps,
         StepCount = steps.Count,   // the FULL total — a ?since delta trims Steps but keeps this, so the client can self-heal
     };
@@ -132,8 +133,25 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         At = turn.CreatedDate,
         DurationMs = DurationOf(turn.CreatedDate, turn.StartedAt, turn.CompletedAt),
         Focused = false,
+        Attempts = MapAttempts(turn, focusedRunId: null),   // a collapsed turn's ladder is a preview — none focused
         Steps = Array.Empty<JournalStep>(),
     };
+
+    /// <summary>Project the skeleton's attempt ladder (already loaded — no extra read) into the wire shape, marking the focused attempt on the focused turn. Empty when the turn was never reran (the skeleton carries no ladder).</summary>
+    private static IReadOnlyList<JournalAttempt> MapAttempts(SessionTurn turn, Guid? focusedRunId) =>
+        turn.Attempts is not { Count: > 0 } attempts
+            ? Array.Empty<JournalAttempt>()
+            : attempts.Select(a => new JournalAttempt
+            {
+                AttemptNumber = a.AttemptNumber,
+                RunId = a.RunId,
+                Status = a.Status,
+                At = a.CreatedDate,
+                SourceType = a.SourceType,
+                RerunFromNodeId = a.RerunFromNodeId,
+                IsLatest = a.IsLatest,
+                Focused = a.RunId == focusedRunId,
+            }).ToList();
 
     /// <summary>The turn/attempt wall-clock — anchored on the immutable enqueue time (a resumed run resets StartedAt, which would under-report the whole elapsed); live elapsed since it started while in-flight, null before then. Mirrors the room projector.</summary>
     private static long? DurationOf(DateTimeOffset createdDate, DateTimeOffset? startedAt, DateTimeOffset? completedAt)
