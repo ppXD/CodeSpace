@@ -70,6 +70,17 @@ public sealed class NonCodingOracleGraderTests : IDisposable
     }
 
     [Fact]
+    public void Duplicate_criterion_ids_stay_symmetric_in_the_aggregate()
+    {
+        // The supervisor lane never runs ValidateAuthored, so a dup-id rubric CAN reach the math: the duplicate
+        // counts in BOTH the numerator and the denominator (one verdict answers both instances) — never a skewed score.
+        var rubric = Rubric(("a", null), ("a", null), ("b", null));
+
+        LlmJudgeGrader.Aggregate(rubric with { Threshold = 0.66 }, Verdict(("a", true), ("b", false))).Passed.ShouldBeTrue("met weight 2 of 3");
+        LlmJudgeGrader.Aggregate(rubric with { Threshold = 0.67 }, Verdict(("a", true), ("b", false))).Passed.ShouldBeFalse();
+    }
+
+    [Fact]
     public void Negative_weights_clamp_and_an_all_zero_rubric_fails_closed()
     {
         var negatives = Rubric(("a", -5.0), ("b", 1.0));

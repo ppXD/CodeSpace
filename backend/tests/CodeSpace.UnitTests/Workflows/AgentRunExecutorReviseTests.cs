@@ -50,6 +50,16 @@ public sealed class AgentRunExecutorReviseTests
             .ShouldBeNull("another agent round cannot fix the grader");
 
     [Fact]
+    public void A_missing_deliverable_buys_a_round_because_producing_it_is_the_fix()
+    {
+        // S7: a non-coding oracle's "artifact-missing" is the rubric/citation/schema twin of "the agent did no work" —
+        // the revise instruction tells it exactly which deliverable to produce.
+        var missingDeliverable = AcceptanceFailed("artifact-missing: report.md");
+
+        AgentRunExecutor.ReviseReasonFor(TaskWith(), missingDeliverable).ShouldNotBeNull();
+    }
+
+    [Fact]
     public void No_branch_with_no_work_buys_a_round_because_doing_the_work_is_the_fix()
     {
         var didNothing = AcceptanceFailed("no-branch-or-repo") with { ChangedFiles = Array.Empty<string>(), Patch = null };

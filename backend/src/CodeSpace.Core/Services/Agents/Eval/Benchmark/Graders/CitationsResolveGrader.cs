@@ -16,6 +16,11 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 /// file target, a non-http(s) scheme (<c>mailto:</c>, <c>javascript:</c>, a bare word) all fail with a detail naming
 /// the file + target — exactly what the S6 revise loop feeds back. A pure <c>#anchor</c> self-link is accepted
 /// (heading anchors aren't verifiable without a markdown AST — documented bound, not a silent gap).</para>
+///
+/// <para>Documented bounds: only INLINE links (<c>[text](target)</c>, images included) count — reference-style
+/// definitions (<c>[1]: url</c>) are not parsed, so a purely reference-style document must carry at least one inline
+/// citation. The extraction is hardened against hostile committed content: the post-target run is structurally
+/// bounded and the whole match carries a timeout, and a timeout FAILS the grade (never hangs it).</para>
 /// </summary>
 public sealed partial class CitationsResolveGrader : IBenchmarkGrader, ISingletonDependency
 {
@@ -42,7 +47,14 @@ public sealed partial class CitationsResolveGrader : IBenchmarkGrader, ISingleto
             if (!WorkspaceArtifactGuard.TryReadWithin(root, path, MaxArtifactBytesPerFile, out var content, out var error))
                 return Task.FromResult(Fail(error!));
 
-            var citations = ExtractCitations(content);
+            IReadOnlyList<string> citations;
+            try { citations = ExtractCitations(content); }
+            catch (RegexMatchTimeoutException)
+            {
+                // Hostile/pathological committed content stalled the parser — an ungradable deliverable is a FAIL,
+                // never a hung grader (the same fail-closed stance as an unreadable file).
+                return Task.FromResult(Fail($"citation-parse-timeout: {path}"));
+            }
 
             if (citations.Count == 0) return Task.FromResult(Fail($"citations-missing: {path} contains no markdown citation"));
 
@@ -86,8 +98,8 @@ public sealed partial class CitationsResolveGrader : IBenchmarkGrader, ISingleto
         return WorkspaceArtifactGuard.ExistsWithin(root, relativeToRoot) ? null : "file-not-found-in-workspace";
     }
 
-    /// <summary>Markdown inline link: <c>[text](target)</c> — the target group stops at whitespace or <c>)</c> so an optional <c>"title"</c> is excluded. An image (<c>![alt](src)</c>) matches too — an image source is a citation-grade reference.</summary>
-    [GeneratedRegex("""\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)""")]
+    /// <summary>Markdown inline link: <c>[text](target)</c> — the target group stops at whitespace or <c>)</c> so an optional <c>"title"</c> is excluded. An image (<c>![alt](src)</c>) matches too — an image source is a citation-grade reference. Hardened against hostile content: the text and post-target runs are structurally bounded (an unclosed pseudo-link with a megabyte tail would otherwise re-scan per backtrack — O(n²)) and the match carries a hard timeout the caller converts to a fail-closed grade.</summary>
+    [GeneratedRegex("""\[[^\]]{0,512}\]\(\s*<?([^)\s>]+)>?[^)]{0,512}\)""", RegexOptions.None, matchTimeoutMilliseconds: 2000)]
     private static partial Regex MarkdownLink();
 
     private static BenchmarkGrade Fail(string detail) => new() { Passed = false, Detail = detail };
