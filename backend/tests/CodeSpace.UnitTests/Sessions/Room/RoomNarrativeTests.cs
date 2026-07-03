@@ -625,6 +625,36 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void A_supervisor_crash_before_deciding_emits_a_connecting_beat_before_the_diagnostic()
+    {
+        // The reported case: plan → spawn(agents) with NO turn-closing decision, then Failure (the supervisor's NEXT
+        // decision died mid-LLM-call). The trajectory must not jump from the agents straight to the red error — a beat connects them.
+        var blocks = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 2) }, WorkflowRunStatus.Failure, error: "Node 'sup' failed.").Blocks.ToList();
+
+        var beatIdx = blocks.FindIndex(b => b is NarrativeStepBlock s && s.Text == "Supervisor's next step failed before it could decide.");
+        beatIdx.ShouldBeGreaterThanOrEqualTo(0, "a supervisor turn that crashed before its next decision shows a connecting beat");
+
+        blocks.FindIndex(b => b is DiagnosticBlock).ShouldBe(beatIdx + 1, "the beat sits immediately before the error diagnostic so the story reads continuously");
+    }
+
+    [Fact]
+    public void A_failed_turn_that_reached_a_terminal_decision_emits_no_next_step_beat()
+    {
+        // A supervisor that DID reach a clean stop (even with a failing outcome) didn't crash before deciding — no beat.
+        Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 2), Tape("stop", 3) }, WorkflowRunStatus.Failure)
+            .Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("next step failed"), "a terminal decision closes the turn → no crashed-before-deciding beat");
+    }
+
+    [Fact]
+    public void A_structural_fan_out_failure_emits_no_supervisor_next_step_beat()
+    {
+        // A flow.map fan-out failure has agent-bearing STRUCTURAL phases (never a supervisor closing verb); the beat is
+        // scoped to supervisor phases, so it must NOT false-fire here.
+        Build(new[] { Structural("map", "Fan out", 1, PhaseStatus.Failed, agentCount: 2) }, WorkflowRunStatus.Failure)
+            .Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("next step failed"), "a non-supervisor failure never shows the supervisor crash beat");
+    }
+
+    [Fact]
     public void Checklist_questions_render_with_the_recommended_option_flagged()
     {
         var checklist = Checklist(Item("s1", "First", state: WorkPlanItemStates.Pending)) with
