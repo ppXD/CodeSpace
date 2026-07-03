@@ -23,8 +23,8 @@ public sealed class ReviseHealingFakeCli : IDisposable
     /// <summary>First-round content: flunks the check AND carries the reviewer's reject marker.</summary>
     public const string DraftContent = "draft " + DeterministicCriticLlmClient.RejectMarker;
 
-    /// <summary>Revise-round content: passes the check, no marker.</summary>
-    public const string RevisedContent = "revised clean";
+    /// <summary>Revise-round content: passes a <c>grep -q revised</c> check, carries no critic reject-marker, AND carries the judge fake's <c>MEETS[healed]</c> marker — so the SAME revision heals whichever gate (check / critic / rubric judge) bought the round.</summary>
+    public const string RevisedContent = "revised clean MEETS[healed]";
 
     public const string SummaryPrefix = "DONE: ";
 

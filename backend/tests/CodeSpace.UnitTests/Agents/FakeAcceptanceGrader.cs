@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -19,10 +20,10 @@ internal sealed class FakeAcceptanceGrader : ISupervisorAcceptanceGrader
     public int CallCount { get; private set; }
     public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
-    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
+    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
     {
         CallCount++;
-        LastCall = (repositoryId, teamId, branch, command, timeoutSeconds, kind);
+        LastCall = (repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass);
         if (_throw != null) throw _throw;
         return Task.FromResult(_grade);
     }

@@ -362,6 +362,15 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
 
+        // Artifact-keyed structured fake for the RUBRIC JUDGE flows (triad S7): under its OWN provider tag
+        // (DeterministicJudgeLlmClient.ProviderTag = "TestJudge"). The production LlmRubricJudge resolves it through
+        // the test's pinned judge pool row; each criterion is met IFF the judged deliverable carries MEETS[id] — so
+        // oracle tests prove the verdict flips only when the content really changes.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicJudgeLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
+
         // S0a real-model phase-authorship instrument: a RECORD/REPLAY decorator over the REAL AnthropicClient,
         // under its OWN provider tag (RecordReplayStructuredLLMClient.ProviderTag), so the LLMClientRegistry holds
         // it alongside the real client + the deterministic fakes without a duplicate-provider collision. The

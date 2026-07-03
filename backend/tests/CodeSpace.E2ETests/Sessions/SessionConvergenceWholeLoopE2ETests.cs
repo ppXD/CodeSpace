@@ -183,7 +183,7 @@ public sealed class SessionConvergenceWholeLoopE2ETests : IDisposable
     private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, new[] { "sh", "check.sh" }, 60, CancellationToken.None);
+        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, CancellationToken.None);
     }
 
     private static TaskLaunchRequest ContinueRequest(Guid teamId, Guid userId, Guid sessionId, Guid repoId, string text) => new()

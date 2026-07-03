@@ -23,6 +23,9 @@ public class SupervisorAcceptanceGraderTests
 {
     private static readonly string[] Command = { "./check.sh", "--ci" };
 
+    /// <summary>The spec-shaped acceptance the adapter now takes (triad S7) — same argv, optional kind.</summary>
+    private static SupervisorAcceptanceSpec Spec(BenchmarkGradingKind? kind = null) => new() { Command = Command, Kind = kind };
+
     [Fact]
     public async Task Clones_the_repo_at_the_produced_branch()
     {
@@ -31,7 +34,7 @@ public class SupervisorAcceptanceGraderTests
 
         var repoId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
-        await grader.GradeAsync(repoId, teamId, "feat/x", Command, 30, CancellationToken.None);
+        await grader.GradeAsync(repoId, teamId, "feat/x", Spec(), 30, CancellationToken.None);
 
         resolver.RepositoryId.ShouldBe(repoId);
         resolver.TeamId.ShouldBe(teamId);
@@ -44,7 +47,7 @@ public class SupervisorAcceptanceGraderTests
         var oracle = new FakeGrader(Pass);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: "/tmp/clone-xyz");
 
-        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 45, CancellationToken.None);
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 45, CancellationToken.None);
 
         oracle.ResolvedKind.ShouldBe(BenchmarkGradingKind.TestsPass, "the TestsPass oracle grades the result");
         oracle.Context.ShouldNotBeNull();
@@ -62,7 +65,7 @@ public class SupervisorAcceptanceGraderTests
         var oracle = new FakeGrader(Pass);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle);
 
-        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None, kind);
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(kind), 30, CancellationToken.None);
 
         oracle.ResolvedKind.ShouldBe(kind, "the adapter resolves the registry oracle by the requested kind — TestsPass by default, ArtifactPresent when the model authored it");
         oracle.Context!.Task.TestCommand.ShouldBe(Command, "the authored paths/argv flow to whichever oracle was resolved");
@@ -73,7 +76,7 @@ public class SupervisorAcceptanceGraderTests
     {
         var grade = await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }),
             new FakeGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" }))
-            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeTrue();
         grade.Detail.ShouldBe("tests-passed");
@@ -83,7 +86,7 @@ public class SupervisorAcceptanceGraderTests
     public async Task Removes_the_clone_on_the_happy_path()
     {
         var handle = new FakeHandle("/tmp/clone");
-        await BuildWithHandle(handle, new FakeGrader(Pass)).GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+        await BuildWithHandle(handle, new FakeGrader(Pass)).GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         handle.Disposed.ShouldBeTrue("the clone is removed after grading");
     }
@@ -96,7 +99,7 @@ public class SupervisorAcceptanceGraderTests
         // NOT a verdict and NOT a crash — acceptance can't be verified, so it fails closed to "not accepted".
         var grader = BuildWithHandle(handle, new FakeGrader(new InvalidOperationException("command not found")));
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeFalse("a check that can't run is not a silent pass — fail closed");
         grade.Detail.ShouldContain("grade-error");
@@ -110,7 +113,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = BuildWithHandle(handle, new FakeGrader(new OperationCanceledException()));
 
         // Cancellation is the one thing NOT swallowed — the caller asked to stop, so it propagates (the clone still cleans up).
-        await Should.ThrowAsync<OperationCanceledException>(() => grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None));
+        await Should.ThrowAsync<OperationCanceledException>(() => grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None));
 
         handle.Disposed.ShouldBeTrue("the clone is removed even when grading is cancelled");
     }
@@ -119,7 +122,7 @@ public class SupervisorAcceptanceGraderTests
     public async Task A_null_clone_request_fails_closed()
     {
         var grade = await Build(new FakeResolver(clone: null), new FakeGrader(Pass))
-            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeFalse("a repo that resolves to no clone cannot be verified → not accepted");
         grade.Detail.ShouldContain("clone-failed");
@@ -129,7 +132,7 @@ public class SupervisorAcceptanceGraderTests
     public async Task A_resolve_failure_fails_closed_without_throwing()
     {
         var grade = await Build(new FakeResolver(throwOnResolve: new WorkspaceException("repo 404")), new FakeGrader(Pass))
-            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+            .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeFalse();
         grade.Detail.ShouldContain("clone-failed");
@@ -142,7 +145,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass),
             throwOnPrepare: new WorkspaceException("clone exit 128"));
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeFalse();
         grade.Detail.ShouldContain("clone exit 128", Case.Insensitive);

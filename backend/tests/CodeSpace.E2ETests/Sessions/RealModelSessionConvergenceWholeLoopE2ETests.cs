@@ -169,7 +169,7 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests : IDisposable
     private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, new[] { "sh", "check.sh" }, 120, CancellationToken.None);
+        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 120, CancellationToken.None);
     }
 
     private static string? ReadProducedBranch(WorkflowRun run)

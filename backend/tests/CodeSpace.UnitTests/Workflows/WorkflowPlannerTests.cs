@@ -71,7 +71,9 @@ public class WorkflowPlannerTests
         var acceptance = itemProps.GetProperty("acceptance");
         acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "command" });
         acceptance.GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(e => e.GetString())
-            .ShouldBe(new[] { "TestsPass", "ArtifactPresent" }, "the acceptance oracle vocabulary matches the supervisor plan schema verbatim");
+            .ShouldBe(new[] { "TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema" }, "the acceptance oracle vocabulary matches the supervisor plan schema verbatim (S7 added the non-coding oracles)");
+        acceptance.GetProperty("properties").TryGetProperty("rubric", out _).ShouldBeTrue("S7: the model authors the LlmJudge rubric WITH the task");
+        acceptance.GetProperty("properties").TryGetProperty("schema", out _).ShouldBeTrue("S7: the model authors the ArtifactSchema contract WITH the task");
         root.GetProperty("properties").TryGetProperty("hasEnoughContext", out _).ShouldBeTrue();
         root.GetProperty("properties").TryGetProperty("assumptions", out _).ShouldBeTrue();
 

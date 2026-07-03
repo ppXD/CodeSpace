@@ -165,10 +165,10 @@ public class AgentRunExecutorAcceptanceTests
         public int Calls { get; private set; }
         public IReadOnlyList<string>? LastCommand { get; private set; }
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             Calls++;
-            LastCommand = command;
+            LastCommand = spec.Command;
 
             if (Throw is { } ex) throw ex;
 
