@@ -13,11 +13,16 @@ namespace CodeSpace.Messages.Dtos.Sessions.Journal;
 /// </summary>
 public sealed record JournalStep
 {
-    /// <summary>Stable per-run id (e.g. <c>supervisor-{guid}</c>, <c>tool-{guid}</c>) — the frontend's React key + the delta id. Carried through verbatim from the source timeline event.</summary>
+    /// <summary>Stable per-run id (e.g. <c>supervisor-{guid}</c>, <c>tool-{guid}</c>) — the frontend's React key. Carried through verbatim from the source timeline event.</summary>
     public required string Id { get; init; }
 
-    /// <summary>The streaming cursor — the walk assigns a monotonic value after merging + ordering the steps (0 straight off a describer, which has no cross-source view). A delta (<c>?since=</c>) adds steps with a greater cursor.</summary>
-    public long Seq { get; init; }
+    /// <summary>
+    /// The OPAQUE streaming cursor — the walk stamps it from the EVENT's own sort key (not its position), so a step's
+    /// cursor is STABLE across re-walks: it never shifts when an earlier event backfills mid-timeline (which a positional
+    /// counter would, silently renumbering later steps + breaking a <c>?since=</c> delta). The frontend echoes it back
+    /// verbatim as the delta anchor; only the server decodes it. Empty straight off a describer (which has no cursor view).
+    /// </summary>
+    public string Cursor { get; init; } = "";
 
     /// <summary>When the step occurred — the chronological sort key (the source event's <c>OccurredAt</c>).</summary>
     public required DateTimeOffset At { get; init; }
