@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
@@ -230,27 +231,56 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     {
         if (decision.Kind != SupervisorDecisionKinds.Spawn) return decision;
 
-        SupervisorSpawnPayload? spawn;
-        try { spawn = JsonSerializer.Deserialize<SupervisorSpawnPayload>(decision.PayloadJson, AgentJson.Options); }
+        JsonObject? root;
+        try { root = JsonNode.Parse(decision.PayloadJson) as JsonObject; }
         catch (JsonException) { return decision; }
 
-        if (spawn is null) return decision;
+        if (root is null) return decision;
 
-        var (ready, deferred) = SupervisorDependencyGate.Partition(context, spawn.SubtaskIds);
+        var (ready, deferred) = SupervisorDependencyGate.Partition(context, ReadSubtaskIds(root));
 
         if (deferred.Count == 0) return decision;   // every requested subtask is ready → byte-identical (the dominant case)
 
         _logger.LogInformation("Supervisor deferred {Deferred} subtask(s) with unmet dependencies at turn {Turn} on node {NodeId}, clamping the spawn to {Ready} ready subtask(s)", deferred.Count, context.TurnNumber, context.NodeId, ready.Count);
 
-        var readySet = ready.ToHashSet();
+        return decision with { PayloadJson = NarrowSpawnPayload(root, ready) };
+    }
 
-        var clamped = new SupervisorSpawnPayload
-        {
-            SubtaskIds = ready,
-            Agents = spawn.Agents?.Where(a => readySet.Contains(a.SubtaskId)).ToList() is { Count: > 0 } kept ? kept : null,
-        };
+    /// <summary>
+    /// PURE narrowing of a spawn payload's JSON to the READY subtasks — rewrites ONLY <c>subtaskIds</c> + <c>agents</c>
+    /// IN PLACE, so EVERY other root key the projector froze (the decision-level <c>rationale</c>, and any future
+    /// annotation) survives verbatim. A rebuild from the typed <c>SupervisorSpawnPayload</c> would silently drop them
+    /// (the record has no such member), losing the model's "why" exactly on a partially-blocked fan-out — the case the
+    /// room most needs explained. Deterministic → a replay re-derives the identical bytes + idempotency key. Internal so
+    /// the byte-preservation is unit-pinned directly, not only through a DB flow.
+    /// </summary>
+    internal static string NarrowSpawnPayload(JsonObject root, IReadOnlyList<string> ready)
+    {
+        root["subtaskIds"] = JsonSerializer.SerializeToNode(ready, AgentJson.Options);
 
-        return decision with { PayloadJson = JsonSerializer.Serialize(clamped, AgentJson.Options) };
+        ClampAgents(root, ready.ToHashSet());
+
+        return root.ToJsonString(AgentJson.Options);
+    }
+
+    /// <summary>The spawn payload's subtask ids, read off the frozen JSON node (string values only). Empty when absent / malformed — the clamp then defers nothing.</summary>
+    private static IReadOnlyList<string> ReadSubtaskIds(JsonObject root) =>
+        root["subtaskIds"] is JsonArray arr
+            ? arr.Select(n => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null).Where(s => s is not null).Select(s => s!).ToList()
+            : Array.Empty<string>();
+
+    /// <summary>Filter the per-agent dispatch array to the ready subtasks IN PLACE, cloning each kept agent's node verbatim. Removes the <c>agents</c> key entirely when none remain (matching the <c>[JsonIgnore(WhenWritingNull)]</c> omission a null Agents produced).</summary>
+    private static void ClampAgents(JsonObject root, IReadOnlySet<string> readySet)
+    {
+        if (root["agents"] is not JsonArray agents) return;
+
+        var kept = agents
+            .Where(a => a is JsonObject o && o["subtaskId"] is JsonValue sv && sv.TryGetValue<string>(out var sid) && readySet.Contains(sid))
+            .Select(a => a!.DeepClone())
+            .ToArray();
+
+        if (kept.Length > 0) root["agents"] = new JsonArray(kept);
+        else root.Remove("agents");
     }
 
     /// <summary>

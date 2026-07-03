@@ -60,6 +60,32 @@ public class SupervisorDecisionSchemaTests
     }
 
     [Fact]
+    public void A_root_level_rationale_is_declared_for_every_verb()
+    {
+        // Rationale is a DECISION-level annotation (why + evidence), authored uniformly at the root for every verb —
+        // NOT nested in one verb's payload. Pin it at the root, closed, with the two bounded fields, and OPTIONAL
+        // (never in `required` — the model may give none). A drift here is a contract change a reviewer must see.
+        var rationale = Schema.GetProperty("properties").GetProperty("rationale");
+
+        rationale.GetProperty("type").GetString().ShouldBe("object");
+        rationale.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse("the rationale rejects invented fields");
+        rationale.GetProperty("properties").TryGetProperty("why", out _).ShouldBeTrue();
+        rationale.GetProperty("properties").TryGetProperty("evidence", out _).ShouldBeTrue();
+
+        Schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldNotContain("rationale", "rationale is strongly recommended but optional — a decision may author none");
+    }
+
+    [Fact]
+    public void The_retry_payload_no_longer_nests_a_rationale()
+    {
+        // The rationale hoisted from retry's sub-object to the decision root — retry must no longer advertise it, or the
+        // model could author it in two places (ambiguous) and the projector would double-count.
+        var retry = Schema.GetProperty("properties").GetProperty("retry");
+
+        retry.GetProperty("properties").TryGetProperty("rationale", out _).ShouldBeFalse("retry's rationale moved to the decision root — it must not remain nested");
+    }
+
+    [Fact]
     public void The_schema_carries_no_graph_topology_reference_anywhere()
     {
         // THE no-graph-ref guard (must-fix): the model NEVER names a node id, a type key, a workflow/run id, or

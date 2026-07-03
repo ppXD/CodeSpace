@@ -13,6 +13,13 @@ public sealed record SupervisorModelDecision
 {
     public string Kind { get; init; } = "";
 
+    /// <summary>
+    /// The model-authored DECISION-LEVEL rationale (why + evidence) — a decision annotation, not verb payload data,
+    /// so it sits at the ROOT for EVERY verb uniformly (a plan, a spawn, a retry, a merge, a stop…), never nested in
+    /// one verb's sub-object. The projector injects it into the canonical payload's root; null → the model gave none.
+    /// </summary>
+    public SupervisorRationale? Rationale { get; init; }
+
     public SupervisorPlanPayload? Plan { get; init; }
 
     public SupervisorSpawnPayload? Spawn { get; init; }

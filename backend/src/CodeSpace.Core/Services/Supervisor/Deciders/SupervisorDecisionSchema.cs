@@ -12,7 +12,9 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// <para>The model picks ONE <c>kind</c> from the seven-verb vocabulary (the resolver loop #379 added <c>resolve</c>,
 /// which intentionally carries NO payload sub-object — the server assembles the resolver task deterministically from
 /// durable data, so the model only picks the verb) and supplies that verb's bounded
-/// payload (the schema documents each verb's fields). Per-verb payloads are bounded (subtasks [1..20],
+/// payload (the schema documents each verb's fields). A single ROOT-LEVEL <c>rationale</c> (why + evidence) is
+/// authored uniformly for EVERY verb — a decision-level annotation, not verb payload data — so the trace explains
+/// WHY, not just what. Per-verb payloads are bounded (subtasks [1..20],
 /// spawn/merge subtask-id lists [1..20]) so a decision never fans out an unbounded wave. The schema is
 /// <c>additionalProperties: false</c> at the root + every payload object, and — CRITICALLY — carries NO
 /// node-id / type-key / workflow-id / run-id field. The model NEVER addresses graph topology: it emits a
@@ -31,6 +33,15 @@ public static class SupervisorDecisionSchema
               "type": "string",
               "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve", "stop"],
               "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'resolve' spawns ONE agent to reconcile a CONFLICTED integration (choose it only after a merge reported INTEGRATION CONFLICTED — the server assembles the resolver task from the conflict); 'ask_human' asks a question; 'stop' ends the run."
+            },
+            "rationale": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "why": { "type": "string", "description": "Why you are making THIS decision (one or two sentences) — the reasoning a reader needs to understand it. Applies to any kind: why this plan, why spawn these subtasks, why retry, why merge now, why stop." },
+                "evidence": { "type": "string", "description": "The concrete evidence you acted on — the prior attempt's error / output / status / acceptance verdict that drove this decision." }
+              },
+              "description": "STRONGLY RECOMMENDED for every decision. A short structured rationale so the trace explains WHY you decided as you did — not just what you did. Especially valuable on a re-plan, a repeat retry, or a stop."
             },
             "plan": {
               "type": "object",
@@ -138,19 +149,10 @@ public static class SupervisorDecisionSchema
               "additionalProperties": false,
               "properties": {
                 "subtaskId": { "type": "string", "description": "The plan-local subtask id to re-run as a fresh agent attempt." },
-                "revisedInstruction": { "type": "string", "description": "Optional replacement instruction for the retried subtask." },
-                "rationale": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "why": { "type": "string", "description": "Why you are retrying this subtask (one or two sentences) — the reasoning a reader needs to understand the decision." },
-                    "evidence": { "type": "string", "description": "The concrete evidence you acted on — the prior attempt's error / output / status that drove this retry." }
-                  },
-                  "description": "STRONGLY RECOMMENDED. A short structured rationale so the trace explains WHY you retried — especially when retrying the SAME subtask more than once."
-                }
+                "revisedInstruction": { "type": "string", "description": "Optional replacement instruction for the retried subtask." }
               },
               "required": ["subtaskId"],
-              "description": "Required when kind == 'retry'."
+              "description": "Required when kind == 'retry'. Author the top-level 'rationale' (why + evidence) so the trace explains WHY you retried — especially when retrying the SAME subtask more than once."
             },
             "askHuman": {
               "type": "object",
