@@ -9,6 +9,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Sessions;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -88,6 +89,34 @@ public sealed class JournalProjectorFlowTests
         focused.RunId.ShouldBe(attempt1, "the anchored attempt is focused, not the newest");
         focused.Status.ShouldBe(WorkflowRunStatus.Failure, "attempt 1's OWN status, not attempt 2's Success");
         focused.Steps.Select(s => s.Title).ShouldBe(new[] { "Supervisor planned the work" }, "attempt 1's run was walked");
+    }
+
+    [Fact]
+    public async Task A_mid_stream_since_returns_only_the_steps_after_the_cursor()
+    {
+        // The delta over REAL walk cursors through the full handler pipeline: three decisions → three steps; a re-read
+        // with ?since = the FIRST step's cursor returns only the LATER two, and preserves the self-heal StepCount.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Live");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Task", resultSummary: "done");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Plan, t);
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Merge, t.AddSeconds(1));
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Stop, t.AddSeconds(2));
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<MediatR.IMediator>();
+
+        var full = (await mediator.Send(new GetRunJournalQuery { RunId = run1 }))!;
+        var steps = full.Turns.Single(t => t.Focused).Steps;
+        steps.Count.ShouldBe(3, "three decisions → three steps");
+
+        var delta = (await mediator.Send(new GetRunJournalQuery { RunId = run1, Since = steps[0].Cursor }))!;
+        var focused = delta.Turns.Single(t => t.Focused);
+
+        focused.Steps.Select(s => s.Id).ShouldBe(steps.Skip(1).Select(s => s.Id), "only the steps after the client's cursor come back over the real pipeline");
+        focused.StepCount.ShouldBe(3, "the delta preserves the full step total (the self-heal signal)");
     }
 
     [Fact]

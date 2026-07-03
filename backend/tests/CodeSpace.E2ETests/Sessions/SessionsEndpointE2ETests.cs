@@ -11,6 +11,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.DependencyInjection;
@@ -132,6 +133,54 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
 
         var bySession = await SendAsync(userId, teamId, $"/api/sessions/{foreign.SessionId}/room");
         bySession.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task The_journal_reads_back_over_http_focused_on_the_runs_turn()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        var turn1 = await LaunchAsync(userId, teamId, "Add login", continueSessionId: null);
+        var turn2 = await LaunchAsync(userId, teamId, "Now add logout", continueSessionId: turn1.SessionId);
+
+        // Entering by a run resolves the thread + focuses that run's turn.
+        var byRun = await GetAsync<JournalView>(userId, teamId, $"/api/sessions/by-run/{turn2.RunId}/journal");
+        byRun.SessionId.ShouldBe(turn1.SessionId);
+        byRun.Title.ShouldBe("Add login", "the journal title is the opening turn's goal");
+        byRun.AnchorTurnIndex.ShouldBe(2, "the run-anchored entry focuses that run's turn");
+        byRun.Turns.Select(t => t.TurnIndex).OrderBy(i => i).ShouldBe(new[] { 1, 2 });
+        byRun.Turns.Count(t => t.Focused).ShouldBe(1, "exactly one turn is focused");
+        byRun.Turns.Single(t => t.Focused).TurnIndex.ShouldBe(2);
+
+        // The by-session journal focuses the latest turn when no focus is given (a bare session-entry has no anchor).
+        var bySession = await GetAsync<JournalView>(userId, teamId, $"/api/sessions/{turn1.SessionId}/journal");
+        bySession.AnchorTurnIndex.ShouldBeNull("a bare session-entry carries no scroll anchor");
+        bySession.Turns.Single(t => t.Focused).TurnIndex.ShouldBe(2, "the session journal focuses the latest turn");
+
+        // ?focusRunId binds over HTTP: focus an EARLIER turn than the latest.
+        var focused1 = await GetAsync<JournalView>(userId, teamId, $"/api/sessions/{turn1.SessionId}/journal?focusRunId={turn1.RunId}");
+        focused1.AnchorTurnIndex.ShouldBe(1, "?focusRunId focuses that run's turn, not the latest");
+        focused1.Turns.Single(t => t.Focused).TurnIndex.ShouldBe(1);
+
+        // ?since= binds over HTTP + returns a consistent view (the delta TRIM over real cursors is pinned at the
+        // integration tier; here we prove the query param wires through + the self-heal StepCount is carried).
+        var delta = await GetAsync<JournalView>(userId, teamId, $"/api/sessions/by-run/{turn2.RunId}/journal?since={Uri.EscapeDataString(byRun.Cursor)}");
+        delta.AnchorTurnIndex.ShouldBe(2, "the ?since request still resolves the same anchored turn");
+        delta.Turns.Single(t => t.Focused).StepCount.ShouldBe(byRun.Turns.Single(t => t.Focused).StepCount, "the delta carries the same self-heal step total as the full view");
+    }
+
+    [Fact]
+    public async Task A_foreign_runs_journal_is_404_never_leaked()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var (otherUser, otherTeam) = await SeedTeamMembershipAsync();
+
+        var foreign = await LaunchAsync(otherUser, otherTeam, "Their work", continueSessionId: null);
+
+        (await SendAsync(userId, teamId, $"/api/sessions/by-run/{foreign.RunId}/journal")).StatusCode
+            .ShouldBe(HttpStatusCode.NotFound, "a cross-team run's journal is an indistinguishable not-found");
+        (await SendAsync(userId, teamId, $"/api/sessions/{foreign.SessionId}/journal")).StatusCode
+            .ShouldBe(HttpStatusCode.NotFound);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

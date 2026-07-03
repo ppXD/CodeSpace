@@ -118,6 +118,7 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
         Focused = true,
         Steps = steps,
+        StepCount = steps.Count,   // the FULL total — a ?since delta trims Steps but keeps this, so the client can self-heal
     };
 
     private static JournalTurn CollapsedTurn(SessionTurn turn) => new()

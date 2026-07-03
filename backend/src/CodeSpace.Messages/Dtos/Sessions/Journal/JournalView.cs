@@ -59,6 +59,14 @@ public sealed record JournalTurn
     /// <summary>True when this turn is the FOCUSED one (walked into <see cref="Steps"/>); false for a light card.</summary>
     public bool Focused { get; init; }
 
-    /// <summary>The turn's chronological journal steps (the walk) — populated ONLY for the focused turn; empty for a collapsed card.</summary>
+    /// <summary>The turn's chronological journal steps (the walk) — populated ONLY for the focused turn; empty for a collapsed card. In a <c>?since=</c> DELTA response this is TRIMMED to the steps after the cursor; the full total is <see cref="StepCount"/>.</summary>
     public required IReadOnlyList<JournalStep> Steps { get; init; }
+
+    /// <summary>
+    /// The focused turn's TOTAL step count — BEFORE any <c>?since=</c> trim. The delta self-heal signal: after applying a
+    /// delta, a client whose accumulated step count is LESS than this saw fewer steps than exist, so a step landed BELOW
+    /// its cursor (an out-of-order backfill the append-only delta can't carry) → it re-fetches the full journal. 0 for a
+    /// collapsed turn (never walked).
+    /// </summary>
+    public int StepCount { get; init; }
 }

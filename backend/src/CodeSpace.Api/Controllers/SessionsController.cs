@@ -52,6 +52,22 @@ public class SessionsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>The backend-authored Session JOURNAL (the chronological work transcript) for the session a run belongs to, focused on that run's turn. <c>?since=</c> returns only the steps after the cursor (the live delta). Team-scoped; foreign / session-less / absent → 404.</summary>
+    [HttpGet("by-run/{runId:guid}/journal")]
+    public async Task<IActionResult> RunJournal([FromRoute] Guid runId, [FromQuery] GetRunJournalQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>The Session Journal for a session, focused on <c>focusRunId</c>'s turn when given (else the latest). <c>?since=</c> returns only the steps after the cursor. Team-scoped; foreign / absent → 404.</summary>
+    [HttpGet("{sessionId:guid}/journal")]
+    public async Task<IActionResult> SessionJournal([FromRoute] Guid sessionId, [FromQuery] GetSessionJournalQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { SessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>A generic preview of one file the run's turn produced (from the producing agent's captured diff), keyed by repo-relative path. Optional <c>agentRunId</c> scopes to one agent's version (per-agent attribution). Team-scoped; foreign / absent run → 404.</summary>
     [HttpGet("by-run/{runId:guid}/room/file")]
     public async Task<IActionResult> RunRoomFile([FromRoute] Guid runId, [FromQuery] string path, [FromQuery] Guid? agentRunId, CancellationToken cancellationToken)
