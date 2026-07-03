@@ -1,0 +1,227 @@
+using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Core.Services.Sessions.Journal;
+using CodeSpace.Messages.Dtos.Sessions;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Timeline;
+using Shouldly;
+
+namespace CodeSpace.UnitTests.Sessions.Journal;
+
+/// <summary>
+/// 🟢 Unit: the journal projector's turn assembly — over a faked session skeleton + a faked walk (so this pins the
+/// ASSEMBLY, not the walk/DB). Only the FOCUSED turn is walked into steps; the rest are light cards (no steps). The
+/// anchor selects the focused turn (a run-entry anchors that run's turn; a session-entry focuses the last); the view
+/// cursor is the focused turn's newest step cursor (the delta head); a foreign session projects to null.
+/// </summary>
+[Trait("Category", "Unit")]
+public class JournalProjectorTests
+{
+    private static readonly Guid Team = Guid.NewGuid();
+
+    private static SessionTurn Turn(int index, Guid runId, string? user = "do the thing", string? result = "done", WorkflowRunStatus status = WorkflowRunStatus.Success) => new()
+    {
+        TurnIndex = index, TurnRunId = runId, RunId = runId, UserMessage = user, RunStatus = status, Result = result,
+        HasPendingDecision = false, CreatedDate = DateTimeOffset.UtcNow, AttemptCount = 1,
+    };
+
+    private static SessionDetail Detail(int? anchor, params SessionTurn[] turns) => new()
+    {
+        Id = Guid.NewGuid(), Title = "A thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open,
+        CreatedDate = DateTimeOffset.UtcNow, AnchorTurnIndex = anchor, Turns = turns,
+    };
+
+    private static JournalStep Step(string id, string cursor) => new()
+    {
+        Id = id, At = DateTimeOffset.UtcNow, Kind = JournalStepKinds.Decision, Title = "Supervisor planned the work", Cursor = cursor,
+    };
+
+    /// <summary>A reran turn: a lineage of attempts (oldest first), the turn's RunId = the newest, TurnRunId = the oldest (the root).</summary>
+    private static SessionTurn RerunTurn(int index, params (Guid RunId, WorkflowRunStatus Status)[] attempts)
+    {
+        var ladder = attempts.Select((a, i) => new SessionTurnAttempt
+        {
+            RunId = a.RunId, AttemptNumber = i + 1, Status = a.Status, SourceType = i == 0 ? "manual" : "rerun",
+            CreatedDate = DateTimeOffset.UtcNow.AddMinutes(i), IsLatest = i == attempts.Length - 1,
+        }).ToList();
+
+        return new SessionTurn
+        {
+            TurnIndex = index, TurnRunId = attempts[0].RunId, RunId = attempts[^1].RunId, UserMessage = "reran work",
+            RunStatus = attempts[^1].Status, Result = "latest result", HasPendingDecision = false,
+            CreatedDate = DateTimeOffset.UtcNow, AttemptCount = attempts.Length, Attempts = ladder,
+        };
+    }
+
+    private static JournalProjector Projector(SessionDetail? detail, Func<Guid, IReadOnlyList<JournalStep>?>? steps = null) =>
+        new(new FakeSessions(detail), new FakeWalk(steps ?? (_ => Array.Empty<JournalStep>())));
+
+    [Fact]
+    public async Task Walks_only_the_focused_turn_others_are_light_cards()
+    {
+        var run1 = Guid.NewGuid();
+        var run2 = Guid.NewGuid();
+        var detail = Detail(anchor: null, Turn(1, run1), Turn(2, run2));
+
+        var view = await Projector(detail, r => r == run2 ? new[] { Step("s1", "c1"), Step("s2", "c2") } : Array.Empty<JournalStep>())
+            .ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+
+        view.ShouldNotBeNull();
+        var focused = view!.Turns.Single(t => t.Focused);
+        focused.TurnIndex.ShouldBe(2, "no focus given → the LAST turn is focused");
+        focused.Steps.Count.ShouldBe(2, "the focused turn is walked into its steps");
+
+        var collapsed = view.Turns.Single(t => !t.Focused);
+        collapsed.TurnIndex.ShouldBe(1);
+        collapsed.Steps.ShouldBeEmpty("a non-focused turn is a light card — no steps");
+    }
+
+    [Fact]
+    public async Task Project_by_run_anchors_the_runs_turn()
+    {
+        var run1 = Guid.NewGuid();
+        var detail = Detail(anchor: 1, Turn(1, run1), Turn(2, Guid.NewGuid()));
+
+        var view = await Projector(detail, r => r == run1 ? new[] { Step("s1", "c1") } : Array.Empty<JournalStep>())
+            .ProjectByRunAsync(run1, Team, CancellationToken.None);
+
+        view.ShouldNotBeNull();
+        view!.AnchorTurnIndex.ShouldBe(1, "entering by a run anchors that run's turn");
+        view.Turns.Single(t => t.Focused).TurnIndex.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task The_view_cursor_is_the_focused_turns_newest_step_cursor()
+    {
+        var run = Guid.NewGuid();
+        var detail = Detail(anchor: null, Turn(1, run));
+
+        var view = await Projector(detail, _ => new[] { Step("s1", "cursor-A"), Step("s2", "cursor-B") })
+            .ProjectAsync(detail.Id, null, Team, CancellationToken.None);
+
+        view!.Cursor.ShouldBe("cursor-B", "the view cursor is the newest step's cursor — the delta head the client echoes back");
+    }
+
+    [Fact]
+    public async Task An_empty_focused_turn_yields_an_empty_view_cursor()
+    {
+        var detail = Detail(anchor: null, Turn(1, Guid.NewGuid()));
+
+        var view = await Projector(detail, _ => Array.Empty<JournalStep>()).ProjectAsync(detail.Id, null, Team, CancellationToken.None);
+
+        view!.Cursor.ShouldBe("", "no steps → no delta head yet");
+    }
+
+    [Fact]
+    public async Task Carries_the_user_message_and_result_onto_the_turn()
+    {
+        var detail = Detail(anchor: null, Turn(1, Guid.NewGuid(), user: "fix the auth bug", result: "Fixed the refresh race."));
+
+        var turn = (await Projector(detail).ProjectAsync(detail.Id, null, Team, CancellationToken.None))!.Turns.Single();
+
+        turn.UserMessage.ShouldBe("fix the auth bug");
+        turn.Summary.ShouldBe("Fixed the refresh race.");
+    }
+
+    [Fact]
+    public async Task A_collapsed_turn_without_a_result_falls_back_to_a_status_word()
+    {
+        var detail = Detail(anchor: 2,
+            Turn(1, Guid.NewGuid(), result: null, status: WorkflowRunStatus.Failure),
+            Turn(2, Guid.NewGuid()));
+
+        var view = await Projector(detail).ProjectByRunAsync(Guid.NewGuid(), Team, CancellationToken.None);
+
+        view!.Turns.Single(t => t.TurnIndex == 1).Summary.ShouldBe("Ended with an error.", "a collapsed turn with no result shows a status word");
+    }
+
+    [Fact]
+    public async Task Focuses_a_prior_attempts_run_and_walks_that_attempt_not_the_latest()
+    {
+        // Parity with the room's attempt switcher: entering by a MIDDLE attempt's run id (neither the turn's root nor
+        // its newest) resolves the right turn (TurnIndexOf's Attempts clause) AND focuses THAT attempt — its own run is
+        // walked and its own status shown, not the newest attempt's.
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var a3 = Guid.NewGuid();
+        var turn = RerunTurn(1, (a1, WorkflowRunStatus.Failure), (a2, WorkflowRunStatus.Cancelled), (a3, WorkflowRunStatus.Success));
+        var detail = Detail(anchor: null, turn);
+
+        var view = await Projector(detail, r => r == a2 ? new[] { Step("mid", "cursor-mid") } : new[] { Step("wrong", "cursor-wrong") })
+            .ProjectAsync(detail.Id, focusRunId: a2, Team, CancellationToken.None);
+
+        view.ShouldNotBeNull();
+        view!.AnchorTurnIndex.ShouldBe(1, "the nested-attempt anchor resolved to its turn (TurnIndexOf's Attempts clause)");
+
+        var focused = view.Turns.Single(t => t.Focused);
+        focused.RunId.ShouldBe(a2, "the FOCUSED run is the anchored attempt, not the newest (a3)");
+        focused.Status.ShouldBe(WorkflowRunStatus.Cancelled, "the anchored attempt's OWN status, not the latest's Success");
+        focused.Steps.Single().Id.ShouldBe("mid", "the anchored attempt's run was walked, not the newest");
+        focused.Summary.ShouldBeNull("a focused prior attempt shows no turn-level result (its steps carry the story)");
+    }
+
+    [Fact]
+    public async Task A_null_walk_on_the_focused_turn_yields_empty_steps()
+    {
+        // The focused run could conflate to null (a foreign/absent run) even though the session resolved — the
+        // `?? Array.Empty` guard must hold, never NPE.
+        var detail = Detail(anchor: null, Turn(1, Guid.NewGuid()));
+
+        var view = await Projector(detail, _ => null).ProjectAsync(detail.Id, null, Team, CancellationToken.None);
+
+        view!.Turns.Single().Steps.ShouldBeEmpty("a null walk degrades to empty steps, not a crash");
+        view.Cursor.ShouldBe("");
+    }
+
+    [Fact]
+    public async Task Only_the_focused_turn_is_walked()
+    {
+        var run1 = Guid.NewGuid();
+        var run2 = Guid.NewGuid();
+        var run3 = Guid.NewGuid();
+        var detail = Detail(anchor: null, Turn(1, run1), Turn(2, run2), Turn(3, run3));
+
+        var walked = new List<Guid>();
+        var projector = new JournalProjector(new FakeSessions(detail), new FakeWalk(r => { walked.Add(r); return Array.Empty<JournalStep>(); }));
+
+        await projector.ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+
+        walked.ShouldHaveSingleItem().ShouldBe(run3, "only the focused (last) turn's run is walked — the collapsed turns are never read (no N+1)");
+    }
+
+    [Fact]
+    public async Task A_session_with_no_turns_projects_an_empty_journal()
+    {
+        var detail = Detail(anchor: null /* no turns */);
+
+        var view = await Projector(detail).ProjectAsync(detail.Id, null, Team, CancellationToken.None);
+
+        view.ShouldNotBeNull("an empty session still projects (it's the team's) — it just has no turns");
+        view!.Turns.ShouldBeEmpty();
+        view.Cursor.ShouldBe("", "no focused turn → no delta head");
+        view.AnchorTurnIndex.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_foreign_session_projects_to_null()
+    {
+        (await Projector(null).ProjectAsync(Guid.NewGuid(), null, Team, CancellationToken.None)).ShouldBeNull();
+        (await Projector(null).ProjectByRunAsync(Guid.NewGuid(), Team, CancellationToken.None)).ShouldBeNull("a foreign / missing target is null, never a leak");
+    }
+
+    private sealed class FakeSessions : ISessionReadService
+    {
+        private readonly SessionDetail? _detail;
+        public FakeSessions(SessionDetail? detail) => _detail = detail;
+        public Task<SessionDetail?> GetDetailAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
+        public Task<SessionDetail?> GetByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_detail);
+        public Task<SessionPage> ListAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeWalk : IJournalWalk
+    {
+        private readonly Func<Guid, IReadOnlyList<JournalStep>?> _steps;
+        public FakeWalk(Func<Guid, IReadOnlyList<JournalStep>?> steps) => _steps = steps;
+        public Task<IReadOnlyList<JournalStep>?> WalkAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_steps(runId));
+    }
+}
