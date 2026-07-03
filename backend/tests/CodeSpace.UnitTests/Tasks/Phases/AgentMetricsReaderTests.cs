@@ -135,6 +135,17 @@ public class AgentMetricsReaderTests
             .ShouldBe(new[] { ("src/A.cs", (int?)42, (int?)3), ("img/logo.png", null, null) }, "the per-file diffstat projects verbatim, binary counts null");
     }
 
+    [Theory]
+    [InlineData("codex-thread-abc", true)]
+    [InlineData(null, false)]
+    public void Flags_an_agent_that_continued_a_prior_conversation(string? resumeFromSessionId, bool expectedResumed)
+    {
+        var taskJson = JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", ResumeFromSessionId = resumeFromSessionId }, AgentJson.Options);
+
+        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, resultJson: null, taskJson, toolCount: 0, Now)
+            .Resumed.ShouldBe(expectedResumed, "an agent whose task carried a resume session id continued a prior conversation");
+    }
+
     [Fact]
     public void A_pre_diffstat_result_projects_an_empty_diffstat_not_null()
     {

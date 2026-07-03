@@ -88,6 +88,7 @@ public sealed class AgentMetricsReader : IScopedDependency
             FilesChanged = result?.ChangedFiles?.Count,
             ChangedFiles = (result?.ChangedFiles ?? Array.Empty<string>()).Take(MaxChangedFiles).ToList(),
             ChangedFileStats = (result?.FileStats ?? Array.Empty<FileDiffStat>()).Take(MaxChangedFiles).ToList(),
+            Resumed = !string.IsNullOrWhiteSpace(task?.ResumeFromSessionId),
         };
     }
 
@@ -116,8 +117,8 @@ public sealed class AgentMetricsReader : IScopedDependency
     /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
     private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats);
 
-    /// <summary>The display leaves of <c>AgentTask</c> — its model + goal — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
-    private sealed record TaskSlice(string? Model, string? Goal);
+    /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + resume marker — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
+    private sealed record TaskSlice(string? Model, string? Goal, string? ResumeFromSessionId);
 
     /// <summary>
     /// A concise one-line display TITLE from an agent's goal — so a fan-out branch reads as its subtask rather than a

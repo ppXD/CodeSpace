@@ -68,6 +68,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
         CostUsd = m.CostUsd,
         FilesChanged = m.FilesChanged,
         Files = m.ChangedFileStats,
+        Resumed = m.Resumed,
     };
 
     private static readonly IReadOnlyDictionary<string, JournalStepFacts> EmptyFacts = new Dictionary<string, JournalStepFacts>();
