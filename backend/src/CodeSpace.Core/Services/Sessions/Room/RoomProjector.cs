@@ -141,12 +141,18 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, bool IsLatest);
 
-    /// <summary>Resolve which attempt to focus. The latest (or a run that isn't one of this turn's attempts) reuses the turn skeleton — no extra read. A specific PRIOR attempt reads its OWN status / error / timing so its whole flow renders faithfully.</summary>
+    /// <summary>
+    /// Resolve which attempt to focus. Reads the ANCHOR run's OWN status / error / timing whenever it's one of this
+    /// turn's attempts — INCLUDING the latest. The turn skeleton's <c>CreatedDate</c> is the lineage ROOT's (attempt 1),
+    /// so a multi-attempt turn's latest would otherwise be dated to attempt 1 and measure the WHOLE-lineage span (days
+    /// across reruns) instead of that attempt's own wall-clock. A single-attempt turn (no ladder), or a run that isn't
+    /// one of this turn's attempts, reuses the skeleton — no extra read (the skeleton IS the single run's own row).
+    /// </summary>
     private async Task<FocusRun> FocusAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var latest = new FocusRun(turn.RunId, turn.RunStatus, turn.Error, turn.CreatedDate, turn.StartedAt, turn.CompletedAt, IsLatest: true);
 
-        if (anchorRunId is not { } anchor || anchor == turn.RunId || (turn.Attempts?.All(a => a.RunId != anchor) ?? true))
+        if (anchorRunId is not { } anchor || (turn.Attempts?.All(a => a.RunId != anchor) ?? true))
             return latest;
 
         var row = await _db.WorkflowRun.AsNoTracking()
@@ -154,7 +160,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Select(r => new { r.Status, r.Error, r.CreatedDate, r.StartedAt, r.CompletedAt })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, IsLatest: false);
+        return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, IsLatest: anchor == turn.RunId);
     }
 
     /// <summary>A light card for a non-focused turn — summary + status + actions, no map / inner blocks (the frontend re-focuses by navigating to the run).</summary>

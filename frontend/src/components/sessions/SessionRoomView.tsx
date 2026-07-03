@@ -33,6 +33,7 @@ import { RunActionsContext } from "@/components/workflows/runActionsContext";
 import { RunOpenContext } from "@/components/workflows/runOpenContext";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { compactAge } from "@/components/workflows/cockpit";
+import { formatTokens } from "@/components/workflows/runActivity";
 import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
@@ -819,16 +820,16 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
   const queued = a.status === "Queued" || a.status === "Pending";
   const action = running ? "Open terminal" : queued ? "View" : cls === "err" ? "View trace" : "Details";
   const fileCount = a.changedFiles?.length ?? a.filesChanged ?? 0;
-  const toolCount = a.toolCount ?? 0;
+  const tokens = a.tokens ?? 0;
 
   return (
     <div className="room-arow-wrap">
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {(toolCount > 0 || fileCount > 0) && (
+        {(tokens > 0 || fileCount > 0) && (
           <span className="room-arow-meta">
-            {toolCount > 0 && <span className="room-arow-metaitem" title={`${toolCount} tool call${toolCount === 1 ? "" : "s"}`}><Sym n="terminal" s={10} cls="room-arow-metaic" /> {toolCount} {toolCount === 1 ? "tool" : "tools"}</span>}
+            {tokens > 0 && <span className="room-arow-metaitem" title={`${tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-arow-metaic" /> {formatTokens(tokens)} tokens</span>}
             {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
           </span>
         )}

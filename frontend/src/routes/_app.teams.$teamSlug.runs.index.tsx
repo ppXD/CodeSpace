@@ -108,13 +108,13 @@ function TeamRunsPage() {
     suspended: s?.suspended ?? 0,
     today: { count: s?.today ?? 0, hourly: summarizeToday(runList, nowMs).hourly },
   };
-  // Open the LINEAGE ROOT (the original), so the attempt switcher lands there — never the fork. A session-backed run
-  // opens the full-page Session room; a session-less run (legacy) opens its raw detail in a modal over this list so the
-  // list never changes. hasSession is undefined against an older backend → treat as "has session" and navigate (keeps
-  // the prior behavior rather than modal-ing every run).
+  // Open the LATEST attempt — the row IS the lineage's latest (WorkflowRunSummary.id), so the room lands on the most
+  // recent run with the attempt switcher available to step back to earlier attempts (opening the root instead stranded
+  // the reader on the oldest attempt). A session-backed run opens the full-page Session room; a session-less run (legacy)
+  // opens its raw detail in a modal over this list. hasSession is undefined against an older backend → treat as "has session".
   const openRun = (run: WorkflowRunSummary) => {
-    if (run.hasSession === false) setModalRunId(run.rootRunId);
-    else navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.rootRunId } });
+    if (run.hasSession === false) setModalRunId(run.id);
+    else navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.id } });
   };
 
   const errorBanner = runs.error instanceof ApiError ? (
