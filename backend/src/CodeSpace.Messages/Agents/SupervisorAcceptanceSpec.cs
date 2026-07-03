@@ -43,4 +43,12 @@ public sealed record SupervisorAcceptanceSpec
     /// <summary>Optional human-readable description of what the check proves — surfaced in the phase projection for legibility; never executed.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Description { get; init; }
+
+    /// <summary>The rubric an <c>LlmJudge</c> acceptance grades against (triad S7) — weighted binary criteria + threshold. Required when <see cref="Kind"/> is <c>LlmJudge</c>; meaningless (and omitted) otherwise. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AcceptanceRubric? Rubric { get; init; }
+
+    /// <summary>The JSON schema an <c>ArtifactSchema</c> acceptance validates the deliverable(s) against (triad S7). Required when <see cref="Kind"/> is <c>ArtifactSchema</c>; meaningless (and omitted) otherwise. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public System.Text.Json.JsonElement? Schema { get; init; }
 }

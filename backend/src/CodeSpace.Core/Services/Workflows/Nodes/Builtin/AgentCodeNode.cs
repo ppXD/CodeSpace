@@ -66,7 +66,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "outputReviewMode": { "type": "integer", "enum": [0, 1, 2], "description": "Review the agent's produced change with an independent critic at completion: 0 = None (default, no review), 1 = Gate (a disapproved change re-grades the run to NeedsReview so a human looks before the downstream PR-open consumes it), 2 = Improve (a disapproved change is fed back to the same agent for a bounded revise round before it can flag). Leave unset for no review." },
                 "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the output critic runs on. Leave empty to auto-pick the team's strongest structured-eligible model. Only used when outputReviewMode is not None." },
                 "reviseRounds": { "type": "integer", "minimum": 0, "maximum": 3, "description": "How many bounded revise rounds the executor may run when the acceptance check fails or the Improve-mode critic flags the output — each round feeds the failure back to the same agent (same conversation, same workspace) and re-verifies. Leave unset for the default: 1 when outputReviewMode is Improve, else 0." },
-                "acceptance": { "type": "object", "description": "This task's OBJECTIVE definition-of-done: { command: [argv...], kind?: TestsPass|ArtifactPresent, description? }. The executor grades it against the produced branch at completion, fail-closed — a failing oracle re-grades the run to Failed. In a fan-out, bind {{item.acceptance}} to carry each plan item's authored contract." },
+                "acceptance": { "type": "object", "description": "This task's OBJECTIVE definition-of-done: { command: [argv-or-deliverable-paths...], kind?: TestsPass|ArtifactPresent|LlmJudge|CitationsResolve|ArtifactSchema, description?, rubric? (LlmJudge: { criteria: [{id, requirement, weight?}], threshold? }), schema? (ArtifactSchema: a JSON schema object) }. The executor grades it against the produced branch at completion, fail-closed — a failing oracle re-grades the run to Failed. In a fan-out, bind {{item.acceptance}} to carry each plan item's authored contract." },
                 "mode":           { "type": "string", "enum": ["research", "code"], "description": "The model-authored intent of this run — the BASE the planner picks per fan-out subtask. research: analysis-only (read-only, no network, no produced branch); code: edits the codebase (workspace write, publishes its own branch). The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling clamp always bounds it. Leave unset for today's tier-derived behaviour." }
               },
               "required": ["harness"]
@@ -236,12 +236,20 @@ public sealed class AgentCodeNode : INodeRuntime
                 return false;
             }
 
+            // Kind-specific completeness (triad S7 — a judge with no rubric / a schema check with no schema): the
+            // SHARED authoring rule, fail-loud at staging so a half-authored contract never reaches a billed agent.
+            if (AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
+            {
+                error = $"Config 'acceptance' is incomplete: {specError}";
+                return false;
+            }
+
             acceptance = spec;
             return true;
         }
         catch (JsonException)
         {
-            error = "Config 'acceptance' is not a valid spec: { command: [argv...], kind?: TestsPass|ArtifactPresent, description? }.";
+            error = "Config 'acceptance' is not a valid spec: { command: [argv...], kind?: TestsPass|ArtifactPresent|LlmJudge|CitationsResolve|ArtifactSchema, description?, rubric?, schema? }.";
             return false;
         }
     }

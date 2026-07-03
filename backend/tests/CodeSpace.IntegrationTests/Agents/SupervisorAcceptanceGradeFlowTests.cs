@@ -133,7 +133,7 @@ public sealed class SupervisorAcceptanceGradeFlowTests
     {
         using var scope = _fixture.BeginScope();   // resolving the grader from DI proves it auto-registers
         return await scope.Resolve<ISupervisorAcceptanceGrader>()
-            .GradeAsync(repoId, teamId, branch, command ?? new[] { "sh", "check.sh" }, timeoutSeconds, CancellationToken.None);
+            .GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = command ?? new[] { "sh", "check.sh" } }, timeoutSeconds, CancellationToken.None);
     }
 
     private async Task<Guid> SeedTeamAsync()

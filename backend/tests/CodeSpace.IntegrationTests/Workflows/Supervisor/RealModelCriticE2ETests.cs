@@ -126,6 +126,56 @@ public sealed class RealModelCriticE2ETests
         });
     }
 
+    /// <summary>The S7 RUBRIC-JUDGE effectiveness gate: the live judge must answer per-criterion BINARY verdicts that
+    /// DISCRIMINATE — an artifact that plainly satisfies both criteria gets both met, one that satisfies neither gets
+    /// neither. This is what the non-coding oracle rests on; the verdicts ARE gated (infra failures stay non-gating).</summary>
+    [Fact]
+    public async Task A_live_rubric_judge_discriminates_per_criterion()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+
+        var rubric = new CodeSpace.Messages.Agents.AcceptanceRubric
+        {
+            Criteria = new[]
+            {
+                new CodeSpace.Messages.Agents.AcceptanceRubricCriterion { Id = "competitors", Requirement = "names at least three specific competitors" },
+                new CodeSpace.Messages.Agents.AcceptanceRubricCriterion { Id = "sources", Requirement = "cites at least one source with a URL" },
+            },
+        };
+
+        const string strong =
+            "=== report.md ===\nThe main competitors are Acme Corp, Globex Ltd, and Initech GmbH. Each holds >10% share.\n" +
+            "Source: the 2025 market survey (https://example.com/market-2025).\n";
+
+        const string weak =
+            "=== report.md ===\nThe market is competitive and several firms operate in it. More research is needed.\n";
+
+        var teamId = await SeedTeamAsync();
+        var judgeRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
+
+        await RealModelGate.AssessLiveAsync(Custom, async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            var judge = new CodeSpace.Core.Services.Review.LlmRubricJudge(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+
+            var strongVerdict = await judge.JudgeAsync(rubric with { JudgeModelId = judgeRowId }, strong, "research the competitive landscape", teamId, CancellationToken.None);
+            var weakVerdict = await judge.JudgeAsync(rubric with { JudgeModelId = judgeRowId }, weak, "research the competitive landscape", teamId, CancellationToken.None);
+
+            if (strongVerdict.Failed || weakVerdict.Failed)
+                return (true, "the judge produced no verdict on one side (gateway infra) — not gating");
+
+            var discriminated = strongVerdict.Criteria.All(c => c.Met) && weakVerdict.Criteria.All(c => !c.Met);
+
+            return (discriminated,
+                $"strong: [{string.Join(", ", strongVerdict.Criteria.Select(c => $"{c.Id}={c.Met}"))}] (want all true) · " +
+                $"weak: [{string.Join(", ", weakVerdict.Criteria.Select(c => $"{c.Id}={c.Met}"))}] (want all false)");
+        });
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid> SeedCredentialedModelAsync(Guid teamId, string modelId, string baseUrl, string apiKey)

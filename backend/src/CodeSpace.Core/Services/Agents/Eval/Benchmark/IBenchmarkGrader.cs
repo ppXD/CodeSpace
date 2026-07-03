@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
@@ -44,6 +45,12 @@ public sealed record BenchmarkGradingContext
     /// <summary>The sandbox runner the grader runs its grading command in — the SAME runner kind the agent ran on, so the test command executes in an environment consistent with the run.</summary>
     public required ISandboxRunner Runner { get; init; }
 
+    /// <summary>The team the graded run belongs to — what a model-backed grader (the rubric judge) resolves its model pool with. Null on the corpus path (<see cref="ForCommand"/>), whose graders are all model-free; the judge grader fails closed without it.</summary>
+    public Guid? TeamId { get; init; }
+
+    /// <summary>The FULL acceptance spec being graded (triad S7) — kind-specific payloads beyond the command ride here (the <c>LlmJudge</c> rubric, the <c>ArtifactSchema</c> schema). Null on the corpus path; spec-requiring graders fail closed without it.</summary>
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
     /// <summary>
     /// Build a grading context for an AD-HOC command grade — a caller that holds only a test command + a prepared
     /// workspace + a runner, not a corpus <see cref="BenchmarkTask"/> (e.g. the supervisor's objective acceptance
@@ -68,4 +75,23 @@ public sealed record BenchmarkGradingContext
         WorkspaceDirectory = workspaceDirectory,
         Runner = runner,
     };
+
+    /// <summary>
+    /// Build a grading context for an ACCEPTANCE-SPEC grade (triad S7) — the supervisor/executor oracle gates, which
+    /// hold a full <see cref="SupervisorAcceptanceSpec"/> (command + kind + rubric/schema) and a team. The spec's
+    /// command rides <c>Task.TestCommand</c> exactly like <see cref="ForCommand"/>, so the command-reading graders
+    /// (tests-pass, artifact-present) behave byte-identically; the spec itself + the team ride alongside for the
+    /// kind-specific graders.
+    /// </summary>
+    public static BenchmarkGradingContext ForAcceptance(SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, string workspaceDirectory, ISandboxRunner runner)
+    {
+        var context = ForCommand(spec.Command, timeoutSeconds, workspaceDirectory, runner);
+
+        return context with
+        {
+            Task = context.Task with { Grading = spec.Kind ?? BenchmarkGradingKind.TestsPass },
+            TeamId = teamId,
+            Acceptance = spec,
+        };
+    }
 }

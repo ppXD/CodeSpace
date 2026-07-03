@@ -50,7 +50,7 @@ public sealed class PlannerCassetteDriftTests
     /// failure prints, then RE-RECORD the cassette via the RealModel live test. The pin is the trip-wire that
     /// makes "I changed the planner prompt but forgot the cassette" a build failure instead of a silent miss.
     /// </summary>
-    public const string ExpectedPlannerKey = "9cd6864261e558521f86025792ddf1cd92491d340082ca501205c3a50488f582";
+    public const string ExpectedPlannerKey = "184ef80960c78e69cb2e36143716a1894b890603933a108b107967832bfd732c";   // re-pinned: S7 widened the acceptance fragment (non-coding kinds + rubric + schema)
 
     [Fact]
     public async Task Planner_request_key_is_pinned_so_a_prompt_or_schema_change_forces_a_re_record()

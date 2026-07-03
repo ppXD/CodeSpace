@@ -20,6 +20,12 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
     /// <summary>The check argv the contract-authoring plan puts on its second subtask's acceptance.</summary>
     public static readonly IReadOnlyList<string> AcceptanceCommand = new[] { "sh", "check.sh" };
 
+    /// <summary>The rubric-contract plan's single deliverable path — the fixed file <see cref="ReviseHealingFakeCli"/> writes.</summary>
+    public const string RubricDeliverablePath = ReviseHealingFakeCli.FileName;
+
+    /// <summary>The rubric-contract plan's single criterion id — met IFF the deliverable carries <c>MEETS[healed]</c> (the revise-round content).</summary>
+    public const string RubricCriterionId = "healed";
+
     /// <summary>The goal the fake restates — asserted verbatim by the flow tests.</summary>
     public const string PlannedGoal = "Ship the planned goal";
 
@@ -49,8 +55,27 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         object[] subtasks;
-        if (request.UserPrompt.Contains("feedback", StringComparison.OrdinalIgnoreCase) && !_script.AuthorInvalidDag && !_script.AuthorHeterogeneousKinds && !_script.AuthorContract)
+        if (request.UserPrompt.Contains("feedback", StringComparison.OrdinalIgnoreCase) && !_script.AuthorInvalidDag && !_script.AuthorHeterogeneousKinds && !_script.AuthorContract && !_script.AuthorRubricContract)
             subtasks = new object[] { new { id = "r1", title = "Merged", instruction = RevisedInstruction } };
+        else if (_script.AuthorRubricContract)
+            subtasks = new object[]
+            {
+                new
+                {
+                    id = "n1", title = "Write the report", instruction = "write the research report", kind = "research",
+                    acceptance = new
+                    {
+                        command = new[] { RubricDeliverablePath },
+                        kind = "LlmJudge",
+                        description = "the report satisfies the rubric",
+                        rubric = new
+                        {
+                            criteria = new object[] { new { id = RubricCriterionId, requirement = "the report carries the revised content" } },
+                            judgeModelId = _script.RubricJudgeModelId,
+                        },
+                    },
+                },
+            };
         else if (_script.AuthorInvalidDag)
             subtasks = new object[] { new { id = "s1", title = "First", instruction = "do the first thing", dependsOn = new[] { "ghost" } } };
         else if (_script.AuthorHeterogeneousKinds)
@@ -112,11 +137,19 @@ public sealed class WorkPlanPlanScript
     /// <summary>When true, the plan is the HETEROGENEOUS three-item shape (<c>DeterministicWorkPlanLlmClient.HeterogeneousItems</c>) — one research + two code kinds, for the dynamic fan-out's mode mapping.</summary>
     public bool AuthorHeterogeneousKinds { get; set; }
 
+    /// <summary>When true, the plan is ONE research item carrying an <c>LlmJudge</c> acceptance (triad S7): deliverable <c>DeterministicWorkPlanLlmClient.RubricDeliverablePath</c>, one criterion <c>RubricCriterionId</c>, judge pinned to <see cref="RubricJudgeModelId"/>.</summary>
+    public bool AuthorRubricContract { get; set; }
+
+    /// <summary>The judge pool row the rubric-contract plan pins (the test seeds the row, then sets this — the fake can't know the guid).</summary>
+    public Guid? RubricJudgeModelId { get; set; }
+
     public void Reset()
     {
         AuthorContract = false;
         HasEnoughContext = false;
         AuthorInvalidDag = false;
         AuthorHeterogeneousKinds = false;
+        AuthorRubricContract = false;
+        RubricJudgeModelId = null;
     }
 }
