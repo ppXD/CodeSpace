@@ -316,6 +316,96 @@ export interface RoomView {
   blocks: RoomBlock[];
 }
 
+// ═══ Session Journal — the chronological work transcript (the new /journal surface, built alongside the room) ═══
+
+/// A journal step's render tone — the timeline's closed severity axis. Mirrors backend `TimelineSeverity`.
+export type JournalTone = "Info" | "Success" | "Warning" | "Error";
+
+/// One changed file with its +added / −removed line counts (git ground truth; a binary file's counts are null). Mirrors backend `FileDiffStat`.
+export interface JournalFileStat {
+  path: string;
+  additions?: number | null;
+  deletions?: number | null;
+}
+
+/// One agent a supervisor decision spawned / re-ran — the card the journal hangs off a spawn step. Mirrors backend `JournalAgentCard`.
+export interface JournalAgentCard {
+  agentRunId: string;
+  label: string;
+  status: string;
+  model?: string | null;
+  durationMs?: number | null;
+  tokens?: number | null;
+  toolCount?: number | null;
+  costUsd?: number | null;
+  filesChanged?: number | null;
+  files: JournalFileStat[];
+  resumed: boolean;
+}
+
+/// A planned subtask still blocked by an unmet dependency at a wave (the "waiting on #n"). Mirrors backend `JournalDeferredSubtask`.
+export interface JournalDeferredSubtask {
+  subtaskId: string;
+  waitingOn: string[];
+}
+
+/// One chronological step of a run's work journal — the frontend renders by `kind`. Mirrors backend `JournalStep`.
+export interface JournalStep {
+  id: string;
+  cursor: string;
+  at: string;
+  kind: string;
+  title: string;
+  detail?: string | null;
+  rationale?: string | null;
+  tone: JournalTone;
+  milestone: boolean;
+  agents: JournalAgentCard[];
+  deferred: JournalDeferredSubtask[];
+  agentRunId?: string | null;
+  nodeId?: string | null;
+}
+
+/// One attempt of a turn — a rerun / replay of the same user message. Mirrors backend `JournalAttempt`.
+export interface JournalAttempt {
+  attemptNumber: number;
+  runId: string;
+  status: WorkflowRunStatus;
+  at: string;
+  sourceType: string;
+  rerunFromNodeId?: string | null;
+  isLatest: boolean;
+  focused: boolean;
+  error?: string | null;
+}
+
+/// One turn of the journal — a user message + the AI's reply as chronological steps. Mirrors backend `JournalTurn`.
+export interface JournalTurn {
+  turnIndex: number;
+  turnRunId: string;
+  runId: string;
+  status: WorkflowRunStatus;
+  userMessage?: string | null;
+  summary?: string | null;
+  at?: string | null;
+  durationMs?: number | null;
+  focused: boolean;
+  steps: JournalStep[];
+  stepCount: number;
+  attempts: JournalAttempt[];
+}
+
+/// A session as a chronological work journal. Mirrors backend `JournalView`.
+export interface JournalView {
+  sessionId: string;
+  title: string;
+  kind: WorkSessionKind;
+  status: WorkSessionStatus;
+  cursor: string;
+  anchorTurnIndex?: number | null;
+  turns: JournalTurn[];
+}
+
 // ─── Client (mirrors src/api/workflows.ts — fetchJson, auto JWT + X-Team-Id) ───
 
 export const sessionsApi = {
@@ -343,6 +433,20 @@ export const sessionsApi = {
   /// The Session Room for a session, focused on `focusRunId`'s turn when given (else the latest turn).
   getSessionRoom: (sessionId: string, focusRunId?: string) =>
     fetchJson<RoomView>(`/api/sessions/${sessionId}/room${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
+
+  /// The Session Journal for the session a run belongs to, focused on that run's turn — null when the run has no session (404).
+  getRunJournal: async (runId: string): Promise<JournalView | null> => {
+    try {
+      return await fetchJson<JournalView>(`/api/sessions/by-run/${runId}/journal`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+
+  /// The Session Journal for a session, focused on `focusRunId`'s turn when given (else the latest turn).
+  getSessionJournal: (sessionId: string, focusRunId?: string) =>
+    fetchJson<JournalView>(`/api/sessions/${sessionId}/journal${focusRunId ? `?focusRunId=${encodeURIComponent(focusRunId)}` : ""}`),
 
   /// A generic preview of one file a run's turn produced, keyed by repo-relative path. Pass `agentRunId` to scope to one
   /// agent's version (per-agent attribution). Null when the run is foreign / missing (404).

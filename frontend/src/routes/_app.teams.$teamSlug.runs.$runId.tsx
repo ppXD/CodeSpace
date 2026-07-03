@@ -2,8 +2,9 @@ import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
-import { useRunRoom } from "@/hooks/use-sessions";
+import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
+import { SessionJournalView } from "@/components/sessions/SessionJournalView";
 
 /**
  * The canonical run-detail page. A run is run-neutral (manual, scheduled, webhook, replay, task, child), so it lives
@@ -11,17 +12,75 @@ import { SessionRoomView } from "@/components/sessions/SessionRoomView";
  * authored transcript (RoomView). The raw run detail (the graph, trace, node JSON, decisions) opens IN A MODAL — the
  * same {@link RunViewerDialog} the workflow editor uses — so "View trace" / "Run details" never navigates away.
  *
- * There is no standalone full-page run detail. A legacy/session-less run (only pre-release data — every new run has a
- * session) opens the SAME modal on its own over the app shell, returning to the Runs index when closed.
+ * A `?view=journal` toggle renders the NEW Session Journal (a chronological work transcript) alongside the room — the
+ * strangler rebuild, default still the room. There is no standalone full-page run detail. A legacy/session-less run
+ * (only pre-release data) opens the SAME modal on its own over the app shell.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runId")({
   component: RunDetailPage,
+  validateSearch: (raw: Record<string, unknown>): { view?: "journal" } =>
+    raw.view === "journal" ? { view: "journal" } : {},
 });
 
 // Remount per URL run id so the modal state resets cleanly on navigation (a path-param change doesn't remount by default).
 function RunDetailPage() {
   const { teamSlug, runId } = Route.useParams();
-  return <RunDetailRoom key={runId} teamSlug={teamSlug} runId={runId} />;
+  return <RunDetail key={runId} teamSlug={teamSlug} runId={runId} />;
+}
+
+function RunDetail({ teamSlug, runId }: { teamSlug: string; runId: string }) {
+  const { view } = Route.useSearch();
+  return (
+    <>
+      <ViewToggle journal={view === "journal"} />
+      {view === "journal" ? (
+        <RunDetailJournal teamSlug={teamSlug} runId={runId} />
+      ) : (
+        <RunDetailRoom teamSlug={teamSlug} runId={runId} />
+      )}
+    </>
+  );
+}
+
+// The room ⇄ journal switch — a floating pill that flips the ?view= search param (omit for the default room).
+function ViewToggle({ journal }: { journal: boolean }) {
+  const navigate = useNavigate();
+  return (
+    <div className="jr-toggle">
+      <button className={!journal ? "jr-toggle-on" : ""} onClick={() => navigate({ to: ".", search: {} })}>Room</button>
+      <button className={journal ? "jr-toggle-on" : ""} onClick={() => navigate({ to: ".", search: { view: "journal" } })}>Journal</button>
+    </div>
+  );
+}
+
+function RunDetailJournal({ teamSlug, runId }: { teamSlug: string; runId: string }) {
+  const navigate = useNavigate();
+  const journal = useRunJournal(runId);
+
+  if (journal.data) {
+    return (
+      <SessionJournalView
+        teamSlug={teamSlug}
+        journal={journal.data}
+        onFocusRun={(rid) =>
+          navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: rid }, search: { view: "journal" } })
+        }
+      />
+    );
+  }
+
+  if (journal.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
+
+  if (journal.isError)
+    return (
+      <div className="run-outline-empty" style={{ padding: 48 }}>
+        Couldn't load the journal.
+        <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => void journal.refetch()}>Retry</button>
+      </div>
+    );
+
+  // Session-less (legacy) run — no journal; fall back to the room pane (which opens the raw run detail).
+  return <RunDetailRoom teamSlug={teamSlug} runId={runId} />;
 }
 
 function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string }) {
