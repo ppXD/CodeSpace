@@ -59,6 +59,13 @@ public sealed record JournalTurn
     /// <summary>True when this turn is the FOCUSED one (walked into <see cref="Steps"/>); false for a light card.</summary>
     public bool Focused { get; init; }
 
+    /// <summary>
+    /// The turn's attempt ladder — every rerun/replay of this user message, so the frontend can render the pager
+    /// (◀ attempt 2 / 3 ▶) and the lineage. A single-attempt turn (never reran) carries at most one; the frontend shows a
+    /// pager only when there's more than one. On the FOCUSED turn exactly one attempt is <see cref="JournalAttempt.Focused"/>.
+    /// </summary>
+    public IReadOnlyList<JournalAttempt> Attempts { get; init; } = Array.Empty<JournalAttempt>();
+
     /// <summary>The turn's chronological journal steps (the walk) — populated ONLY for the focused turn; empty for a collapsed card. In a <c>?since=</c> DELTA response this is TRIMMED to the steps after the cursor; the full total is <see cref="StepCount"/>.</summary>
     public required IReadOnlyList<JournalStep> Steps { get; init; }
 

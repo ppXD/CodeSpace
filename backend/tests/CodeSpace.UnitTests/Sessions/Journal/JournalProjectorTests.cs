@@ -42,6 +42,7 @@ public class JournalProjectorTests
         var ladder = attempts.Select((a, i) => new SessionTurnAttempt
         {
             RunId = a.RunId, AttemptNumber = i + 1, Status = a.Status, SourceType = i == 0 ? "manual" : "rerun",
+            RerunFromNodeId = i == 0 ? null : "integrate",   // a rerun-from-node forks at a step; the original has no fork point
             CreatedDate = DateTimeOffset.UtcNow.AddMinutes(i), IsLatest = i == attempts.Length - 1,
         }).ToList();
 
@@ -158,6 +159,58 @@ public class JournalProjectorTests
         focused.Status.ShouldBe(WorkflowRunStatus.Cancelled, "the anchored attempt's OWN status, not the latest's Success");
         focused.Steps.Single().Id.ShouldBe("mid", "the anchored attempt's run was walked, not the newest");
         focused.Summary.ShouldBeNull("a focused prior attempt shows no turn-level result (its steps carry the story)");
+    }
+
+    [Fact]
+    public async Task Exposes_the_attempt_ladder_marking_the_focused_attempt()
+    {
+        // The pager + lineage data: a reran turn surfaces its whole ladder (number · status · run · SOURCE · fork node ·
+        // latest), and — on the focused turn — the anchored attempt is flagged Focused so the frontend knows which it shows.
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var a3 = Guid.NewGuid();
+        var turn = RerunTurn(1, (a1, WorkflowRunStatus.Failure), (a2, WorkflowRunStatus.Cancelled), (a3, WorkflowRunStatus.Success));
+        var detail = Detail(anchor: null, turn);
+
+        var view = await Projector(detail).ProjectAsync(detail.Id, focusRunId: a2, Team, CancellationToken.None);
+
+        var attempts = view!.Turns.Single(t => t.Focused).Attempts;
+        attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2, 3 }, "the whole ladder, in order");
+        attempts.Select(a => a.Status).ShouldBe(new[] { WorkflowRunStatus.Failure, WorkflowRunStatus.Cancelled, WorkflowRunStatus.Success });
+        attempts.Select(a => a.RunId).ShouldBe(new[] { a1, a2, a3 });
+        attempts.Select(a => a.SourceType).ShouldBe(new[] { "manual", "rerun", "rerun" }, "the rerun source is carried per attempt");
+        attempts.Select(a => a.RerunFromNodeId).ShouldBe(new[] { null, "integrate", "integrate" }, "the fork node (rerun-from-node) is carried — null for the original attempt");
+        attempts.Single(a => a.IsLatest).RunId.ShouldBe(a3, "the newest attempt is flagged latest");
+        attempts.Single(a => a.Focused).RunId.ShouldBe(a2, "exactly the anchored attempt is focused");
+        attempts.Count(a => a.Focused).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_single_attempt_turn_exposes_no_ladder()
+    {
+        var detail = Detail(anchor: null, Turn(1, Guid.NewGuid()));
+
+        var view = await Projector(detail).ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+
+        view!.Turns.Single(t => t.Focused).Attempts.ShouldBeEmpty("a turn never reran carries no ladder — the frontend shows no pager");
+    }
+
+    [Fact]
+    public async Task A_collapsed_turns_ladder_focuses_no_attempt()
+    {
+        // A collapsed turn's ladder is a preview (the pager still renders), but NONE is focused — only the focused turn
+        // walks an attempt.
+        var a1 = Guid.NewGuid();
+        var a2 = Guid.NewGuid();
+        var reran = RerunTurn(1, (a1, WorkflowRunStatus.Failure), (a2, WorkflowRunStatus.Success));
+        var detail = Detail(anchor: null, reran, Turn(2, Guid.NewGuid()));
+
+        // Session entry focuses the LAST turn (2), so the reran turn 1 collapses — its ladder still renders, none focused.
+        var view = await Projector(detail).ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+
+        var collapsed = view!.Turns.Single(t => t.TurnIndex == 1 && !t.Focused);
+        collapsed.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2 }, "the collapsed turn still exposes its ladder");
+        collapsed.Attempts.ShouldAllBe(a => !a.Focused, "but none is focused on a collapsed turn");
     }
 
     [Fact]

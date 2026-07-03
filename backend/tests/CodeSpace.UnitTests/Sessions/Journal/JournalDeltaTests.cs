@@ -60,6 +60,28 @@ public class JournalDeltaTests
         JournalDelta.After(View(steps), steps[^1].Cursor).Turns.Single(t => t.Focused).Steps.ShouldBeEmpty("nothing is newer than the head — an idle poll returns no steps");
     }
 
+    [Fact]
+    public void Preserves_the_focused_turns_attempt_ladder_through_the_trim()
+    {
+        // The pager must not vanish on a poll: the ?since trim only filters Steps, so the focused turn's Attempts ladder
+        // (and its focused flag) survives verbatim — else the FE's attempt switcher would blink out on every delta.
+        var s1 = Step("s1", 1);
+        var s2 = Step("s2", 2);
+        var ladder = new[]
+        {
+            new JournalAttempt { AttemptNumber = 1, RunId = Guid.NewGuid(), Status = WorkflowRunStatus.Failure, At = T, SourceType = "manual", IsLatest = false },
+            new JournalAttempt { AttemptNumber = 2, RunId = Guid.NewGuid(), Status = WorkflowRunStatus.Running, At = T.AddMinutes(1), SourceType = "rerun", IsLatest = true, Focused = true },
+        };
+        var baseView = View(new[] { s1, s2 });
+        var view = baseView with { Turns = new[] { baseView.Turns[0], baseView.Turns[1] with { Attempts = ladder } } };
+
+        var focused = JournalDelta.After(view, s1.Cursor).Turns.Single(t => t.Focused);
+
+        focused.Steps.Select(s => s.Id).ShouldBe(new[] { "s2" }, "steps are still trimmed to after the cursor");
+        focused.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2 }, "the ladder survives the trim intact");
+        focused.Attempts.Single(a => a.Focused).AttemptNumber.ShouldBe(2, "the focused flag survives too");
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
