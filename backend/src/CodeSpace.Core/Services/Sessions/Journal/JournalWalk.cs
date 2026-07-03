@@ -46,5 +46,6 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
         {
             Rationale = facts.Rationale ?? step.Rationale,
             Agents = facts.Agents ?? step.Agents,
+            Deferred = facts.Deferred ?? step.Deferred,
         };
 }

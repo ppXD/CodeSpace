@@ -17,10 +17,14 @@ public sealed record JournalStepFacts
     /// <summary>The agents this decision spawned / re-ran, as render-ready cards. Null when the step spawned none.</summary>
     public IReadOnlyList<JournalAgentCard>? Agents { get; init; }
 
-    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · diffstat) compose onto one step without clobbering each other.</summary>
+    /// <summary>The plan's subtasks still BLOCKED by unmet dependencies at this wave (the dependency frontier). Null when nothing is blocked / the step isn't a spawn.</summary>
+    public IReadOnlyList<JournalDeferredSubtask>? Deferred { get; init; }
+
+    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · diffstat) compose onto one step without clobbering each other.</summary>
     public JournalStepFacts Merge(JournalStepFacts other) => new()
     {
         Rationale = other.Rationale ?? Rationale,
         Agents = other.Agents ?? Agents,
+        Deferred = other.Deferred ?? Deferred,
     };
 }
