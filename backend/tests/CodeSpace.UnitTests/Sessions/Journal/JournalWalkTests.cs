@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Sessions.Journal;
 using CodeSpace.Core.Services.Sessions.Journal.Describers;
 using CodeSpace.Core.Services.Tasks.Timeline;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
 using Shouldly;
 
@@ -130,9 +131,13 @@ public class JournalWalkTests
         // The enrichment seam: the walk folds each step's gathered facts (rationale/agents/diffstat — the reads a pure
         // describer can't do) onto the step keyed by the SAME id. A step with no facts stays bare, so enrichment is
         // additive and never fabricated.
+        var cards = new[] { new JournalAgentCard { AgentRunId = Guid.NewGuid(), Label = "Fix the build", Status = AgentRunStatus.Running } };
         var facts = new JournalFacts
         {
-            ByStepId = new Dictionary<string, JournalStepFacts> { ["supervisor-1"] = new() { Rationale = "Spawned to unblock the build · Evidence: CI red" } },
+            ByStepId = new Dictionary<string, JournalStepFacts>
+            {
+                ["supervisor-1"] = new() { Rationale = "Spawned to unblock the build · Evidence: CI red", Agents = cards },
+            },
         };
 
         var walk = WalkOver(new[]
@@ -143,8 +148,13 @@ public class JournalWalkTests
 
         var steps = (await walk.WalkAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None))!;
 
-        steps.Single(s => s.Id == "supervisor-1").Rationale.ShouldBe("Spawned to unblock the build · Evidence: CI red", "the decision step carries the rationale gathered for its id");
-        steps.Single(s => s.Id == "tool-1").Rationale.ShouldBeNull("a step with no gathered facts stays bare — enrichment is never fabricated");
+        var decision = steps.Single(s => s.Id == "supervisor-1");
+        decision.Rationale.ShouldBe("Spawned to unblock the build · Evidence: CI red", "the decision step carries the rationale gathered for its id");
+        decision.Agents.ShouldBe(cards, "and the agent cards gathered for the same id");
+
+        var tool = steps.Single(s => s.Id == "tool-1");
+        tool.Rationale.ShouldBeNull("a step with no gathered facts stays bare — enrichment is never fabricated");
+        tool.Agents.ShouldBeEmpty("a bare step's Agents default to empty, never null");
     }
 
     private sealed class FakeTimeline : IRunTimelineProjector

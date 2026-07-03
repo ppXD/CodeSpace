@@ -42,5 +42,9 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
 
     /// <summary>Fold this step's gathered facts onto the described step — null facts leave it bare (the common case). A set fact wins over the describer's (which never authors enrichment fields), so the source is the enrichment authority.</summary>
     private static JournalStep Enrich(JournalStep step, JournalStepFacts? facts) =>
-        facts is null ? step : step with { Rationale = facts.Rationale ?? step.Rationale };
+        facts is null ? step : step with
+        {
+            Rationale = facts.Rationale ?? step.Rationale,
+            Agents = facts.Agents ?? step.Agents,
+        };
 }
