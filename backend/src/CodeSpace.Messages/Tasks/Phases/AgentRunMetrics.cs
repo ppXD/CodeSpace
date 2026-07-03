@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks.Phases;
@@ -35,4 +36,7 @@ public sealed record AgentRunMetrics
 
     /// <summary>The git-truth changed-file paths (bounded) off the result — the LIST behind <see cref="FilesChanged"/>, so a phase agent carries the files for the terminal's Files tab. Empty until the result lands / when it touched none.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
+    /// <summary>The git-truth per-file line diffstat (bounded) off the result — the same paths as <see cref="ChangedFiles"/> plus their +added / −removed counts (a binary file's counts are null). Empty for a pre-diffstat run / before the result lands, so a consumer degrades to the plain <see cref="ChangedFiles"/> list.</summary>
+    public IReadOnlyList<FileDiffStat> ChangedFileStats { get; init; } = Array.Empty<FileDiffStat>();
 }

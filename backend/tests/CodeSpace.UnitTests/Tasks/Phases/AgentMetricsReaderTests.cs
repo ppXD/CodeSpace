@@ -119,6 +119,37 @@ public class AgentMetricsReaderTests
     }
 
     [Fact]
+    public void Projects_the_per_file_diffstat_off_the_result()
+    {
+        // The git-truth +added / −removed per file (a binary carries null counts) — the diffstat rows a card renders.
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+            ChangedFiles = new[] { "src/A.cs", "img/logo.png" },
+            FileStats = new[] { new FileDiffStat("src/A.cs", 42, 3), new FileDiffStat("img/logo.png", null, null) },
+        }, AgentJson.Options);
+
+        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
+
+        m.ChangedFileStats.Select(f => (f.Path, f.Additions, f.Deletions))
+            .ShouldBe(new[] { ("src/A.cs", (int?)42, (int?)3), ("img/logo.png", null, null) }, "the per-file diffstat projects verbatim, binary counts null");
+    }
+
+    [Fact]
+    public void A_pre_diffstat_result_projects_an_empty_diffstat_not_null()
+    {
+        // An older run persisted before FileStats existed still projects — an empty diffstat, so a consumer degrades to the
+        // plain ChangedFiles list rather than NRE-ing on a null.
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/A.cs" },
+        }, AgentJson.Options);
+
+        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now)
+            .ChangedFileStats.ShouldBeEmpty("a result with no FileStats projects an empty diffstat, never null");
+    }
+
+    [Fact]
     public void Cost_is_null_for_an_unpriced_model_but_tokens_and_a_zero_file_count_still_project()
     {
         // An OpenAI/Codex model is intentionally absent from the price table → fail-open NULL cost (never a misleading 0).

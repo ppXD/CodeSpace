@@ -171,6 +171,35 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_spawned_agents_card_carries_its_per_file_diffstat()
+    {
+        // The diffstat end-to-end: a spawned agent whose result holds git-truth FileStats surfaces +added / −removed rows on
+        // its card — read off the real result through the shared metrics reader, not recomputed.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Diffstat run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Build it", resultSummary: "done");
+
+        var result = JsonSerializer.Serialize(new
+        {
+            status = "Succeeded", exitReason = "completed",
+            changedFiles = new[] { "auth/session.ts", "img/logo.png" },
+            fileStats = new object[] { new { path = "auth/session.ts", additions = 42, deletions = 3 }, new { path = "img/logo.png", additions = (int?)null, deletions = (int?)null } },
+        });
+        var agent = await SeedAgentRunAsync(teamId, run1, goal: "Refactor auth", status: AgentRunStatus.Succeeded, resultJson: result);
+
+        await SeedSpawnDecisionAsync(run1, teamId, DateTimeOffset.UtcNow, new[] { agent });
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var card = view!.Turns.Single(t => t.Focused).Steps.Single(s => s.Kind == JournalStepKinds.Decision).Agents.Single();
+        card.FilesChanged.ShouldBe(2);
+        card.Files.Select(f => (f.Path, f.Additions, f.Deletions))
+            .ShouldBe(new[] { ("auth/session.ts", (int?)42, (int?)3), ("img/logo.png", null, null) }, "the card carries the git-truth per-file diffstat, binary counts null");
+    }
+
+    [Fact]
     public async Task A_staged_agent_with_no_readable_row_is_skipped_never_crashed_or_fabricated()
     {
         // The load-bearing skip guard: a spawn stages two ids but only one has a persisted, team-scoped AgentRun row (the
@@ -207,7 +236,7 @@ public sealed class JournalProjectorFlowTests
     private static string RationalePayload(string why, string evidence) =>
         JsonSerializer.Serialize(new { rationale = new { why, evidence } });
 
-    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status)
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status, string? resultJson = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -217,7 +246,7 @@ public sealed class JournalProjectorFlowTests
         db.AgentRun.Add(new AgentRun
         {
             Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = $"agent#{agentRunId:N}",
-            Harness = "codex-cli", Status = status,
+            Harness = "codex-cli", Status = status, ResultJson = resultJson,
             TaskJson = JsonSerializer.Serialize(new { goal, harness = "codex-cli", model = "claude-opus-4-8" }),
             StartedAt = now, CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });

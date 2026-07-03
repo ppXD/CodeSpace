@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Sessions.Journal;
@@ -38,4 +39,7 @@ public sealed record JournalAgentCard
 
     /// <summary>Git-truth changed-file count off the result. Null before the result lands.</summary>
     public int? FilesChanged { get; init; }
+
+    /// <summary>The agent's changed files with their +added / −removed line counts (git ground truth; a binary file's counts are null) — the diffstat ROWS the journal shows under the card. Empty for a pre-diffstat run / before the result lands, where only <see cref="FilesChanged"/> is known.</summary>
+    public IReadOnlyList<FileDiffStat> Files { get; init; } = Array.Empty<FileDiffStat>();
 }

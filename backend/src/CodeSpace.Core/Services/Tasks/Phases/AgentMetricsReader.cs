@@ -87,6 +87,7 @@ public sealed class AgentMetricsReader : IScopedDependency
             CostUsd = tokens is null ? null : AgentCostPricing.CostUsd(model, tokens.InputTokens, tokens.OutputTokens),
             FilesChanged = result?.ChangedFiles?.Count,
             ChangedFiles = (result?.ChangedFiles ?? Array.Empty<string>()).Take(MaxChangedFiles).ToList(),
+            ChangedFileStats = (result?.FileStats ?? Array.Empty<FileDiffStat>()).Take(MaxChangedFiles).ToList(),
         };
     }
 
@@ -112,8 +113,8 @@ public sealed class AgentMetricsReader : IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
-    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles);
+    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
+    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats);
 
     /// <summary>The display leaves of <c>AgentTask</c> — its model + goal — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
     private sealed record TaskSlice(string? Model, string? Goal);
