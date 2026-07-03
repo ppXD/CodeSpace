@@ -23,6 +23,14 @@ public sealed record AgentRunResult
     /// <summary>Repo-relative paths the agent changed. When the run had a workspace, this is git ground truth (the captured diff), not the agent's self-report.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>
+    /// Per-file line diffstat (added / removed counts), git ground truth from <c>git diff --numstat</c> — parallel to
+    /// <see cref="ChangedFiles"/>. Captured at run end so the "+X −Y" is a durable fact even when <see cref="Patch"/> is
+    /// offloaded (the counts can't be re-derived from an absent patch). Empty when there was no workspace / nothing
+    /// changed; a binary file's counts are null. The turn's "+X −Y" is the sum of the non-null counts.
+    /// </summary>
+    public IReadOnlyList<FileDiffStat> FileStats { get; init; } = Array.Empty<FileDiffStat>();
+
     /// <summary>Unified diff (git format) of everything the agent changed vs the cloned base. Empty when there was no workspace or nothing changed, OR when the diff was large enough to offload — in that case <see cref="PatchArtifactId"/> is set and the full diff is fetched from the artifact store. The artefact a downstream PR-open step consumes.</summary>
     public string Patch { get; init; } = "";
 
@@ -128,6 +136,9 @@ public sealed record RepositoryRunResult
 
     /// <summary>Repo-relative paths the agent changed in this repo (git ground truth).</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
+    /// <summary>Per-file line diffstat for this repo (added / removed counts, git ground truth) — parallel to <see cref="ChangedFiles"/>, mirroring the top-level <see cref="AgentRunResult.FileStats"/>. A binary file's counts are null.</summary>
+    public IReadOnlyList<FileDiffStat> FileStats { get; init; } = Array.Empty<FileDiffStat>();
 
     /// <summary>
     /// The inline unified diff (git format) of this repo's changes vs its <see cref="BaseSha"/> — the durable,

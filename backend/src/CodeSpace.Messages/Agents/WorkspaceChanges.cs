@@ -22,6 +22,9 @@ public sealed record WorkspaceChanges
     /// <summary>Repo-relative paths the agent changed (added / modified / deleted).</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>Per-file line diffstat (added / removed counts) parsed from <c>git diff --numstat</c> — git ground truth, parallel to <see cref="ChangedFiles"/>. Empty when nothing changed; a binary file's counts are null. Captured so the "+X −Y" survives even when the full <see cref="Patch"/> is offloaded.</summary>
+    public IReadOnlyList<FileDiffStat> FileStats { get; init; } = Array.Empty<FileDiffStat>();
+
     /// <summary>True when the agent left the workspace unchanged.</summary>
     public bool IsEmpty => string.IsNullOrEmpty(Patch) && ChangedFiles.Count == 0;
 }
