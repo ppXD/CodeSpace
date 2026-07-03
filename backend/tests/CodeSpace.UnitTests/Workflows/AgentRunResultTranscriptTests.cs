@@ -62,4 +62,36 @@ public class AgentRunResultTranscriptTests
         result.Transcript.ShouldBe("");
         result.TranscriptArtifactId.ShouldBeNull();
     }
+
+    [Fact]
+    public void Round_trips_the_per_file_diffstat_through_the_persistence_serializer()
+    {
+        var original = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            ChangedFiles = new[] { "src/auth.ts", "assets/logo.png" },
+            FileStats = new[]
+            {
+                new FileDiffStat("src/auth.ts", 12, 3),
+                new FileDiffStat("assets/logo.png", null, null),   // a binary file's counts persist as null, not 0
+            },
+        };
+
+        var roundTripped = JsonSerializer.Deserialize<AgentRunResult>(
+            JsonSerializer.Serialize(original, AgentJson.Options), AgentJson.Options)!;
+
+        roundTripped.FileStats.Count.ShouldBe(2, "the per-file diffstat is part of the persisted result_jsonb contract");
+        roundTripped.FileStats[0].ShouldBe(new FileDiffStat("src/auth.ts", 12, 3));
+        roundTripped.FileStats[1].ShouldBe(new FileDiffStat("assets/logo.png", null, null), "a binary file's null counts survive — not coerced to 0");
+    }
+
+    [Fact]
+    public void Defaults_to_an_empty_diffstat_never_null()
+    {
+        var result = JsonSerializer.Deserialize<AgentRunResult>(
+            JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, AgentJson.Options), AgentJson.Options)!;
+
+        result.FileStats.ShouldBeEmpty("a result with no workspace defaults to an empty diffstat, never null — consumers index it without a guard");
+    }
 }

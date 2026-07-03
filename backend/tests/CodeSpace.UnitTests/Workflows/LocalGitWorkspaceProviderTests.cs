@@ -212,6 +212,18 @@ public sealed class LocalGitWorkspaceProviderTests
         changes.ChangedFiles.ShouldBe(new[] { "keep.txt", "new.txt", "remove.txt" }, ignoreOrder: true);
         changes.Patch.ShouldContain("edited by agent");
         changes.Patch.ShouldContain("brand new");
+
+        // The per-file diffstat is captured alongside (git ground truth, --numstat) — a pure-add file has 0 deletions,
+        // a pure-delete 0 additions, so "+X −Y" is durable even once the patch is offloaded.
+        changes.FileStats.Select(s => s.Path).ShouldBe(changes.ChangedFiles, ignoreOrder: true, "the diffstat covers exactly the changed files");
+
+        var added = changes.FileStats.Single(s => s.Path == "new.txt");
+        added.Additions.ShouldBe(1, "the brand-new single-line file added one line");
+        added.Deletions.ShouldBe(0, "a brand-new file is a pure addition");
+
+        var removed = changes.FileStats.Single(s => s.Path == "remove.txt");
+        removed.Additions.ShouldBe(0, "a deleted file is a pure deletion");
+        removed.Deletions.ShouldBe(1, "the deleted single-line file removed one line");
     }
 
     [Fact]
@@ -229,6 +241,30 @@ public sealed class LocalGitWorkspaceProviderTests
         changes.IsEmpty.ShouldBeTrue();
         changes.ChangedFiles.ShouldBeEmpty();
         changes.Patch.ShouldBeEmpty();
+        changes.FileStats.ShouldBeEmpty("no changes → no diffstat");
+    }
+
+    [Fact]
+    public async Task Captures_a_renamed_files_diffstat_under_its_new_name_matching_the_changed_file()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "old.ts", "line1\nline2\nline3\n");
+
+        await using var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
+
+        // The "agent" renames the file and adds a line — git renders this in numstat as a folded "old => new" path,
+        // but lists it by its NEW name in --name-only. The capture must resolve the stat to the new name so a consumer
+        // can join FileStats↔ChangedFiles (robust whether git's rename detection is on or off in the host config).
+        File.Move(Path.Combine(handle.Directory, "old.ts"), Path.Combine(handle.Directory, "new.ts"));
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "new.ts"), "line1\nline2\nline3\nline4\n");
+
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.FileStats.Select(s => s.Path).ShouldBe(changes.ChangedFiles, ignoreOrder: true, "every per-file stat keys on a real changed-file path — no orphaned rename key");
+        changes.FileStats.ShouldNotContain(s => s.Path.Contains("=>"), "the rename resolved to its new name, not a raw 'old => new' path");
+        changes.FileStats.ShouldContain(s => s.Path == "new.ts", "the renamed file's stat is keyed on its new name");
     }
 
     [Fact]

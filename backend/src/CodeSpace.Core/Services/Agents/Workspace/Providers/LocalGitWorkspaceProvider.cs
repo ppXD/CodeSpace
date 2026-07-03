@@ -407,12 +407,14 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             var patch = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--no-color", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
             var names = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--name-only", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+            var numstat = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--numstat", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
 
             return new WorkspaceChanges
             {
                 Patch = patch,
                 BaseSha = repo.BaseSha,
                 ChangedFiles = names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                FileStats = NumstatParser.Parse(numstat),
             };
         }
 

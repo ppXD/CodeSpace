@@ -643,7 +643,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             // The PRIMARY repo's diff is git ground truth for the top-level fields — byte-identical to a single-repo run.
             var changes = await workspace.CaptureChangesAsync(cancellationToken).ConfigureAwait(false);
-            result = result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
+            result = result with { ChangedFiles = changes.ChangedFiles, FileStats = changes.FileStats, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
 
             // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
             // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
@@ -691,6 +691,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 Alias = repo.Alias,
                 RepositoryId = repoIds is not null && repoIds.TryGetValue(repo.Alias, out var id) ? id : null,
                 ChangedFiles = changes.ChangedFiles,
+                FileStats = changes.FileStats,
                 // Capture this repo's diff (capped inline like the top-level patch) — the durable, base-anchored input
                 // the supervisor's per-repo on-disk integration consumes; a large one is offloaded at completion.
                 Patch = TruncatePatch(changes.Patch, MaxPatchChars),
