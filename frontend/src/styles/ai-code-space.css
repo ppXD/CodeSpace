@@ -5508,6 +5508,7 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-file:hover { background: var(--panel); }
 .room-file-path { flex: 1; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .room-file-stat { font-variant-numeric: tabular-nums; color: var(--muted); flex: none; }
+.room-file-from { flex: none; max-width: 45%; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .room-file-caret { color: var(--muted-2); flex: none; opacity: 0; transition: opacity .12s; }
 .room-file:hover .room-file-caret { opacity: 1; }
 

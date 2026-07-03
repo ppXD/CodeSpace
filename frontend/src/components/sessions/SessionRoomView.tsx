@@ -588,7 +588,7 @@ function FileRow({ item }: { item: StatItem }) {
   return (
     <button className="room-file" disabled={!run} onClick={() => run && openDrawer({ kind: "file", runId: run.runId, path: item.text })}>
       <span className="room-file-path">{item.text}</span>
-      {item.detail && <span className="room-file-stat"><DiffStat text={item.detail} /></span>}
+      {item.detail && <span className="room-file-from">{item.detail}</span>}
       <Sym n="chevron-right" s={11} cls="room-file-caret" />
     </button>
   );
