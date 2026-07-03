@@ -24,7 +24,7 @@ internal sealed class StubWorkflowService : IWorkflowService
         _detail = detail;
     }
 
-    public Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+    public Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true) =>
         Task.FromResult(runId == _runId && teamId == _teamId ? _detail : null);
 
     public Task<RunAttemptsResponse?> ListRunAttemptsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();

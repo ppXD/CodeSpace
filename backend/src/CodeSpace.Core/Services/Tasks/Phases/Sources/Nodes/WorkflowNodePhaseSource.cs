@@ -42,7 +42,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 
     public async Task<IReadOnlyList<RunPhase>> ContributeAsync(RunPhaseContext context, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var run = await _workflows.GetRunAsync(context.RunId, context.TeamId, cancellationToken, context.MergeLineage).ConfigureAwait(false);
 
         if (run == null) return Array.Empty<RunPhase>();
 

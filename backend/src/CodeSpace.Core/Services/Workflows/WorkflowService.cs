@@ -1415,7 +1415,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return new CellAttemptsResponse { Attempts = attempts };
     }
 
-    public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true)
     {
         var run = await _db.WorkflowRun
             .Include(r => r.Workflow)
@@ -1428,16 +1428,20 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // run, and the ONLY team source for a snapshot run (which has no parent Workflow row).
         if (run.TeamId != teamId) return null;
 
-        // LINEAGE-MERGED projection: a rerun fork only re-executes the chosen node/branch; the reused ones live on
-        // earlier attempts. So the detail merges across the WHOLE lineage — for each (node, iteration) it shows the
-        // LATEST attempt that ran it — and a map fan-out then shows EVERY branch (reused + freshly re-run), not just
+        // LINEAGE-MERGED projection (default): a rerun fork only re-executes the chosen node/branch; the reused ones
+        // live on earlier attempts. So the detail merges across the WHOLE lineage — for each (node, iteration) it shows
+        // the LATEST attempt that ran it — and a map fan-out then shows EVERY branch (reused + freshly re-run), not just
         // the one re-run. A single-attempt run is byte-identical (its lineage is itself, the dedup keeps its rows).
+        // mergeLineage: false scopes STRICTLY to THIS run's own cells — the Session Room's per-attempt view, where a
+        // FULL rerun re-ran every cell, so the merge would collapse every attempt to the latest's nodes.
         var rootKey = run.RootRunId ?? run.Id;
-        var lineage = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
-            .Select(r => new { r.Id, r.CreatedDate })
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var createdByRun = lineage.ToDictionary(x => x.Id, x => x.CreatedDate);
+        var createdByRun = mergeLineage
+            ? (await _db.WorkflowRun.AsNoTracking()
+                .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && (r.RootRunId ?? r.Id) == rootKey)
+                .Select(r => new { r.Id, r.CreatedDate })
+                .ToListAsync(cancellationToken).ConfigureAwait(false))
+                .ToDictionary(x => x.Id, x => x.CreatedDate)
+            : new Dictionary<Guid, DateTimeOffset> { [run.Id] = run.CreatedDate };
         var lineageIds = createdByRun.Keys.ToList();
 
         var allNodes = await _db.WorkflowRunNode.Where(n => lineageIds.Contains(n.RunId)).ToListAsync(cancellationToken).ConfigureAwait(false);
