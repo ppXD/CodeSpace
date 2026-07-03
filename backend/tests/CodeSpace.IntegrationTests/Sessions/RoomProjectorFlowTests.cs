@@ -235,8 +235,25 @@ public class RoomProjectorFlowTests
         room!.Blocks.OfType<AssistantTurnBlock>().Single().Attempts.ShouldBeEmpty("a lone attempt needs no history — the timeline stays empty");
     }
 
-    /// <summary>Seed one attempt (a top-level turn run when turnIndex is set, else a rerun/replay fork with rootRunId) of a session turn, with an explicit created time so the attempt ordering is deterministic.</summary>
-    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt)
+    [Fact]
+    public async Task The_latest_attempt_shows_its_own_wall_clock_not_the_whole_lineage_span()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Reran a week later");
+        var now = DateTimeOffset.UtcNow;
+
+        // attempt 1 (the lineage root) was created a WEEK ago; attempt 2 (a rerun) was created an hour ago and ran ~1h.
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddDays(-7), completedAt: now.AddDays(-7).AddMinutes(30));
+        var latest = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Rerun, createdAt: now.AddHours(-1), completedAt: now);
+
+        var turn = (await ProjectByRunAsync(latest, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+
+        turn.At!.Value.ShouldBe(now.AddHours(-1), TimeSpan.FromSeconds(5), "the latest attempt shows its OWN created time, not the lineage root's (a week ago)");
+        turn.DurationMs!.Value.ShouldBeInRange(50 * 60_000L, 70 * 60_000L, "its OWN ~1h wall-clock, NOT the ~7-day span from the first attempt's creation to now");
+    }
+
+    /// <summary>Seed one attempt (a top-level turn run when turnIndex is set, else a rerun/replay fork with rootRunId) of a session turn, with an explicit created (and optional completed) time so the attempt ordering + wall-clock are deterministic.</summary>
+    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt, DateTimeOffset? completedAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -253,7 +270,7 @@ public class RoomProjectorFlowTests
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = source,
             Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId,
-            OutputsJson = "{}", CreatedDate = createdAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+            OutputsJson = "{}", CreatedDate = createdAt, CompletedAt = completedAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
         return runId;
