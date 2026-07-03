@@ -81,7 +81,7 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
             Mode = ReviewMode.Gate,
             Approved = model.Approved,
             Score = model.Score,
-            Issues = model.Issues ?? Array.Empty<string>(),
+            Issues = ModelIssueProjection.Project(model.Issues),
             Rationale = Rationale(model.Rationale),
         };
     }
@@ -98,7 +98,7 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         {
             Mode = ReviewMode.Improve,
             Critique = model.Critique,
-            Issues = model.Issues ?? Array.Empty<string>(),
+            Issues = ModelIssueProjection.Project(model.Issues),
             Rationale = Rationale(model.Rationale),
         };
     }
@@ -143,10 +143,13 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     private const string GateSystemPrompt =
         "You are an INDEPENDENT reviewer. You did not write the artifact under review; judge it strictly and fairly on " +
         "its own merits against the stated goal. Approve ONLY when it soundly achieves the goal with no material flaw; " +
-        "otherwise flag it with concrete, specific issues a human should weigh. Always give a rationale. Return ONLY the schema-constrained JSON.";
+        "otherwise flag it with concrete, specific issues a human should weigh — and ground EVERY issue in evidence: " +
+        "quote the offending part of the artifact or name its precise location (an unevidenced issue is an opinion, " +
+        "not a finding). Always give a rationale. Return ONLY the schema-constrained JSON.";
 
     private const string ImproveSystemPrompt =
         "You are an INDEPENDENT reviewer helping improve an artifact you did not write. Critique it against the stated " +
         "goal: identify what is weak, missing, or wrong, and give SPECIFIC, ACTIONABLE guidance the author can apply to " +
-        "produce a better revision. Be concrete, not vague. Return ONLY the schema-constrained JSON.";
+        "produce a better revision. Ground every itemised issue in evidence — quote the artifact or name the precise " +
+        "location. Be concrete, not vague. Return ONLY the schema-constrained JSON.";
 }

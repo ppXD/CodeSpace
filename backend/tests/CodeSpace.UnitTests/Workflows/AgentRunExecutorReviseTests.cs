@@ -218,7 +218,7 @@ public sealed class AgentRunExecutorReviseTests
     [Fact]
     public void The_review_feedback_folds_rationale_and_issues()
     {
-        AgentRunExecutor.RenderReviewFeedback(new CriticVerdict { Mode = ReviewMode.Improve, Approved = false, Rationale = "incomplete", Issues = new[] { "no tests", "typo" } })
+        AgentRunExecutor.RenderReviewFeedback(new CriticVerdict { Mode = ReviewMode.Improve, Approved = false, Rationale = "incomplete", Issues = new[] { new CriticIssue { Text = "no tests" }, new CriticIssue { Text = "typo" } } })
             .ShouldBe("incomplete Issues: no tests; typo");
 
         AgentRunExecutor.RenderReviewFeedback(new CriticVerdict { Mode = ReviewMode.Improve, Approved = false, Rationale = "weak" })

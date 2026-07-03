@@ -63,7 +63,7 @@ public class CriticPlannerDecoratorTests
     public async Task Gate_annotates_the_plan_risks_without_re_planning_or_discarding()
     {
         var planner = new FakePlanner();
-        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Score = 40, Issues = new[] { "no tests named" }, Rationale = "too thin" } };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Score = 40, Issues = new[] { new CriticIssue { Text = "no tests named", Evidence = "no subtask carries a test command" } }, Rationale = "too thin" } };
         var decorator = new CriticPlannerDecorator(planner, critic);
 
         var result = await decorator.PlanAsync(Request(ReviewMode.Gate), CancellationToken.None);

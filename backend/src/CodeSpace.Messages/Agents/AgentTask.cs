@@ -200,6 +200,16 @@ public sealed record AgentTask
     public Guid? ReviewerModelId { get; init; }
 
     /// <summary>
+    /// S8: review this run's output with a REAL independent agent (a read-only run cloning the produced branch on a
+    /// DIFFERENT harness when one is registered) instead of only the in-process model critic — the executor ladders
+    /// agent → model critic → fail-open, so an agent review is never worse. Only consulted when
+    /// <see cref="OutputReviewMode"/> is not None. The reviewer's own task pins this false (recursion-proof).
+    /// <c>[JsonIgnore(WhenWritingDefault)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ReviewerAgent { get; init; }
+
+    /// <summary>
     /// S6: how many bounded REVISE rounds the executor may run inside this run when the objective oracle fails or the
     /// Improve-mode critic flags the output — each round feeds the failure detail back to the SAME agent (a same-session
     /// harness continuation in the same workspace) and re-verifies through the full push→grade→review chain. Null ⇒ the

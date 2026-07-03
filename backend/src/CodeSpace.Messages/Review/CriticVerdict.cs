@@ -19,8 +19,8 @@ public sealed record CriticVerdict
     /// <summary>An optional 0–100 quality score the reviewer assigned (GATE). Null when not scored / on failure.</summary>
     public int? Score { get; init; }
 
-    /// <summary>Concrete issues the reviewer found (both modes). Empty when none / on failure.</summary>
-    public IReadOnlyList<string> Issues { get; init; } = Array.Empty<string>();
+    /// <summary>Concrete issues the reviewer found (both modes), each carrying its EVIDENCE from the artifact (S8 — auditable verdicts, meta-evaluable reviews). Empty when none / on failure.</summary>
+    public IReadOnlyList<CriticIssue> Issues { get; init; } = Array.Empty<CriticIssue>();
 
     /// <summary>IMPROVE: the critique text to fold BACK into the producer for its one revision. Null in GATE / on failure.</summary>
     public string? Critique { get; init; }

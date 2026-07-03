@@ -18,7 +18,7 @@ public class LlmStructuredCriticTests
     [Fact]
     public void Project_gate_carries_approved_score_and_issues()
     {
-        var json = Parse("""{ "approved": false, "score": 55, "issues": ["no rollback plan"], "rationale": "thin" }""");
+        var json = Parse("""{ "approved": false, "score": 55, "issues": [{ "issue": "no rollback plan", "evidence": "the plan has no rollback subtask" }], "rationale": "thin" }""");
 
         var verdict = LlmStructuredCritic.Project(ReviewMode.Gate, json);
 
@@ -26,21 +26,21 @@ public class LlmStructuredCriticTests
         verdict.Mode.ShouldBe(ReviewMode.Gate);
         verdict.Approved.ShouldBeFalse();
         verdict.Score.ShouldBe(55);
-        verdict.Issues.ShouldContain("no rollback plan");
+        verdict.Issues.ShouldContain(i => i.Text == "no rollback plan" && i.Evidence == "the plan has no rollback subtask", "issues carry their evidence (S8)");
         verdict.Rationale.ShouldBe("thin");
     }
 
     [Fact]
     public void Project_improve_carries_the_critique()
     {
-        var json = Parse("""{ "critique": "add an integration test subtask", "issues": ["untested path"], "rationale": "missing coverage" }""");
+        var json = Parse("""{ "critique": "add an integration test subtask", "issues": [{ "issue": "untested path", "evidence": "subtask s2 names no test" }], "rationale": "missing coverage" }""");
 
         var verdict = LlmStructuredCritic.Project(ReviewMode.Improve, json);
 
         verdict.Failed.ShouldBeFalse();
         verdict.Mode.ShouldBe(ReviewMode.Improve);
         verdict.Critique.ShouldBe("add an integration test subtask");
-        verdict.Issues.ShouldContain("untested path");
+        verdict.Issues.ShouldContain(i => i.Text == "untested path", "improve issues project the same evidence-attached shape");
     }
 
     [Fact]

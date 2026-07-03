@@ -38,12 +38,13 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
 
         var flawed = request.UserPrompt.Contains(RejectMarker, StringComparison.Ordinal);
 
-        // The critique deliberately does NOT repeat the marker: the revise loop echoes the critique into the next
-        // round's goal (and the goal echoes into the next review prompt), so a marker-quoting critique would keep
-        // re-triggering the reject forever — only the DIFF's own content may carry the marker.
+        // The critique (and its evidence) deliberately does NOT repeat the marker: the revise loop echoes the critique
+        // into the next round's goal (and the goal echoes into the next review prompt), so a marker-quoting critique
+        // would keep re-triggering the reject forever — only the DIFF's own content may carry the marker. Issues carry
+        // the S8 evidence-attached shape ({issue, evidence}) the Gate schema now requires.
         var json = flawed
-            ? JsonSerializer.SerializeToElement(new { approved = false, score = 3, issues = new[] { "contains a placeholder hack" }, rationale = Critique })
-            : JsonSerializer.SerializeToElement(new { approved = true, score = 9, issues = Array.Empty<string>(), rationale = "clean and goal-aligned" });
+            ? JsonSerializer.SerializeToElement(new { approved = false, score = 3, issues = new[] { new { issue = "contains a placeholder hack", evidence = "the flaw marker is present in the diff" } }, rationale = Critique })
+            : JsonSerializer.SerializeToElement(new { approved = true, score = 9, issues = Array.Empty<object>(), rationale = "clean and goal-aligned" });
 
         return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 7 } });
     }

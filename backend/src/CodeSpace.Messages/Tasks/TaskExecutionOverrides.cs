@@ -59,4 +59,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>S6: the bounded revise budget — how many times the executor may feed an acceptance failure / Improve-critic flag back to the same agent inside one run (same conversation, same workspace, full re-verify). Null → the executor's default (1 under Improve, else 0); clamped server-side. Flows to the single-agent node + each plan-map branch.</summary>
     public int? ReviseRounds { get; init; }
+
+    /// <summary>S8: run the output review as a REAL independent agent (read-only clone of the produced branch, distinct-harness-first, model-critic fallback). Null/false → the model critic (byte-identical).</summary>
+    public bool? ReviewerAgent { get; init; }
 }
