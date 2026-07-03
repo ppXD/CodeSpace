@@ -91,7 +91,8 @@ public interface IWorkflowService
     /// </summary>
     Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken);
 
-    Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
+    /// <summary>The run's detail. <paramref name="mergeLineage"/> (default) shows the LINEAGE-MERGED picture — for each (node, iteration) cell the latest attempt that ran it, so a rerun-from-node shows reused + re-run branches together. Pass <c>false</c> to scope STRICTLY to this run's own cells (the Session Room's per-attempt view — each attempt must show ONLY its own flow, never the latest attempt's merged in).</summary>
+    Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true);
 
     /// <summary>
     /// The attempt ladder of the lineage <paramref name="runId"/> belongs to — the original plus every replay/rerun

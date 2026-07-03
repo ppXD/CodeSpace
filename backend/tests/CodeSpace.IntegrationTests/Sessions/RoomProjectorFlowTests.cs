@@ -252,6 +252,28 @@ public class RoomProjectorFlowTests
         turn.DurationMs!.Value.ShouldBeInRange(50 * 60_000L, 70 * 60_000L, "its OWN ~1h wall-clock, NOT the ~7-day span from the first attempt's creation to now");
     }
 
+    [Fact]
+    public async Task Each_attempt_shows_its_own_content_not_the_latest_lineage_merged()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Full reruns");
+        var now = DateTimeOffset.UtcNow;
+
+        // Two FULL reruns of the SAME turn — each re-ran the "agent" cell with its OWN output. The lineage merge keeps the
+        // NEWEST attempt per cell, so without a per-run scope BOTH attempts' rooms would show attempt 2's output.
+        var attempt1 = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddMinutes(-10), completedAt: now.AddMinutes(-9));
+        await SeedAgentNodeAsync(teamId, attempt1, summary: "first attempt output", changedFiles: new[] { "a1.txt" });
+
+        var attempt2 = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: attempt1, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Rerun, createdAt: now, completedAt: now.AddMinutes(1));
+        await SeedAgentNodeAsync(teamId, attempt2, summary: "second attempt output", changedFiles: new[] { "a2.txt" });
+
+        var turn1 = (await ProjectByRunAsync(attempt1, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var turn2 = (await ProjectByRunAsync(attempt2, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        turn1.Blocks.OfType<FinalAnswerBlock>().Single().Text.ShouldBe("first attempt output", "attempt 1 shows its OWN run's content — not the latest attempt's lineage-merged in");
+        turn2.Blocks.OfType<FinalAnswerBlock>().Single().Text.ShouldBe("second attempt output", "attempt 2 shows its own");
+    }
+
     /// <summary>Seed one attempt (a top-level turn run when turnIndex is set, else a rerun/replay fork with rootRunId) of a session turn, with an explicit created (and optional completed) time so the attempt ordering + wall-clock are deterministic.</summary>
     private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int? turnIndex, Guid? rootRunId, WorkflowRunStatus status, string source, DateTimeOffset createdAt, DateTimeOffset? completedAt = null)
     {

@@ -25,23 +25,23 @@ public sealed class RunPhaseProjector : IRunPhaseProjector, IScopedDependency
         _logger = logger;
     }
 
-    public async Task<IReadOnlyList<RunPhase>?> ProjectAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RunPhase>?> ProjectAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true)
     {
-        var belongs = await RunBelongsToTeamAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var belongs = await RunBelongsToTeamAsync(runId, teamId, mergeLineage, cancellationToken).ConfigureAwait(false);
 
         if (!belongs) return null;
 
-        var context = new RunPhaseContext { RunId = runId, TeamId = teamId };
+        var context = new RunPhaseContext { RunId = runId, TeamId = teamId, MergeLineage = mergeLineage };
 
         var contributed = await FanOutAsync(context, cancellationToken).ConfigureAwait(false);
 
         return Merge(contributed);
     }
 
-    /// <summary>The team-scope precheck — <c>GetRunAsync</c> is team-scoped (foreign / absent → null), so a non-null run is the team's. No existence is leaked: a foreign run is indistinguishable from an absent one.</summary>
-    private async Task<bool> RunBelongsToTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>The team-scope precheck — <c>GetRunAsync</c> is team-scoped (foreign / absent → null), so a non-null run is the team's. No existence is leaked: a foreign run is indistinguishable from an absent one. Threads <paramref name="mergeLineage"/> so a run-scoped projection doesn't pay the lineage load just to check tenancy.</summary>
+    private async Task<bool> RunBelongsToTeamAsync(Guid runId, Guid teamId, bool mergeLineage, CancellationToken cancellationToken)
     {
-        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var run = await _workflows.GetRunAsync(runId, teamId, cancellationToken, mergeLineage).ConfigureAwait(false);
 
         return run != null;
     }

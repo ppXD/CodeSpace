@@ -108,7 +108,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var focus = await FocusAsync(turn, anchorRunId, teamId, cancellationToken).ConfigureAwait(false);
         var runId = focus.RunId;
 
-        var phases = await _phases.ProjectAsync(runId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<RunPhase>();
+        // Per-ATTEMPT view: scope the node/agent phases STRICTLY to THIS run's own cells (mergeLineage: false). The
+        // lineage-merged default shows each cell's LATEST attempt, so a FULL rerun (every attempt re-ran every cell)
+        // would collapse every attempt to the latest's nodes — the switcher would show identical agents/tools for all.
+        var phases = await _phases.ProjectAsync(runId, teamId, cancellationToken, mergeLineage: false).ConfigureAwait(false) ?? Array.Empty<RunPhase>();
         var watermark = await WatermarkAsync(runId, cancellationToken).ConfigureAwait(false);
 
         // Skip the pending-decision read entirely in the common case — the turn skeleton already knows whether this
