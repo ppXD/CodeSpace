@@ -72,6 +72,60 @@ public sealed class RealModelCriticE2ETests
         });
     }
 
+    /// <summary>The S6 EFFECTIVENESS gate: the same live reviewer must DISCRIMINATE — reject an agent change whose diff plants an egregious, material flaw against the goal, and approve a small, sound one. This is the claim the revise loop rests on (a critic that approves garbage feeds the loop nothing); unlike the thin-plan probe above, the verdicts here ARE gated. Infra failures (no verdict) stay non-gating.</summary>
+    [Fact]
+    public async Task A_live_reviewer_discriminates_a_planted_flaw_from_a_clean_change()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+
+        const string goal = "Reject empty or missing passwords in the login endpoint.";
+
+        const string flawedChange =
+            "Agent summary: added the password validation\n\n" +
+            "Changed files (1): src/Api/LoginController.cs\n\n" +
+            "Diff:\n" +
+            "diff --git a/src/Api/LoginController.cs b/src/Api/LoginController.cs\n" +
+            "+            // TODO placeholder — accepts every password, validation not actually implemented\n" +
+            "+            if (password == null || password.Length >= 0) return Ok(IssueToken(user));\n";
+
+        const string cleanChange =
+            "Agent summary: reject empty or missing passwords with 400\n\n" +
+            "Changed files (2): src/Api/LoginController.cs, tests/LoginControllerTests.cs\n\n" +
+            "Diff:\n" +
+            "diff --git a/src/Api/LoginController.cs b/src/Api/LoginController.cs\n" +
+            "+            if (string.IsNullOrEmpty(password)) return BadRequest(\"password is required\");\n" +
+            "diff --git a/tests/LoginControllerTests.cs b/tests/LoginControllerTests.cs\n" +
+            "+        [Theory] [InlineData(null)] [InlineData(\"\")] public async Task Rejects_missing_password(string? password) => (await Post(password)).StatusCode.ShouldBe(400);\n";
+
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
+
+        await RealModelGate.AssessLiveAsync(Custom, async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+
+            var flawed = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = flawedChange, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+            var clean = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = cleanChange, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+
+            if (flawed.Failed || clean.Failed)
+                return (true, "the reviewer produced no verdict on one side (gateway infra) — not gating");
+
+            var discriminated = !flawed.Approved && clean.Approved;
+
+            return (discriminated,
+                $"flawed: approved={flawed.Approved} (want false; issues={flawed.Issues.Count}) · clean: approved={clean.Approved} (want true) — {flawed.Rationale}");
+        });
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid> SeedCredentialedModelAsync(Guid teamId, string modelId, string baseUrl, string apiKey)

@@ -305,6 +305,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             PushBranch = request.Overrides.PushBranch,
             OutputReviewMode = request.Overrides.OutputReviewMode,
             ReviewerModelId = request.Overrides.ReviewerModelId,
+            ReviseRounds = request.Overrides.ReviseRounds,
         };
     }
 

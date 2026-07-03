@@ -437,7 +437,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             // push to, no credential to re-inject). Not a failure: the run simply produces no branch.
             if (string.IsNullOrEmpty(repo.Token)) return null;
 
-            await RunGitOrThrowAsync(repo, new[] { "checkout", "-b", branchName }, cancellationToken).ConfigureAwait(false);
+            // -B (create-or-reset), not -b: an S6 revise round RE-pushes the same run-derived branch after another
+            // pass in the same workspace — the branch already exists locally from the first push, and -b would throw.
+            // Round 1 is byte-identical (-B creates when absent); a re-push resets the branch to the CURRENT head,
+            // which is exactly the force-overwrite semantics the remote half (push --force) already promises.
+            await RunGitOrThrowAsync(repo, new[] { "checkout", "-B", branchName }, cancellationToken).ConfigureAwait(false);
             await RunGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
 
             // A run that changed nothing has nothing to push. The agent may either leave its edits for us to commit

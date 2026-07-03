@@ -40,6 +40,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   decisionReview: "None",
   outputReview: "None",
   reviewerModel: "",
+  reviseRounds: "",
   ...over,
 });
 
@@ -220,6 +221,27 @@ describe("buildLaunchInput — base fields", () => {
     // active output review ⇒ the reviewer rides along
     expect(buildLaunchInput(form({ outputReview: "Gate", reviewerModel: "row-1" })).reviewerModelId).toBe("row-1");
     expect(buildLaunchInput(form({ effort: "deep", decisionReview: "Gate", reviewerModel: "row-2" })).reviewerModelId).toBe("row-2");
+  });
+
+  it("sends outputReviewMode Improve — the S6 self-revising review", () => {
+    expect(buildLaunchInput(form({ outputReview: "Improve" })).outputReviewMode).toBe("Improve");
+  });
+});
+
+describe("buildLaunchInput — self-revise rounds (S6)", () => {
+  it("omits reviseRounds at Auto (the backend default: 1 under Improve, else 0 — byte-identical)", () => {
+    expect(buildLaunchInput(form())).not.toHaveProperty("reviseRounds");
+    expect(buildLaunchInput(form({ outputReview: "Improve" }))).not.toHaveProperty("reviseRounds");
+  });
+
+  it("sends an explicit round count verbatim — including 0 (Off kills even Improve's implied round)", () => {
+    expect(buildLaunchInput(form({ reviseRounds: "0" })).reviseRounds).toBe(0);
+    expect(buildLaunchInput(form({ reviseRounds: "1" })).reviseRounds).toBe(1);
+    expect(buildLaunchInput(form({ effort: "quick", reviseRounds: "2" })).reviseRounds).toBe(2);
+  });
+
+  it("never sends reviseRounds on Deep — supervisor units revise via the supervisor's own retry loop", () => {
+    expect(buildLaunchInput(form({ effort: "deep", reviseRounds: "1" }))).not.toHaveProperty("reviseRounds");
   });
 });
 
