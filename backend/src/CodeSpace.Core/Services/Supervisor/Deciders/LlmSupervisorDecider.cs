@@ -190,6 +190,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             AppendDependencyFrontier(builder, context);
         }
 
+        // S8 RECITATION (the Manus lesson): restate the CURRENT plan with live per-item states at the prompt TAIL —
+        // the recency-biased position — so a long run never loses the plan under a growing prior-decision log.
+        // Null (no plan yet) ⇒ byte-identical prompt.
+        if (SupervisorRecitation.Render(context.PriorDecisions) is { } recitation)
+        {
+            builder.AppendLine();
+            builder.AppendLine(recitation);
+        }
+
         builder.AppendLine();
         builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 

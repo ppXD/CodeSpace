@@ -70,6 +70,8 @@ export interface LaunchFormState {
   reviewerModel: string;
   /** Evaluation "Self-revise" (S6) — the bounded in-run revise budget when a check fails / the Improve critic flags: `""` (Auto — the backend default: 1 under Improve, else 0) / `"0"` (Off, kills even Improve's implied round) / `"1"` / `"2"`. Quick/standard/auto (deep units revise via the supervisor's own retry). Sent only when not Auto. */
   reviseRounds: string;
+  /** Evaluation "Reviewer" (S8) — run the output review as a REAL independent agent (read-only clone of the produced branch, distinct-harness-first, model-critic fallback): `false` (default, the in-process model critic) / `true`. Sent only when true AND a review mode is active. */
+  reviewerAgent: boolean;
 }
 
 /** The canonical default acceptance chips — shared by the modal seed/reset and the omit-check, so an UNMODIFIED set is
@@ -183,6 +185,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   if (decisionOn) input.decisionReviewMode = state.decisionReview;
   if (outputOn) input.outputReviewMode = state.outputReview;
   if (state.reviewerModel && (decisionOn || outputOn || plannerOn)) input.reviewerModelId = state.reviewerModel;
+
+  // The S8 agent-reviewer opt-in rides only when an output review is actually active (inert otherwise — byte-identical).
+  if (outputOn && state.reviewerAgent) input.reviewerAgent = true;
 
   // The S6 self-revise budget — an explicit round count (incl. "0" = Off, which kills even Improve's implied round)
   // is sent verbatim; "" (Auto) is omitted so the backend default applies (1 under Improve, else 0). Deep is excluded:

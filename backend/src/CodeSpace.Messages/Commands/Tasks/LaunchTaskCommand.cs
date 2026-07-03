@@ -181,6 +181,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>S6: the bounded revise budget — how many times the executor may feed an acceptance failure / Improve-critic flag back to the SAME agent inside one run (same conversation, same workspace, full re-verify) before the failure stands. Null ⇒ the executor's default (1 when <see cref="OutputReviewMode"/> is Improve, else 0); clamped server-side. Flows to the single-agent node + each plan-map branch.</summary>
     public int? ReviseRounds { get; init; }
 
+    /// <summary>S8: run each agent's output review as a REAL independent agent (a read-only run cloning the produced branch, preferring a DIFFERENT harness; the in-process model critic is the fallback). Null/false ⇒ the model critic. Only meaningful when <see cref="OutputReviewMode"/> is not None.</summary>
+    public bool? ReviewerAgent { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

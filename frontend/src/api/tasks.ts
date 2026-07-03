@@ -92,6 +92,8 @@ export interface LaunchTaskInput {
   reviewerModelId?: string;
   /** S6: how many self-revise rounds an agent gets when its acceptance check fails or the Improve critic flags it (0 disables — even Improve's implied round). Omitted ⇒ the backend default (1 under Improve, else 0). Clamped server-side. */
   reviseRounds?: number;
+  /** S8: review each agent's output with a REAL independent agent (read-only clone of the produced branch, prefers a different harness; the model critic is the fallback). Omitted ⇒ the model critic. */
+  reviewerAgent?: boolean;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

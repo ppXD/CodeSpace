@@ -41,6 +41,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   outputReview: "None",
   reviewerModel: "",
   reviseRounds: "",
+  reviewerAgent: false,
   ...over,
 });
 
@@ -242,6 +243,18 @@ describe("buildLaunchInput — self-revise rounds (S6)", () => {
 
   it("never sends reviseRounds on Deep — supervisor units revise via the supervisor's own retry loop", () => {
     expect(buildLaunchInput(form({ effort: "deep", reviseRounds: "1" }))).not.toHaveProperty("reviseRounds");
+  });
+});
+
+describe("buildLaunchInput — agent reviewer (S8)", () => {
+  it("omits reviewerAgent by default and when no review is active (inert ⇒ byte-identical)", () => {
+    expect(buildLaunchInput(form())).not.toHaveProperty("reviewerAgent");
+    expect(buildLaunchInput(form({ reviewerAgent: true }))).not.toHaveProperty("reviewerAgent");
+  });
+
+  it("sends reviewerAgent only alongside an active output review", () => {
+    expect(buildLaunchInput(form({ outputReview: "Improve", reviewerAgent: true })).reviewerAgent).toBe(true);
+    expect(buildLaunchInput(form({ outputReview: "Gate", reviewerAgent: true })).reviewerAgent).toBe(true);
   });
 });
 

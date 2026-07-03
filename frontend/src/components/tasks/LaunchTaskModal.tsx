@@ -97,14 +97,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [] as string[],
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
     requirePlanConfirmation: false, plannerReview: "None",
-    decisionReview: "None", outputReview: "None", reviewerModel: "", reviseRounds: "",
+    decisionReview: "None", outputReview: "None", reviewerModel: "", reviseRounds: "", reviewerAgent: false,
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", decisionReview: "None" });
-    else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None", reviseRounds: "" });
+    else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None", reviseRounds: "", reviewerAgent: false });
     else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
 
@@ -202,7 +202,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
       agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
       requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
-      decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds,
+      decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds, reviewerAgent: cfg.reviewerAgent,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
@@ -514,6 +514,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   </div>
                 </RowPop>}
                 <Combo label="Agent output critic" value={cfg.outputReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak change for human review" }, { value: "Improve", label: "Improve — feed the critique back, agent revises" }]} onChange={v => setC({ outputReview: v })} />
+                <Combo label="Reviewer" value={cfg.reviewerAgent ? "agent" : "model"} options={[{ value: "model", label: "Model — in-process critic reads the diff" }, { value: "agent", label: "Independent agent — clones the branch, other harness" }]} onChange={v => setC({ reviewerAgent: v === "agent" })} />
                 {effort === "deep"
                   ? <TierRow label="Self-revise" tier="Deep units revise via the supervisor's retry loop" />
                   : <Combo label="Self-revise" value={cfg.reviseRounds} options={[{ value: "", label: "Auto — one round under Improve" }, { value: "0", label: "Off — a failure stands immediately" }, { value: "1", label: "1 round — feed the failure back once" }, { value: "2", label: "2 rounds" }]} onChange={v => setC({ reviseRounds: v })} />}

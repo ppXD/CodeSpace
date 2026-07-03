@@ -91,7 +91,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     [Fact]
     public async Task A_disapproved_change_is_re_graded_to_needs_review_with_a_warning()
     {
-        var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Issues = new[] { "no tests for the new path" }, Rationale = "incomplete" });
+        var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Issues = new[] { new CriticIssue { Text = "no tests for the new path" } }, Rationale = "incomplete" });
 
         var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
