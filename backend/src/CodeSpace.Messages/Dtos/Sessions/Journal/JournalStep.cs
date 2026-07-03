@@ -1,0 +1,45 @@
+using CodeSpace.Messages.Tasks.Timeline;
+
+namespace CodeSpace.Messages.Dtos.Sessions.Journal;
+
+/// <summary>
+/// One step of a run's CHRONOLOGICAL work journal — the render-ready unit the Session Journal shows in true execution
+/// order (a decision, a tool call, a file edit, a model call, a lifecycle beat). The backend OWNS the copy + the
+/// classification; the frontend renders by <see cref="Kind"/> and never inspects the raw run to decide language. A
+/// backend-authored translation of ONE <c>RunTimelineEvent</c> off the merged timeline spine, produced by the matching
+/// <c>IJournalStepDescriber</c> — an UNKNOWN event still becomes a step via the mandatory fallback, so a step is never
+/// silently dropped (the genericity guarantee). Tone reuses the timeline's closed <see cref="TimelineSeverity"/> axis —
+/// the journal is built ON that spine, so it shares one render-tone vocabulary rather than a parallel enum.
+/// </summary>
+public sealed record JournalStep
+{
+    /// <summary>Stable per-run id (e.g. <c>supervisor-{guid}</c>, <c>tool-{guid}</c>) — the frontend's React key + the delta id. Carried through verbatim from the source timeline event.</summary>
+    public required string Id { get; init; }
+
+    /// <summary>The streaming cursor — the walk assigns a monotonic value after merging + ordering the steps (0 straight off a describer, which has no cross-source view). A delta (<c>?since=</c>) adds steps with a greater cursor.</summary>
+    public long Seq { get; init; }
+
+    /// <summary>When the step occurred — the chronological sort key (the source event's <c>OccurredAt</c>).</summary>
+    public required DateTimeOffset At { get; init; }
+
+    /// <summary>The JOURNAL step-kind — the frontend's render discriminator (<c>decision</c> / <c>tool</c> / <c>agent</c> / <c>lifecycle</c> / <c>model_call</c> / …, see <c>JournalStepKinds</c>). OPEN: an unknown kind degrades to a generic step, never a switch-on for copy. This is the describer's CLASSIFICATION, distinct from the raw timeline provenance <c>Kind</c>.</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>The human one-line headline (backend-authored). e.g. "Supervisor planned the work", "Called git.open_pr", "edited auth/session.ts".</summary>
+    public required string Title { get; init; }
+
+    /// <summary>An optional secondary line (an error, an answer, a model's token cost). Null when none.</summary>
+    public string? Detail { get; init; }
+
+    /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
+    public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
+
+    /// <summary>Whether this step is a story MILESTONE (shown by default) vs a DETAIL that folds into a "N steps" disclosure. The describer sets it from the event's prominence.</summary>
+    public bool Milestone { get; init; }
+
+    /// <summary>The agent run this step belongs to, when applicable (a spawn's agent, a tool call's agent) — provenance the frontend deep-links. Null for a run-level step.</summary>
+    public string? AgentRunId { get; init; }
+
+    /// <summary>The node this step belongs to, when applicable. Null for a run-level step.</summary>
+    public string? NodeId { get; init; }
+}
