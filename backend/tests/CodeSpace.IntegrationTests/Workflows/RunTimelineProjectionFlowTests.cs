@@ -106,9 +106,9 @@ public sealed class RunTimelineProjectionFlowTests
 
         var t = DateTimeOffset.UtcNow;
         await SeedAgentEventsAsync(agentId,
-            (AgentEventKind.AssistantMessage, "thinking out loud", t),               // chatter → dropped
+            (AgentEventKind.AssistantMessage, "thinking out loud", t),               // assistant text → dropped (Trace-only)
             (AgentEventKind.FileChanged, "edited auth/session.ts", t.AddSeconds(1)),
-            (AgentEventKind.Reasoning, "considering options", t.AddSeconds(2)),       // chatter → dropped
+            (AgentEventKind.Reasoning, "considering options", t.AddSeconds(2)),       // reasoning → surfaces (folded thinking beat)
             (AgentEventKind.Error, "2 tests failing", t.AddSeconds(3)),
             (AgentEventKind.FinalSummary, "done — fixed the session bug", t.AddSeconds(4)));
 
@@ -116,11 +116,12 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         var agentEvents = events!.Where(e => e.SourceKey == "agent-events").ToList();
-        agentEvents.Select(e => e.Title).ShouldBe(new[] { "edited auth/session.ts", "2 tests failing", "done — fixed the session bug" },
-            "only the narrative kinds surface, chronologically; the assistant/reasoning chatter is dropped");
+        agentEvents.Select(e => e.Title).ShouldBe(new[] { "edited auth/session.ts", "considering options", "2 tests failing", "done — fixed the session bug" },
+            "the narrative kinds (now including reasoning) surface chronologically; only the assistant-text chatter is dropped");
         agentEvents.ShouldAllBe(e => e.AgentRunId == agentId.ToString());
         agentEvents.ShouldAllBe(e => e.NodeId == "code");
         agentEvents.Single(e => e.Title == "2 tests failing").Severity.ShouldBe(TimelineSeverity.Error);
+        agentEvents.Single(e => e.Title == "considering options").Level.ShouldBe(TimelineLevel.Detail, "reasoning is a folded Detail beat, not a milestone");
     }
 
     [Fact]

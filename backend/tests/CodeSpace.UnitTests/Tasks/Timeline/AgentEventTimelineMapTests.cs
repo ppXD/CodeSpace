@@ -7,9 +7,10 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Tasks.Timeline;
 
 /// <summary>
-/// The pure agent-event → timeline mapping: the narrative kind set is exactly the story-line kinds (file edits,
-/// tests, errors, warnings, the final summary) and excludes the verbose chatter; the severity follows the kind; a
-/// long final summary is clamped; an empty text falls back to the kind name; the agent + node are stamped on. No DB.
+/// The pure agent-event → timeline mapping: the narrative kind set is exactly the story-line kinds (reasoning, file
+/// edits, tests, errors, warnings, the final summary) and excludes the remaining chatter; reasoning rides folded; the
+/// severity follows the kind; a long final summary is clamped; an empty text falls back to the kind name; the agent +
+/// node are stamped on. No DB.
 /// </summary>
 [Trait("Category", "Unit")]
 public class AgentEventTimelineMapTests
@@ -35,13 +36,26 @@ public class AgentEventTimelineMapTests
         // accidentally slipping into the story line is caught.
         var excluded = new[]
         {
-            AgentEventKind.Queued, AgentEventKind.Started, AgentEventKind.AssistantMessage, AgentEventKind.Reasoning,
+            AgentEventKind.Queued, AgentEventKind.Started, AgentEventKind.AssistantMessage,
             AgentEventKind.PlanUpdate, AgentEventKind.ToolCall, AgentEventKind.CommandExecuted,
             AgentEventKind.ApprovalRequested, AgentEventKind.ApprovalResolved, AgentEventKind.Completed,
         };
 
         foreach (var kind in excluded)
             AgentEventTimelineMap.Narrative.ShouldNotContain(kind, $"{kind} is not part of the run story line");
+    }
+
+    [Fact]
+    public void Reasoning_is_a_folded_story_beat_on_the_spine()
+    {
+        // Reasoning IS surfaced now (the journal's chain-of-thought, one spine with Activity) — but as a foldable
+        // Detail/Info beat, never a milestone, and it carries the emitted kind the journal describer matches.
+        AgentEventTimelineMap.Narrative.ShouldContain(AgentEventKind.Reasoning, "reasoning surfaces as a folded story beat");
+
+        var ev = AgentEventTimelineMap.ToEvent(Event(AgentEventKind.Reasoning, "the race is two concurrent 401s…"), NodeByAgent);
+        ev.Level.ShouldBe(TimelineLevel.Detail, "reasoning folds away on the story line, like a file edit");
+        ev.Severity.ShouldBe(TimelineSeverity.Info);
+        ev.Kind.ShouldBe(AgentEventTimelineMap.ReasoningKind, "the emitted kind is the one the journal describer classifies as thinking");
     }
 
     [Theory]

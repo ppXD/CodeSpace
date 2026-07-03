@@ -55,6 +55,30 @@ public sealed class JournalWalkFlowTests
     }
 
     [Fact]
+    public async Task An_agents_reasoning_walks_into_a_thinking_step_its_edits_stay_agent()
+    {
+        // The chain-of-thought end-to-end: a reasoning block surfaces on the spine (folded) and the journal classifies it
+        // as a distinct thinking step, chronologically between the agent's narrative edits — not dropped, not an agent step.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var agentId = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentId, "code");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedAgentEventAsync(agentId, AgentEventKind.FileChanged, "edited auth/session.ts", t);
+        await SeedAgentEventAsync(agentId, AgentEventKind.Reasoning, "the race is two concurrent 401s racing refresh", t.AddSeconds(1));
+        await SeedAgentEventAsync(agentId, AgentEventKind.FinalSummary, "done — deduped the refresh", t.AddSeconds(2));
+
+        var steps = (await WalkAsync(userId, teamId, runId))!;
+
+        steps.Select(s => s.Kind).ShouldBe(new[] { JournalStepKinds.Agent, JournalStepKinds.Thinking, JournalStepKinds.Agent },
+            "the reasoning block reads as a thinking step, chronologically between the agent's narrative events");
+        var thinking = steps.Single(s => s.Kind == JournalStepKinds.Thinking);
+        thinking.Title.ShouldBe("the race is two concurrent 401s racing refresh", "the thinking step carries the reasoning text");
+        thinking.Milestone.ShouldBeFalse("a thinking step folds — never a milestone");
+    }
+
+    [Fact]
     public async Task A_foreign_run_walks_to_null()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -16,6 +16,9 @@ public static class JournalStepKinds
     /// <summary>An agent's own narrative event (a file edit, a test result, an error, its final summary).</summary>
     public const string Agent = "agent";
 
+    /// <summary>An agent's REASONING beat — a folded "thinking" summary inserted chronologically (the chain-of-thought), distinct from its narrative <see cref="Agent"/> events. The frontend renders it italic + collapsed by default.</summary>
+    public const string Thinking = "thinking";
+
     /// <summary>A run / node lifecycle beat (started / completed / failed).</summary>
     public const string Lifecycle = "lifecycle";
 
