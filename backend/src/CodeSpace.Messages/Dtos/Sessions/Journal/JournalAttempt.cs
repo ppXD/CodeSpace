@@ -31,6 +31,9 @@ public sealed record JournalAttempt
     /// <summary>Whether this is the newest attempt (the one the turn shows by default). Exactly one is latest.</summary>
     public required bool IsLatest { get; init; }
 
+    /// <summary>This attempt's terminal failure reason, when it failed — the "why it was reran" the next attempt's fork note shows. Null when it succeeded / is in flight.</summary>
+    public string? Error { get; init; }
+
     /// <summary>Whether this attempt is the one CURRENTLY focused (walked into the turn's steps). Set only on the focused turn; false on a collapsed turn's ladder.</summary>
     public bool Focused { get; init; }
 }

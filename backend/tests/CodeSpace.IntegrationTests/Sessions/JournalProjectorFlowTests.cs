@@ -74,7 +74,7 @@ public sealed class JournalProjectorFlowTests
         var sessionId = await SeedSessionAsync(teamId, "Reran turn");
 
         var t = DateTimeOffset.UtcNow;
-        var attempt1 = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, WorkflowRunStatus.Failure, createdAt: t);
+        var attempt1 = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, WorkflowRunStatus.Failure, createdAt: t, error: "vitest timed out");
         await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: attempt1, WorkflowRunStatus.Success, createdAt: t.AddMinutes(1));
 
         // attempt 1 made a decision before it failed — the walk of attempt 1 surfaces it.
@@ -94,6 +94,8 @@ public sealed class JournalProjectorFlowTests
         focused.Attempts.Select(a => (a.AttemptNumber, a.Status)).ShouldBe(new[] { (1, WorkflowRunStatus.Failure), (2, WorkflowRunStatus.Success) });
         focused.Attempts.Single(a => a.Focused).RunId.ShouldBe(attempt1, "the deep-linked attempt is flagged focused in the ladder");
         focused.Attempts.Single(a => a.IsLatest).Status.ShouldBe(WorkflowRunStatus.Success, "the newest attempt is flagged latest");
+        focused.Attempts.Single(a => a.AttemptNumber == 1).Error.ShouldBe("vitest timed out", "the failed attempt carries its reason (why it was reran); the succeeded one has none");
+        focused.Attempts.Single(a => a.AttemptNumber == 2).Error.ShouldBeNull();
     }
 
     [Fact]
@@ -334,7 +336,7 @@ public sealed class JournalProjectorFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int turnIndex, Guid? rootRunId, WorkflowRunStatus status, DateTimeOffset createdAt)
+    private async Task<Guid> SeedAttemptAsync(Guid teamId, Guid sessionId, int turnIndex, Guid? rootRunId, WorkflowRunStatus status, DateTimeOffset createdAt, string? error = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -351,7 +353,7 @@ public sealed class JournalProjectorFlowTests
         db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
-            Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId,
+            Status = status, SessionId = sessionId, SessionTurnIndex = turnIndex, RootRunId = rootRunId, Error = error,
             OutputsJson = "{}", CreatedDate = createdAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 

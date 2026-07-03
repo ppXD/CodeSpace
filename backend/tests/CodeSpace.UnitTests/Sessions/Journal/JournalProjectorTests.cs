@@ -43,6 +43,7 @@ public class JournalProjectorTests
         {
             RunId = a.RunId, AttemptNumber = i + 1, Status = a.Status, SourceType = i == 0 ? "manual" : "rerun",
             RerunFromNodeId = i == 0 ? null : "integrate",   // a rerun-from-node forks at a step; the original has no fork point
+            Error = a.Status == WorkflowRunStatus.Failure ? "the tests timed out" : null,
             CreatedDate = DateTimeOffset.UtcNow.AddMinutes(i), IsLatest = i == attempts.Length - 1,
         }).ToList();
 
@@ -180,6 +181,7 @@ public class JournalProjectorTests
         attempts.Select(a => a.RunId).ShouldBe(new[] { a1, a2, a3 });
         attempts.Select(a => a.SourceType).ShouldBe(new[] { "manual", "rerun", "rerun" }, "the rerun source is carried per attempt");
         attempts.Select(a => a.RerunFromNodeId).ShouldBe(new[] { null, "integrate", "integrate" }, "the fork node (rerun-from-node) is carried — null for the original attempt");
+        attempts.Select(a => a.Error).ShouldBe(new[] { "the tests timed out", null, null }, "the failed attempt's reason is carried (why it was reran); a non-failed attempt has none");
         attempts.Single(a => a.IsLatest).RunId.ShouldBe(a3, "the newest attempt is flagged latest");
         attempts.Single(a => a.Focused).RunId.ShouldBe(a2, "exactly the anchored attempt is focused");
         attempts.Count(a => a.Focused).ShouldBe(1);
