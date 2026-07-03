@@ -191,7 +191,7 @@ public static class RoomNarrative
             blocks.Add(fanout);
         }
 
-        if (FilesStat(idPrefix, seq, facts) is { } files) blocks.Add(files);
+        if (FilesStat(idPrefix, seq, facts, FileProducers(facts, agentById)) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
 
         if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
@@ -425,8 +425,9 @@ public static class RoomNarrative
 
     // ─── stat rows (label · detail, design vocabulary) ──────────────────────────────
 
-    private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f) =>
-        f.ChangedFiles.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, f.ChangedFiles.Count), Items = f.ChangedFiles.Select(p => new StatItem { Text = p }).ToList() };
+    /// <summary>The "Files changed" row. Each path is attributed to its producing agent ("from {label}") via the SAME newest-accepted-writer-wins map the RESULT card uses — so when several agents (across waves) wrote one path, the row names whose version is the FINAL one. An un-attributed path (no per-agent entry — e.g. a supervisor-direct edit, or beyond the per-agent file cap) carries no attribution.</summary>
+    private static StatBlock? FilesStat(string idPrefix, long seq, RoomTurnFacts f, IReadOnlyDictionary<string, (Guid AgentRunId, string Label)> producers) =>
+        f.ChangedFiles.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:files", Seq = seq, Kind = "files", Label = "Files changed", Detail = FilesDetail(f.Additions, f.Deletions, f.ChangedFiles.Count), Items = f.ChangedFiles.Select(p => new StatItem { Text = p, Detail = producers.TryGetValue(p, out var pr) ? $"from {pr.Label}" : null }).ToList() };
 
     /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>

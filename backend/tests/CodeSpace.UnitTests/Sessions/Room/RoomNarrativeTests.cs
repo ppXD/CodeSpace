@@ -433,6 +433,41 @@ public class RoomNarrativeTests
         file.Producer.ShouldBe("Research");
     }
 
+    [Fact]
+    public void The_files_row_attributes_each_path_to_its_newest_producing_agent()
+    {
+        var wave1 = Guid.NewGuid();
+        var wave2 = Guid.NewGuid();
+
+        var spawn1 = new RunPhase
+        {
+            Id = "decision-2", Label = "Spawn", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 2, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = wave1, Status = nameof(AgentRunStatus.Succeeded), Role = "first pass" } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+        };
+        var spawn2 = new RunPhase
+        {
+            Id = "decision-5", Label = "Spawn", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded,
+            Order = SupervisorPhaseSource.OrderBase + 5, SourceKey = SupervisorPhaseSource.Key,
+            Agents = new[] { new PhaseAgentRef { AgentRunId = wave2, Status = nameof(AgentRunStatus.Succeeded), Role = "second pass" } },
+            Metrics = new PhaseMetrics { AgentCount = 1 },
+        };
+
+        // report.md was written by BOTH waves (the final version is wave 2's); notes.md only by wave 1; orphan.md by no agent.
+        var facts = new RoomTurnFacts
+        {
+            ChangedFiles = new[] { "notes.md", "orphan.md", "report.md" },
+            AgentFiles = new Dictionary<Guid, IReadOnlyList<string>> { [wave1] = new[] { "report.md", "notes.md" }, [wave2] = new[] { "report.md" } },
+        };
+
+        var files = Build(new[] { Tape("plan", 1), spawn1, spawn2 }, WorkflowRunStatus.Failure, facts: facts).Blocks.OfType<StatBlock>().Single(b => b.Kind == "files");
+
+        files.Items.Single(i => i.Text == "report.md").Detail.ShouldBe("from second pass", "a file written across waves is attributed to its NEWEST (final) writer");
+        files.Items.Single(i => i.Text == "notes.md").Detail.ShouldBe("from first pass", "a single-writer file names its producer");
+        files.Items.Single(i => i.Text == "orphan.md").Detail.ShouldBeNull("a path no agent claims carries no attribution");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     // ─── the plan checklist (triad S2b) ─────────────────────────────────────────
