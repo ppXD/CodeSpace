@@ -19,10 +19,13 @@ public static class SupervisorDecisionTimelineMap
     /// <summary>The supervisor source's provenance key — stamped on every event this mapper emits.</summary>
     public const string Key = "supervisor";
 
+    /// <summary>The timeline event id (and thus the journal step id) for a decision row — the ONE format both this map and the journal facts sources key by, so an enrichment source can address a decision's step without the format drifting.</summary>
+    public static string EventId(SupervisorDecisionRecord d) => $"supervisor-{d.Id:N}";
+
     public static RunTimelineEvent ToEvent(SupervisorDecisionRecord d) =>
         new()
         {
-            Id = $"supervisor-{d.Id:N}",
+            Id = EventId(d),
             Kind = $"supervisor.{d.DecisionKind}",
             Title = TitleFor(d),
             Summary = SummaryFor(d),

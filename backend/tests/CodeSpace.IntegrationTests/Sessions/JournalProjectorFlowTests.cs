@@ -120,6 +120,30 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_decision_step_carries_the_supervisors_authored_rationale()
+    {
+        // The facts-enrichment path end-to-end over real data: a decision whose payload carries a rationale surfaces it on
+        // its journal step (the chain-of-thought), read off the durable decision tape by the real facts source — NOT from
+        // the timeline event. A decision with no rationale stays bare.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Reasoned run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Task", resultSummary: "done");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Plan, t, RationalePayload("Break the work into 3 tasks", "the goal names 3 files"));
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Stop, t.AddSeconds(1));
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var steps = view!.Turns.Single(t => t.Focused).Steps;
+        steps[0].Title.ShouldBe("Supervisor planned the work");
+        steps[0].Rationale.ShouldBe("Break the work into 3 tasks · Evidence: the goal names 3 files", "the plan step carries the model's authored rationale, read off the decision payload");
+        steps[1].Rationale.ShouldBeNull("the stop authored no rationale — it stays bare");
+    }
+
+    [Fact]
     public async Task A_foreign_session_projects_to_null()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -129,7 +153,10 @@ public sealed class JournalProjectorFlowTests
             .ShouldBeNull("a run that isn't the team's is null — no existence leak");
     }
 
-    private async Task SeedDecisionAsync(Guid runId, Guid teamId, string kind, DateTimeOffset at)
+    private static string RationalePayload(string why, string evidence) =>
+        JsonSerializer.Serialize(new { rationale = new { why, evidence } });
+
+    private async Task SeedDecisionAsync(Guid runId, Guid teamId, string kind, DateTimeOffset at, string payloadJson = "{}")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -137,7 +164,7 @@ public sealed class JournalProjectorFlowTests
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
-            DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = null,
+            DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = null,
             IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
             CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
         });
