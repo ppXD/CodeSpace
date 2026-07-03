@@ -36,6 +36,15 @@ public sealed record JournalStep
     /// <summary>An optional secondary line (an error, an answer, a model's token cost). Null when none.</summary>
     public string? Detail { get; init; }
 
+    /// <summary>
+    /// The actor's authored REASONING for this step, when it published one — a decision's "why · Evidence: …" line
+    /// (the supervisor's rationale for planning / spawning / retrying / stopping). This is the chain-of-thought the
+    /// journal surfaces so a run reads as reasoned, not just a list of actions. Null when the step carries no authored
+    /// rationale. Enriched by a <c>JournalFactsSource</c> off the durable record — NOT on the raw timeline event, so the
+    /// Activity spine stays a plain event log while the journal reads its facts on top.
+    /// </summary>
+    public string? Rationale { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 

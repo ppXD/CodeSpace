@@ -26,7 +26,8 @@ public class JournalWalkTests
         OccurredAt = DateTimeOffset.UtcNow, Order = 0, SourceKey = sourceKey,
     };
 
-    private static JournalWalk WalkOver(IReadOnlyList<RunTimelineEvent>? events) => new(new FakeTimeline(events), Registry);
+    private static JournalWalk WalkOver(IReadOnlyList<RunTimelineEvent>? events, JournalFacts? facts = null) =>
+        new(new FakeTimeline(events), Registry, new FakeFacts(facts ?? JournalFacts.Empty));
 
     [Fact]
     public async Task Walks_the_events_into_steps_in_order_each_with_a_distinct_cursor()
@@ -123,10 +124,40 @@ public class JournalWalkTests
         steps[0].Cursor.ShouldNotBeNullOrEmpty("even a fallback step gets a cursor");
     }
 
+    [Fact]
+    public async Task Enriches_a_step_with_the_facts_gathered_for_its_id_leaving_the_rest_bare()
+    {
+        // The enrichment seam: the walk folds each step's gathered facts (rationale/agents/diffstat — the reads a pure
+        // describer can't do) onto the step keyed by the SAME id. A step with no facts stays bare, so enrichment is
+        // additive and never fabricated.
+        var facts = new JournalFacts
+        {
+            ByStepId = new Dictionary<string, JournalStepFacts> { ["supervisor-1"] = new() { Rationale = "Spawned to unblock the build · Evidence: CI red" } },
+        };
+
+        var walk = WalkOver(new[]
+        {
+            Event("supervisor-1", "supervisor", title: "Supervisor spawned 1 agent"),
+            Event("tool-1", "tool-calls", title: "Called git.open_pr"),
+        }, facts);
+
+        var steps = (await walk.WalkAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None))!;
+
+        steps.Single(s => s.Id == "supervisor-1").Rationale.ShouldBe("Spawned to unblock the build · Evidence: CI red", "the decision step carries the rationale gathered for its id");
+        steps.Single(s => s.Id == "tool-1").Rationale.ShouldBeNull("a step with no gathered facts stays bare — enrichment is never fabricated");
+    }
+
     private sealed class FakeTimeline : IRunTimelineProjector
     {
         private readonly IReadOnlyList<RunTimelineEvent>? _events;
         public FakeTimeline(IReadOnlyList<RunTimelineEvent>? events) => _events = events;
         public Task<IReadOnlyList<RunTimelineEvent>?> ProjectAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_events);
+    }
+
+    private sealed class FakeFacts : IJournalFactsGatherer
+    {
+        private readonly JournalFacts _facts;
+        public FakeFacts(JournalFacts facts) => _facts = facts;
+        public Task<JournalFacts> GatherAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_facts);
     }
 }
