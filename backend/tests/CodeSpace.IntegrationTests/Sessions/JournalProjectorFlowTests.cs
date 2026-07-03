@@ -144,6 +144,57 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_spawn_decision_step_carries_a_card_for_every_agent_it_staged()
+    {
+        // The agent-card enrichment end-to-end over real data: a spawn decision whose outcome staged two agents surfaces a
+        // card per agent on its journal step — labels + statuses read off the real AgentRun rows through the shared metrics
+        // reader (the SAME numbers the phase board reads), keyed to the decision's step. Proves the tape→ids→batched-read
+        // →cards wiring, not just the pure mapping.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Fan-out run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Build it", resultSummary: "done");
+
+        var agentA = await SeedAgentRunAsync(teamId, run1, goal: "Write the API", status: AgentRunStatus.Succeeded);
+        var agentB = await SeedAgentRunAsync(teamId, run1, goal: "Write the UI", status: AgentRunStatus.Running);
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedSpawnDecisionAsync(run1, teamId, t, new[] { agentA, agentB });
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var spawn = view!.Turns.Single(t => t.Focused).Steps.Single(s => s.Kind == JournalStepKinds.Decision);
+        spawn.Agents.Count.ShouldBe(2, "one card per staged agent");
+        spawn.Agents.Select(a => a.Label).ShouldBe(new[] { "Write the API", "Write the UI" }, ignoreOrder: true);
+        spawn.Agents.Single(a => a.Label == "Write the API").AgentRunId.ShouldBe(agentA);
+    }
+
+    [Fact]
+    public async Task A_staged_agent_with_no_readable_row_is_skipped_never_crashed_or_fabricated()
+    {
+        // The load-bearing skip guard: a spawn stages two ids but only one has a persisted, team-scoped AgentRun row (the
+        // other is stale / another team's / not yet written). The card for the present agent surfaces; the absent id is
+        // silently dropped — NOT crashed (a KeyNotFoundException on the metrics lookup) and NOT fabricated (a phantom card
+        // for an agent that isn't there). Exercises the `.Where(metrics.ContainsKey)` branch the happy path never reaches.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Partial fan-out");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Build it", resultSummary: "done");
+
+        var present = await SeedAgentRunAsync(teamId, run1, goal: "Write the API", status: AgentRunStatus.Succeeded);
+        var rowless = Guid.NewGuid();   // staged in the outcome, but no AgentRun row exists for it
+
+        await SeedSpawnDecisionAsync(run1, teamId, DateTimeOffset.UtcNow, new[] { present, rowless });
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var spawn = view!.Turns.Single(t => t.Focused).Steps.Single(s => s.Kind == JournalStepKinds.Decision);
+        spawn.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { present }, "only the agent with a readable row gets a card — the rowless id is skipped, not crashed or fabricated");
+    }
+
+    [Fact]
     public async Task A_foreign_session_projects_to_null()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -155,6 +206,42 @@ public sealed class JournalProjectorFlowTests
 
     private static string RationalePayload(string why, string evidence) =>
         JsonSerializer.Serialize(new { rationale = new { why, evidence } });
+
+    private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = $"agent#{agentRunId:N}",
+            Harness = "codex-cli", Status = status,
+            TaskJson = JsonSerializer.Serialize(new { goal, harness = "codex-cli", model = "claude-opus-4-8" }),
+            StartedAt = now, CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return agentRunId;
+    }
+
+    private async Task SeedSpawnDecisionAsync(Guid runId, Guid teamId, DateTimeOffset at, IReadOnlyList<Guid> agentRunIds)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = agentRunIds.Select(id => id.ToString()), agentCount = agentRunIds.Count }),
+            IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
+            CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
 
     private async Task SeedDecisionAsync(Guid runId, Guid teamId, string kind, DateTimeOffset at, string payloadJson = "{}")
     {

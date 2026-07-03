@@ -51,6 +51,14 @@ public sealed record JournalStep
     /// <summary>Whether this step is a story MILESTONE (shown by default) vs a DETAIL that folds into a "N steps" disclosure. The describer sets it from the event's prominence.</summary>
     public bool Milestone { get; init; }
 
+    /// <summary>
+    /// The agents this step SPAWNED, when it is a decision that staged them (a spawn's fan-out, a retry's re-run) — each a
+    /// render-ready card (goal · status · files · tokens · duration). Empty for every non-spawning step. Enriched by a
+    /// <c>JournalFactsSource</c> off the durable agent records; a re-spawn wave is just a LATER decision step carrying its
+    /// own cards, so the chronological journal shows every wave with no special grouping.
+    /// </summary>
+    public IReadOnlyList<JournalAgentCard> Agents { get; init; } = Array.Empty<JournalAgentCard>();
+
     /// <summary>The agent run this step belongs to, when applicable (a spawn's agent, a tool call's agent) — provenance the frontend deep-links. Null for a run-level step.</summary>
     public string? AgentRunId { get; init; }
 

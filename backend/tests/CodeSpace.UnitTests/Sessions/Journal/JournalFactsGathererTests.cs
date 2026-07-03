@@ -1,4 +1,6 @@
 using CodeSpace.Core.Services.Sessions.Journal;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Journal;
@@ -60,6 +62,27 @@ public class JournalFactsGathererTests
         var facts = await gatherer.GatherAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
 
         facts.For("supervisor-1")!.Rationale.ShouldBe("first", "the empty later contribution does NOT erase the earlier set field");
+    }
+
+    [Fact]
+    public async Task Two_sources_setting_DIFFERENT_fields_compose_onto_one_step()
+    {
+        // The end-to-end genericity property: a rationale source and an agent-cards source both contribute to the SAME
+        // step id but set DIFFERENT fields — the merged bundle carries BOTH. This is the "independent enrichers stack"
+        // guarantee at the gatherer level (JournalStepFacts.Merge proves it in isolation; this proves the fold applies it).
+        var cards = new[] { new JournalAgentCard { AgentRunId = Guid.NewGuid(), Label = "task", Status = AgentRunStatus.Running } };
+
+        var gatherer = new JournalFactsGatherer(new IJournalFactsSource[]
+        {
+            Source(("supervisor-1", new JournalStepFacts { Rationale = "why it spawned" })),
+            Source(("supervisor-1", new JournalStepFacts { Agents = cards })),
+        });
+
+        var facts = await gatherer.GatherAsync(Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
+
+        var stepFacts = facts.For("supervisor-1")!;
+        stepFacts.Rationale.ShouldBe("why it spawned", "the rationale source's contribution survives");
+        stepFacts.Agents.ShouldBe(cards, "the agent-cards source's contribution survives — independent sources stack onto one step");
     }
 
     [Fact]

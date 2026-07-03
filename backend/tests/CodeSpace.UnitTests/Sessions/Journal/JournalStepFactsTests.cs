@@ -1,4 +1,6 @@
 using CodeSpace.Core.Services.Sessions.Journal;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Journal;
@@ -34,5 +36,23 @@ public class JournalStepFactsTests
     {
         new JournalStepFacts { Rationale = null }.Merge(new JournalStepFacts { Rationale = "right" })
             .Rationale.ShouldBe("right", "the left gap is filled by the right — a source fills a field an earlier one left empty");
+    }
+
+    [Fact]
+    public void Different_fields_from_two_sources_COMPOSE_onto_one_step()
+    {
+        // The genericity property the whole "drop-a-source" claim rests on, now DIRECTLY testable with two fields: a
+        // rationale source (sets only Rationale) and an agent-cards source (sets only Agents) contribute to the SAME step,
+        // and BOTH survive the merge — neither clobbers the other. This is what a null-on-one-side same-field case could
+        // never prove (Lesson 7). Independent enrichers stack.
+        var cards = new[] { new JournalAgentCard { AgentRunId = Guid.NewGuid(), Label = "task", Status = AgentRunStatus.Succeeded } };
+
+        var rationaleOnly = new JournalStepFacts { Rationale = "why it spawned" };
+        var agentsOnly = new JournalStepFacts { Agents = cards };
+
+        var merged = rationaleOnly.Merge(agentsOnly);
+
+        merged.Rationale.ShouldBe("why it spawned", "the rationale source's field survives");
+        merged.Agents.ShouldBe(cards, "the agent-cards source's field survives — the two independent fields compose, neither clobbers");
     }
 }
