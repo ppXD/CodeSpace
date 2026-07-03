@@ -52,4 +52,13 @@ public static class SupervisorDecisionKinds
     /// <c>is Spawn or Retry</c> copies (the resolver loop #379 added <see cref="Resolve"/> here exactly once).
     /// </summary>
     public static bool StagesAgents(string decisionKind) => decisionKind is Spawn or Retry or Resolve;
+
+    /// <summary>
+    /// Whether a verb CLOSES the supervisor turn — <see cref="Stop"/> finishes the loop, <see cref="Merge"/> synthesizes
+    /// then self-advances to a stop, <see cref="AskHuman"/> parks on a human. <see cref="Spawn"/> / <see cref="Retry"/> /
+    /// <see cref="Resolve"/> stage agents (mid-work) and <see cref="Plan"/> opens a round, so NONE of them close a turn.
+    /// The single "did this verb end the turn" classifier — a tape whose last decision is none of these never reached a
+    /// clean close (e.g. the decision loop crashed mid-LLM-call before it could persist its next verb).
+    /// </summary>
+    public static bool ClosesTurn(string decisionKind) => decisionKind is Stop or Merge or AskHuman;
 }

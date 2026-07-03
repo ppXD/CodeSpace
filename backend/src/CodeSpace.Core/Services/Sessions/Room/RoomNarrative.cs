@@ -199,6 +199,13 @@ public static class RoomNarrative
         // Pending decisions are "now" — the current ask.
         blocks.AddRange(decisions);
 
+        // A supervisor turn that FAILED after real agent work but never recorded a turn-closing decision (no
+        // stop/merge/ask_human) crashed on its NEXT decision — the decision loop died mid-LLM-call (e.g. an OpenAI
+        // gateway timeout) before it could persist. Emit a truthful connecting beat so the trajectory doesn't jump from
+        // the last agent group straight to the red error: the reader sees the supervisor WAS attempting its next step.
+        if (status == WorkflowRunStatus.Failure && SupervisorCrashedBeforeDeciding(narrativePhases))
+            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:next-step-failed", Seq = seq, Text = "Supervisor's next step failed before it could decide.", Tone = NarrativeTone.Info });
+
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
 
@@ -334,6 +341,17 @@ public static class RoomNarrative
     private static bool IsActive(WorkflowRunStatus status) => status is WorkflowRunStatus.Pending or WorkflowRunStatus.Enqueued or WorkflowRunStatus.Running or WorkflowRunStatus.Suspended;
 
     private static bool IsTerminal(WorkflowRunStatus status) => status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
+
+    /// <summary>
+    /// Whether a FAILED supervisor turn ran real agent work yet its tape carries NO turn-closing decision (no
+    /// stop/merge/ask_human) — the decision loop crashed (e.g. an OpenAI gateway timeout) before it could record its
+    /// next verb. Scoped to SUPERVISOR phases so a flow.map fan-out failure — whose agent-bearing phases are structural
+    /// node phases, never a closing verb — does NOT false-fire. A clean stop, a mid-work failure that DID reach a
+    /// terminal decision, or a failure with no supervisor agents → false → the turn projects byte-identically.
+    /// </summary>
+    private static bool SupervisorCrashedBeforeDeciding(IReadOnlyList<RunPhase> narrativePhases) =>
+        narrativePhases.Any(p => p.SourceKey == SupervisorPhaseSource.Key && p.Agents.Count > 0)
+        && !narrativePhases.Any(p => p.SourceKey == SupervisorPhaseSource.Key && SupervisorDecisionKinds.ClosesTurn(p.Kind));
 
     // ─── the plan checklist (the whole current plan as a live tracker) ──────────────
 

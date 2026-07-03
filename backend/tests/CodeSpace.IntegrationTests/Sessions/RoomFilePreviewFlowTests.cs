@@ -1,9 +1,11 @@
+using System.IO;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -134,10 +136,70 @@ public class RoomFilePreviewFlowTests
         (await PreviewAsync(runId, "shared.md", teamId, older))!.Text.ShouldBe("OLDER", "scoping to an agent returns ITS own version");
     }
 
+    [Fact]
+    public async Task A_purged_offloaded_patch_degrades_to_an_expired_notice_instead_of_a_500()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        // The agent's diff was OFFLOADED (Patch empty, PatchArtifactId set) and its blob has since been PURGED — the
+        // durable metadata row lives on, the file is gone (the classic dev case: the store is a temp dir the OS cleaned).
+        var artifactId = await SeedPurgedPatchArtifactAsync(teamId);
+        await AddOffloadedAgentAsync(teamId, runId, new[] { "docs/plan.md" }, artifactId);
+
+        var preview = await PreviewAsync(runId, "docs/plan.md", teamId);
+
+        preview.ShouldNotBeNull("a purged artifact must degrade gracefully, never propagate as a 500");
+        preview!.Kind.ShouldBe("unavailable");
+        preview.Text.ShouldBeNull();
+        preview.Note.ShouldNotBeNull();
+        preview.Note!.ShouldContain("expired", customMessage: "the notice tells the operator the saved content is gone — not a bare 'couldn't load'");
+    }
+
     private async Task<RoomFilePreview?> PreviewAsync(Guid runId, string path, Guid teamId, Guid? agentRunId = null)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRoomFilePreviewService>().PreviewAsync(runId, path, teamId, agentRunId, CancellationToken.None);
+    }
+
+    /// <summary>Seed a workflow_artifact METADATA row whose blob is MISSING — an offloaded storage_url UNDER the store root (so it passes the backend's under-root check) pointing at a sharded file that was never written. Reading it throws FileNotFoundException, exactly like a temp-cleaned artifact.</summary>
+    private async Task<Guid> SeedPurgedPatchArtifactAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var sha = Convert.ToHexString(Guid.NewGuid().ToByteArray().Concat(Guid.NewGuid().ToByteArray()).ToArray()).ToLowerInvariant();   // 64 hex, unique → never on disk
+        var root = Path.GetFullPath(Environment.GetEnvironmentVariable(LocalFileArtifactBlobBackend.StoreDirEnvVar) is { Length: > 0 } d ? d : Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
+        var missing = Path.Combine(root, sha[..2], sha.Substring(2, 2), sha);
+
+        var id = Guid.NewGuid();
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = id, TeamId = teamId, Sha256 = sha, ContentType = "text/x-diff", SizeBytes = 22193,
+            InlineBytes = null, StorageUrl = new Uri(missing).AbsoluteUri,
+        });
+
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task AddOffloadedAgentAsync(Guid teamId, Guid runId, IReadOnlyList<string> changedFiles, Guid patchArtifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+            ChangedFiles = changedFiles.ToList(), Patch = "", PatchArtifactId = patchArtifactId,
+        };
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Harness = "codex-cli",
+            Status = AgentRunStatus.Succeeded, CreatedDate = DateTimeOffset.UtcNow, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private static string AddedFile(string path, string body) =>

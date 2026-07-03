@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
@@ -45,7 +46,8 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
         var patchRef = await LocateFilePatchAsync(runId, teamId, target, agentRunId, cancellationToken).ConfigureAwait(false);
         if (patchRef is null) return Unavailable(target, sourceUrl, "This file isn't part of the turn's change set.");
 
-        var patch = await _offloader.ResolveAsync(teamId, patchRef.Value.Inline, patchRef.Value.ArtifactId, cancellationToken).ConfigureAwait(false);
+        var patch = await ResolvePatchAsync(teamId, patchRef.Value, cancellationToken).ConfigureAwait(false);
+        if (patch is null) return Unavailable(target, sourceUrl, "This file's saved content has expired from the store — open it in the pull request.");
 
         var view = UnifiedPatchReader.Read(patch, target);
         if (view is null) return Unavailable(target, sourceUrl, "This file's change is too large to reconstruct for an inline preview — open it in the pull request.");
@@ -89,6 +91,20 @@ public sealed class RoomFilePreviewService : IRoomFilePreviewService, IScopedDep
     {
         try { return JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options); }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// Resolve the captured patch text (inline, or the offloaded blob). A purged / unresolvable offloaded artifact — its
+    /// blob was reaped from the store while the durable metadata row lives on (the classic dev case: the store is a temp
+    /// dir the OS cleaned) — yields null so the caller returns a graceful "expired" preview instead of a 500. Narrow by
+    /// design: <see cref="IOException"/> covers the missing blob file / purged shard dir, <see cref="InvalidOperationException"/>
+    /// the artifact layer's url-validation / neither-inline-nor-url guards; a real programming bug (or a cancellation)
+    /// still surfaces.
+    /// </summary>
+    private async Task<string?> ResolvePatchAsync(Guid teamId, PatchRef patchRef, CancellationToken cancellationToken)
+    {
+        try { return await _offloader.ResolveAsync(teamId, patchRef.Inline, patchRef.ArtifactId, cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException) { return null; }
     }
 
     /// <summary>The patch reference (inline text or offloaded id) of the result's repo that changed <paramref name="path"/> — per-repo first, then the single-repo top level.</summary>
