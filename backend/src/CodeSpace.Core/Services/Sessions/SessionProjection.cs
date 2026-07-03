@@ -74,6 +74,7 @@ internal static class SessionProjection
             RerunFromNodeId = r.RerunFromNodeId,
             CreatedDate = r.CreatedDate,
             IsLatest = i == ordered.Count - 1,
+            Error = r.Error,
         }).ToList();
 
     private static string? ClipResult(string outputsJson)

@@ -151,6 +151,7 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
                 RerunFromNodeId = a.RerunFromNodeId,
                 IsLatest = a.IsLatest,
                 Focused = a.RunId == focusedRunId,
+                Error = a.Error,
             }).ToList();
 
     /// <summary>The turn/attempt wall-clock — anchored on the immutable enqueue time (a resumed run resets StartedAt, which would under-report the whole elapsed); live elapsed since it started while in-flight, null before then. Mirrors the room projector.</summary>

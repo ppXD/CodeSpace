@@ -99,6 +99,9 @@ public sealed record SessionTurnAttempt
 
     /// <summary>True for the newest attempt — the one the turn shows by default.</summary>
     public required bool IsLatest { get; init; }
+
+    /// <summary>This attempt's terminal failure reason, when it failed — so a reader (or the next attempt's fork note) sees WHY it was reran. Null when it succeeded / is in flight.</summary>
+    public string? Error { get; init; }
 }
 
 /// <summary>One repo's produced branch within a multi-repo turn.</summary>
