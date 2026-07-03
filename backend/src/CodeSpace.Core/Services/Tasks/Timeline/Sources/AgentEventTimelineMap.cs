@@ -6,19 +6,25 @@ namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
 
 /// <summary>
 /// Pure mapping from ONE <c>agent_run_event</c> harness log row to a narrative timeline event. Only the
-/// NARRATIVE-worthy kinds (<see cref="Narrative"/>: file edits, test output, errors, warnings, the final summary)
-/// become events — the verbose chatter (assistant text, reasoning, tool/command lines, queued/started/completed
-/// lifecycle) stays in the per-agent timeline + the Trace tab, not the run story line. Extracted from the source so
-/// the kind set + the per-event shape are unit-testable without a database.
+/// NARRATIVE-worthy kinds (<see cref="Narrative"/>: reasoning, file edits, test output, errors, warnings, the final
+/// summary) become events — the remaining chatter (assistant text, tool/command lines, queued/started/completed
+/// lifecycle) stays in the per-agent timeline + the Trace tab, not the run story line. Reasoning IS surfaced (a folded
+/// <see cref="TimelineLevel.Detail"/> beat) so the journal can show the chain-of-thought and Activity/journal converge on
+/// one spine; it is emitted per thinking-BLOCK (bounded like file edits), not per token, so it never floods. Extracted
+/// from the source so the kind set + the per-event shape are unit-testable without a database.
 /// </summary>
 public static class AgentEventTimelineMap
 {
     /// <summary>The agent-events source's provenance key — stamped on every event this mapper emits.</summary>
     public const string Key = "agent-events";
 
-    /// <summary>The narrative-worthy harness event kinds — the ONLY kinds that surface on the run story line. Also the source's SQL filter (kind IN …), so a verbose run doesn't flood the timeline.</summary>
+    /// <summary>The timeline <see cref="RunTimelineEvent.Kind"/> a reasoning event carries (<c>agent.Reasoning</c>) — the one string the journal describer matches to classify a THINKING step, so the sub-classification can't drift from the emitted kind.</summary>
+    public const string ReasoningKind = "agent." + nameof(AgentEventKind.Reasoning);
+
+    /// <summary>The narrative-worthy harness event kinds — the ONLY kinds that surface on the run story line. Also the source's SQL filter (kind IN …), so a verbose run doesn't flood the timeline. Reasoning rides at <see cref="TimelineLevel.Detail"/> (folded), bounded per thinking-block.</summary>
     public static readonly AgentEventKind[] Narrative =
     {
+        AgentEventKind.Reasoning,
         AgentEventKind.FileChanged,
         AgentEventKind.TestOutput,
         AgentEventKind.Error,

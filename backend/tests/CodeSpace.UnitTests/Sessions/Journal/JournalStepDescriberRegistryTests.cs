@@ -47,6 +47,17 @@ public class JournalStepDescriberRegistryTests
         Registry.Describe(Event("run-record", kind: recordKind)).Kind.ShouldBe(expectedKind);
     }
 
+    [Theory]
+    // An agent's reasoning block reads as a distinct thinking step (the folded chain-of-thought); its other narrative
+    // events (a file edit, a test result, its final summary) stay a plain agent step.
+    [InlineData("agent.Reasoning", JournalStepKinds.Thinking)]
+    [InlineData("agent.FileChanged", JournalStepKinds.Agent)]
+    [InlineData("agent.FinalSummary", JournalStepKinds.Agent)]
+    public void An_agent_reasoning_reads_as_a_thinking_step_the_rest_agent(string agentKind, string expectedKind)
+    {
+        Registry.Describe(Event("agent-events", kind: agentKind)).Kind.ShouldBe(expectedKind);
+    }
+
     [Fact]
     public void An_unknown_source_still_becomes_a_step_via_the_fallback()
     {
