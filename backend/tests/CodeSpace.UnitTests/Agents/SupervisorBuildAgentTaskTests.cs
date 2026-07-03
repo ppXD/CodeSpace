@@ -57,6 +57,10 @@ public class SupervisorBuildAgentTaskTests
         task.Environment.ShouldBeEmpty("untouched → the record default empty environment");
         task.TimeoutSeconds.ShouldBe(3600, "untouched → the record default timeout (1h)");
         task.Workspace.ShouldBeNull("no profile → no related repos → null Workspace → byte-identical single-repo execution (S7)");
+
+        // S6: an EXPLICIT 0, never null — null would let an Improve output-review imply an in-run revise round,
+        // stacking with the supervisor's own retry loop (the supervisor IS its units' revision mechanism).
+        task.MaxReviseRounds.ShouldBe(0, "supervisor units never self-revise — the supervisor's retry loop owns their revision");
     }
 
     [Fact]

@@ -284,10 +284,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 var reviseSpec = ApplyEgressPolicy(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
 
                 var priorTranscript = result.Transcript;
+                var priorUsage = result.TokenUsage;
                 result = await RunHarnessAsync(agentRunId, harness, runner, reviseSpec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round), cancellationToken).ConfigureAwait(false);
-                result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), ReviseRounds = round };
+                result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
 
-                result = await VerifyProducedWorkAsync(agentRunId, run, harness, reviseTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+                // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
+                // output critic must judge goal-alignment against what the task actually asked for, not the feedback
+                // wrapper (which quotes the failure and could bias or blind the reviewer).
+                result = await VerifyProducedWorkAsync(agentRunId, run, harness, reviseTask with { Goal = effectiveTask.Goal }, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
             }
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
@@ -882,7 +886,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static string? ReviseReasonFor(AgentTask task, AgentRunResult result)
     {
         if (result is { Status: AgentRunStatus.Failed, ExitReason: "acceptance-failed", AcceptancePassed: false }
-            && result.AcceptanceDetail is { } detail && !detail.StartsWith("grade-error:", StringComparison.Ordinal))
+            && result.AcceptanceDetail is { } detail && IsAgentFixableOracleFailure(result, detail))
             return $"The objective acceptance check failed: {detail}";
 
         if (task.OutputReviewMode == ReviewMode.Improve && result is { Status: AgentRunStatus.NeedsReview, ExitReason: "output-flagged", ReviewFeedback: { Length: > 0 } feedback })
@@ -890,6 +894,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return null;
     }
+
+    /// <summary>An oracle failure the agent can plausibly fix with another pass. A real check verdict always is. A <c>grade-error:</c> is the grader's own failure — infra. <c>no-branch-or-repo</c> is fixable ONLY when the run produced NO work (the fix is to do the work); when work EXISTS but no branch published, the PUBLISH failed (credential-less clone / push infra) and another agent pass would burn the whole budget without ever changing that.</summary>
+    private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
+        !detail.StartsWith("grade-error:", StringComparison.Ordinal)
+        && !(detail == "no-branch-or-repo" && (result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch)));
+
+    /// <summary>Sum the rounds' token usage — the final result must bill the WHOLE run (the cost plane prices <c>ResultJson.TokenUsage</c>), not just the last round. Null when neither round reported usage.</summary>
+    internal static AgentTokenUsage? SumTokenUsage(AgentTokenUsage? prior, AgentTokenUsage? current) =>
+        prior is null ? current
+        : current is null ? prior
+        : new AgentTokenUsage { InputTokens = prior.InputTokens + current.InputTokens, OutputTokens = prior.OutputTokens + current.OutputTokens };
 
     /// <summary>
     /// The task for one revise round: the SAME contract with the failure fed back as the goal. WARM when the finished

@@ -37,6 +37,35 @@ public sealed class AgentRunSpoolReaperTests
     }
 
     [Fact]
+    public void RoundSpoolFamily_finds_every_revise_round_sibling_not_just_the_handles_last_round()
+    {
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
+        var root = Path.Combine(Path.GetTempPath(), "cs-reaper-family-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, root);
+
+            var runId = Guid.NewGuid();
+            Directory.CreateDirectory(Path.Combine(root, runId.ToString("N")));                    // round 0
+            Directory.CreateDirectory(Path.Combine(root, $"{runId:N}-r1"));                        // revise round 1
+            Directory.CreateDirectory(Path.Combine(root, $"{runId:N}-r2"));                        // revise round 2 (the handle points HERE)
+            Directory.CreateDirectory(Path.Combine(root, Guid.NewGuid().ToString("N")));           // another run — must not match
+
+            var family = AgentRunSpoolReaper.RoundSpoolFamily(runId);
+
+            family.ShouldContain(Path.Combine(root, runId.ToString("N")), "round 0's spool holds raw output + the config home — it must age out too");
+            family.ShouldContain(Path.Combine(root, $"{runId:N}-r1"));
+            family.ShouldContain(Path.Combine(root, $"{runId:N}-r2"));
+            family.Count.ShouldBe(3, "exactly this run's rounds — never another run's spool");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original);
+            try { Directory.Delete(root, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
     public void IsUnderSpoolRoot_accepts_only_paths_strictly_under_the_spool_root()
     {
         var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);

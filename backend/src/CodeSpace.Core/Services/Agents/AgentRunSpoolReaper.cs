@@ -93,6 +93,14 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         if (handle?.SpoolDirectory is { } dir && IsUnderSpoolRoot(dir))
             DeleteQuietly(dir);
 
+        // S6: a revised run leaves one spool PER ROUND (ReviseSpoolKey) and the handle points only at the LAST
+        // round's — so sweep the run's whole spool family (the bare round-0 dir + every "-rN" sibling) through the
+        // same containment guard. Without this, every earlier round's raw un-redacted output + per-round config home
+        // (MCP token declaration, session transcript) would sit on disk forever, defeating the retention window.
+        foreach (var sibling in RoundSpoolFamily(runId))
+            if (IsUnderSpoolRoot(sibling))
+                DeleteQuietly(sibling);
+
         // Backstop the durable runner's per-terminal-path filtered-egress netns teardown (B3.2b): a run that reached
         // terminal via a path that SKIPPED it — most notably a re-attach that could only complete from the exit marker
         // (e.g. after the run's credential rotated) — would otherwise leave its netns/veth/nft-table on the host with
@@ -122,6 +130,18 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     {
         try { return JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options); }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>Every spool directory a run can have left behind across S6 revise rounds: the bare run-key dir (round 0) plus every existing <c>-rN</c> suffixed sibling. Computed from the RUN ID — not the handle — so earlier rounds are found even though the handle points only at the last one. Best-effort enumeration; internal so it's unit-pinned.</summary>
+    internal static IReadOnlyList<string> RoundSpoolFamily(Guid runId)
+    {
+        var root = LocalProcessRunner.SpoolRoot();
+        var family = new List<string> { Path.Combine(root, runId.ToString("N")) };
+
+        try { if (Directory.Exists(root)) family.AddRange(Directory.GetDirectories(root, $"{runId:N}-r*")); }
+        catch (Exception) { /* enumeration is best-effort — the handle-pointed dir already got its targeted delete */ }
+
+        return family;
     }
 
     /// <summary>Containment guard (security-critical, so unit-pinned): true only when <paramref name="dir"/> is strictly UNDER the spool root — never the root itself, never an arbitrary path a corrupt handle might carry.</summary>

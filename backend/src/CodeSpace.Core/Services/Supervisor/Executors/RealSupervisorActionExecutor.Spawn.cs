@@ -414,6 +414,10 @@ public sealed partial class RealSupervisorActionExecutor
             PushProducedBranch = forcePushBranch ? true : profile?.PushBranch,
             OutputReviewMode = profile?.OutputReviewMode ?? ReviewMode.None,
             ReviewerModelId = profile?.ReviewerModelId,
+            // Explicit 0, not null: null would let Improve imply an in-run revise round (the executor's default),
+            // STACKING with the supervisor's own retry loop — the supervisor is the revision mechanism for its units
+            // (it sees the flagged/failed unit and retries with a revised instruction), so units never self-revise.
+            MaxReviseRounds = 0,
         };
     }
 

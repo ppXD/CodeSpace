@@ -204,8 +204,10 @@ public sealed record AgentTask
     /// Improve-mode critic flags the output — each round feeds the failure detail back to the SAME agent (a same-session
     /// harness continuation in the same workspace) and re-verifies through the full push→grade→review chain. Null ⇒ the
     /// executor's default: 1 round under <see cref="ReviewMode.Improve"/> (Improve MEANS improve), else 0 (S5's hard-gate
-    /// semantics, byte-identical). Clamped server-side; supervisor-dispatched units deliberately do NOT set it — the
-    /// supervisor's own retry loop owns their revision. <c>[JsonIgnore(WhenWritingNull)]</c>.
+    /// semantics, byte-identical). Clamped server-side. Each round re-arms <see cref="TimeoutSeconds"/>, so the run's
+    /// wall-clock ceiling is (1 + rounds) × timeout. Supervisor-dispatched units pin this to an EXPLICIT 0 — the
+    /// supervisor's own retry loop owns their revision (a null would let Improve imply an in-run round and stack the
+    /// two loops). <c>[JsonIgnore(WhenWritingNull)]</c>.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? MaxReviseRounds { get; init; }

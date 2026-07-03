@@ -50,6 +50,24 @@ public sealed class AgentRunExecutorReviseTests
             .ShouldBeNull("another agent round cannot fix the grader");
 
     [Fact]
+    public void No_branch_with_no_work_buys_a_round_because_doing_the_work_is_the_fix()
+    {
+        var didNothing = AcceptanceFailed("no-branch-or-repo") with { ChangedFiles = Array.Empty<string>(), Patch = null };
+
+        AgentRunExecutor.ReviseReasonFor(TaskWith(), didNothing).ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void No_branch_despite_produced_work_is_a_publish_failure_and_never_buys_a_round()
+    {
+        // The work exists but the branch didn't publish (credential-less clone / push infra) — another agent
+        // pass can't fix the publish, so revising would burn the whole budget on an infra condition.
+        var publishFailed = AcceptanceFailed("no-branch-or-repo");   // fixture carries ChangedFiles
+
+        AgentRunExecutor.ReviseReasonFor(TaskWith(), publishFailed).ShouldBeNull();
+    }
+
+    [Fact]
     public void An_improve_flag_buys_a_round_with_the_critique()
     {
         var flagged = Flagged("missing tests for the new path");
@@ -172,6 +190,19 @@ public sealed class AgentRunExecutorReviseTests
         AgentRunExecutor.JoinTranscripts(null, "only").ShouldBe("only");
         AgentRunExecutor.JoinTranscripts("only", null).ShouldBe("only");
         AgentRunExecutor.JoinTranscripts(null, null).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Token_usage_sums_across_rounds_so_the_cost_plane_bills_the_whole_run()
+    {
+        var sum = AgentRunExecutor.SumTokenUsage(new AgentTokenUsage { InputTokens = 100, OutputTokens = 40 }, new AgentTokenUsage { InputTokens = 60, OutputTokens = 25 });
+
+        sum!.InputTokens.ShouldBe(160);
+        sum.OutputTokens.ShouldBe(65);
+
+        AgentRunExecutor.SumTokenUsage(null, new AgentTokenUsage { InputTokens = 1, OutputTokens = 2 })!.InputTokens.ShouldBe(1);
+        AgentRunExecutor.SumTokenUsage(new AgentTokenUsage { InputTokens = 3, OutputTokens = 4 }, null)!.OutputTokens.ShouldBe(4);
+        AgentRunExecutor.SumTokenUsage(null, null).ShouldBeNull();
     }
 
     [Fact]
