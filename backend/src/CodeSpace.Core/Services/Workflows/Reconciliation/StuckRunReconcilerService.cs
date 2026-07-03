@@ -85,14 +85,16 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowRunDispatcher _dispatcher;
     private readonly IWorkflowResumeService _resumeService;
+    private readonly ISubworkflowService _subworkflowService;
     private readonly IRunRecordLogger _recordLogger;
     private readonly ILogger<StuckRunReconcilerService> _logger;
 
-    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, IRunRecordLogger recordLogger, ILogger<StuckRunReconcilerService> logger)
+    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, ISubworkflowService subworkflowService, IRunRecordLogger recordLogger, ILogger<StuckRunReconcilerService> logger)
     {
         _db = db;
         _dispatcher = dispatcher;
         _resumeService = resumeService;
+        _subworkflowService = subworkflowService;
         _recordLogger = recordLogger;
         _logger = logger;
     }
@@ -119,6 +121,8 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         var recoveredTimerWaits = await RecoverStrandedTimerWaitsAsync(cancellationToken).ConfigureAwait(false);
 
+        var recoveredSubworkflowParents = await RecoverStrandedSubworkflowParentsAsync(cancellationToken).ConfigureAwait(false);
+
         var summary = new StuckRunReconcileSummary
         {
             RedispatchedFromPending = redispatched,
@@ -129,12 +133,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RecoveredAbandonedSupervisorRun = recoveredSupervisorRuns,
             ReleasedRerunLeases = releasedLeases,
             RecoveredStrandedTimerWait = recoveredTimerWaits,
+            RecoveredStrandedSubworkflowParent = recoveredSubworkflowParents,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}, subworkflowParentsRecovered={SubworkflowParentsRecovered}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait, summary.RecoveredStrandedSubworkflowParent);
 
         return summary;
     }
@@ -423,6 +428,66 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             {
                 // Per-row resilience: one stranded timer's failure doesn't abort the sweep.
                 _logger.LogWarning(ex, "StuckRunReconciler: stranded-timer recovery for run {RunId} wait {WaitId} failed; will retry next tick", wait.RunId, wait.Id);
+            }
+        }
+
+        return recovered;
+    }
+
+    /// <summary>
+    /// Stranded-Subworkflow-parent recovery — the symmetric twin of the agent-run backstop
+    /// (<c>AgentRunReconcilerService.ReconcilePendingWaitsAsync</c>), and the LAST un-backstopped wait strand. A parent
+    /// parked on a Pending <c>Subworkflow</c> wait whose CHILD run is already terminal means the child's INLINE
+    /// on-completion resume (<c>ISubworkflowService.ResumeParentIfChildTerminalAsync</c>, called by the engine) was lost
+    /// — a crash between the child's terminal commit and the resume. Nothing else recovers it: the stranded-Suspended
+    /// sweep excludes any run holding a pending wait, and the operator reissue verb refuses <c>Subworkflow</c> (faking a
+    /// child's outputs would corrupt the node). Re-fire the SAME resume the engine uses — passing the child's real
+    /// status + outputs, so nothing is faked — which the wait CAS makes idempotent (a re-fire racing a late original
+    /// no-ops). A still-RUNNING child is excluded: it resumes its own parent when it finishes, so it isn't stranded.
+    /// Bounded by <see cref="BatchSize"/> per tick.
+    /// </summary>
+    private async Task<int> RecoverStrandedSubworkflowParentsAsync(CancellationToken cancellationToken)
+    {
+        // Pending Subworkflow waits (Token = child run id) on a Suspended parent — the stranded-parent signature.
+        var tokens = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.WaitKind == WorkflowWaitKinds.Subworkflow
+                        && w.Status == WorkflowWaitStatuses.Pending
+                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+            .Select(w => w.Token)
+            .Take(BatchSize)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var childIds = tokens
+            .Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .ToList();
+
+        if (childIds.Count == 0) return 0;
+
+        // Only children ALREADY terminal — a still-running child resumes its own parent when it finishes, so it isn't
+        // stranded. A pending parent wait + a terminal child is the signature that the child's inline resume was lost.
+        var terminalChildren = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => childIds.Contains(r.Id)
+                        && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var recovered = 0;
+        foreach (var child in terminalChildren)
+        {
+            try
+            {
+                // Re-fire the engine's own on-completion resume with the child's REAL status + outputs (nothing faked).
+                // Counted only when it actually resolved the wait; the method is best-effort (it logs + returns false on
+                // error), so the sweep never throws.
+                if (await _subworkflowService.ResumeParentIfChildTerminalAsync(child, child.Status, child.Error, cancellationToken).ConfigureAwait(false)) recovered++;
+            }
+            catch (Exception ex)
+            {
+                // Per-row resilience: one stranded parent's failure doesn't abort the sweep.
+                _logger.LogWarning(ex, "StuckRunReconciler: stranded-subworkflow-parent recovery for child run {ChildRunId} failed; will retry next tick", child.Id);
             }
         }
 

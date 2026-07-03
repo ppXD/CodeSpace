@@ -76,5 +76,8 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at) — the automated twin of the operator reissue verb. 0 when no timer wake is overdue.</summary>
     public int RecoveredStrandedTimerWait { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait;
+    /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost (a crash between the child's terminal commit and the resume) — the last un-backstopped wait strand. 0 when no parent is parked on a terminal child.</summary>
+    public int RecoveredStrandedSubworkflowParent { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait + RecoveredStrandedSubworkflowParent;
 }

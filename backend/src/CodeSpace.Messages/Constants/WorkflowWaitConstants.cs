@@ -78,9 +78,10 @@ public static class WorkflowWaitKinds
     /// <see cref="Action"/> / <see cref="Decision"/>) carry a human decision and resolve via their own verbs (a blind
     /// reissue would feed the node a decision-less payload); the completion-driven waits (<see cref="Subworkflow"/> /
     /// <see cref="AgentRun"/>) and the supervisor self-waits resolve only when their real work completes — faking their
-    /// result payload here would corrupt the node — so none is operator-reissuable. (<see cref="AgentRun"/> + the
-    /// supervisor self-waits also have a reconciler backstop; a stranded <see cref="Subworkflow"/> parent does NOT yet —
-    /// see the follow-up.) Pinned by a unit test so widening the set is a conscious, reviewed decision (Rule 8).
+    /// result payload here would corrupt the node — so none is operator-reissuable. (All of them ALSO have a reconciler
+    /// backstop that re-fires the real completion: <see cref="AgentRun"/> + the supervisor self-waits, and — closing the
+    /// last un-backstopped strand — a stranded <see cref="Subworkflow"/> parent whose child already went terminal.)
+    /// Pinned by a unit test so widening the set is a conscious, reviewed decision (Rule 8).
     /// </summary>
     public static bool IsOperatorReissuable(string waitKind) => waitKind is Timer or Callback;
 }
