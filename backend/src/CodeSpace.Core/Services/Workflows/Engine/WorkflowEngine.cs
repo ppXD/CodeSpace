@@ -258,11 +258,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             await EnsureRunCancelledAsync(run.Id, engineStartedAt).ConfigureAwait(false);
 
             // If this cancelled run is a sub-workflow CHILD, wake the parent parked on it — exactly as the normal
-            // CompleteRunAsync path does. Without this a child cancelled mid-walk would leave its parent Suspended
-            // forever: no reconciler resumes a parent on a Pending Subworkflow wait (the stranded-Suspended sweep
-            // skips any run holding a pending wait). Resolves only this child's own wait, with status=Cancelled, so
-            // the parent's subworkflow node fails / routes its error edge. No-op when the run has no parent wait.
-            await ResumeParentIfSubworkflowChildAsync(run, WorkflowRunStatus.Cancelled, error: null, CancellationToken.None).ConfigureAwait(false);
+            // CompleteRunAsync path does. Resolves only this child's own wait, with status=Cancelled, so the parent's
+            // subworkflow node fails / routes its error edge. No-op when the run has no parent wait; if this inline
+            // resume is lost (a crash before it commits), the reconciler's stranded-Subworkflow-parent sweep re-fires it.
+            await _subworkflowService.ResumeParentIfChildTerminalAsync(run, WorkflowRunStatus.Cancelled, error: null, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
     }
@@ -888,8 +887,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         if (run.SourceType == WorkflowRunSourceTypes.Rerun)
             await ReleaseRerunLeasesAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
-        // If this run is a sub-workflow child, wake the parent that's parked on it.
-        await ResumeParentIfSubworkflowChildAsync(run, status, error, cancellationToken).ConfigureAwait(false);
+        // If this run is a sub-workflow child, wake the parent that's parked on it (the reconciler re-fires this if lost).
+        await _subworkflowService.ResumeParentIfChildTerminalAsync(run, status, error, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Best-effort: free the active-rerun leases this fork holds (status-guarded CAS by fork id). NEVER
@@ -1029,60 +1028,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _backgroundJobClient.Enqueue<IWorkflowResumeService>(s => s.ResumeWaitAsync(runId, waitId, null, CancellationToken.None));
     }
 
-    /// <summary>
-    /// When a child run reaches a terminal state, resume the parent parked on it (Phase 3). The
-    /// parent is found via its pending <c>Subworkflow</c> wait whose Token equals this child's id —
-    /// which also distinguishes a sub-workflow child from a replay child (a replay's "parent" holds
-    /// no such wait). Resumes with the child's status + outputs + error so the node can map them.
-    /// Best-effort: a failure here is logged, not propagated (the child already completed cleanly).
-    /// </summary>
-    private async Task ResumeParentIfSubworkflowChildAsync(WorkflowRun child, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
-    {
-        if (child.ParentRunId == null) return;
-
-        try
-        {
-            var childIdToken = child.Id.ToString();
-            var waitId = await _db.WorkflowRunWait.AsNoTracking()
-                .Where(w => w.RunId == child.ParentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow
-                            && w.Token == childIdToken && w.Status == WorkflowWaitStatuses.Pending)
-                .Select(w => (Guid?)w.Id)
-                .FirstOrDefaultAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            if (waitId is null) return;   // not a sub-workflow child (e.g. a replay) — nothing to resume
-
-            var payload = JsonSerializer.Serialize(new
-            {
-                status = status.ToString(),
-                outputs = JsonSafeParseObject(child.OutputsJson),
-                error,
-            });
-
-            // Resolve ONLY this child's own wait — never the sibling waits a parallel fan-out of children
-            // holds — so each parent subworkflow node resumes with its own child's outputs.
-            await _resumeService.ResumeOnWaitCompletionAsync(child.ParentRunId.Value, waitId.Value, payload, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Sub-workflow child {ChildRunId} completed but resuming parent {ParentRunId} failed", child.Id, child.ParentRunId);
-        }
-    }
-
-    /// <summary>Parse a run's OutputsJson into a JsonElement object for the resume payload; an empty object on any trouble.</summary>
-    private static JsonElement JsonSafeParseObject(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return JsonDocument.Parse("{}").RootElement.Clone();
-        try
-        {
-            var root = JsonDocument.Parse(json).RootElement;
-            return root.ValueKind == JsonValueKind.Object ? root.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
-        }
-        catch
-        {
-            return JsonDocument.Parse("{}").RootElement.Clone();
-        }
-    }
+    // The sub-workflow child → parent resume moved to ISubworkflowService.ResumeParentIfChildTerminalAsync — the ONE
+    // path shared by this engine's on-completion call (above) and the reconciler's stranded-parent backstop.
 
     // Returns the workflow's outputs (filled by the last successful Terminal). Empty when
     // no Terminal ran or the Terminal had no Inputs declared.

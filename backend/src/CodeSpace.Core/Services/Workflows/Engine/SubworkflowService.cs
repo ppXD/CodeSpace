@@ -1,9 +1,11 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -28,6 +30,18 @@ public interface ISubworkflowService
 
     /// <summary>Dispatch a previously-staged child run (Pending → Enqueued → engine). Called once the parent is committed Suspended.</summary>
     Task DispatchChildRunAsync(Guid childRunId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// When a child run reaches a terminal state, resume the parent parked on it: find the parent's pending
+    /// <c>Subworkflow</c> wait whose <c>Token</c> equals this child's id (which also distinguishes a sub-workflow child
+    /// from a replay child — a replay's "parent" holds no such wait), then resolve it with the child's status + outputs +
+    /// error so the node can map them, via the wait-for-all completion path. Returns true iff THIS call resolved the wait
+    /// (false when there is no such pending wait — not a sub-workflow child, or a concurrent resume / this child's own
+    /// happy-path resume already won). Idempotent (the wait CAS) and best-effort (a failure is logged, never propagated —
+    /// the child already completed cleanly). The ONE resume path shared by the engine's on-completion call AND the
+    /// reconciler's stranded-parent backstop, so the child-output mapping can never drift between them.
+    /// </summary>
+    Task<bool> ResumeParentIfChildTerminalAsync(WorkflowRun child, WorkflowRunStatus status, string? error, CancellationToken cancellationToken);
 }
 
 public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
@@ -38,13 +52,15 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly IRunStarter _runStarter;
     private readonly IWorkflowRunDispatcher _dispatcher;
+    private readonly IWorkflowResumeService _resumeService;
     private readonly ILogger<SubworkflowService> _logger;
 
-    public SubworkflowService(CodeSpaceDbContext db, IRunStarter runStarter, IWorkflowRunDispatcher dispatcher, ILogger<SubworkflowService> logger)
+    public SubworkflowService(CodeSpaceDbContext db, IRunStarter runStarter, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, ILogger<SubworkflowService> logger)
     {
         _db = db;
         _runStarter = runStarter;
         _dispatcher = dispatcher;
+        _resumeService = resumeService;
         _logger = logger;
     }
 
@@ -87,6 +103,59 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
 
     public async Task DispatchChildRunAsync(Guid childRunId, CancellationToken cancellationToken) =>
         await _dispatcher.DispatchAsync(childRunId, cancellationToken).ConfigureAwait(false);
+
+    public async Task<bool> ResumeParentIfChildTerminalAsync(WorkflowRun child, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
+    {
+        if (child.ParentRunId == null) return false;
+
+        try
+        {
+            var childIdToken = child.Id.ToString();
+            var waitId = await _db.WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == child.ParentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow
+                            && w.Token == childIdToken && w.Status == WorkflowWaitStatuses.Pending)
+                .Select(w => (Guid?)w.Id)
+                .FirstOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            if (waitId is null) return false;   // not a sub-workflow child (e.g. a replay), or its wait already resolved
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                status = status.ToString(),
+                outputs = JsonSafeParseObject(child.OutputsJson),
+                error,
+            });
+
+            // Resolve ONLY this child's own wait — never the sibling waits a parallel fan-out of children holds — so each
+            // parent subworkflow node resumes with its own child's outputs. The wait-COMPLETION path's CAS makes a
+            // re-fire (a reconciler backstop racing this child's own happy-path resume) an idempotent no-op.
+            return await _resumeService.ResumeOnWaitCompletionAsync(child.ParentRunId.Value, waitId.Value, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: the child already completed cleanly, so a resume failure is logged for the reconciler to
+            // retry, never propagated back into the child's terminal path.
+            _logger.LogError(ex, "Sub-workflow child {ChildRunId} is terminal but resuming parent {ParentRunId} failed", child.Id, child.ParentRunId);
+            return false;
+        }
+    }
+
+    /// <summary>Parse a run's OutputsJson into a JsonElement object for the resume payload; an empty object on any trouble.</summary>
+    private static JsonElement JsonSafeParseObject(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return JsonDocument.Parse("{}").RootElement.Clone();
+
+        try
+        {
+            var root = JsonDocument.Parse(json).RootElement;
+            return root.ValueKind == JsonValueKind.Object ? root.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
+        }
+        catch
+        {
+            return JsonDocument.Parse("{}").RootElement.Clone();
+        }
+    }
 
     /// <summary>Cycle guard for the ancestry walk — a parent-run chain (real nesting + rerun lineage) never approaches this; a corrupt cycle can't loop forever.</summary>
     private const int MaxChainWalk = 512;

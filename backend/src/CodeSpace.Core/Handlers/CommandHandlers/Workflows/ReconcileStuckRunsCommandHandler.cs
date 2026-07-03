@@ -26,6 +26,7 @@ public sealed class ReconcileStuckRunsCommandHandler : IRequestHandler<Reconcile
             RecoveredSupervisorAdvance = summary.RecoveredSupervisorAdvance,
             RecoveredAbandonedSupervisorRun = summary.RecoveredAbandonedSupervisorRun,
             RecoveredStrandedTimerWait = summary.RecoveredStrandedTimerWait,
+            RecoveredStrandedSubworkflowParent = summary.RecoveredStrandedSubworkflowParent,
         };
     }
 }

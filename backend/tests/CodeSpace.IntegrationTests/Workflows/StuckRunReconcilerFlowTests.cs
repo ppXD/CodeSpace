@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -633,6 +634,50 @@ public class StuckRunReconcilerFlowTests
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the healthy timer's run stays parked until its real wake");
     }
 
+    [Fact]
+    public async Task A_stranded_subworkflow_parent_with_a_terminal_child_is_recovered_carrying_the_childs_real_outputs()
+    {
+        // The last un-backstopped strand: a parent parked (Suspended) on a Pending Subworkflow wait whose child is
+        // ALREADY terminal — the signature that the child's inline on-completion resume was lost (a crash).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var parentRunId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+        var childRunId = await SeedChildRunAsync(teamId, parentRunId, WorkflowRunStatus.Success, outputsJson: """{"result":"ok"}""");
+        await SeedSubworkflowWaitAsync(parentRunId, childRunId);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSubworkflowParent.ShouldBe(1, "a parent parked on a terminal child's Subworkflow wait is re-fired — the symmetric twin of the AgentRun backstop");
+        (await ReadStatusAsync(parentRunId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == parentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow);
+
+        wait.Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+        var payload = JsonDocument.Parse(wait.PayloadJson!).RootElement;
+        payload.GetProperty("status").GetString().ShouldBe("Success", "the child's REAL status is mapped onto the parent — nothing faked");
+        payload.GetProperty("outputs").GetProperty("result").GetString().ShouldBe("ok", "the child's REAL outputs ride to the parent — the same mapping as the happy path");
+    }
+
+    [Fact]
+    public async Task A_subworkflow_parent_whose_child_is_still_running_is_left_alone()
+    {
+        // A still-running child resumes its own parent when it finishes — it isn't stranded, so the sweep must not touch it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var parentRunId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+        var childRunId = await SeedChildRunAsync(teamId, parentRunId, WorkflowRunStatus.Running, outputsJson: "{}");
+        await SeedSubworkflowWaitAsync(parentRunId, childRunId);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSubworkflowParent.ShouldBe(0, "a still-running child is not stranded — it will resume its own parent when it finishes");
+        (await ReadStatusAsync(parentRunId)).ShouldBe(WorkflowRunStatus.Suspended, "the parent stays parked while its child runs");
+    }
+
     /// <summary>
     /// Backdate a run's LastModifiedDate via raw SQL (EF's audit hook would otherwise re-stamp it to now),
     /// so a genuinely-suspended run looks stale to the stranded-Suspended sweep's grace-window check.
@@ -681,6 +726,53 @@ public class StuckRunReconcilerFlowTests
             WaitKind = WorkflowWaitKinds.Timer,
             Token = Guid.NewGuid().ToString("N"),
             WakeAt = wakeAt,
+            Status = WorkflowWaitStatuses.Pending,
+            PayloadJson = null,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedChildRunAsync(Guid teamId, Guid parentRunId, WorkflowRunStatus status, string outputsJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var requestId = Guid.NewGuid();
+        var childRunId = Guid.NewGuid();
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, WorkflowId = null, SourceType = WorkflowRunSourceTypes.Snapshot,
+            ActorType = "system", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}",
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = childRunId, WorkflowId = null, WorkflowVersion = null, TeamId = teamId, RunRequestId = requestId,
+            ParentRunId = parentRunId, SourceType = WorkflowRunSourceTypes.Snapshot, Status = status, OutputsJson = outputsJson,
+            ScopeRepositoryIds = [], ScopeProjectIds = [], CreatedDate = now,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return childRunId;
+    }
+
+    private async Task SeedSubworkflowWaitAsync(Guid parentRunId, Guid childRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = parentRunId,
+            NodeId = "sub",
+            IterationKey = string.Empty,
+            WaitKind = WorkflowWaitKinds.Subworkflow,
+            Token = childRunId.ToString(),   // the parent's wait is keyed to the child run id
             Status = WorkflowWaitStatuses.Pending,
             PayloadJson = null,
             CreatedAt = DateTimeOffset.UtcNow,

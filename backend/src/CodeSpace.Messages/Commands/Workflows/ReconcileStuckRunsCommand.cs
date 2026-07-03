@@ -29,4 +29,7 @@ public sealed record ReconcileStuckRunsResponse
 
     /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at). 0 when no timer wake is overdue.</summary>
     public required int RecoveredStrandedTimerWait { get; init; }
+
+    /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost. 0 when no parent is parked on a terminal child.</summary>
+    public required int RecoveredStrandedSubworkflowParent { get; init; }
 }
