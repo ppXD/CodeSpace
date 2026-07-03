@@ -72,19 +72,21 @@ public sealed record SupervisorSpawnPayload
     public IReadOnlyList<SupervisorAgentDispatch>? Agents { get; init; }
 }
 
-/// <summary>The <c>retry</c> payload: ONE prior subtask id re-run as a fresh agent attempt, optionally with a revised instruction and a structured rationale (why + evidence) the room surfaces so a reader can see the supervisor's decision, not just that it retried.</summary>
+/// <summary>The <c>retry</c> payload: ONE prior subtask id re-run as a fresh agent attempt, optionally with a revised instruction. The decision's rationale (why + evidence) is a decision-level annotation on the frozen payload's root (see <see cref="SupervisorRationale"/>), NOT a retry-specific field.</summary>
 public sealed record SupervisorRetryPayload
 {
     public required string SubtaskId { get; init; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? RevisedInstruction { get; init; }
-
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public SupervisorRationale? Rationale { get; init; }
 }
 
-/// <summary>A model-authored, STRUCTURED decision rationale — bounded fields, not raw chain-of-thought. Durably frozen in the decision payload so the room can explain WHY the supervisor decided as it did (e.g. why it retried a subtask). Both fields optional; an omitted rationale means the model gave none.</summary>
+/// <summary>
+/// A model-authored, STRUCTURED decision rationale — bounded fields, not raw chain-of-thought. The DECISION's "why",
+/// frozen at the ROOT of every verb's canonical payload (the projector injects it uniformly), so the trace can explain
+/// WHY the supervisor decided as it did — for a plan, a spawn, a retry, a merge, a stop, alike. Both fields optional;
+/// an omitted rationale means the model gave none. Read back generically via <c>SupervisorOutcome.ReadRationale</c>.
+/// </summary>
 public sealed record SupervisorRationale
 {
     /// <summary>Why the supervisor made this decision — the reasoning, one or two sentences.</summary>

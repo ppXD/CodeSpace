@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
+using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -105,14 +106,39 @@ public sealed class SupervisorDependencyOrderingFlowTests
         (await StagedAgentTasksAsync(runId, teamId)).Count.ShouldBe(2, "no DependsOn → every requested subtask stages, byte-identical to before the rail");
     }
 
+    [Fact]
+    public async Task A_clamped_spawn_preserves_the_model_authored_rationale_on_the_persisted_payload()
+    {
+        // The genericity regression (adversarial-review CONFIRMED): a spawn the model authored WITH a decision-level
+        // rationale, clamped to its ready frontier, must still carry the "why" on the persisted tape — the room/journal
+        // reads it off the CLAMPED row. Before the fix the clamp rebuilt the typed spawn payload and silently dropped it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, ("a", null, "implement-a"), ("b", new[] { "a" }, "implement-b"));
+
+        var rationale = new SupervisorRationale { Why = "fan out the ready frontier now", Evidence = "a has no deps; b waits on a" };
+        await RunSpawnTurnAsync(runId, teamId, rationale, "a", "b");
+
+        var payload = await SpawnPayloadAsync(runId, teamId);
+
+        JsonDocument.Parse(payload).RootElement.GetProperty("subtaskIds").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "a" }, "b deferred → the spawn clamped to the ready frontier");
+        SupervisorOutcome.ReadRationale(payload)
+            .ShouldBe(("fan out the ready frontier now", "a has no deps; b waits on a"), "the clamped spawn kept the model's why on the persisted tape");
+    }
+
     // ─── Helpers ───
 
-    private async Task RunSpawnTurnAsync(Guid runId, Guid teamId, params string[] subtaskIds)
+    private Task RunSpawnTurnAsync(Guid runId, Guid teamId, params string[] subtaskIds) =>
+        RunSpawnTurnAsync(runId, teamId, rationale: null, subtaskIds);
+
+    private async Task RunSpawnTurnAsync(Guid runId, Guid teamId, SupervisorRationale? rationale, params string[] subtaskIds)
     {
         using var scope = _fixture.BeginScope();
         var service = new SupervisorTurnService(
             scope.Resolve<ISupervisorDecisionLog>(),
-            new SpawnDecider(subtaskIds),
+            new SpawnDecider(subtaskIds, rationale),
             scope.Resolve<ISupervisorActionExecutor>(),
             scope.Resolve<CodeSpaceDbContext>(),
             scope.Resolve<ISupervisorAcceptanceGrader>(),
@@ -214,18 +240,24 @@ public sealed class SupervisorDependencyOrderingFlowTests
         });
     }
 
-    /// <summary>A decider that emits a single SPAWN over the given subtask ids — drives the real spawn executor + its dependency clamp.</summary>
+    /// <summary>A decider that emits a single SPAWN over the given subtask ids (optionally with a decision-level rationale) — built the SAME way production does (via the projector), so the clamp sees a faithful root-rationale payload. Drives the real spawn executor + its dependency clamp.</summary>
     private sealed class SpawnDecider : ISupervisorDecider
     {
         private readonly string[] _subtaskIds;
+        private readonly SupervisorRationale? _rationale;
 
-        public SpawnDecider(string[] subtaskIds) => _subtaskIds = subtaskIds;
+        public SpawnDecider(string[] subtaskIds, SupervisorRationale? rationale = null)
+        {
+            _subtaskIds = subtaskIds;
+            _rationale = rationale;
+        }
 
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
-            Task.FromResult(new SupervisorDecision
+            Task.FromResult(SupervisorDecisionProjector.Project(new SupervisorModelDecision
             {
                 Kind = SupervisorDecisionKinds.Spawn,
-                PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = _subtaskIds }, AgentJson.Options),
-            });
+                Rationale = _rationale,
+                Spawn = new SupervisorSpawnPayload { SubtaskIds = _subtaskIds },
+            }));
     }
 }

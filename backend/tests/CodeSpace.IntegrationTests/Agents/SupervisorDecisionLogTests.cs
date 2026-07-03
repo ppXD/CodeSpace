@@ -463,6 +463,58 @@ public class SupervisorDecisionLogTests
             .ShouldBeNull("a plain spawn replays with no per-agent dispatch — the optional field never leaks");
     }
 
+    // ── decision-level rationale is CARRIED durably on EVERY verb (the room/journal reads it off the tape) ──
+
+    [Fact]
+    public async Task A_decisions_rationale_survives_a_real_persist_and_replay_on_a_non_retry_verb()
+    {
+        // Rationale is a decision-level annotation projected onto EVERY verb's payload root. Prove the full loop —
+        // project → freeze into the canonical PayloadJson → real Postgres → replay → generic read — on a SPAWN (not
+        // retry), so the "why" survives for any verb, not just the one that shipped it first.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            Rationale = new SupervisorRationale { Why = "fan out the two independent subtasks now", Evidence = "both dependencies are satisfied" },
+            Spawn = new SupervisorSpawnPayload { SubtaskIds = new[] { "s1", "s2" } },
+        }).PayloadJson;
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:rationale", InputHash, canonical, 0, CancellationToken.None);
+
+        SupervisorDecisionRecord replayed;
+        using (var scope = _fixture.BeginScope())
+            replayed = (await Log(scope).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        var (why, evidence) = SupervisorOutcome.ReadRationale(replayed.PayloadJson);
+        why.ShouldBe("fan out the two independent subtasks now", "the decision-level rationale survived the real persist + replay — the tape the room/journal reads");
+        evidence.ShouldBe("both dependencies are satisfied");
+    }
+
+    [Fact]
+    public async Task A_decision_without_rationale_replays_with_none_and_the_pre_field_bytes()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            Spawn = new SupervisorSpawnPayload { SubtaskIds = new[] { "s1" } },
+        }).PayloadJson;
+
+        canonical.ShouldBe("""{"subtaskIds":["s1"]}""", "no rationale authored → the pre-field idempotency-key bytes (byte-identical to before the feature)");
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:norationale", InputHash, canonical, 0, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        SupervisorOutcome.ReadRationale((await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single().PayloadJson)
+            .ShouldBe((null, null), "a plain decision replays with no rationale — the optional annotation never leaks");
+    }
+
     private static ISupervisorDecisionLog Log(ILifetimeScope scope) => scope.Resolve<ISupervisorDecisionLog>();
 
     private async Task<SupervisorDecisionRecord> ReadRowAsync(Guid decisionId)

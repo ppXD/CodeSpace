@@ -805,14 +805,19 @@ public static class SupervisorOutcome
         }
     }
 
-    /// <summary>Read the structured rationale (why + evidence) off a <c>retry</c> decision's PAYLOAD — <c>(null, null)</c> when the model authored none. The room surfaces it under the retry step so a reader can see WHY the supervisor retried, not just that it did.</summary>
-    public static (string? Why, string? Evidence) ReadRetryRationale(string? retryPayloadJson)
+    /// <summary>
+    /// Read the DECISION-LEVEL structured rationale (why + evidence) off ANY verb's decision PAYLOAD — the projector
+    /// freezes it at the payload's root for every kind (plan / spawn / retry / merge / stop …), so this one reader
+    /// surfaces the supervisor's "why" uniformly. <c>(null, null)</c> when the model authored none. Historical retry
+    /// rows already carry root <c>rationale</c>, so they read back unchanged (no special-casing, no migration).
+    /// </summary>
+    public static (string? Why, string? Evidence) ReadRationale(string? payloadJson)
     {
-        if (string.IsNullOrWhiteSpace(retryPayloadJson)) return (null, null);
+        if (string.IsNullOrWhiteSpace(payloadJson)) return (null, null);
 
         try
         {
-            var root = JsonDocument.Parse(retryPayloadJson).RootElement;
+            var root = JsonDocument.Parse(payloadJson).RootElement;
 
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("rationale", out var r) || r.ValueKind != JsonValueKind.Object)
                 return (null, null);
@@ -824,6 +829,9 @@ public static class SupervisorOutcome
             return (null, null);
         }
     }
+
+    /// <summary>Read a <c>retry</c> decision's rationale — a thin alias over the generic <see cref="ReadRationale"/> (rationale is a decision-level annotation on every verb, not a retry-specific field). Retained for the callers that name the verb.</summary>
+    public static (string? Why, string? Evidence) ReadRetryRationale(string? retryPayloadJson) => ReadRationale(retryPayloadJson);
 
     private static string? ReadNonEmptyString(JsonElement obj, string name) =>
         obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s ? s : null;
