@@ -57,4 +57,78 @@ public class JournalCursorTests
         decoded.ShouldContain("supervisor-1", Case.Sensitive);
         decoded.ShouldContain("3", Case.Sensitive);
     }
+
+    // ── Decode + Compare (the ?since= delta) ─────────────────────────────────────────
+
+    [Fact]
+    public void Decode_round_trips_encode()
+    {
+        var decoded = JournalCursor.Decode(JournalCursor.Encode(Event("supervisor-1", sourceKey: "supervisor", order: 3, at: T)));
+
+        decoded.ShouldNotBeNull();
+        decoded!.Value.Ticks.ShouldBe(T.UtcTicks);
+        decoded.Value.SourceKey.ShouldBe("supervisor");
+        decoded.Value.Order.ShouldBe(3);
+        decoded.Value.Id.ShouldBe("supervisor-1");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("not-base64!!")]
+    [InlineData("YWJj")]          // valid base64 but not the 4-field shape ("abc")
+    public void Decode_rejects_a_malformed_cursor(string? cursor)
+    {
+        JournalCursor.Decode(cursor).ShouldBeNull("an old / forged / truncated token is not a cursor");
+    }
+
+    [Fact]
+    public void Compare_orders_by_the_projector_sort_key()
+    {
+        // Later instant is AFTER; at one instant the tie-break runs SourceKey → Order → Id, matching the timeline merge.
+        JournalCursor.Compare(JournalCursor.Encode(Event("a", at: T.AddTicks(1))), JournalCursor.Encode(Event("a", at: T))).ShouldBeGreaterThan(0, "a later instant sorts after");
+        JournalCursor.Compare(JournalCursor.Encode(Event("a", sourceKey: "tool-calls")), JournalCursor.Encode(Event("a", sourceKey: "supervisor"))).ShouldBeGreaterThan(0, "at one instant, source key breaks the tie (ordinal)");
+        JournalCursor.Compare(JournalCursor.Encode(Event("a", order: 5)), JournalCursor.Encode(Event("a", order: 2))).ShouldBeGreaterThan(0, "then order");
+        JournalCursor.Compare(JournalCursor.Encode(Event("b")), JournalCursor.Encode(Event("a"))).ShouldBeGreaterThan(0, "then id");
+    }
+
+    [Fact]
+    public void Compare_of_equal_cursors_is_zero()
+    {
+        var c = JournalCursor.Encode(Event("supervisor-1"));
+
+        JournalCursor.Compare(c, c).ShouldBe(0);
+    }
+
+    [Fact]
+    public void Compare_falls_back_to_ordinal_on_a_malformed_cursor_without_throwing()
+    {
+        Should.NotThrow(() => JournalCursor.Compare("garbage", JournalCursor.Encode(Event("a"))));
+    }
+
+    [Fact]
+    public void Compare_agrees_with_the_timeline_projectors_merge_order()
+    {
+        // THE delta-soundness invariant: ordering cursors by Compare must equal ordering the events the way the timeline
+        // projector's Merge does (OccurredAt → SourceKey ordinal → Order → Id ordinal). If they diverge, a ?since delta
+        // skips or double-serves steps. Span every tie-break dimension in a deliberately-shuffled input.
+        var events = new[]
+        {
+            Event("z", sourceKey: "supervisor", order: 0, at: T.AddSeconds(2)),
+            Event("a", sourceKey: "tool-calls", order: 0, at: T),           // same tick as the next two — source breaks it
+            Event("a", sourceKey: "supervisor", order: 5, at: T),
+            Event("a", sourceKey: "supervisor", order: 2, at: T),           // same tick+source as above — order breaks it
+            Event("b", sourceKey: "agent-events", order: 0, at: T),
+            Event("a", sourceKey: "agent-events", order: 0, at: T),         // same tick+source+order as above — id breaks it
+        };
+
+        var byCursor = events.OrderBy(e => JournalCursor.Encode(e), Comparer<string>.Create(JournalCursor.Compare)).Select(e => (e.SourceKey, e.Order, e.Id, e.OccurredAt)).ToList();
+
+        // The reference: the projector's exact sort key.
+        var byProjector = events
+            .OrderBy(e => e.OccurredAt).ThenBy(e => e.SourceKey, StringComparer.Ordinal).ThenBy(e => e.Order).ThenBy(e => e.Id, StringComparer.Ordinal)
+            .Select(e => (e.SourceKey, e.Order, e.Id, e.OccurredAt)).ToList();
+
+        byCursor.ShouldBe(byProjector, "Compare orders cursors exactly as the timeline projector merges the events");
+    }
 }

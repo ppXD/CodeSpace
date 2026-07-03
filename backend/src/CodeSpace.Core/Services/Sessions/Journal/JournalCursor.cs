@@ -27,4 +27,44 @@ public static class JournalCursor
 
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(canonical));
     }
+
+    /// <summary>Decode a cursor back to its sort-key tuple, or null when it isn't a well-formed journal cursor (an old / forged / truncated token — the caller then treats it as "no cursor" rather than trusting it).</summary>
+    public static (long Ticks, string SourceKey, long Order, string Id)? Decode(string? cursor)
+    {
+        if (string.IsNullOrEmpty(cursor)) return null;
+
+        try
+        {
+            var parts = Encoding.UTF8.GetString(Convert.FromBase64String(cursor)).Split(Sep);
+
+            return parts.Length == 4 && long.TryParse(parts[0], out var ticks) && long.TryParse(parts[2], out var order)
+                ? (ticks, parts[1], order, parts[3])
+                : null;
+        }
+        catch (FormatException)
+        {
+            return null;   // not valid base64 → not a cursor
+        }
+    }
+
+    /// <summary>
+    /// Order two cursors by the SAME key the timeline projector merges on (ticks → source key ordinal → order → id
+    /// ordinal), so <c>Compare(step, since) &gt; 0</c> means "the step is strictly AFTER the client's last-seen cursor"
+    /// — the delta predicate. A malformed cursor falls back to a raw ordinal compare (deterministic, never throws).
+    /// </summary>
+    public static int Compare(string a, string b)
+    {
+        if (Decode(a) is not { } da || Decode(b) is not { } db) return string.CompareOrdinal(a, b);
+
+        var c = da.Ticks.CompareTo(db.Ticks);
+        if (c != 0) return c;
+
+        c = string.CompareOrdinal(da.SourceKey, db.SourceKey);
+        if (c != 0) return c;
+
+        c = da.Order.CompareTo(db.Order);
+        if (c != 0) return c;
+
+        return string.CompareOrdinal(da.Id, db.Id);
+    }
 }
