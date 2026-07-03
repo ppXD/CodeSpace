@@ -59,6 +59,14 @@ public sealed record JournalStep
     /// </summary>
     public IReadOnlyList<JournalAgentCard> Agents { get; init; } = Array.Empty<JournalAgentCard>();
 
+    /// <summary>
+    /// The plan's subtasks still BLOCKED by an unmet dependency when this wave ran — the dependency-gated "waiting on #n"
+    /// shown alongside a spawn, so a reader sees which parts of a DAG plan weren't ready yet. This is the blocked FRONTIER
+    /// as of this spawn (a not-yet-ready subtask), NOT necessarily one this spawn requested. Empty for a flat plan (no DAG)
+    /// and every non-spawn step. Enriched by a <c>JournalFactsSource</c> that replays the real dependency gate over the tape.
+    /// </summary>
+    public IReadOnlyList<JournalDeferredSubtask> Deferred { get; init; } = Array.Empty<JournalDeferredSubtask>();
+
     /// <summary>The agent run this step belongs to, when applicable (a spawn's agent, a tool call's agent) — provenance the frontend deep-links. Null for a run-level step.</summary>
     public string? AgentRunId { get; init; }
 

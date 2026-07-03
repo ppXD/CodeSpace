@@ -224,6 +224,32 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_spawn_step_carries_the_dependency_blocked_frontier()
+    {
+        // The blocked frontier end-to-end over real data: a DAG plan (b depends on a) + a wave that ran a surfaces the
+        // still-blocked b on the spawn step — replaying the REAL dependency gate over the persisted tape, so the journal's
+        // "waiting on #n" can't drift from the gate the server enforces.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "DAG run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Build it", resultSummary: "done");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Plan, t, DagPlanPayload());
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Spawn, t.AddSeconds(1), SpawnPayloadFor("a"));
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var steps = view!.Turns.Single(t => t.Focused).Steps;
+        steps.First(s => s.Title.Contains("planned")).Deferred.ShouldBeEmpty("the plan step carries no frontier");
+
+        var spawn = steps.First(s => s.Title.Contains("spawned"));
+        spawn.Deferred.Select(d => d.SubtaskId).ShouldBe(new[] { "b" }, "b is blocked at this wave (dep a not accepted yet) — surfaced on the spawn");
+        spawn.Deferred.Single().WaitingOn.ShouldBe(new[] { "a" });
+    }
+
+    [Fact]
     public async Task A_foreign_session_projects_to_null()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -235,6 +261,21 @@ public sealed class JournalProjectorFlowTests
 
     private static string RationalePayload(string why, string evidence) =>
         JsonSerializer.Serialize(new { rationale = new { why, evidence } });
+
+    /// <summary>A spawn payload that requests the given subtask ids (the wave's fan-out). The frontier the source computes ignores this — it reads the plan + prior outcomes — but a realistic wave requests the ready ones.</summary>
+    private static string SpawnPayloadFor(params string[] subtaskIds) => JsonSerializer.Serialize(new { subtaskIds });
+
+    /// <summary>A 2-subtask plan where b depends on a — the DAG that makes the gate defer b until a is accepted.</summary>
+    private static string DagPlanPayload() =>
+        JsonSerializer.Serialize(new
+        {
+            goal = "g",
+            subtasks = new object[]
+            {
+                new { id = "a", title = "a", instruction = "do a" },
+                new { id = "b", title = "b", instruction = "do b", dependsOn = new[] { "a" } },
+            },
+        });
 
     private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, string goal, AgentRunStatus status, string? resultJson = null)
     {
