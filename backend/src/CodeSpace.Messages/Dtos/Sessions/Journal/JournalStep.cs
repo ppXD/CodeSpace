@@ -70,6 +70,9 @@ public sealed record JournalStep
     /// </summary>
     public IReadOnlyList<JournalDeferredSubtask> Deferred { get; init; } = Array.Empty<JournalDeferredSubtask>();
 
+    /// <summary>The subtasks this step PLANNED, when it is a PLAN decision — the model's authored plan, rendered inline right under the "planned the work" beat so the causal spine reads plan → dispatch → agents. Empty for every non-plan step. A re-plan is a later Plan step carrying its own subtasks.</summary>
+    public IReadOnlyList<JournalSubtask> Plan { get; init; } = Array.Empty<JournalSubtask>();
+
     /// <summary>The agent run this step belongs to, when applicable (a spawn's agent, a tool call's agent) — provenance the frontend deep-links. Null for a run-level step.</summary>
     public string? AgentRunId { get; init; }
 

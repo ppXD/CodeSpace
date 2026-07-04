@@ -151,6 +151,30 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_plan_decision_carries_its_subtasks_inline_on_the_plan_step()
+    {
+        // The plan-enrichment path end-to-end: a Plan decision whose payload carries subtasks surfaces them on its OWN
+        // journal step (rendered inline under "planned the work"), read off the durable tape by the real facts source. A
+        // non-plan step stays bare — so the causal spine reads plan → (dispatch → agents) instead of a floating plan block.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Planned run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Task", resultSummary: "done");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Plan, t, PlanPayload(("s1", "Research the market"), ("s2", "Write the report")));
+        await SeedDecisionAsync(run1, teamId, SupervisorDecisionKinds.Stop, t.AddSeconds(1));
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var steps = view!.Turns.Single(t => t.Focused).Steps;
+        steps[0].Title.ShouldBe("Supervisor planned the work");
+        steps[0].Plan.Select(p => (p.SubtaskId, p.Title)).ShouldBe(new[] { ("s1", "Research the market"), ("s2", "Write the report") }, "the plan step carries its authored subtasks, rendered inline under it");
+        steps[1].Plan.ShouldBeEmpty("the stop step is not a plan — it stays bare");
+    }
+
+    [Fact]
     public async Task A_spawn_decision_step_carries_a_card_for_every_agent_it_staged()
     {
         // The agent-card enrichment end-to-end over real data: a spawn decision whose outcome staged two agents surfaces a
@@ -297,6 +321,9 @@ public sealed class JournalProjectorFlowTests
 
     private static string RationalePayload(string why, string evidence) =>
         JsonSerializer.Serialize(new { rationale = new { why, evidence } });
+
+    private static string PlanPayload(params (string id, string title)[] subtasks) =>
+        JsonSerializer.Serialize(new { subtasks = subtasks.Select(s => new { id = s.id, title = s.title, instruction = s.title }) });
 
     /// <summary>A spawn payload that requests the given subtask ids (the wave's fan-out). The frontier the source computes ignores this — it reads the plan + prior outcomes — but a realistic wave requests the ready ones.</summary>
     private static string SpawnPayloadFor(params string[] subtaskIds) => JsonSerializer.Serialize(new { subtaskIds });

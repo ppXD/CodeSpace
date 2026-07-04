@@ -367,16 +367,17 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // result ⑥. Supporting stat rows (Files changed / Tools / Reasoning) drop to a collapsed strip AFTER the
                 // result so they never interrupt the story. Any block the journal doesn't deliberately replace — an
                 // unknown/future additive type — still falls through InnerBlock so it degrades to a faint line, never vanishes.
-                // The PRIMARY plan pinned at the top: the plan_checklist ② when a checklist exists, else the first
-                // "Plan · N subtasks" stat — the room emits ONE or the OTHER (checklist-present vs null), never both, so a
-                // run without a checklist still shows its plan here instead of nowhere.
-                const topPlan = turn.blocks.find((b) => b.type === "plan_checklist") ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks");
+                // When the journal has a PLAN decision step, the plan renders INLINE under it (the causal spine plan →
+                // dispatch → agents), so nothing is pinned at the top and the redundant "Plan · N subtasks" stat is dropped.
+                // A run with NO plan step (e.g. a flow.map run whose plan comes from a planner node, or a legacy block-only
+                // run) still pins its plan block at the top so the plan never vanishes.
+                const hasInlinePlan = journalTurn.steps.some((s) => s.plan.length > 0);
+                const topPlan = hasInlinePlan ? undefined : (turn.blocks.find((b) => b.type === "plan_checklist") ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
-                // Supporting rows AFTER the result — Files changed / Tools / Reasoning, PLUS any SECONDARY plan (a mid-run
-                // re-plan's "Plan · N subtasks" round) as its own collapsed card, so a later planning moment still surfaces
-                // generically; only the ONE block already pinned at the top is excluded.
-                const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id);
+                // Supporting rows AFTER the result — Files changed / Tools / Reasoning. Drop the "Plan · N subtasks" stat
+                // when the plan is shown inline (redundant); never re-render the one block pinned at the top.
+                const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id && !(hasInlinePlan && b.kind === "subtasks"));
                 const passThrough = turn.blocks.filter((b) => !JOURNAL_HANDLED.has(b.type));
                 return (
                   <>
@@ -590,6 +591,11 @@ function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean })
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
       {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}
+      {step.plan.length > 0 && (
+        <ol className="room-jplan">
+          {step.plan.map((s, i) => <li key={s.subtaskId}><span className="room-jplan-n">{i + 1}.</span><span className="room-jplan-t">{s.title}</span></li>)}
+        </ol>
+      )}
       {step.agents.length > 0 && <div className="room-jagents"><AgentSection group={journalAgentsGroup(step)} /></div>}
       {step.deferred.length > 0 && <div className="room-jdeferred">{step.deferred.map((d) => <span key={d.subtaskId} className="room-jdefer">{d.subtaskId} · waiting on {d.waitingOn.join(", ")}</span>)}</div>}
     </div>
