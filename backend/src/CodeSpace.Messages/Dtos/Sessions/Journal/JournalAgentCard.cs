@@ -16,7 +16,7 @@ public sealed record JournalAgentCard
     /// <summary>The agent run — the frontend deep-links its terminal / transcript.</summary>
     public required Guid AgentRunId { get; init; }
 
-    /// <summary>What the agent was asked — its subtask goal (the model's decomposition). Falls back to a neutral label when the task envelope named none.</summary>
+    /// <summary>The short name the card shows — the agent's semantic role, else its planned subtask title, else the raw instruction, else a neutral word. Mirrors the room card (<c>RoomAgentCard.Label</c>) so the two never disagree; the full instruction stays available in the agent's terminal drawer.</summary>
     public required string Label { get; init; }
 
     /// <summary>The agent's ground-truth lifecycle status (the <c>AgentRunStatus</c>).</summary>

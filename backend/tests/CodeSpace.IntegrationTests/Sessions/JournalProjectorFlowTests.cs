@@ -209,6 +209,32 @@ public sealed class JournalProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_cards_file_count_comes_from_the_supervisor_compact_when_the_agent_result_folded_none()
+    {
+        // The codex-cli case end-to-end: the agent's own result row carried NO changed-file list, but the supervisor
+        // folded the git-truth changed files into the spawn decision's compact. The journal card must show that count —
+        // the SAME one the room card reads off the compact — instead of a blank, so the two views can't disagree.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Compact-files run");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Research it", resultSummary: "done");
+
+        // A result with no changedFiles — the harness reported completion but folded no file list onto its own row.
+        var resultNoFiles = JsonSerializer.Serialize(new { status = "Succeeded", exitReason = "completed" });
+        var agent = await SeedAgentRunAsync(teamId, run1, goal: "Deep-dive the turn logic", status: AgentRunStatus.Succeeded, resultJson: resultNoFiles);
+
+        await SeedSpawnDecisionAsync(run1, teamId, DateTimeOffset.UtcNow, new[] { agent },
+            agentResults: new[] { (agent, new[] { "docs/report.md" }) });
+
+        JournalView? view;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
+
+        var card = view!.Turns.Single(t => t.Focused).Steps.Single(s => s.Kind == JournalStepKinds.Decision).Agents.Single();
+        card.FilesChanged.ShouldBe(1, "the compact's git-truth count fills the gap the empty result row left");
+        card.Files.Select(f => f.Path).ShouldBe(new[] { "docs/report.md" }, "path-only rows from the compact when the result carried no diffstat");
+    }
+
+    [Fact]
     public async Task A_staged_agent_with_no_readable_row_is_skipped_never_crashed_or_fabricated()
     {
         // The load-bearing skip guard: a spawn stages two ids but only one has a persisted, team-scoped AgentRun row (the
@@ -305,16 +331,27 @@ public sealed class JournalProjectorFlowTests
         return agentRunId;
     }
 
-    private async Task SeedSpawnDecisionAsync(Guid runId, Guid teamId, DateTimeOffset at, IReadOnlyList<Guid> agentRunIds)
+    private async Task SeedSpawnDecisionAsync(Guid runId, Guid teamId, DateTimeOffset at, IReadOnlyList<Guid> agentRunIds, IReadOnlyList<(Guid agentId, string[] changedFiles)>? agentResults = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+
+        // Mirror the real spawn outcome: agentRunIds are always folded; agentResults (the compact carrying each agent's
+        // git-truth changed files) is folded only when the supervisor recorded them, so callers that omit it exercise the
+        // metrics-only path exactly as before.
+        var outcome = new Dictionary<string, object?>
+        {
+            ["agentRunIds"] = agentRunIds.Select(id => id.ToString()),
+            ["agentCount"] = agentRunIds.Count,
+        };
+        if (agentResults != null)
+            outcome["agentResults"] = agentResults.Select(r => new { agentRunId = r.agentId.ToString(), status = "Succeeded", changedFiles = r.changedFiles });
 
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
-            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = agentRunIds.Select(id => id.ToString()), agentCount = agentRunIds.Count }),
+            OutcomeJson = JsonSerializer.Serialize(outcome),
             IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
             CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
         });

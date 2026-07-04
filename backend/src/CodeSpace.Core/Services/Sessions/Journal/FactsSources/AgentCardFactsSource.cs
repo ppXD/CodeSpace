@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Tasks.Phases;
 
@@ -39,13 +40,18 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
         var allAgentIds = stagedByDecision.SelectMany(x => x.AgentIds).Distinct().ToList();
         var metrics = await _metrics.ReadAsync(teamId, allAgentIds, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
+        // The SAME allocation (short subtask label) + ledger compact (git-truth files) the room card reads, folded from
+        // the already-loaded tape — so a journal card can't disagree with the room card for the same agent.
+        var allocation = SupervisorAgentAllocation.Map(tape);
+        var results = SupervisorAgentAllocation.ResultsById(tape);
+
         var facts = new Dictionary<string, JournalStepFacts>();
 
         foreach (var (decision, agentIds) in stagedByDecision)
         {
             var cards = agentIds
                 .Where(metrics.ContainsKey)   // an id whose row isn't the team's / not yet readable is skipped, never fabricated
-                .Select(id => ToCard(id, metrics[id]))
+                .Select(id => ToCard(id, metrics[id], allocation.GetValueOrDefault(id), results.GetValueOrDefault(id)))
                 .ToList();
 
             if (cards.Count > 0)
@@ -55,21 +61,37 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
         return facts;
     }
 
-    /// <summary>Map the shared metrics projection to a journal card — the ground-truth (status · files · tokens · duration · cost), with a neutral label when the task named no goal. Total tokens is null unless the agent reported usage (0 would read as "measured zero").</summary>
-    internal static JournalAgentCard ToCard(Guid agentRunId, AgentRunMetrics m) => new()
+    /// <summary>
+    /// Map the shared metrics projection to a journal card — the ground-truth (status · tokens · duration · cost · tool
+    /// count from the metrics reader). The LABEL mirrors the room card (<c>RoomNarrative.ToCard</c>): the agent's semantic
+    /// role, else its planned subtask title, else the raw instruction, else a neutral word — so a spawned agent shows the
+    /// short "what it was for", not its long instruction. FILES prefer the ledger COMPACT's git-truth changed files (the
+    /// same source the room reads, present even when the agent's own result row didn't fold a changed-file list — e.g.
+    /// codex-cli), falling back to the metrics reader; the per-file diffstat rows use the metrics reader when it has them,
+    /// else the compact's path-only list. Total tokens is null unless the agent reported usage (0 would read as "measured zero").
+    /// </summary>
+    internal static JournalAgentCard ToCard(Guid agentRunId, AgentRunMetrics m, AgentAllocation? allocation, SupervisorAgentResult? compact)
     {
-        AgentRunId = agentRunId,
-        Label = string.IsNullOrWhiteSpace(m.Goal) ? "Agent" : m.Goal!.Trim(),
-        Status = m.Status,
-        Model = m.Model,
-        DurationMs = m.DurationMs,
-        Tokens = m.InputTokens is null && m.OutputTokens is null ? null : (m.InputTokens ?? 0) + (m.OutputTokens ?? 0),
-        ToolCount = m.ToolCount,
-        CostUsd = m.CostUsd,
-        FilesChanged = m.FilesChanged,
-        Files = m.ChangedFileStats,
-        Resumed = m.Resumed,
-    };
+        var compactFiles = compact?.ChangedFiles ?? Array.Empty<string>();
+
+        return new JournalAgentCard
+        {
+            AgentRunId = agentRunId,
+            Label = FirstNonBlank(allocation?.Role, allocation?.SubtaskTitle, m.Goal) ?? "Agent",
+            Status = m.Status,
+            Model = m.Model,
+            DurationMs = m.DurationMs,
+            Tokens = m.InputTokens is null && m.OutputTokens is null ? null : (m.InputTokens ?? 0) + (m.OutputTokens ?? 0),
+            ToolCount = m.ToolCount,
+            CostUsd = m.CostUsd,
+            FilesChanged = compactFiles.Count > 0 ? compactFiles.Count : m.FilesChanged,
+            Files = m.ChangedFileStats.Count > 0 ? m.ChangedFileStats : compactFiles.Select(p => new FileDiffStat(p, null, null)).ToList(),
+            Resumed = m.Resumed,
+        };
+    }
+
+    /// <summary>The first non-blank value, trimmed — the label picks role → subtask title → instruction, treating an empty/whitespace field as absent so the card never shows a blank name.</summary>
+    private static string? FirstNonBlank(params string?[] values) => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim();
 
     private static readonly IReadOnlyDictionary<string, JournalStepFacts> EmptyFacts = new Dictionary<string, JournalStepFacts>();
 }
