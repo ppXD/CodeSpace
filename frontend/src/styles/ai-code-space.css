@@ -5895,7 +5895,7 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-plan-foot-gap { flex: 1; }
 .room-plan-prior { font-size: 11px; color: var(--muted); }
 
-/* ═══════════════ Session Journal (the chronological transcript — ?view=journal) ═══════════════ */
+/* ═══════════════ Session Journal (the chronological transcript — the only run-detail view) ═══════════════ */
 .journal-room {
   --jr-good: #1F6B3F; --jr-good-bg: #E9F4EE; --jr-good-line: #C2E0CF;
   --jr-warn: #A8590E; --jr-warn-bg: #FBF0DF; --jr-warn-line: #EFDABC;
