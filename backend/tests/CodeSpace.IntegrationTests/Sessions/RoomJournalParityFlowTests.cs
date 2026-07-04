@@ -20,10 +20,16 @@ namespace CodeSpace.IntegrationTests.Sessions;
 /// set (either REPLACED by the journal ③ steps — only <c>narrative_step</c> — or REUSED from the room projector by the
 /// hybrid FE — the other 9). A room block kind outside that set would silently vanish in journal mode at cutover.</item>
 /// <item><b>Narrative coverage</b> — the journal ③ carries the same agents + the same retry/respawn beats the room's
-/// <c>narrative_step</c>s did, so deleting the room narrative loses nothing.</item>
+/// <c>narrative_step</c>s did, so no room block-level SURFACE is lost.</item>
 /// <item><b>Retained-block liveness</b> — the room still projects each rich/live block the hybrid FE reuses
 /// (plan_checklist, final_answer, diagnostic, decision, live_activity) + the attempt ladder is journal-native.</item>
 /// </list>
+///
+/// <para>SCOPE (honest): the room ALSO emits two SYNTHETIC connecting narrative lines with no decision backing — the crash
+/// beat ("its next step failed before it could decide") and the between-phase "reviewed N agents · planning the next step"
+/// label. The journal ③ does NOT reproduce these as beats; they are intentionally SUPERSEDED — the crash by the RETAINED
+/// diagnostic card (witnessed below), the transitions by the chronological beats themselves. So "narrative coverage" is a
+/// block-SURFACE claim, not a line-by-line one.</para>
 ///
 /// <para>If this gate ever goes red, a room surface would disappear at cutover — classify it (retain the room projector
 /// for it, or cover it natively in the journal ③) before deleting the room narrative stack. The pure per-emitter richness
@@ -50,13 +56,15 @@ public sealed class RoomJournalParityFlowTests
 
     // ─── Tier 1: the structural tripwire ────────────────────────────────────────────
 
+    // ReranTurn is intentionally NOT in this Theory: a bare reran-winner turn emits NO inner blocks + no map, so the
+    // tripwire's ShouldAllBe would pass VACUOUSLY (zero blocks to check). Its parity is proven by the attempt-ladder test
+    // below. The ShouldNotBeEmpty guard makes any FUTURE shape that stops emitting blocks fail loudly rather than hide.
     [Theory]
     [InlineData(SessionCorpusSeed.Shape.SupervisorPlanSpawn)]
     [InlineData(SessionCorpusSeed.Shape.SingleAgent)]
     [InlineData(SessionCorpusSeed.Shape.Retry)]
     [InlineData(SessionCorpusSeed.Shape.RespawnCrash)]
     [InlineData(SessionCorpusSeed.Shape.PendingDecision)]
-    [InlineData(SessionCorpusSeed.Shape.ReranTurn)]
     public async Task Every_room_block_the_focused_turn_emits_is_handled_by_the_journal_mode(SessionCorpusSeed.Shape shape)
     {
         var seeded = await SessionCorpusSeed.SeedAsync(_fixture, shape);
@@ -65,6 +73,7 @@ public sealed class RoomJournalParityFlowTests
         var kinds = focused.Blocks.Select(KindOf).ToList();
         if (focused.Map is not null) kinds.Add("execution_map");
 
+        kinds.ShouldNotBeEmpty($"[{shape}] this shape must emit inner blocks for the tripwire to guard anything — an empty focused turn would pass the ShouldAllBe below vacuously");
         kinds.ShouldAllBe(k => JournalHandled.Contains(k),
             customMessage: $"[{shape}] a room block kind outside the FE JOURNAL_HANDLED set would silently vanish in journal mode at P6 cutover — classify it (retain its room projector, or cover it natively in the journal ③)");
     }
@@ -136,6 +145,21 @@ public sealed class RoomJournalParityFlowTests
         var journal = FocusedJournalTurn(await ProjectJournalAsync(seeded));
         journal.Steps.Count(s => s.Beat && s.Verb == "spawn").ShouldBeGreaterThanOrEqualTo(2,
             "both spawn waves survive as chronological journal ③ beats — the room's synthetic 'again' narrative becomes two real dispatch beats");
+    }
+
+    [Fact]
+    public async Task The_deep_failure_the_room_narrates_survives_on_the_retained_diagnostic()
+    {
+        // The room narrates a crash as a SYNTHETIC narrative_step ("its next step failed before it could decide") that the
+        // journal ③ does not reproduce as a beat — the one narrative line the ③ supersedes rather than carries. It is NOT
+        // lost: the deep cause rides the RETAINED diagnostic block (the hybrid FE reuses it), so the failure the operator
+        // needs still surfaces after the room narrative stack is deleted. This witnesses that supersession is safe.
+        var seeded = await SessionCorpusSeed.SeedAsync(_fixture, SessionCorpusSeed.Shape.RespawnCrash);
+        var room = FocusedRoomTurn(await ProjectRoomAsync(seeded), seeded.RunId);
+
+        room.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem()
+            .Text.ShouldContain("the request timed out before the gateway responded",
+                customMessage: "the deep failure survives on the retained diagnostic — the journal ③ supersedes the room's synthetic crash narrative with this card, so the failure isn't lost at cutover");
     }
 
     // ─── Tier 3: retained-block liveness + the journal-native attempt ladder ─────────
