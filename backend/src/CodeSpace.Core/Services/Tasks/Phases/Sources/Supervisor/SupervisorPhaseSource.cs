@@ -67,7 +67,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses (and the optional live duration/tool-count extras) → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim). The compact (model/tokens) folds from the ledger; <paramref name="extrasByAgent"/> carries the figures that don't (duration, tool count) — omitted leaves those ref fields null.</summary>
     public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunExtras>? extrasByAgent = null)
     {
-        var rollup = new AgentRollup(agentStatusById, AgentResultsById(decisions), extrasByAgent ?? EmptyExtras, AllocationMap(decisions));
+        var rollup = new AgentRollup(agentStatusById, SupervisorAgentAllocation.ResultsById(decisions), extrasByAgent ?? EmptyExtras, SupervisorAgentAllocation.Map(decisions));
 
         var phases = decisions.Select(d => ToPhase(d, rollup)).ToList();
 
@@ -173,36 +173,6 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// (carrying the subtask title; no per-agent role on a retry). Pure + best-effort — a homogeneous spawn (no
     /// <c>agents[]</c>) or a flat plan simply yields null role/title, byte-identical to before.
     /// </summary>
-    private static IReadOnlyDictionary<Guid, AgentAllocation> AllocationMap(IReadOnlyList<SupervisorDecisionRecord> decisions)
-    {
-        var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
-        var titleBySubtask = SupervisorOutcome.ReadPlanSubtasks(plan?.PayloadJson)
-            .GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.Last().Title);
-
-        var map = new Dictionary<Guid, AgentAllocation>();
-
-        foreach (var d in decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry).OrderBy(d => d.Sequence))
-        {
-            var agentIds = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson);
-
-            if (d.DecisionKind == SupervisorDecisionKinds.Spawn)
-            {
-                var subtaskIds = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
-                var rolesBySubtask = SupervisorOutcome.ReadSpawnAgentRoles(d.PayloadJson);
-
-                for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
-                    map[agentIds[i]] = new AgentAllocation(rolesBySubtask.GetValueOrDefault(subtaskIds[i]), titleBySubtask.GetValueOrDefault(subtaskIds[i]));
-            }
-            else if (SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } retried && agentIds.Count > 0)
-                map[agentIds[0]] = new AgentAllocation(Role: null, SubtaskTitle: titleBySubtask.GetValueOrDefault(retried));
-        }
-
-        return map;
-    }
-
-    /// <summary>One agent's model-authored allocation — its semantic role + the planned subtask title it was assigned. Either may be null.</summary>
-    private sealed record AgentAllocation(string? Role, string? SubtaskTitle);
-
     /// <summary>A phase's status folds from its agents: none → Pending; any failed/cancelled/timed-out → Failed; all succeeded → Succeeded; else still Active.</summary>
     private static PhaseStatus PhaseStatusFromAgents(IReadOnlyList<PhaseAgentRef> agents)
     {
@@ -311,14 +281,6 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
     /// <summary>A staged agent's real <c>AgentRun</c> row, narrowed to what the rollup needs — ground-truth status + the timestamps the live duration is computed from.</summary>
     private sealed record AgentRunRow(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
-
-    /// <summary>Every spawned agent's compact result (model + realized tokens), keyed by agent-run id — read straight off the staging decisions' folded <c>agentResults</c> (no DB, replay-deterministic). An id is unique to one decision; Last() is a defensive de-dup.</summary>
-    private static IReadOnlyDictionary<Guid, SupervisorAgentResult> AgentResultsById(IReadOnlyList<SupervisorDecisionRecord> decisions) =>
-        decisions
-            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
-            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .GroupBy(r => r.AgentRunId)
-            .ToDictionary(g => g.Key, g => g.Last());
 
     private static IReadOnlyList<Guid> StagedAgentIds(SupervisorDecisionRecord decision) =>
         SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
