@@ -491,12 +491,12 @@ const JOURNAL_HANDLED = new Set<RoomBlock["type"]>(["execution_map", "narrative_
 
 /** The journal's ③ shows only the supervisor's decision skeleton (planned · dispatched · asked · merged). Everything else — thinking, tool calls, model calls, agent-file events, run/node lifecycle — folds into the "background steps" disclosure; the raw text lives in the trace drawer, never flat on the main transcript. */
 function isBackgroundStep(s: JournalStep): boolean {
-  return s.kind !== "decision";
+  return !s.beat;
 }
 
 /** The supervisor "stopped" decision is internal lifecycle — its outcome is the result card ⑥, so it never takes a step in ③. There's no verb field on the DTO yet, so match the backend's title (see SupervisorDecisionTimelineMap.TitleFor). */
 function isStopDecision(s: JournalStep): boolean {
-  return s.kind === "decision" && /\bstopped\b/i.test(s.title);
+  return s.beat && /\bstopped\b/i.test(s.title);
 }
 
 /** Strip the internal-actor "Supervisor " voice so a decision reads as a plain past-tense beat ("Planned the work", "Dispatched 4 agents", "Asked you", "Merged the results"). */
@@ -545,7 +545,7 @@ function JournalNarrative({ turn }: { turn: JournalTurn }) {
 
   // One lightweight actor lane names WHO is driving the turn, so every beat below reads as the supervisor's without
   // repeating "Supervisor" on each line — the decisions carry only a semantic verb pill + a natural past-tense title.
-  const hasDecision = turn.steps.some((s) => s.kind === "decision" && !isStopDecision(s));
+  const hasDecision = turn.steps.some((s) => s.beat && !isStopDecision(s));
 
   return (
     <>
@@ -584,10 +584,10 @@ function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean })
       <span className="room-jnode" />
       <div className="room-jline">
         <span className="room-jtime">{jTime(step.at)}</span>
-        {step.kind === "decision"
+        {step.beat
           ? <span className={`room-jpill room-jpill-${jVerbKey(step.verb)}`}>{jVerbKey(step.verb)}</span>
           : <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>}
-        <span className="room-jtitle">{step.kind === "decision" ? jTitle(step.title) : step.title}</span>
+        <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
       {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}

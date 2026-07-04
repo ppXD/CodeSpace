@@ -365,7 +365,9 @@ export interface JournalStep {
   cursor: string;
   at: string;
   kind: string;
-  /// For a decision step, the supervisor's decision verb (Plan / Spawn / Retry / AskHuman / Merge / Resolve / Stop) — the semantic pill. Null for a non-decision step.
+  /// Whether this step is an orchestration BEAT — a curated milestone shown in the ③ timeline (a supervisor decision, a map/planner node's dispatch, …). Non-beats fold into "background steps". Generic across run shapes.
+  beat: boolean;
+  /// For a beat step, its semantic verb (plan / spawn / retry / ask_human / merge / resolve / stop / dispatch) — the semantic pill. Null for a non-beat step.
   verb?: string | null;
   title: string;
   detail?: string | null;

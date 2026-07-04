@@ -33,7 +33,16 @@ public sealed record JournalStep
     /// <summary>The human one-line headline (backend-authored). e.g. "Supervisor planned the work", "Called git.open_pr", "edited auth/session.ts".</summary>
     public required string Title { get; init; }
 
-    /// <summary>For a supervisor DECISION step, its semantic verb — the lowercase/snake_case <c>SupervisorDecisionKinds</c> value (<c>plan</c> / <c>spawn</c> / <c>retry</c> / <c>ask_human</c> / <c>merge</c> / <c>resolve</c> / <c>stop</c>) — so the frontend renders a semantic pill (PLAN / DISPATCH / ASK / MERGE / RETRY / …) under one "Supervisor" actor lane, instead of tagging every beat a generic "decision". Null for a non-decision step.</summary>
+    /// <summary>
+    /// Whether this step is an ORCHESTRATION BEAT — a curated milestone the journal shows in its ③ timeline (a supervisor
+    /// decision, a map/planner node's dispatch, any future orchestrator's move), as opposed to background chatter (tool
+    /// calls, thinking, model calls, run/node lifecycle, agent events) that folds away. GENERIC across run shapes: the
+    /// frontend shows a step iff it is a beat, so a non-supervisor run (flow.map) surfaces its beats the same way — the
+    /// describer that authored the step decides, not a hardcoded "is it a decision" test on the frontend.
+    /// </summary>
+    public bool Beat { get; init; }
+
+    /// <summary>For an orchestration-beat step, its semantic verb — a supervisor <c>SupervisorDecisionKinds</c> value (<c>plan</c> / <c>spawn</c> / <c>retry</c> / <c>ask_human</c> / <c>merge</c> / <c>resolve</c> / <c>stop</c>) or a node beat's verb (<c>dispatch</c> / <c>plan</c>) — so the frontend renders a semantic pill (PLAN / DISPATCH / ASK / MERGE / …). Null for a non-beat step.</summary>
     public string? Verb { get; init; }
 
     /// <summary>An optional secondary line (an error, an answer, a model's token cost). Null when none.</summary>
