@@ -100,6 +100,59 @@ public static class SupervisorOutcome
     /// <summary>The model-authored closing line a <c>stop</c> outcome recorded — the <c>summary</c> field <c>ExecuteStop</c> wrote to <c>{ stopped, outcome, summary }</c>. The run's "here's what I did" narration; null when absent / malformed.</summary>
     public static string? ReadStopSummary(string? outcomeJson) => ReadStringField(outcomeJson, "summary");
 
+    /// <summary>
+    /// Fold the authoring model call (model + tokens) into a decision's OUTCOME under a <c>modelUsage</c> key — a
+    /// NON-hashed enrichment (only the payload is hashed into the idempotency key), so it can never drift replay identity.
+    /// A null usage (a stub / no-model decision) returns the outcome unchanged (byte-identical), and a malformed outcome
+    /// is left alone. So the journal can attribute how a decision was made (e.g. the "via &lt;model&gt;" line on a plan beat).
+    /// </summary>
+    public static string WriteModelUsage(string? outcomeJson, SupervisorModelUsage? usage)
+    {
+        if (usage is null) return outcomeJson ?? "{}";
+
+        System.Text.Json.Nodes.JsonNode? root;
+
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(string.IsNullOrWhiteSpace(outcomeJson) ? "{}" : outcomeJson); }
+        catch (JsonException) { return outcomeJson ?? "{}"; }
+
+        if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
+
+        obj["modelUsage"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["model"] = usage.Model,
+            ["inputTokens"] = usage.InputTokens,
+            ["outputTokens"] = usage.OutputTokens,
+        };
+
+        return obj.ToJsonString();
+    }
+
+    /// <summary>Read the authoring model call folded into a decision's outcome by <see cref="WriteModelUsage"/>. Null when absent / malformed / no model.</summary>
+    public static SupervisorModelUsage? ReadModelUsage(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("modelUsage", out var u) || u.ValueKind != JsonValueKind.Object) return null;
+
+            var model = u.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
+
+            if (string.IsNullOrWhiteSpace(model)) return null;
+
+            return new SupervisorModelUsage { Model = model!, InputTokens = ReadIntField(u, "inputTokens"), OutputTokens = ReadIntField(u, "outputTokens") };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static int? ReadIntField(JsonElement obj, string field) =>
+        obj.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
+
     /// <summary>Best-effort read of a top-level string field from an outcome object (null when absent / malformed / not a string).</summary>
     private static string? ReadStringField(string? outcomeJson, string field)
     {

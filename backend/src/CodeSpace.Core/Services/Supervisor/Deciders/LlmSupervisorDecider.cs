@@ -81,7 +81,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // A reply that did not parse to a decision (wrong shape) or carried no kind is the same model-side MISS — fail closed.
         if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop();
 
-        return SupervisorDecisionProjector.Project(model);
+        // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
+        // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
+        // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).
+        return SupervisorDecisionProjector.Project(model) with
+        {
+            Usage = new SupervisorModelUsage { Model = pick.ModelId, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+        };
     }
 
     /// <summary>Whether an LLM transport failure is a MODEL-side capability miss (the model could not produce a usable structured decision) rather than a gateway/credential INFRA fault. Capability misses fail closed to a clean stop (never crash the run); infra faults (Transient / RateLimited / AuthFailed) propagate so the engine fails the run and the live-gate treats them as non-gating infra. This is the decider's "fail closed on a model miss, surface real infra" split.</summary>
