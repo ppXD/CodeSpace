@@ -205,11 +205,44 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         var type = ReadType(root);
         if (type is null) return Array.Empty<AgentEvent>();
 
-        // Codex's `exec --json` emits ONE event object per JSONL line, so a line maps to a single event (the full
-        // root is retained as Data, and a large payload is offloaded downstream). The list contract lets a future
-        // multi-block stream surface several — Codex just never packs more than one per line today.
+        // Codex 0.142.x threaded schema: `turn.started` is pure lifecycle and `item.started` duplicates the terminal
+        // `item.completed` (same item, in_progress) — suppress both (like ClaudeCodeHarness drops system/init lines) so
+        // the transcript shows ONE self-describing row per item, not a flood of bare "turn.started"/"item.started" names.
+        // No reader consumes their payload.
+        if (type is TurnStartedType or ItemStartedType) return Array.Empty<AgentEvent>();
+
+        // `item.completed` nests its readable payload under `item` (item.type + text/command/message/items) — read the
+        // human line + kind from THERE, not the top level (where the old flat schema carried them). This is the fix for
+        // a terminal that otherwise showed a wall of bare "item.completed" names. Classify by the type alone so even a
+        // malformed line whose `item` is absent/non-object never falls back to the bare "item.completed" envelope name.
+        if (type == ItemCompletedType)
+        {
+            var hasItem = root.TryGetProperty("item", out var item) && item.ValueKind == JsonValueKind.Object;
+            return new[] { new AgentEvent { Kind = hasItem ? MapItemKind(ReadItemType(item)) : AgentEventKind.Warning, Text = hasItem ? ReadItemText(item) : "item", Data = root } };
+        }
+
+        // `turn.failed` carries the real reason nested under `error.message` — surface it as an Error so BuildResult
+        // reports it (the top-level ReadText can't reach a nested field and would leave a bare "turn.failed").
+        if (type == TurnFailedType)
+            return new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = ReadNestedString(root, "error", "message") ?? type, Data = root } };
+
+        // `thread.started` (its Data carries the thread_id the session reader needs) and `turn.completed` (its Data
+        // carries the token usage the usage reader needs) MUST keep being produced so those readers still find them;
+        // give them a clean line instead of the bare lifecycle name.
+        if (type == ThreadStartedType) return new[] { new AgentEvent { Kind = AgentEventKind.Started, Text = "Session started", Data = root } };
+        if (type == TurnCompletedType) return new[] { new AgentEvent { Kind = AgentEventKind.Completed, Text = "Turn complete", Data = root } };
+
+        // The older FLAT schema (still emitted by the fake CLI + pre-threaded Codex) carries content at the top level —
+        // read it there. Codex emits one event per JSONL line, so a line maps to a single event.
         return new[] { new AgentEvent { Kind = MapKind(type), Text = ReadText(root, type), Data = root } };
     }
+
+    private const string ThreadStartedType = "thread.started";
+    private const string TurnStartedType = "turn.started";
+    private const string TurnCompletedType = "turn.completed";
+    private const string TurnFailedType = "turn.failed";
+    private const string ItemStartedType = "item.started";
+    private const string ItemCompletedType = "item.completed";
 
     public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode)
     {
@@ -408,6 +441,57 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
         return type;
     }
+
+    /// <summary>The threaded item's own discriminator (<c>item.type</c>) — the codex 0.142.x kind vocabulary (agent_message / command_execution / todo_list / error / reasoning). Null when absent.</summary>
+    private static string? ReadItemType(JsonElement item) =>
+        item.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+
+    /// <summary>Map a threaded item's kind to the normalized event kind. Unknown → Warning so a new item type is never silently dropped, only unstyled.</summary>
+    private static AgentEventKind MapItemKind(string? itemType) => itemType switch
+    {
+        "agent_message" => AgentEventKind.AssistantMessage,
+        "reasoning" => AgentEventKind.Reasoning,
+        "command_execution" => AgentEventKind.CommandExecuted,
+        "todo_list" => AgentEventKind.PlanUpdate,
+        "error" => AgentEventKind.Error,
+        _ => AgentEventKind.Warning,
+    };
+
+    /// <summary>The readable line for a threaded item — the message/command/error/plan the item carries. A todo_list renders as checklist lines; every other kind takes its first non-empty content field, so an UNRECOGNIZED item still yields real text (its content or, last resort, its type), never a bare "item.completed".</summary>
+    private static string ReadItemText(JsonElement item)
+    {
+        var itemType = ReadItemType(item);
+
+        if (itemType == "todo_list") return RenderTodos(item);
+
+        foreach (var key in new[] { "text", "message", "command", "aggregated_output" })
+            if (TryReadString(item, key, out var v)) return v;
+
+        // A RECOGNIZED content-bearing kind that carried an empty field renders as a blank line (the FE falls back to the
+        // humanized kind), never the raw kind token; only a genuinely unknown item keeps its type as a self-describing hint.
+        return itemType is "agent_message" or "reasoning" or "command_execution" or "error" ? "" : itemType ?? "item";
+    }
+
+    /// <summary>Render a codex todo_list item as checklist lines ("[x] done" / "[ ] pending") — its <c>items[].text</c> + <c>completed</c>. Falls back to the bare kind when the list is empty/malformed.</summary>
+    private static string RenderTodos(JsonElement item)
+    {
+        if (!item.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array) return "todo_list";
+
+        var lines = new List<string>();
+        foreach (var todo in items.EnumerateArray())
+        {
+            if (!TryReadString(todo, "text", out var text)) continue;
+
+            var done = todo.TryGetProperty("completed", out var c) && c.ValueKind == JsonValueKind.True;
+            lines.Add((done ? "[x] " : "[ ] ") + text);
+        }
+
+        return lines.Count > 0 ? string.Join("\n", lines) : "todo_list";
+    }
+
+    /// <summary>Read a nested string (<c>parent.key</c>) — for a payload whose readable line lives one object down (e.g. turn.failed's <c>error.message</c>). Null when absent.</summary>
+    private static string? ReadNestedString(JsonElement root, string parent, string key) =>
+        root.TryGetProperty(parent, out var p) && p.ValueKind == JsonValueKind.Object && TryReadString(p, key, out var v) ? v : null;
 
     private static bool TryReadString(JsonElement obj, string key, out string value)
     {
