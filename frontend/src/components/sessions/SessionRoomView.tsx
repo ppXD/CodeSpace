@@ -796,6 +796,14 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
             <div className="room-janswer"><span className="room-janswer-l">└ answer · </span>{ask.answer}</div>
           </>
         : <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>)}
+      {step.modelCall && (
+        <div className="room-jmodel">
+          <span className="room-jmodel-l">└ via · </span>
+          <span className="room-jmodel-model">{step.modelCall.model ?? "model"}</span>
+          {step.modelCall.tokens != null && step.modelCall.tokens > 0 && <span className="room-jmodel-x"> · {formatTokens(step.modelCall.tokens)} tokens</span>}
+          {step.modelCall.costUsd != null && <span className="room-jmodel-x"> · {formatCostUsd(step.modelCall.costUsd)}</span>}
+        </div>
+      )}
       {step.plan.length > 0 && (
         <div className="room-jplan-card">
           {planCard
