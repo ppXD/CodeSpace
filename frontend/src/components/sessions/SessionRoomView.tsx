@@ -56,10 +56,10 @@ const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
 const useRoomDrawer = () => useContext(RoomDrawerContext);
 
 /**
- * The Session Journal, when the ?view=journal toggle is on — null in plain Room mode. When present, a turn REUSES the
- * Room frame (header, execution map ①, plan checklist ②, result card ⑥, mono style) but replaces its narrative blocks
- * (agent groups / supervisor steps / the live ticker) with the journal's CHRONOLOGICAL steps ③, so the journal is the
- * Room with a better middle, not a different-looking page.
+ * The Session Journal for this run — undefined only while its fetch resolves (the Room frame renders meanwhile). When
+ * present, a turn REUSES the Room frame (header, execution map ①, plan checklist ②, result card ⑥, mono style) but
+ * replaces its narrative blocks (agent groups / supervisor steps / the live ticker) with the journal's CHRONOLOGICAL
+ * steps ③, so the journal is the Room with a better middle, not a different-looking page.
  */
 const JournalContext = createContext<JournalView | null>(null);
 const useJournal = () => useContext(JournalContext);

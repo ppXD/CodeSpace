@@ -5999,11 +5999,6 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .jr-empty { color: var(--muted-2); font-size: 13px; padding: 8px 0 8px 44px; }
 .jr-foot { color: var(--muted-2); font-size: 12px; text-align: center; margin-top: 30px; }
 
-/* room ⇄ journal toggle — floats bottom-right (a FAB spot that never overlaps the app-shell top bar) */
-.jr-toggle { position: fixed; bottom: 20px; right: 20px; z-index: 50; display: inline-flex; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 2px; box-shadow: var(--shadow-2); }
-.jr-toggle button { font: inherit; font-size: 12px; font-weight: 600; border: 0; cursor: pointer; background: transparent; color: var(--muted); padding: 4px 13px; border-radius: 999px; }
-.jr-toggle button.jr-toggle-on { background: var(--accent-soft); color: var(--accent); }
-
 /* ─── Journal ③ timeline (inside the Room frame; inherits the Room's mono + --rm-* tokens) ─── */
 /* Actor lane — names WHO drives the turn once, so the beats below don't each repeat "Supervisor". */
 .room-jactor { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-size: 12px; }
