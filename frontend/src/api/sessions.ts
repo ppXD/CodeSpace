@@ -377,6 +377,15 @@ export interface JournalModelCall {
   status: string;
 }
 
+/// The full, on-demand detail of one model call — mirrors backend `ModelCallDetail`. Fetched when the drawer opens; each
+/// field is a display string (offloaded prompt/result resolved to text), null when the call didn't carry it.
+export interface ModelCallDetail {
+  prompt?: string | null;
+  result?: string | null;
+  usage?: string | null;
+  trace: string;
+}
+
 export interface JournalStep {
   id: string;
   cursor: string;
@@ -493,6 +502,17 @@ export const sessionsApi = {
     try {
       const scope = agentRunId ? `&agentRunId=${encodeURIComponent(agentRunId)}` : "";
       return await fetchJson<RoomFilePreview>(`/api/sessions/by-run/${runId}/room/file?path=${encodeURIComponent(path)}${scope}`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+
+  /// One model call's full detail (prompt · result · usage · trace) for the journal drawer, by the completed interaction
+  /// record's ledger sequence. Null when the run is foreign / missing or the sequence isn't a model call (404).
+  getModelCallDetail: async (runId: string, sequence: number): Promise<ModelCallDetail | null> => {
+    try {
+      return await fetchJson<ModelCallDetail>(`/api/sessions/by-run/${runId}/model-call/${sequence}`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

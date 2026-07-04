@@ -68,6 +68,14 @@ public class SessionsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>One model call's full detail (prompt · result · usage · trace) — the journal's model-call drawer, fetched on demand by the completed interaction record's ledger sequence. Team-scoped; foreign / absent run or unknown sequence → 404.</summary>
+    [HttpGet("by-run/{runId:guid}/model-call/{sequence:long}")]
+    public async Task<IActionResult> RunModelCall([FromRoute] Guid runId, [FromRoute] long sequence, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetModelCallDetailQuery { RunId = runId, Sequence = sequence }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>A generic preview of one file the run's turn produced (from the producing agent's captured diff), keyed by repo-relative path. Optional <c>agentRunId</c> scopes to one agent's version (per-agent attribution). Team-scoped; foreign / absent run → 404.</summary>
     [HttpGet("by-run/{runId:guid}/room/file")]
     public async Task<IActionResult> RunRoomFile([FromRoute] Guid runId, [FromQuery] string path, [FromQuery] Guid? agentRunId, CancellationToken cancellationToken)
