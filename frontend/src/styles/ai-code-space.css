@@ -2685,6 +2685,7 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-lights > i:nth-child(2) { background: #febc2e; }
 .acs-root .agent-terminal-lights > i:nth-child(3) { background: #28c840; }
 .acs-root .agent-terminal-title { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 500; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-terminal-barsub { flex: none; max-width: 45%; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .agent-terminal-close { appearance: none; border: 0; background: transparent; cursor: pointer; display: inline-flex; color: var(--muted-2); padding: 2px; border-radius: 5px; flex: none; }
 .acs-root .agent-terminal-close:hover { background: var(--panel); color: var(--ink-2); }
 /* the identity strip — harness · model · tool count · run time, the agent's whole identity in one line */
