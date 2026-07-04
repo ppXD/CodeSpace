@@ -27,8 +27,6 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 {
     public const string Key = "node-summary";
 
-    private const string MapContainerKind = "flow.map";
-
     private readonly IWorkflowService _workflows;
     private readonly AgentMetricsReader _metrics;
 
@@ -81,7 +79,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 
     private static RunPhase ToPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> allRows, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
-        var branches = MapBranchesOf(node.NodeId, allRows);
+        var branches = MapFanout.BranchesOf(node.NodeId, allRows);
 
         if (branches.Count > 0) return MapPhase(node, order, branches, agentStatusById, metricsById);
 
@@ -90,21 +88,6 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         return PlainPhase(node, order);
     }
 
-    /// <summary>The map element-branch rows belonging DIRECTLY to this node: a branch carries ContainerKind=="flow.map" and an iteration key whose remainder after the "&lt;nodeId&gt;#" prefix has NO '/' — i.e. the engine's "&lt;mapId&gt;#&lt;i&gt;" shape, excluding a nested grandchild like "&lt;mapId&gt;#&lt;i&gt;/&lt;innerKey&gt;" (the engine composes nested keys as "&lt;outerKey&gt;/&lt;segment&gt;"). So the fan-out folds ONLY its own direct elements, matching the outer map's count/failed metric.</summary>
-    private static IReadOnlyList<WorkflowRunNodeSummary> MapBranchesOf(string nodeId, IReadOnlyList<WorkflowRunNodeSummary> allRows)
-    {
-        var prefix = nodeId + "#";
-
-        return allRows
-            .Where(r => r.ContainerKind == MapContainerKind && IsDirectBranch(r.IterationKey, prefix))
-            .OrderBy(r => r.IterationKey, StringComparer.Ordinal)
-            .ToList();
-    }
-
-    /// <summary>A direct branch of the map: the key starts with "&lt;nodeId&gt;#" and the remainder after that prefix carries NO '/' (a '/' marks a nested-container segment, i.e. a grandchild — not this map's direct element).</summary>
-    private static bool IsDirectBranch(string iterationKey, string prefix) =>
-        iterationKey.StartsWith(prefix, StringComparison.Ordinal) &&
-        iterationKey.AsSpan(prefix.Length).IndexOf('/') < 0;
 
     private static RunPhase MapPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> branches, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
