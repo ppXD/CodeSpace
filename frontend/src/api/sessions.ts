@@ -353,6 +353,12 @@ export interface JournalDeferredSubtask {
   waitingOn: string[];
 }
 
+/// One planned subtask on a PLAN step — the model's authored plan, rendered inline under "planned the work". Mirrors backend `JournalSubtask`.
+export interface JournalSubtask {
+  subtaskId: string;
+  title: string;
+}
+
 /// One chronological step of a run's work journal — the frontend renders by `kind`. Mirrors backend `JournalStep`.
 export interface JournalStep {
   id: string;
@@ -368,6 +374,8 @@ export interface JournalStep {
   milestone: boolean;
   agents: JournalAgentCard[];
   deferred: JournalDeferredSubtask[];
+  /// The subtasks this PLAN step authored — rendered inline under "planned the work". Empty for a non-plan step.
+  plan: JournalSubtask[];
   agentRunId?: string | null;
   nodeId?: string | null;
 }
