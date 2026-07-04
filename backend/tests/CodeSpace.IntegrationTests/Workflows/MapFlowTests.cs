@@ -12,6 +12,9 @@ using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+// #955 added a second CodeSpace.Core.Services.Workflows.MapPlan (the journal planner helper), colliding with the
+// fan-out Engine.MapPlan this file uses; alias the bare name back to the Engine one it means.
+using MapPlan = CodeSpace.Core.Services.Workflows.Engine.MapPlan;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
