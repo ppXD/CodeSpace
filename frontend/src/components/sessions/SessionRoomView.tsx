@@ -367,10 +367,15 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // result ⑥. Supporting stat rows (Files changed / Tools / Reasoning) drop to a collapsed strip AFTER the
                 // result so they never interrupt the story. Any block the journal doesn't deliberately replace — an
                 // unknown/future additive type — still falls through InnerBlock so it degrades to a faint line, never vanishes.
-                const topPlan = turn.blocks.find((b) => b.type === "plan_checklist");
+                // The plan pinned at the top: the plan_checklist ② when a checklist exists, else the "Plan · N subtasks"
+                // stat — the room emits ONE or the OTHER (checklist-present vs null), never both, so a run without a
+                // checklist still shows its plan here instead of nowhere.
+                const topPlan = turn.blocks.find((b) => b.type === "plan_checklist") ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks");
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
-                const statBlocks = turn.blocks.filter((b) => b.type === "stat");
+                // Files changed / Tools / Reasoning as supporting rows after the result — but NOT any "Plan · N subtasks"
+                // stat, which is the plan already pinned at the top, so it isn't repeated as an appendix.
+                const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.kind !== "subtasks");
                 const passThrough = turn.blocks.filter((b) => !JOURNAL_HANDLED.has(b.type));
                 return (
                   <>
@@ -536,21 +541,34 @@ function JournalNarrative({ turn }: { turn: JournalTurn }) {
     }
   }
 
+  // One lightweight actor lane names WHO is driving the turn, so every beat below reads as the supervisor's without
+  // repeating "Supervisor" on each line — the decisions carry only a semantic verb pill + a natural past-tense title.
+  const hasDecision = turn.steps.some((s) => s.kind === "decision" && !isStopDecision(s));
+
   return (
-    <div className="room-jrnl">
-      {rows.map((r, i) => (r.kind === "step" ? <JournalStepRow key={r.step.id} step={r.step} /> : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
-      {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
-    </div>
+    <>
+      {hasDecision && (
+        <div className="room-jactor">
+          <span className="room-jactor-dot" />
+          <span className="room-jactor-name">Supervisor</span>
+          <span className="room-jactor-sub">· coordinating this turn</span>
+        </div>
+      )}
+      <div className="room-jrnl">
+        {rows.map((r, i) => (r.kind === "step" ? <JournalStepRow key={r.step.id} step={r.step} /> : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
+        {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
+      </div>
+    </>
   );
 }
 
 function JournalFold({ steps }: { steps: JournalStep[] }) {
   const [open, setOpen] = useState(false);
   const noun = steps.every((s) => s.kind === "thinking") ? "reasoning" : "background";
-  if (open) return <>{steps.map((s) => <JournalStepRow key={s.id} step={s} muted />)}</>;
   return (
     <div className="room-jfold">
-      <button onClick={() => setOpen(true)}>▸ {steps.length} {noun} {steps.length === 1 ? "step" : "steps"}</button>
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open}>{open ? "▾" : "▸"} {steps.length} {noun} {steps.length === 1 ? "step" : "steps"}</button>
+      {open && <div className="room-jfold-steps">{steps.map((s) => <JournalStepRow key={s.id} step={s} muted />)}</div>}
     </div>
   );
 }
@@ -564,7 +582,9 @@ function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean })
       <span className="room-jnode" />
       <div className="room-jline">
         <span className="room-jtime">{jTime(step.at)}</span>
-        <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>
+        {step.kind === "decision"
+          ? <span className={`room-jpill room-jpill-${jVerbKey(step.verb)}`}>{jVerbKey(step.verb)}</span>
+          : <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>}
         <span className="room-jtitle">{step.kind === "decision" ? jTitle(step.title) : step.title}</span>
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
@@ -577,6 +597,19 @@ function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean })
 
 function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }
 function jKindLabel(k: string): string { return k === "model_call" ? "model" : k; }
+/** The semantic pill for a supervisor decision verb — PLAN / DISPATCH / ASK / MERGE / RETRY / RESOLVE (rendered uppercase by CSS), so a beat says WHAT was decided, not a generic "decision". The backend emits the lowercase/snake_case DecisionKind (plan / spawn / ask_human / …); lowercased here for robustness. Unknown/missing verb falls back to "decision". */
+function jVerbKey(verb: string | null | undefined): string {
+  switch ((verb ?? "").toLowerCase()) {
+    case "plan": return "plan";
+    case "spawn": return "dispatch";
+    case "retry": return "retry";
+    case "ask_human": return "ask";
+    case "merge": return "merge";
+    case "resolve": return "resolve";
+    case "stop": return "stop";
+    default: return "decision";
+  }
+}
 function jTime(iso: string): string { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 
 /** One inner block, rendered by type as a Codex-style detail row / card. */

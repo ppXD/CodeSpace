@@ -33,6 +33,9 @@ public sealed record JournalStep
     /// <summary>The human one-line headline (backend-authored). e.g. "Supervisor planned the work", "Called git.open_pr", "edited auth/session.ts".</summary>
     public required string Title { get; init; }
 
+    /// <summary>For a supervisor DECISION step, its semantic verb — the lowercase/snake_case <c>SupervisorDecisionKinds</c> value (<c>plan</c> / <c>spawn</c> / <c>retry</c> / <c>ask_human</c> / <c>merge</c> / <c>resolve</c> / <c>stop</c>) — so the frontend renders a semantic pill (PLAN / DISPATCH / ASK / MERGE / RETRY / …) under one "Supervisor" actor lane, instead of tagging every beat a generic "decision". Null for a non-decision step.</summary>
+    public string? Verb { get; init; }
+
     /// <summary>An optional secondary line (an error, an answer, a model's token cost). Null when none.</summary>
     public string? Detail { get; init; }
 

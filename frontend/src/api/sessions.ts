@@ -359,6 +359,8 @@ export interface JournalStep {
   cursor: string;
   at: string;
   kind: string;
+  /// For a decision step, the supervisor's decision verb (Plan / Spawn / Retry / AskHuman / Merge / Resolve / Stop) — the semantic pill. Null for a non-decision step.
+  verb?: string | null;
   title: string;
   detail?: string | null;
   rationale?: string | null;

@@ -82,9 +82,9 @@ public class SupervisorDecisionTimelineMapTests
             .ShouldBe("Supervisor retried a subtask");
 
         // A retry that SETTLED having staged NO agent re-ran nothing (the model authored an empty/unknown subtask id,
-        // the server no-op'd it) — say so, instead of implying work happened.
+        // the server no-op'd it) — read as a review-with-no-retry, not "retried" copy that implies work happened.
         SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry, SupervisorDecisionStatus.Succeeded, outcome: StagedAgents(0))).Title
-            .ShouldBe("Supervisor retried — no subtask to re-run");
+            .ShouldBe("Supervisor reviewed the results — no retry needed");
     }
 
     [Theory]
