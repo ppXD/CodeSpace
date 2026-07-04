@@ -589,22 +589,72 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
       <div className="room-jrnl">
         {rows.map((r, i) => (r.kind === "step"
           ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === currentPlanStepId ? planCard : undefined} planVersion={planVersionById.get(r.step.id)} planSuperseded={r.step.id !== currentPlanStepId} />
-          : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
+          : partitionBackground(r.steps).map((g, j) => <JournalFold key={`fold-${i}-${g.category}-${j}`} steps={g.steps} category={g.category} />)))}
         {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
       </div>
     </>
   );
 }
 
-function JournalFold({ steps }: { steps: JournalStep[] }) {
+function JournalFold({ steps, category }: { steps: JournalStep[]; category: string }) {
   const [open, setOpen] = useState(false);
-  const noun = steps.every((s) => s.kind === "thinking") ? "reasoning" : "background";
   return (
     <div className="room-jfold">
-      <button onClick={() => setOpen((v) => !v)} aria-expanded={open}>{open ? "▾" : "▸"} {steps.length} {noun} {steps.length === 1 ? "step" : "steps"}</button>
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open}>{open ? "▾" : "▸"} {foldLabel(category, steps)}</button>
       {open && <div className="room-jfold-steps">{steps.map((s) => <JournalStepRow key={s.id} step={s} muted />)}</div>}
     </div>
   );
+}
+
+/** The display category of a folded background step — so the fold reads "3 model calls · 25.6k tokens" not a flat "N
+ *  background steps" that hides cost + intelligence. Model calls / tool calls / reasoning each get their own class; the
+ *  rest (lifecycle housekeeping, and any other non-beat kind) stays generic. */
+function stepCategory(kind: string): "model" | "tool" | "reasoning" | "lifecycle" | "background" {
+  switch (kind) {
+    case "model_call": return "model";
+    case "tool": return "tool";
+    case "thinking": return "reasoning";
+    case "lifecycle": return "lifecycle";
+    default: return "background";
+  }
+}
+
+/** A consecutive run of folded background steps, split into typed groups by category (first-appearance order preserved),
+ *  so model calls / tool calls / reasoning / lifecycle each collapse into their OWN labeled fold instead of one opaque
+ *  "N background steps". */
+function partitionBackground(steps: JournalStep[]): { category: string; steps: JournalStep[] }[] {
+  const order: string[] = [];
+  const byCategory = new Map<string, JournalStep[]>();
+  for (const s of steps) {
+    const cat = stepCategory(s.kind);
+    if (!byCategory.has(cat)) { byCategory.set(cat, []); order.push(cat); }
+    byCategory.get(cat)!.push(s);
+  }
+  return order.map((cat) => ({ category: cat, steps: byCategory.get(cat)! }));
+}
+
+/** A model call's total tokens, parsed from its "kind · model · N tokens" detail (RunRecordTimelineMap.ModelCallSummary).
+ *  0 when the call reported no usage — so the fold's token sum omits it rather than counting a phantom zero. */
+function stepTokens(step: JournalStep): number {
+  const m = /·\s*([\d,]+)\s*tokens/.exec(step.detail ?? "");
+  return m ? parseInt(m[1].replace(/,/g, ""), 10) : 0;
+}
+
+/** The fold's label by category — model calls surface their summed token cost (the thing that must be SEEN, not buried);
+ *  the others just count. */
+function foldLabel(category: string, steps: JournalStep[]): string {
+  const n = steps.length;
+  const plural = n === 1 ? "" : "s";
+  switch (category) {
+    case "model": {
+      const tokens = steps.reduce((sum, s) => sum + stepTokens(s), 0);
+      return `${n} model call${plural}${tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}`;
+    }
+    case "tool": return `${n} tool call${plural}`;
+    case "reasoning": return `${n} reasoning step${plural}`;
+    case "lifecycle": return `${n} lifecycle step${plural}`;
+    default: return `${n} background step${plural}`;
+  }
 }
 
 function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock; planVersion?: number; planSuperseded?: boolean }) {
