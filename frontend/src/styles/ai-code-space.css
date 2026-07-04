@@ -6044,6 +6044,9 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jagents .room-work { margin: 0; }
 
 /* Inline plan — the subtasks the PLAN step authored, rendered right under "planned the work" so the plan reads before the dispatch. */
+/* The rich plan checklist card (the room's PlanChecklistCard) rendered inline under the plan beat — just indent it to the beat's content column. */
+.room-jplan-card { margin: 8px 0 2px 64px; }
+.room-jplan-card .room-plan { margin: 0; }
 .room-jplan { margin: 8px 0 2px 64px; padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); display: flex; flex-direction: column; gap: 6px; list-style: none; }
 .room-jplan li { display: flex; gap: 9px; font-size: 12.5px; color: var(--ink-2); align-items: baseline; }
 .room-jplan-n { flex: none; color: var(--muted-2); font-variant-numeric: tabular-nums; }
