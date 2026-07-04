@@ -22,8 +22,8 @@ namespace CodeSpace.IntegrationTests.Sessions;
 /// NULL turn index (Correction-1 — a derived run attaches to the thread via ParentRunId, consuming no new turn), so
 /// replaying a turn keeps it ON the thread instead of orphaning it. Before S5 a fork dropped the session
 /// (<c>session: null</c>). Proven through the REAL <see cref="IWorkflowService.ReplayRunAsync"/> over both fork branches
-/// (snapshot inline-def + authored re-pinned-version), plus the session-less byte-identical case. The fork is staged
-/// but not executed (the inheritance is established at staging — AutoExecute paused).
+/// (snapshot inline-def + authored re-pinned-version). A fork of a session-LESS parent (legacy only) now opens its OWN
+/// session at the generic staging seam. The fork is staged but not executed (inheritance established at staging — AutoExecute paused).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -50,8 +50,11 @@ public class WorkSessionForkInheritFlowTests
     }
 
     [Fact]
-    public async Task Replay_of_a_session_less_run_stays_session_less_byte_identical()
+    public async Task Replay_of_a_session_less_run_opens_its_own_session()
     {
+        // A session-less parent (only LEGACY pre-session runs) has no thread to inherit, so the generic staging seam opens
+        // the fork its OWN session — every run reaches the Journal, none stays session-less. (A session-BACKED parent is
+        // still inherited with no new turn — the tests above.)
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var originalRunId = await SeedSnapshotRunAsync(teamId, sessionId: null, turnIndex: null);
 
@@ -59,8 +62,9 @@ public class WorkSessionForkInheritFlowTests
         var replayRunId = await ReplayAsync(originalRunId, teamId, userId);
 
         var fork = await LoadRunAsync(replayRunId);
-        fork.SessionId.ShouldBeNull("a session-less parent ⇒ a session-less fork (byte-identical to the pre-S5 behaviour)");
-        fork.SessionTurnIndex.ShouldBeNull();
+        fork.SessionId.ShouldNotBeNull("a session-less parent has no thread to inherit → the seam opens the fork its own session");
+        fork.SessionTurnIndex.ShouldBe(1, "its own new session's opening turn (it can't ride a non-existent parent thread)");
+        fork.ParentRunId.ShouldBe(originalRunId, "fork lineage is still stamped");
     }
 
     [Fact]

@@ -28,15 +28,17 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     private readonly IRunRecordLogger _recordLogger;
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly IPostCommitActions _postCommit;
+    private readonly Sessions.IWorkSessionService _sessions;
     private readonly ILogger<RunFromSnapshotStarter> _logger;
 
-    public RunFromSnapshotStarter(CodeSpaceDbContext db, DefinitionValidator validator, IRunRecordLogger recordLogger, IWorkflowRunDispatcher runDispatcher, IPostCommitActions postCommit, ILogger<RunFromSnapshotStarter> logger)
+    public RunFromSnapshotStarter(CodeSpaceDbContext db, DefinitionValidator validator, IRunRecordLogger recordLogger, IWorkflowRunDispatcher runDispatcher, IPostCommitActions postCommit, Sessions.IWorkSessionService sessions, ILogger<RunFromSnapshotStarter> logger)
     {
         _db = db;
         _validator = validator;
         _recordLogger = recordLogger;
         _runDispatcher = runDispatcher;
         _postCommit = postCommit;
+        _sessions = sessions;
         _logger = logger;
     }
 
@@ -161,6 +163,11 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             NormalizedAt = now,
         });
 
+        // Same session seam as RunStarter: use the provided session (a task's own, or an inherited fork session) or open
+        // a fresh per-run one here (a snapshot run has no Workflow row → null workflowId → the default title). So this
+        // staging path can't produce a session-less run either.
+        var resolved = await _sessions.ResolveForRunAsync(session, teamId, null, actorUserId, cancellationToken).ConfigureAwait(false);
+
         _db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId,
@@ -179,8 +186,8 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             ProjectionKind = projectionKind,
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),
             ScopeProjectIds = scopeProjectIds.ToList(),
-            SessionId = session?.SessionId,
-            SessionTurnIndex = session?.TurnIndex,
+            SessionId = resolved.SessionId,
+            SessionTurnIndex = resolved.TurnIndex,
             Status = WorkflowRunStatus.Pending,
             CreatedBy = actorUserId,
             LastModifiedBy = actorUserId,
@@ -201,6 +208,9 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             // transaction, so the 23505 rolls back to the savepoint and the subsequent lookup query still runs.
             DetachIfTracked(_db.WorkflowRunRequest.Local, requestId, r => r.Id);
             DetachIfTracked(_db.WorkflowRun.Local, runId, r => r.Id);
+            // Detach a freshly-opened session too (a duplicate fork whose parent was session-less); a provided/inherited
+            // session isn't tracked-as-Added, so this no-ops for it (same guard as RunStarter's dedup path).
+            DetachIfTracked(_db.WorkSession.Local, resolved.SessionId, s => s.Id);
 
             _logger.LogInformation("Snapshot run fork deduplicated by idempotency key — silently no-op. Source={SourceType} TeamId={TeamId}", sourceType, teamId);
 

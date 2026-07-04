@@ -22,6 +22,18 @@ public interface IWorkSessionService
     Task<SessionAssignment> OpenAsync(Guid teamId, string title, WorkSessionKind kind, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The session a run belongs to, resolved GENERICALLY at the run-staging seam so NO trigger source can forget to
+    /// attach one (Rule 7/16 — the single "which session" decision, not re-made per source). Returns
+    /// <paramref name="provided"/> when the caller already resolved a session (a user CONTINUATION, or a fork/child
+    /// inheriting its parent's), ELSE opens a FRESH per-run <see cref="WorkSessionKind.Workflow"/> session (title = the
+    /// workflow's name when <paramref name="workflowId"/> is set, else a default; actor = <paramref name="actorUserId"/>
+    /// or the system seeder for an anonymous trigger). STAGED onto the caller's unit of work like <see cref="OpenAsync"/>
+    /// — committed atomically with the run, so a failed stage leaves no orphan session. This is why EVERY run source
+    /// (manual · scheduled · webhook · child) gets a session by default: it does nothing, and the seam supplies one.
+    /// </summary>
+    Task<SessionAssignment> ResolveForRunAsync(SessionAssignment? provided, Guid teamId, Guid? workflowId, Guid? actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Continue an EXISTING session with the NEXT top-level turn: validate it exists + belongs to
     /// <paramref name="teamId"/> (a foreign / missing session is an indistinguishable not-found — never a leak) and
     /// is still <c>Open</c>, then return a binding whose <c>TurnIndex</c> is one past the session's highest existing

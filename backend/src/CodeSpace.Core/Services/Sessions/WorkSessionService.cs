@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
@@ -23,6 +24,9 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
 
     /// <summary>Fallback when the supplied title is blank after sanitisation — a session row always has a non-empty title.</summary>
     private const string DefaultTitle = "Untitled session";
+
+    /// <summary>Fallback title for a run whose workflow name isn't resolvable (a snapshot / task run, or a since-deleted workflow).</summary>
+    private const string DefaultRunTitle = "Workflow run";
 
     public WorkSessionService(CodeSpaceDbContext db, Chat.IConversationService conversations)
     {
@@ -48,6 +52,21 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
         _db.WorkSession.Add(session);
 
         return Task.FromResult(new SessionAssignment { SessionId = session.Id, TurnIndex = FirstTurnIndex });
+    }
+
+    public async Task<SessionAssignment> ResolveForRunAsync(SessionAssignment? provided, Guid teamId, Guid? workflowId, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        // The caller already decided the session — a user continuation, or a fork/child inheriting its parent's thread.
+        if (provided is { } explicitSession) return explicitSession;
+
+        // No session supplied → this run's source didn't (and needn't) resolve one; open a fresh per-run thread here so
+        // no source can forget. Title = the workflow's name for an authored-workflow run; a snapshot / task run
+        // (workflowId null) uses the default — a task supplies its OWN session via `provided`, so it never reaches here.
+        var title = workflowId is { } id
+            ? await _db.Workflow.AsNoTracking().Where(w => w.Id == id).Select(w => w.Name).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            : null;
+
+        return await OpenAsync(teamId, title ?? DefaultRunTitle, WorkSessionKind.Workflow, actorUserId ?? SystemUsers.SeederId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<SessionAssignment> ContinueAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)

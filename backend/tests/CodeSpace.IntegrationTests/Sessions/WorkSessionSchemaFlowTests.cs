@@ -86,7 +86,7 @@ public class WorkSessionSchemaFlowTests
     }
 
     [Fact]
-    public async Task Snapshot_starter_with_null_session_leaves_run_unbound()
+    public async Task Snapshot_starter_with_no_session_opens_one_at_the_seam()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -99,8 +99,8 @@ public class WorkSessionSchemaFlowTests
         }
 
         var run = await LoadRunAsync(runId);
-        run.SessionId.ShouldBeNull("a null SessionAssignment is byte-identical to pre-session behaviour");
-        run.SessionTurnIndex.ShouldBeNull();
+        run.SessionId.ShouldNotBeNull("no explicit session → the generic staging seam opens a fresh one, so every run reaches the Journal");
+        run.SessionTurnIndex.ShouldBe(1, "its own new session's opening turn");
     }
 
     [Fact]
@@ -181,7 +181,7 @@ public class WorkSessionSchemaFlowTests
     }
 
     [Fact]
-    public async Task Manual_starter_without_session_leaves_run_unbound()
+    public async Task Manual_starter_with_no_session_opens_one_at_the_seam()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
@@ -208,8 +208,8 @@ public class WorkSessionSchemaFlowTests
         }
 
         var run = await LoadRunAsync(runId);
-        run.SessionId.ShouldBeNull("an envelope without a Session is byte-identical to pre-session behaviour");
-        run.SessionTurnIndex.ShouldBeNull();
+        run.SessionId.ShouldNotBeNull("an envelope without a Session → the generic staging seam opens a fresh Workflow-kind session");
+        run.SessionTurnIndex.ShouldBe(1, "its own new session's opening turn");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
