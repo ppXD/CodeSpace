@@ -5572,6 +5572,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-arow-meta { display: inline-flex; align-items: center; gap: 10px; flex: none; margin-right: 8px; }
 .room-arow-metaitem { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .room-arow-metaic { color: var(--muted-2); }
+/* Model id can be long (e.g. "claude-3-5-sonnet-…") — cap it so the row never overflows; full value stays in the title. */
+.room-arow-model { max-width: 18ch; overflow: hidden; }
 
 .room-fprev { display: flex; flex-direction: column; min-height: 100%; }
 .room-fprev-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--muted); padding: 32px 20px; }
@@ -5994,3 +5996,41 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .jr-toggle { position: fixed; bottom: 20px; right: 20px; z-index: 50; display: inline-flex; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 2px; box-shadow: var(--shadow-2); }
 .jr-toggle button { font: inherit; font-size: 12px; font-weight: 600; border: 0; cursor: pointer; background: transparent; color: var(--muted); padding: 4px 13px; border-radius: 999px; }
 .jr-toggle button.jr-toggle-on { background: var(--accent-soft); color: var(--accent); }
+
+/* ─── Journal ③ timeline (inside the Room frame; inherits the Room's mono + --rm-* tokens) ─── */
+.room-jrnl { position: relative; margin: 6px 0 4px; padding-left: 22px; border-left: 2px solid var(--line); display: flex; flex-direction: column; gap: 9px; }
+.room-jstep { position: relative; }
+.room-jnode { position: absolute; left: -29px; top: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); border: 2px solid var(--line-2); }
+.room-jtone-ok .room-jnode { border-color: var(--rm-good); background: var(--rm-good-bg); }
+.room-jtone-warn .room-jnode { border-color: var(--rm-warn); background: var(--rm-warn-bg); }
+.room-jtone-err .room-jnode { border-color: var(--rm-danger); background: var(--rm-err-bg); }
+.room-jkey .room-jnode { box-shadow: 0 0 0 3px var(--panel); }
+.room-jmuted { opacity: .72; }
+.room-jline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.room-jtime { flex: none; font-size: 10.5px; color: var(--muted-2); min-width: 56px; }
+.room-jkind { flex: none; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; background: var(--panel-2); color: var(--muted); }
+.room-jkind-decision { background: var(--accent-soft); color: var(--accent); }
+.room-jkind-tool { background: #EDEFF2; color: #5B6B7B; }
+.room-jkind-thinking { background: var(--panel-2); color: var(--muted); }
+.room-jtitle { font-size: 13px; color: var(--ink-2); } .room-jtitle b { color: var(--ink); }
+.room-jstep.room-jtone-err .room-jtitle { color: var(--rm-danger); }
+
+.room-jwhy { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; font-style: italic; max-width: 68ch; }
+.room-jwhy-l { font-style: normal; color: var(--muted-2); font-size: 10.5px; }
+.room-jdetail { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; max-width: 72ch; }
+.room-jdetail-err { color: var(--rm-danger); }
+.room-jdetail-warn { color: var(--rm-warn); }
+
+/* A spawn wave reuses the Room's own agent card (AgentSection) so the cards look identical and each row opens the side drawer; we only indent it under the decision beat. */
+.room-jagents { margin: 8px 0 2px 64px; }
+.room-jagents .room-work { margin: 0; }
+
+.room-jdeferred { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px 64px; }
+.room-jdefer { font-size: 11px; color: var(--rm-warn); background: var(--rm-warn-bg); border: 1px solid var(--rm-warn-line); border-radius: 999px; padding: 1px 9px; }
+
+.room-jfold { padding: 1px 0; }
+.room-jfold button { font: inherit; font-size: 11.5px; color: var(--muted-2); cursor: pointer; background: none; border: 0; padding: 2px 0; }
+.room-jfold button:hover { color: var(--accent); }
+
+/* Supporting material (Files changed / Tools / Reasoning) — the collapsed stat rows below the result ⑥, set off by a hairline so they read as an appendix, never as part of the story. */
+.room-jsupport { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line-2); display: flex; flex-direction: column; gap: 2px; }
