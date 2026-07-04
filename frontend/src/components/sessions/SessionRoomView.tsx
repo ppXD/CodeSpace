@@ -10,6 +10,7 @@ import type {
   ExecutionMapStep,
   ExecutionStepStatus,
   FinalAnswerBlock,
+  JournalModelCall,
   JournalStep,
   JournalSubtask,
   JournalTurn,
@@ -46,7 +47,8 @@ import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
   | { kind: "agent"; agent: RoomAgentCard; runId: string }
-  | { kind: "file"; runId: string; path: string; agentRunId?: string };
+  | { kind: "file"; runId: string; path: string; agentRunId?: string }
+  | { kind: "modelcall"; runId: string; sequence: number; call: JournalModelCall };
 
 /** Open the unified preview drawer. Any row (an agent card, a changed file) calls this to preview on the right. */
 const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
@@ -170,7 +172,9 @@ function RoomDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => 
     <aside className="room-drawer">
       {target.kind === "agent"
         ? <AgentDrawer agent={target.agent} runId={target.runId} onClose={onClose} />
-        : <FileDrawer target={target} onClose={onClose} />}
+        : target.kind === "modelcall"
+          ? <ModelCallDrawer target={target} onClose={onClose} />
+          : <FileDrawer target={target} onClose={onClose} />}
     </aside>
   );
 }
@@ -190,6 +194,41 @@ function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: s
         <div className="room-drawer-term">
           <AgentTerminal agent={toPhaseAgentRef(agent)} onClose={onClose} onOpenFile={(path) => openDrawer({ kind: "file", runId, path, agentRunId: agent.agentRunId })} />
         </div>
+      </div>
+    </>
+  );
+}
+
+/** A model call's detail in the drawer — its prompt / result / usage / trace, fetched on demand by the ledger sequence.
+ *  A ledger record is immutable, so the fetch never refetches. Offloaded prompt/result are resolved server-side to text. */
+function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "modelcall" }>; onClose: () => void }) {
+  const [tab, setTab] = useState<"prompt" | "result" | "usage" | "trace">("prompt");
+  const q = useQuery({
+    queryKey: ["model-call", target.runId, target.sequence],
+    queryFn: () => sessionsApi.getModelCallDetail(target.runId, target.sequence),
+    staleTime: Infinity,
+  });
+  const mc = target.call;
+  const body = q.data == null ? null : tab === "prompt" ? q.data.prompt : tab === "result" ? q.data.result : tab === "usage" ? q.data.usage : q.data.trace;
+
+  return (
+    <>
+      <div className="room-drawer-head">
+        <span className="room-drawer-ic"><Sym n="sparkle" s={15} /></span>
+        <span className="room-drawer-title">{jPurpose(mc.purpose)}{mc.model ? ` · ${mc.model}` : ""}</span>
+        <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
+      </div>
+      <div className="room-mctabs">
+        {(["prompt", "result", "usage", "trace"] as const).map((t) => (
+          <button key={t} className={`room-mctab${tab === t ? " room-mctab-on" : ""}`} onClick={() => setTab(t)}>{t}</button>
+        ))}
+      </div>
+      <div className="room-drawer-body">
+        {q.isLoading ? <p className="room-para room-muted">Loading…</p>
+          : q.isError ? <p className="room-para room-muted">Couldn't load this model call.</p>
+          : q.data == null ? <p className="room-para room-muted">This model call's detail isn't available.</p>
+          : body ? <pre className="room-mcpre">{body}</pre>
+          : <p className="room-para room-muted">No {tab} recorded for this call.</p>}
       </div>
     </>
   );
@@ -614,10 +653,15 @@ function JournalFold({ steps, category }: { steps: JournalStep[]; category: stri
  *  the muted step row if the facts didn't attach (a pre-enrichment step). */
 function ModelCallRow({ step }: { step: JournalStep }) {
   const mc = step.modelCall;
+  const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
   if (!mc) return <JournalStepRow step={step} muted />;
   const failed = mc.status === "failed";
+  const sequence = modelCallSequence(step.id);
+  const clickable = run != null && sequence != null;
   return (
-    <div className={`room-mcrow${failed ? " room-mcrow-err" : ""}`}>
+    <button className={`room-mcrow${failed ? " room-mcrow-err" : ""}`} disabled={!clickable}
+      onClick={() => clickable && openDrawer({ kind: "modelcall", runId: run!.runId, sequence: sequence!, call: mc })}>
       <span className="room-mctime">{jTime(step.at)}</span>
       <span className="room-mcpurpose">{jPurpose(mc.purpose)}</span>
       <span className="room-mcmeta">
@@ -627,8 +671,15 @@ function ModelCallRow({ step }: { step: JournalStep }) {
         {mc.costUsd != null && <span className="room-mcitem room-mccost" title="Estimated cost">{formatCostUsd(mc.costUsd)}</span>}
       </span>
       <span className={`room-mcstatus${failed ? " room-mcstatus-err" : ""}`}>{failed ? "failed" : "done"}</span>
-    </div>
+      {clickable && <Sym n="chevron-right" s={11} cls="room-mcchev" />}
+    </button>
   );
+}
+
+/** A model-call step's id is "record-{sequence}" (the ledger sequence) — the key the drawer fetches its detail by. */
+function modelCallSequence(stepId: string): number | null {
+  const m = /^record-(\d+)$/.exec(stepId);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 /** The friendly word for a model call's purpose (its interaction kind) — the common ones read naturally, an unknown kind shows verbatim. */
