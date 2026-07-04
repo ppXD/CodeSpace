@@ -3,8 +3,8 @@ using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
-/// <summary>One agent's model-authored allocation — its semantic role + the planned subtask title it was assigned. Either may be null (a homogeneous spawn or a flat plan yields both null).</summary>
-public sealed record AgentAllocation(string? Role, string? SubtaskTitle);
+/// <summary>One agent's model-authored allocation — its semantic role, the planned subtask title, and the subtask's stable plan-local id it was assigned. Any may be null (a homogeneous spawn / flat plan yields role/title null; a non-supervisor allocation has no id). The id is the SAME slug the dependency / deferred labels use, so a card keyed on it correlates 1:1 with "waiting on {id}".</summary>
+public sealed record AgentAllocation(string? Role, string? SubtaskTitle, string? SubtaskId = null);
 
 /// <summary>
 /// Pure per-agent folds over a run's supervisor decision tape, keyed by agent-run id — the model-authored ALLOCATION
@@ -41,10 +41,10 @@ public static class SupervisorAgentAllocation
                 var rolesBySubtask = SupervisorOutcome.ReadSpawnAgentRoles(d.PayloadJson);
 
                 for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
-                    map[agentIds[i]] = new AgentAllocation(rolesBySubtask.GetValueOrDefault(subtaskIds[i]), titleBySubtask.GetValueOrDefault(subtaskIds[i]));
+                    map[agentIds[i]] = new AgentAllocation(rolesBySubtask.GetValueOrDefault(subtaskIds[i]), titleBySubtask.GetValueOrDefault(subtaskIds[i]), subtaskIds[i]);
             }
             else if (SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } retried && agentIds.Count > 0)
-                map[agentIds[0]] = new AgentAllocation(Role: null, SubtaskTitle: titleBySubtask.GetValueOrDefault(retried));
+                map[agentIds[0]] = new AgentAllocation(Role: null, SubtaskTitle: titleBySubtask.GetValueOrDefault(retried), SubtaskId: retried);
         }
 
         return map;

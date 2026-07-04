@@ -16,8 +16,11 @@ public sealed record JournalAgentCard
     /// <summary>The agent run — the frontend deep-links its terminal / transcript.</summary>
     public required Guid AgentRunId { get; init; }
 
-    /// <summary>The short name the card shows — the agent's semantic role, else its planned subtask title, else the raw instruction, else a neutral word. Mirrors the room card (<c>RoomAgentCard.Label</c>) so the two never disagree; the full instruction stays available in the agent's terminal drawer.</summary>
+    /// <summary>The short name the card shows — the subtask's stable id (the SAME slug the deferred "waiting on {id}" labels use, so the card and its dependents correlate), else the agent's semantic role, else its planned subtask title, else the raw instruction, else a neutral word. The full instruction stays one click away in the agent's terminal drawer.</summary>
     public required string Label { get; init; }
+
+    /// <summary>The human-readable planned subtask title (e.g. "定義軌跡規範 + 分析現有代碼") — shown on hover over the id header + in the drawer's allocation strip, so the readable title isn't lost when the header is the slug. Null for a non-supervisor / homogeneous agent.</summary>
+    public string? AssignedSubtask { get; init; }
 
     /// <summary>The agent's ground-truth lifecycle status (the <c>AgentRunStatus</c>).</summary>
     public required AgentRunStatus Status { get; init; }

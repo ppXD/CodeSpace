@@ -29,7 +29,7 @@ public class AgentCardFactsSourceTests
             ChangedFileStats = stats ?? new[] { new FileDiffStat("auth/session.ts", 42, 3) }, Resumed = true,
         };
 
-    private static AgentAllocation Alloc(string? role = null, string? subtask = null) => new(role, subtask);
+    private static AgentAllocation Alloc(string? role = null, string? subtask = null, string? id = null) => new(role, subtask, id);
 
     private static SupervisorAgentResult Compact(params string[] changedFiles) =>
         new() { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ChangedFiles = changedFiles };
@@ -72,10 +72,33 @@ public class AgentCardFactsSourceTests
     // ── Label: role → subtask title → instruction → neutral (mirrors RoomNarrative.ToCard) ──
 
     [Fact]
-    public void Label_prefers_the_allocated_role_over_the_instruction()
+    public void Label_prefers_the_subtask_id_so_it_correlates_with_the_deferred_labels()
+    {
+        // The id is the SAME slug the deferred "waiting on {id}" labels use, so keying the card header on it lets the
+        // reader line a card up with its dependents. The human title rides as AssignedSubtask (the hover + drawer).
+        var card = AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(goal: "【並行任務】(long instruction)"),
+            Alloc(role: "researcher", subtask: "定義軌跡規範 + 分析現有代碼", id: "spec-and-analyze"), compact: null);
+
+        card.Label.ShouldBe("spec-and-analyze", "the subtask id names the card so it correlates with 'waiting on spec-and-analyze'");
+        card.AssignedSubtask.ShouldBe("定義軌跡規範 + 分析現有代碼", "the readable title rides along for the hover + drawer");
+    }
+
+    [Fact]
+    public void Label_prefers_the_allocated_role_over_the_instruction_when_there_is_no_id()
     {
         AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(goal: "Deep-dive the whole session-room turn logic and report"), Alloc(role: "researcher", subtask: "Research current turn logic"), compact: null)
-            .Label.ShouldBe("researcher", "a model-authored role names the agent, not its long instruction");
+            .Label.ShouldBe("researcher", "with no subtask id, a model-authored role names the agent, not its long instruction");
+    }
+
+    [Fact]
+    public void A_map_or_flow_agent_with_no_allocation_keeps_its_goal_and_carries_no_assigned_subtask()
+    {
+        // The label change is generic: a map/flow agent has no allocation → no id → its goal string still names it, and
+        // AssignedSubtask stays null (no false hover/strip). This is the case that must NOT regress into "spec-and-…".
+        var card = AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(goal: "分析當前Workflow架構的Generic特性"), allocation: null, compact: null);
+
+        card.Label.ShouldBe("分析當前Workflow架構的Generic特性");
+        card.AssignedSubtask.ShouldBeNull();
     }
 
     [Fact]

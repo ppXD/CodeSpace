@@ -529,6 +529,10 @@ function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
     agents: step.agents.map((c) => ({
       agentRunId: c.agentRunId,
       label: c.label,
+      // The readable subtask title rides as summary (the row's hover) + assignedSubtask (the drawer's allocation strip),
+      // so the id header correlates with the deferred labels while the human title stays one hover / click away.
+      summary: c.assignedSubtask ?? null,
+      assignedSubtask: c.assignedSubtask ?? null,
       status: c.status,
       model: c.model ?? null,
       harness: c.harness ?? null,

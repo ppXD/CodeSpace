@@ -334,6 +334,9 @@ export interface JournalFileStat {
 export interface JournalAgentCard {
   agentRunId: string;
   label: string;
+  /// The human-readable planned subtask title — shown on hover over the (slug) label + in the drawer strip, so the
+  /// readable title isn't lost when the header is the id. Null for a non-supervisor / homogeneous agent.
+  assignedSubtask?: string | null;
   status: string;
   model?: string | null;
   /// The harness the agent ran on (e.g. "codex-cli" / "claude-code") — the small harness glyph on the card. Null when unknown.
