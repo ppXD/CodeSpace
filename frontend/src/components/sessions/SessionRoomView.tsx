@@ -371,8 +371,13 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // dispatch → agents), so nothing is pinned at the top and the redundant "Plan · N subtasks" stat is dropped.
                 // A run with NO plan step (e.g. a flow.map run whose plan comes from a planner node, or a legacy block-only
                 // run) still pins its plan block at the top so the plan never vanishes.
-                const hasInlinePlan = journalTurn.steps.some((s) => s.plan.length > 0);
-                const topPlan = hasInlinePlan ? undefined : (turn.blocks.find((b) => b.type === "plan_checklist") ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
+                // Same predicate as firstPlanStepId (below) so the top-pin drop and the inline render stay in lockstep —
+                // a plan-bearing step the inline path skips (a hidden stop) never leaves the plan neither pinned nor inline.
+                const hasInlinePlan = journalTurn.steps.some((s) => s.plan.length > 0 && !isStopDecision(s));
+                // The rich plan checklist card (per-item status / artifacts / details) rendered INLINE under the plan beat
+                // — the same component the room shows, not a re-implemented plain list.
+                const planCard = turn.blocks.find((b): b is PlanChecklistBlock => b.type === "plan_checklist");
+                const topPlan = hasInlinePlan ? undefined : (planCard ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
                 // Supporting rows AFTER the result — Files changed / Tools / Reasoning. Drop the "Plan · N subtasks" stat
@@ -382,7 +387,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 return (
                   <>
                     {topPlan && <InnerBlock key={topPlan.id} block={topPlan} pdById={pdById} onOpenRoom={onOpenRoom} />}
-                    <JournalNarrative turn={journalTurn} />
+                    <JournalNarrative turn={journalTurn} planCard={hasInlinePlan ? planCard : undefined} />
                     {liveBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {resultBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {statBlocks.length > 0 && (
@@ -529,7 +534,7 @@ function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
 }
 
 /** The chronological work timeline for one turn — the journal's ③, in the Room's mono style. Consecutive background steps collapse into one in-place disclosure so the story reads clean but nothing is lost. */
-function JournalNarrative({ turn }: { turn: JournalTurn }) {
+function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: PlanChecklistBlock }) {
   const rows: ({ kind: "step"; step: JournalStep } | { kind: "fold"; steps: JournalStep[] })[] = [];
   for (const step of turn.steps) {
     if (isStopDecision(step)) continue; // the "stopped" outcome lives in the result card ⑥, not as a step
@@ -547,6 +552,10 @@ function JournalNarrative({ turn }: { turn: JournalTurn }) {
   // repeating "Supervisor" on each line — the decisions carry only a semantic verb pill + a natural past-tense title.
   const hasDecision = turn.steps.some((s) => s.beat && !isStopDecision(s));
 
+  // The rich plan checklist card renders inline under the FIRST plan beat (its per-item status / artifacts / approval),
+  // reusing the same component the room shows — not a re-implemented plain list.
+  const firstPlanStepId = turn.steps.find((s) => s.plan.length > 0 && !isStopDecision(s))?.id;
+
   return (
     <>
       {hasDecision && (
@@ -557,7 +566,9 @@ function JournalNarrative({ turn }: { turn: JournalTurn }) {
         </div>
       )}
       <div className="room-jrnl">
-        {rows.map((r, i) => (r.kind === "step" ? <JournalStepRow key={r.step.id} step={r.step} /> : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
+        {rows.map((r, i) => (r.kind === "step"
+          ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === firstPlanStepId ? planCard : undefined} />
+          : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
         {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
       </div>
     </>
@@ -575,7 +586,7 @@ function JournalFold({ steps }: { steps: JournalStep[] }) {
   );
 }
 
-function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean }) {
+function JournalStepRow({ step, muted, planCard }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock }) {
   // Raw thinking never renders flat on the main transcript — it lives in the trace drawer. A folded thinking step,
   // even when its disclosure is opened, shows only its one-line title; the full chain-of-thought stays in the trace.
   const showDetail = step.detail && step.kind !== "thinking";
@@ -592,9 +603,13 @@ function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean })
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
       {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}
       {step.plan.length > 0 && (
-        <ol className="room-jplan">
-          {step.plan.map((s, i) => <li key={s.subtaskId}><span className="room-jplan-n">{i + 1}.</span><span className="room-jplan-t">{s.title}</span></li>)}
-        </ol>
+        planCard
+          ? <div className="room-jplan-card"><PlanChecklistCard plan={planCard} /></div>
+          : (
+            <ol className="room-jplan">
+              {step.plan.map((s, i) => <li key={s.subtaskId}><span className="room-jplan-n">{i + 1}.</span><span className="room-jplan-t">{s.title}</span></li>)}
+            </ol>
+          )
       )}
       {step.agents.length > 0 && <div className="room-jagents"><AgentSection group={journalAgentsGroup(step)} /></div>}
       {step.deferred.length > 0 && <div className="room-jdeferred">{step.deferred.map((d) => <span key={d.subtaskId} className="room-jdefer">{d.subtaskId} · waiting on {d.waitingOn.join(", ")}</span>)}</div>}
