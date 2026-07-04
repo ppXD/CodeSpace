@@ -6040,6 +6040,10 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jwhy-l { font-style: normal; color: var(--muted-2); font-size: 10.5px; }
 .room-janswer { margin: 4px 0 0 64px; color: var(--ink-2); font-size: 12px; max-width: 72ch; }
 .room-janswer-l { color: var(--accent); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+.room-jmodel { margin: 3px 0 0 64px; font-size: 11.5px; color: var(--muted); }
+.room-jmodel-l { color: var(--muted-2); font-size: 10.5px; }
+.room-jmodel-model { color: var(--ink-2); }
+.room-jmodel-x { color: var(--muted); font-variant-numeric: tabular-nums; }
 .room-jdetail { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; max-width: 72ch; }
 .room-jdetail-err { color: var(--rm-danger); }
 .room-jdetail-warn { color: var(--rm-warn); }

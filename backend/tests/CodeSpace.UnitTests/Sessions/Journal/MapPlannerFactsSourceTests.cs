@@ -40,5 +40,36 @@ public class MapPlannerFactsSourceTests
         MapPlannerFactsSource.ReadSubtasks(Arr("[42, \"real\", null]")).Select(s => s.Title).ShouldBe(new[] { "real" });
     }
 
+    [Fact]
+    public void Reads_the_authoring_model_call_off_the_planner_outputs()
+    {
+        // A flow.map planner stamps model + tokens on its node OUTPUTS even when no separate interaction record exists, so
+        // the plan beat can always attribute HOW it was planned. Cost prefers the recorded value.
+        var call = MapPlannerFactsSource.ModelCallFromOutputs(Arr("{\"model\":\"metis-coder-max\",\"inputTokens\":352,\"outputTokens\":1226,\"costUsd\":0.05}"));
+
+        call.ShouldNotBeNull();
+        call!.Model.ShouldBe("metis-coder-max");
+        call.Tokens.ShouldBe(1578, "input + output");
+        call.CostUsd.ShouldBe(0.05m, "the recorded cost wins");
+        call.Purpose.ShouldBe("plan.author");
+        call.Status.ShouldBe("completed");
+    }
+
+    [Fact]
+    public void An_unpriced_planner_with_no_recorded_cost_reads_null_cost_but_keeps_tokens()
+    {
+        var call = MapPlannerFactsSource.ModelCallFromOutputs(Arr("{\"model\":\"metis-coder-max\",\"inputTokens\":352,\"outputTokens\":1226}"));
+
+        call.ShouldNotBeNull();
+        call!.Tokens.ShouldBe(1578);
+        call.CostUsd.ShouldBeNull("metis-coder-max is unpriced and no cost was recorded → fail-open null");
+    }
+
+    [Fact]
+    public void Outputs_with_no_model_carry_no_model_call()
+    {
+        MapPlannerFactsSource.ModelCallFromOutputs(Arr("{\"json\":{\"subtasks\":[]}}")).ShouldBeNull();
+    }
+
     private static JsonElement Arr(string json) => JsonDocument.Parse(json).RootElement;
 }
