@@ -5864,6 +5864,7 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-pchip-err { background: var(--rm-danger-soft, rgba(191,70,52,.1)); border-color: transparent; color: var(--rm-danger); }
 .room-pchip-tries { color: var(--muted); }
 .room-prow-deps { font-size: 10.5px; color: var(--muted); }
+.room-prow-accept-err { margin-top: 5px; font-size: 11px; color: var(--rm-danger); }
 .room-prow-state { flex: none; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-top: 3px; color: var(--muted); }
 .room-prow-state-ok { color: var(--rm-good); }
 .room-prow-state-err { color: var(--rm-danger); }
@@ -6036,6 +6037,8 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 
 .room-jwhy { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; font-style: italic; max-width: 68ch; }
 .room-jwhy-l { font-style: normal; color: var(--muted-2); font-size: 10.5px; }
+.room-janswer { margin: 4px 0 0 64px; color: var(--ink-2); font-size: 12px; max-width: 72ch; }
+.room-janswer-l { color: var(--accent); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
 .room-jdetail { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; max-width: 72ch; }
 .room-jdetail-err { color: var(--rm-danger); }
 .room-jdetail-warn { color: var(--rm-warn); }

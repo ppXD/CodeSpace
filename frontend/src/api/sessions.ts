@@ -375,6 +375,9 @@ export interface JournalStep {
   title: string;
   detail?: string | null;
   rationale?: string | null;
+  /// The operator's answer on an ASK_HUMAN step (approve, or the requested change) — a structured field the FE renders
+  /// as its own "└ answer" line rather than parsing it out of the joined question detail. Null unless answered.
+  answer?: string | null;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];

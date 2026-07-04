@@ -23,12 +23,16 @@ public sealed record JournalStepFacts
     /// <summary>The subtasks the model authored on a PLAN step — the plan, rendered inline under "planned the work". Null when the step isn't a plan.</summary>
     public IReadOnlyList<JournalSubtask>? Plan { get; init; }
 
-    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan) compose onto one step without clobbering each other.</summary>
+    /// <summary>The operator's ANSWER on an ASK_HUMAN step — the decision the human made (approve, or the change requested). Carried as its own field (not folded into the question prose) so the frontend renders it distinctly. Null when the step isn't an ask, or it's still pending.</summary>
+    public string? Answer { get; init; }
+
+    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer) compose onto one step without clobbering each other.</summary>
     public JournalStepFacts Merge(JournalStepFacts other) => new()
     {
         Rationale = other.Rationale ?? Rationale,
         Agents = other.Agents ?? Agents,
         Deferred = other.Deferred ?? Deferred,
         Plan = other.Plan ?? Plan,
+        Answer = other.Answer ?? Answer,
     };
 }

@@ -611,6 +611,11 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
   // Raw thinking never renders flat on the main transcript — it lives in the trace drawer. A folded thinking step,
   // even when its disclosure is opened, shows only its one-line title; the full chain-of-thought stays in the trace.
   const showDetail = step.detail && step.kind !== "thinking";
+  // An ASK beat carries the operator's answer as a STRUCTURED field (step.answer). The shared detail still folds it onto
+  // the question as "{question} — {answer}", so use the known answer to locate + strip that suffix — precise, unlike an
+  // em-dash split which mis-fires when the question itself contains a dash. The answer then reads as its OWN "└ answer ·"
+  // line (like the "└ why" rationale line). Scoped to ASK beats with an answer; a still-pending ask shows just the question.
+  const ask = step.beat && jVerbKey(step.verb) === "ask" && step.answer ? askParts(step.detail, step.answer) : null;
   return (
     <div className={`room-jstep room-jtone-${jTone(step.tone)}${step.milestone ? " room-jkey" : ""}${muted ? " room-jmuted" : ""}`}>
       <span className="room-jnode" />
@@ -622,7 +627,12 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
         <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
-      {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}
+      {showDetail && (ask
+        ? <>
+            {ask.question && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{ask.question}</div>}
+            <div className="room-janswer"><span className="room-janswer-l">└ answer · </span>{ask.answer}</div>
+          </>
+        : <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>)}
       {step.plan.length > 0 && (
         <div className="room-jplan-card">
           {planCard
@@ -661,6 +671,19 @@ function jVerbKey(verb: string | null | undefined): string {
   }
 }
 function jTime(iso: string): string { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+
+/** Recover an ASK beat's question from its folded "{question} — {answer}" detail using the KNOWN structured answer:
+ *  locate the answer at the end of the detail and strip it plus the trailing em-dash separator, so the question reads
+ *  clean and the answer renders on its own line. Precise (no ambiguous em-dash split) — the question may itself contain an
+ *  em-dash. If the answer isn't found in the detail (a format drift), the whole detail stays as the question (the answer
+ *  line still shows step.answer). */
+function askParts(detail: string | null | undefined, answer: string): { question: string; answer: string } {
+  const d = (detail ?? "").trim();
+  const a = answer.trim();
+  const i = d.lastIndexOf(a);
+  const question = i > 0 ? d.slice(0, i).replace(/\s*—\s*$/, "").trim() : d;
+  return { question, answer: a };
+}
 
 /** One inner block, rendered by type as a Codex-style detail row / card. */
 function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: (runId?: string) => void }) {
@@ -996,6 +1019,12 @@ function PlanItemRow({ it }: { it: PlanChecklistItem }) {
             {criteria.map((c, i) => <span key={i} className="room-pchip">{c}</span>)}
             {it.attempts > 1 && <span className="room-pchip room-pchip-tries">×{it.attempts} attempts</span>}
           </div>
+        )}
+        {/* A FAILED plan item is the ACCEPTANCE check failing, NOT the agent — the agent may have Succeeded (its card
+            reads DONE) while the acceptance test couldn't verify the artifact (e.g. "no-branch-or-repo" = the harness
+            couldn't reach the workspace branch). Surface that reason inline so the row doesn't read as "the agent failed". */}
+        {it.acceptancePassed === false && it.acceptanceDetail && (
+          <div className="room-prow-accept-err">acceptance failed · {it.acceptanceDetail}</div>
         )}
       </div>
       <span className={`room-prow-state room-prow-state-${tone}`}>{planStateWord(it.state)}</span>
