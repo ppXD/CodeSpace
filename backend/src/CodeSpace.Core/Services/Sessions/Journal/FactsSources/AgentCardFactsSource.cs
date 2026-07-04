@@ -63,12 +63,14 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
 
     /// <summary>
     /// Map the shared metrics projection to a journal card — the ground-truth (status · tokens · duration · cost · tool
-    /// count from the metrics reader). The LABEL mirrors the room card (<c>RoomNarrative.ToCard</c>): the agent's semantic
-    /// role, else its planned subtask title, else the raw instruction, else a neutral word — so a spawned agent shows the
-    /// short "what it was for", not its long instruction. FILES prefer the ledger COMPACT's git-truth changed files (the
-    /// same source the room reads, present even when the agent's own result row didn't fold a changed-file list — e.g.
-    /// codex-cli), falling back to the metrics reader; the per-file diffstat rows use the metrics reader when it has them,
-    /// else the compact's path-only list. Total tokens is null unless the agent reported usage (0 would read as "measured zero").
+    /// count from the metrics reader). The LABEL prefers the subtask's stable ID (the SAME slug the deferred "waiting on
+    /// {id}" labels use, so a card and its dependents correlate by name), else the semantic role, else the planned subtask
+    /// title, else the raw instruction, else a neutral word — a supervisor card reads "spec-and-analyze" (matching its
+    /// dependency labels) with the human title carried as <see cref="JournalAgentCard.AssignedSubtask"/> for the hover +
+    /// drawer, while a map/flow agent (no allocation → no id) keeps its goal. FILES prefer the ledger COMPACT's git-truth
+    /// changed files (the same source the room reads, present even when the agent's own result row didn't fold a
+    /// changed-file list — e.g. codex-cli), falling back to the metrics reader; the per-file diffstat rows use the metrics
+    /// reader when it has them, else the compact's path-only list. Total tokens is null unless the agent reported usage.
     /// </summary>
     internal static JournalAgentCard ToCard(Guid agentRunId, AgentRunMetrics m, AgentAllocation? allocation, SupervisorAgentResult? compact)
     {
@@ -77,7 +79,8 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
         return new JournalAgentCard
         {
             AgentRunId = agentRunId,
-            Label = FirstNonBlank(allocation?.Role, allocation?.SubtaskTitle, m.Goal) ?? "Agent",
+            Label = FirstNonBlank(allocation?.SubtaskId, allocation?.Role, allocation?.SubtaskTitle, m.Goal) ?? "Agent",
+            AssignedSubtask = allocation?.SubtaskTitle,
             Status = m.Status,
             Model = m.Model,
             Harness = m.Harness,
