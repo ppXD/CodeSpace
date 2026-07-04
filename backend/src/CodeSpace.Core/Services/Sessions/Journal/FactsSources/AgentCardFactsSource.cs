@@ -80,6 +80,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
             Label = FirstNonBlank(allocation?.Role, allocation?.SubtaskTitle, m.Goal) ?? "Agent",
             Status = m.Status,
             Model = m.Model,
+            Harness = m.Harness,
             DurationMs = m.DurationMs,
             Tokens = m.InputTokens is null && m.OutputTokens is null ? null : (m.InputTokens ?? 0) + (m.OutputTokens ?? 0),
             ToolCount = m.ToolCount,

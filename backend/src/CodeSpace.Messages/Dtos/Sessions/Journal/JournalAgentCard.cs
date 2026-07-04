@@ -25,6 +25,9 @@ public sealed record JournalAgentCard
     /// <summary>The model the agent ran on (from its task envelope). Null when unpinned.</summary>
     public string? Model { get; init; }
 
+    /// <summary>The harness kind the agent ran on (e.g. "codex-cli" / "claude-code") — the small harness glyph the card shows. Null when the task envelope didn't name one.</summary>
+    public string? Harness { get; init; }
+
     /// <summary>Wall-clock in milliseconds — live elapsed while running, final once terminal. Null before it starts.</summary>
     public long? DurationMs { get; init; }
 

@@ -204,6 +204,7 @@ public sealed class JournalProjectorFlowTests
 
         var card = view!.Turns.Single(t => t.Focused).Steps.Single(s => s.Kind == JournalStepKinds.Decision).Agents.Single();
         card.FilesChanged.ShouldBe(2);
+        card.Harness.ShouldBe("codex-cli", "the harness kind reaches the card off the task envelope, end-to-end");
         card.Files.Select(f => (f.Path, f.Additions, f.Deletions))
             .ShouldBe(new[] { ("auth/session.ts", (int?)42, (int?)3), ("img/logo.png", null, null) }, "the card carries the git-truth per-file diffstat, binary counts null");
     }

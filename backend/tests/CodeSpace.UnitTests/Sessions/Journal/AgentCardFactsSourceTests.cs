@@ -21,11 +21,11 @@ public class AgentCardFactsSourceTests
 {
     private static AgentRunMetrics Metrics(string? goal = "Build the login form", AgentRunStatus status = AgentRunStatus.Succeeded,
         int? inTok = 1200, int? outTok = 340, int tools = 6, string? model = "claude-opus-4-8", decimal? cost = 0.42m, long? durationMs = 45000,
-        int? files = 3, FileDiffStat[]? stats = null) =>
+        int? files = 3, FileDiffStat[]? stats = null, string? harness = "codex-cli") =>
         new()
         {
             Status = status, Goal = goal, DurationMs = durationMs, InputTokens = inTok, OutputTokens = outTok,
-            ToolCount = tools, Model = model, CostUsd = cost, FilesChanged = files,
+            ToolCount = tools, Model = model, Harness = harness, CostUsd = cost, FilesChanged = files,
             ChangedFileStats = stats ?? new[] { new FileDiffStat("auth/session.ts", 42, 3) }, Resumed = true,
         };
 
@@ -45,6 +45,7 @@ public class AgentCardFactsSourceTests
         card.Label.ShouldBe("Build the login form");
         card.Status.ShouldBe(AgentRunStatus.Succeeded);
         card.Model.ShouldBe("claude-opus-4-8");
+        card.Harness.ShouldBe("codex-cli", "the harness kind rides onto the card for its glyph");
         card.DurationMs.ShouldBe(45000);
         card.Tokens.ShouldBe(1540, "input + output");
         card.ToolCount.ShouldBe(6);
