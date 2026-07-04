@@ -363,6 +363,20 @@ export interface JournalSubtask {
 }
 
 /// One chronological step of a run's work journal — the frontend renders by `kind`. Mirrors backend `JournalStep`.
+/// The structured facts of one model call — mirrors backend `JournalModelCall`. Rendered as a row in the expanded model
+/// fold (purpose · model · tokens · latency · cost · status). Cost/latency/tokens are null when unknown (unpriced model,
+/// unpaired start, usage-silent call).
+export interface JournalModelCall {
+  purpose: string;
+  model?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  tokens?: number | null;
+  latencyMs?: number | null;
+  costUsd?: number | null;
+  status: string;
+}
+
 export interface JournalStep {
   id: string;
   cursor: string;
@@ -378,6 +392,9 @@ export interface JournalStep {
   /// The operator's answer on an ASK_HUMAN step (approve, or the requested change) — a structured field the FE renders
   /// as its own "└ answer" line rather than parsing it out of the joined question detail. Null unless answered.
   answer?: string | null;
+  /// The structured facts of a MODEL_CALL step (purpose · model · tokens · latency · cost · status) — the expanded model
+  /// fold renders these as a legible row. Null on every non-model-call step.
+  modelCall?: JournalModelCall | null;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];

@@ -6061,5 +6061,17 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 /* Expanded background steps sit indented under their toggle, and the toggle stays clickable to collapse them back. */
 .room-jfold-steps { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 2px; }
 
+/* A model call in the expanded model fold — purpose · model · tokens · latency · cost · status, one legible row. */
+.room-mcrow { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-2); }
+.room-mctime { flex: none; min-width: 56px; font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.room-mcpurpose { flex: none; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; font-size: 10px; }
+.room-mcmeta { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; flex-wrap: wrap; color: var(--muted); }
+.room-mcitem { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; white-space: nowrap; }
+.room-mcic { color: var(--muted-2); }
+.room-mccost { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.room-mcstatus { flex: none; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--rm-good); }
+.room-mcstatus-err { color: var(--rm-danger); }
+.room-mcrow-err .room-mcpurpose { color: var(--rm-danger); }
+
 /* Supporting material (Files changed / Tools / Reasoning) — the collapsed stat rows below the result ⑥, set off by a hairline so they read as an appendix, never as part of the story. */
 .room-jsupport { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line-2); display: flex; flex-direction: column; gap: 8px; }

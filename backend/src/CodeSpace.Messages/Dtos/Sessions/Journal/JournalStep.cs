@@ -60,6 +60,9 @@ public sealed record JournalStep
     /// <summary>The operator's ANSWER on an ASK_HUMAN step — the decision the human made (approve, or the change requested), carried as its own field so the frontend renders it as a distinct line rather than parsing it back out of the joined question prose. Null when the step isn't an ask, or it's still pending. Enriched by <c>AskAnswerFactsSource</c>.</summary>
     public string? Answer { get; init; }
 
+    /// <summary>The structured facts of a MODEL-CALL step (purpose · model · tokens · latency · cost · status) — so the expanded model fold shows a legible row per call, not a bare "Model call" line. Null on every non-model-call step. Enriched by <c>ModelCallFactsSource</c>.</summary>
+    public JournalModelCall? ModelCall { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 
