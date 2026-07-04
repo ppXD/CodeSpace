@@ -601,9 +601,62 @@ function JournalFold({ steps, category }: { steps: JournalStep[]; category: stri
   return (
     <div className="room-jfold">
       <button onClick={() => setOpen((v) => !v)} aria-expanded={open}>{open ? "▾" : "▸"} {foldLabel(category, steps)}</button>
-      {open && <div className="room-jfold-steps">{steps.map((s) => <JournalStepRow key={s.id} step={s} muted />)}</div>}
+      {open && <div className="room-jfold-steps">{steps.map((s) => category === "model"
+        ? <ModelCallRow key={s.id} step={s} />
+        : <JournalStepRow key={s.id} step={s} muted />)}</div>}
     </div>
   );
+}
+
+/** One model call in the expanded model fold — a legible row (purpose · model · tokens · latency · cost · status) off the
+ *  step's structured facts. A model call is the cost + intelligence source of an AI workflow, so once the fold is opened
+ *  the reader sees WHAT decided WHAT, at what token cost + latency + spend — not a bare "Model call" line. Falls back to
+ *  the muted step row if the facts didn't attach (a pre-enrichment step). */
+function ModelCallRow({ step }: { step: JournalStep }) {
+  const mc = step.modelCall;
+  if (!mc) return <JournalStepRow step={step} muted />;
+  const failed = mc.status === "failed";
+  return (
+    <div className={`room-mcrow${failed ? " room-mcrow-err" : ""}`}>
+      <span className="room-mctime">{jTime(step.at)}</span>
+      <span className="room-mcpurpose">{jPurpose(mc.purpose)}</span>
+      <span className="room-mcmeta">
+        {mc.model && <span className="room-mcitem room-mcmodel" title={`Model · ${mc.model}`}><Sym n="sparkle" s={10} cls="room-mcic" /> {mc.model}</span>}
+        {mc.tokens != null && mc.tokens > 0 && <span className="room-mcitem" title={`${mc.tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-mcic" /> {formatTokens(mc.tokens)} tokens</span>}
+        {mc.latencyMs != null && <span className="room-mcitem" title="Latency"><Sym n="clock" s={10} cls="room-mcic" /> {formatLatencyMs(mc.latencyMs)}</span>}
+        {mc.costUsd != null && <span className="room-mcitem room-mccost" title="Estimated cost">{formatCostUsd(mc.costUsd)}</span>}
+      </span>
+      <span className={`room-mcstatus${failed ? " room-mcstatus-err" : ""}`}>{failed ? "failed" : "done"}</span>
+    </div>
+  );
+}
+
+/** The friendly word for a model call's purpose (its interaction kind) — the common ones read naturally, an unknown kind shows verbatim. */
+function jPurpose(kind: string): string {
+  switch (kind) {
+    case "supervisor.decision": return "decision";
+    case "plan.author": return "planner";
+    case "plan.confirm": return "plan review";
+    case "llm.complete": return "synthesis";
+    default: return kind;
+  }
+}
+
+/** A per-call USD cost — a few cents needs 3–4 decimals to read, a larger spend 2. A real-but-tiny spend that would round
+ *  to $0.0000 shows a floor sentinel so it never reads as free. Never scientific notation. */
+function formatCostUsd(usd: number): string {
+  if (usd === 0) return "$0";
+  if (usd > 0 && usd < 0.00005) return "<$0.0001";
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : usd < 1 ? `$${usd.toFixed(3)}` : `$${usd.toFixed(2)}`;
+}
+
+/** Per-call latency reads on a millisecond scale (most calls are sub-second) — so show "NNNms" below a second and "N.Ns"
+ *  up to ~10s, falling back to the coarse whole-second/minute formatter for a long call. Reusing formatDurationMs alone
+ *  would floor every fast call to "0s". */
+function formatLatencyMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+  return formatDurationMs(ms);
 }
 
 /** The display category of a folded background step — so the fold reads "3 model calls · 25.6k tokens" not a flat "N

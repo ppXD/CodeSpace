@@ -49,5 +49,6 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
             Deferred = facts.Deferred ?? step.Deferred,
             Plan = facts.Plan ?? step.Plan,
             Answer = facts.Answer ?? step.Answer,
+            ModelCall = facts.ModelCall ?? step.ModelCall,
         };
 }
