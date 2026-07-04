@@ -627,11 +627,17 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
 function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }
 function jKindLabel(k: string): string { return k === "model_call" ? "model" : k; }
 /** The semantic pill for a supervisor decision verb — PLAN / DISPATCH / ASK / MERGE / RETRY / RESOLVE (rendered uppercase by CSS), so a beat says WHAT was decided, not a generic "decision". The backend emits the lowercase/snake_case DecisionKind (plan / spawn / ask_human / …); lowercased here for robustness. Unknown/missing verb falls back to "decision". */
-/** The supervisor decision verbs — a beat carrying one means the turn is supervisor-orchestrated (the actor lane reads "Supervisor"); a run with only node-dispatch beats reads "Workflow". */
+/** The supervisor-DISTINCTIVE decision verbs — a beat carrying one means the turn is supervisor-orchestrated (the actor
+ *  lane reads "Supervisor"); a run with only node beats reads "Workflow". A supervisor's plan is its own first decision,
+ *  so an ungated supervisor observed live between its plan and its spawn has ONLY a plan beat — "plan" must stay here or
+ *  that window would misread "Workflow". The parallel map verbs are kept DISTINCT so they don't imply a supervisor: a
+ *  flow.map planner beat is "map_plan" (not "plan") and its fan-out is "dispatch" (not "spawn") — both render the same
+ *  PLAN / DISPATCH pill via jVerbKey, but neither is in this set, so a pure map run correctly reads "Workflow". */
 const SUPERVISOR_VERBS = new Set(["plan", "spawn", "merge", "ask_human", "retry", "resolve", "stop"]);
 function jVerbKey(verb: string | null | undefined): string {
   switch ((verb ?? "").toLowerCase()) {
-    case "plan": return "plan";
+    case "plan": return "plan";           // a supervisor plan
+    case "map_plan": return "plan";       // a flow.map planner node — same PLAN pill, but not supervisor-distinctive
     case "spawn": return "dispatch";      // a supervisor spawn
     case "dispatch": return "dispatch";   // a flow.map node's fan-out — same DISPATCH pill
     case "retry": return "retry";

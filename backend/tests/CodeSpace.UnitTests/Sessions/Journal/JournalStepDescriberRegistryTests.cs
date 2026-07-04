@@ -17,7 +17,7 @@ namespace CodeSpace.UnitTests.Sessions.Journal;
 public class JournalStepDescriberRegistryTests
 {
     private static readonly IJournalStepDescriberRegistry Registry = new JournalStepDescriberRegistry(
-        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new MapDispatchStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new LifecycleStepDescriber() },
+        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new MapPlannerStepDescriber(), new MapDispatchStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new LifecycleStepDescriber() },
         new FallbackStepDescriber());
 
     private static RunTimelineEvent Event(string sourceKey, string kind = "k", string title = "t", string? summary = null,
@@ -106,6 +106,21 @@ public class JournalStepDescriberRegistryTests
 
         step.Verb.ShouldBe(expectedVerb);
         step.Beat.ShouldBeTrue("a supervisor decision is an orchestration beat — it shows in the ③ timeline");
+    }
+
+    [Fact]
+    public void A_flow_map_planner_is_a_beat_with_the_plan_verb()
+    {
+        // The same generic-beat seam: a NON-supervisor run's planner node becomes a plan beat, so its plan shows in the ③
+        // timeline (a "Planned N subtasks" beat with its plan card) exactly like a supervisor PLAN — read-only, no frontend
+        // change. The verb is "map_plan", DISTINCT from the supervisor's "plan": the frontend renders the same PLAN pill
+        // for both, but only "plan" is supervisor-distinctive, so a pure map run's actor lane reads "Workflow" — the exact
+        // parallel to map "dispatch" vs supervisor "spawn".
+        var step = Registry.Describe(Event(MapPlannerTimelineMap.Key, kind: MapPlannerTimelineMap.PlanKind, title: "Planned 5 subtasks"));
+
+        step.Beat.ShouldBeTrue("a map planner is an orchestration beat");
+        step.Verb.ShouldBe("map_plan", "distinct from the supervisor's 'plan' so it isn't supervisor-distinctive for the actor lane");
+        step.Title.ShouldBe("Planned 5 subtasks");
     }
 
     [Fact]
