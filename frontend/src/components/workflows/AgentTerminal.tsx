@@ -47,6 +47,11 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
   // assigned-subtask strip is suppressed when it merely repeats the title (the terminal bar already leads with it).
   const files = viewingLatest ? agent.changedFiles ?? [] : [];
   const showSubtask = !!agent.assignedSubtask && agent.assignedSubtask !== name;
+  // The bar leads (right of the lights) with the READABLE title — the assigned subtask when it adds over the name (the
+  // name / id is already in the drawer header, so the bar needn't repeat it), else the name. The authored role rides as a
+  // muted secondary. One bar line — no separate header row below it.
+  const barName = showSubtask ? agent.assignedSubtask! : name;
+  const barRole = agent.role && agent.role !== barName ? agent.role : null;
 
   // The metrics shown describe the ACTIVE attempt: the ref carries the merged-latest figures, while an earlier
   // attempt carries its OWN (from its agent run) — so switching to a failed/older attempt shows that attempt's
@@ -68,18 +73,10 @@ export function AgentTerminal({ agent, onClose, rerun, onOpenFile }: { agent: Ph
     <div className="agent-terminal" data-state={tileState(status)}>
       <div className="agent-terminal-bar">
         <span className="agent-terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span className="agent-terminal-title" title={name}>{name}</span>
+        <span className="agent-terminal-title" title={barName}>{barName}</span>
+        {barRole && <span className="agent-terminal-barsub" title={barRole}>{barRole}</span>}
         {onClose && <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>}
       </div>
-
-      {/* The model's allocation for this agent — its authored role + the subtask it was assigned. Absent for a
-          homogeneous spawn / non-supervisor agent (both fields null). */}
-      {(agent.role || showSubtask) && (
-        <div className="agent-terminal-alloc">
-          {agent.role && <span className="agent-terminal-role">{agent.role}</span>}
-          {showSubtask && <span className="agent-terminal-subtask">{agent.assignedSubtask}</span>}
-        </div>
-      )}
 
       {identity.length > 0 && (
         <div className="agent-terminal-meta">
