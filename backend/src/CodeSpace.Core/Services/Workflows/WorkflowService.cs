@@ -44,13 +44,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
     private readonly Engine.IRunCancellationRegistry _cancellationRegistry;
     private readonly Artifacts.IArtifactStore _artifactStore;
-    private readonly Sessions.IWorkSessionService _sessions;
     private readonly ILogger<WorkflowService> _logger;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, Artifacts.IArtifactStore artifactStore, Sessions.IWorkSessionService sessions, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, Artifacts.IArtifactStore artifactStore, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -65,7 +64,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _cellSeeder = cellSeeder;
         _cancellationRegistry = cancellationRegistry;
         _artifactStore = artifactStore;
-        _sessions = sessions;
         _logger = logger;
     }
 
@@ -249,15 +247,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         var payloadJson = payload?.GetRawText() ?? "{}";
 
-        // Every run is a turn of a work session so its detail page can render the Session (the Room/Journal transcript);
-        // a manual workflow run OPENS its own Workflow-kind session, staged on the SAME unit of work as the run below (the
-        // shared _db) so the two commit atomically at the SaveChanges after StartAsync — mirroring the Task launch path.
-        // Without this the run is session-less and its detail falls back to the raw trace modal instead of the Session.
-        var session = await _sessions.OpenAsync(teamId, workflow.Name, WorkSessionKind.Workflow, actorUserId, cancellationToken).ConfigureAwait(false);
-
-        // Unified run-start through IRunStarter. The manual / replay / webhook paths share
-        // one (request + run + run.queued) staging path, varying only by the envelope
-        // they hand in.
+        // Unified run-start through IRunStarter. The manual / replay / webhook paths share one (request + run +
+        // run.queued) staging path, varying only by the envelope they hand in — and that staging seam opens the run's
+        // WorkSession generically (IWorkSessionService.ResolveForRunAsync), so a manual run needs no session code here.
         var runId = await _runStarter.StartAsync(new RunSourceEnvelope
         {
             TeamId = teamId,
@@ -267,7 +259,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             ActorType = WorkflowRunActorTypes.User,
             ActorId = actorUserId,
             NormalizedPayloadJson = payloadJson,
-            Session = session,
             CreatedBy = actorUserId,
         }, cancellationToken).ConfigureAwait(false);
 

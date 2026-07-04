@@ -23,15 +23,17 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IRunRecordLogger _recordLogger;
+    private readonly Sessions.IWorkSessionService _sessions;
     private readonly ILogger<RunStarter> _logger;
 
     /// <summary>Postgres unique-constraint violation SQLSTATE. <see cref="DbUpdateException"/> wraps this when our duplicate-event index fires.</summary>
     private const string PostgresUniqueViolation = "23505";
 
-    public RunStarter(CodeSpaceDbContext db, IRunRecordLogger recordLogger, ILogger<RunStarter> logger)
+    public RunStarter(CodeSpaceDbContext db, IRunRecordLogger recordLogger, Sessions.IWorkSessionService sessions, ILogger<RunStarter> logger)
     {
         _db = db;
         _recordLogger = recordLogger;
+        _sessions = sessions;
         _logger = logger;
     }
 
@@ -71,6 +73,11 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             CausationId = envelope.CausationRequestId,
         });
 
+        // Resolve the run's session at this ONE staging seam: the envelope's own (a continuation / an inherited fork
+        // session) or a FRESH per-run Workflow-kind session opened here — so a source that supplies none (scheduled,
+        // webhook, child) still gets one, and a new source can't forget. Staged onto _db → committed by the save below.
+        var session = await _sessions.ResolveForRunAsync(envelope.Session, envelope.TeamId, envelope.WorkflowId, envelope.ActorId, cancellationToken).ConfigureAwait(false);
+
         _db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId,
@@ -84,8 +91,8 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ParentRunId = envelope.ParentRunId,
             RootRunId = envelope.RootRunId,
             RerunFromNodeId = envelope.RerunFromNodeId,
-            SessionId = envelope.Session?.SessionId,
-            SessionTurnIndex = envelope.Session?.TurnIndex,
+            SessionId = session.SessionId,
+            SessionTurnIndex = session.TurnIndex,
             Status = WorkflowRunStatus.Pending,
             CreatedBy = envelope.CreatedBy,
             LastModifiedBy = envelope.CreatedBy,
@@ -110,6 +117,10 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             // when EF had already detached the entity for us.
             DetachIfTracked(_db.WorkflowRunRequest.Local, requestId, r => r.Id);
             DetachIfTracked(_db.WorkflowRun.Local, runId, r => r.Id);
+            // A duplicate event opened a FRESH session above (staged as Added); detach it too, else it would insert
+            // orphaned on the caller's next SaveChanges. A PROVIDED session (continuation / inherited fork) isn't
+            // tracked-as-Added here, so this no-ops for it — safe to call unconditionally.
+            DetachIfTracked(_db.WorkSession.Local, session.SessionId, s => s.Id);
 
             _logger.LogInformation(
                 "RunStarter: deduplicated duplicate provider event. SourceType={SourceType} ExternalEventId={ExternalEventId} IdempotencyKey={IdempotencyKey} — silently no-op",
