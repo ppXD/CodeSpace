@@ -826,9 +826,10 @@ function FileRow({ item }: { item: StatItem }) {
  * planner's plan that was never up for confirmation. It reuses the room plan-card frame (same border / header / rows)
  * so the version looks like the plan it was, built from the beat's OWN authored subtasks. No per-item status (a
  * superseded version never ran), no edit box or approve/request-changes buttons (there is nothing to confirm — a
- * superseded version's outcome shows on the ask beat that follows). The pending "square" icon matches the rich card's
- * un-started rows. The "superseded" chip shows only for an earlier version; the current plan rendered lite (no rich
- * block available) is not superseded, so it carries no chip.
+ * superseded version's outcome shows on the ask beat that follows). Rows carry a neutral dot, NOT the rich card's
+ * checkbox: a read-only plan (rejected version / a workflow planner's plan) has nothing to check off, so a checkbox
+ * would falsely read as actionable. The "superseded" chip shows only for an earlier version; the current plan rendered
+ * lite (no rich block available) is not superseded, so it carries no chip.
  */
 function PlanLiteCard({ subtasks, version, superseded }: { subtasks: JournalSubtask[]; version?: number; superseded?: boolean }) {
   return (
@@ -844,7 +845,7 @@ function PlanLiteCard({ subtasks, version, superseded }: { subtasks: JournalSubt
           // Key by row index, not subtaskId — the plan validator tolerates duplicate subtask ids (a degenerate flat
           // plan), so subtaskId can collide; this static read-only list never reorders, so the index is a stable key.
           <div key={i} className="room-prow">
-            <span className="room-prow-ic room-prow-ic-idle"><Sym n="square" s={15} /></span>
+            <span className="room-prow-ic room-prow-ic-idle"><Sym n="dot" s={7} /></span>
             <div className="room-prow-main"><div className="room-prow-title">{i + 1}. {s.title}</div></div>
           </div>
         ))}

@@ -41,15 +41,23 @@ public sealed class MapPlannerFactsSource : IJournalFactsSource
         return facts;
     }
 
-    /// <summary>Project each subtask object (camelCase <c>id</c> + <c>title</c>) to the bare <see cref="JournalSubtask"/> — the SAME shape the supervisor plan facts source produces, so both render through one inline-plan path.</summary>
-    private static IReadOnlyList<JournalSubtask> ReadSubtasks(JsonElement subtasks) =>
+    /// <summary>
+    /// Project each subtask to the bare <see cref="JournalSubtask"/> — the SAME shape the supervisor plan facts source
+    /// produces, so both render through one inline-plan path. A map's items come in TWO generic shapes: an OBJECT subtask
+    /// (a <c>plan.author</c> plan — camelCase <c>id</c> + <c>title</c>) OR a plain STRING (a simpler planner whose
+    /// <c>json.subtasks</c> is a string array). A string carries no id, so its id is the positional index and the string
+    /// itself is the title. A non-object / non-string element is skipped. Uses the SAME numbering the timeline beat counts.
+    /// </summary>
+    internal static IReadOnlyList<JournalSubtask> ReadSubtasks(JsonElement subtasks) =>
         subtasks.EnumerateArray()
-            .Where(e => e.ValueKind == JsonValueKind.Object)
-            .Select(e => new JournalSubtask
+            .Select((e, i) => e.ValueKind switch
             {
-                SubtaskId = ReadString(e, "id"),
-                Title = ReadString(e, "title"),
+                JsonValueKind.Object => new JournalSubtask { SubtaskId = ReadString(e, "id"), Title = ReadString(e, "title") },
+                JsonValueKind.String => new JournalSubtask { SubtaskId = $"item-{i}", Title = e.GetString() ?? "" },
+                _ => null,
             })
+            .Where(s => s is not null)
+            .Select(s => s!)
             .ToList();
 
     private static string ReadString(JsonElement obj, string name) =>
