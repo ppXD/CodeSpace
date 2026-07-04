@@ -30,6 +30,9 @@ public sealed record AgentRunMetrics
 
     public string? Model { get; init; }
 
+    /// <summary>The harness kind the agent ran on (e.g. "codex-cli" / "claude-code"), off the task envelope — the small harness glyph a card shows. Null when the task didn't name one (a malformed/partial envelope).</summary>
+    public string? Harness { get; init; }
+
     public decimal? CostUsd { get; init; }
 
     public int? FilesChanged { get; init; }

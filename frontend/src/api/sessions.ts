@@ -124,6 +124,8 @@ export interface RoomAgentCard {
   assignedSubtask?: string | null;
   status: string;
   model?: string | null;
+  /// The harness the agent ran on (e.g. "codex-cli" / "claude-code") — the small harness glyph on the card. Null when unknown.
+  harness?: string | null;
   tokens?: number | null;
   costUsd?: number | null;
   filesChanged?: number | null;
@@ -334,6 +336,8 @@ export interface JournalAgentCard {
   label: string;
   status: string;
   model?: string | null;
+  /// The harness the agent ran on (e.g. "codex-cli" / "claude-code") — the small harness glyph on the card. Null when unknown.
+  harness?: string | null;
   durationMs?: number | null;
   tokens?: number | null;
   toolCount?: number | null;

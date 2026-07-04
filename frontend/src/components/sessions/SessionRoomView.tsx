@@ -510,6 +510,7 @@ function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
       label: c.label,
       status: c.status,
       model: c.model ?? null,
+      harness: c.harness ?? null,
       tokens: c.tokens ?? null,
       costUsd: c.costUsd ?? null,
       filesChanged: c.filesChanged ?? null,
@@ -978,8 +979,9 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {(tokens > 0 || fileCount > 0 || a.model) && (
+        {(tokens > 0 || fileCount > 0 || a.model || a.harness) && (
           <span className="room-arow-meta">
+            {a.harness && <span className={`room-arow-metaitem room-arow-harness room-arow-hn-${harnessTint(a.harness)}`} title={`Harness · ${a.harness}`}><Sym n="terminal" s={11} cls="room-arow-metaic room-arow-hic" /></span>}
             {tokens > 0 && <span className="room-arow-metaitem" title={`${tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-arow-metaic" /> {formatTokens(tokens)} tokens</span>}
             {a.model && <span className="room-arow-metaitem room-arow-model" title={`Model · ${a.model}`}><Sym n="sparkle" s={10} cls="room-arow-metaic" /> {a.model}</span>}
             {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
@@ -1162,6 +1164,14 @@ function agentTone(status: string): string {
   if (status === "Running") return "run";
   if (status === "Queued" || status === "Pending") return "idle";
   return "ok";
+}
+
+/** The tint class for a harness's small glyph — codex vs claude read at a glance by colour; any other kind stays neutral. Matched loosely so a versioned kind ("codex-cli", "claude-code") still resolves. */
+function harnessTint(harness: string): string {
+  const h = harness.toLowerCase();
+  if (h.includes("codex")) return "codex";
+  if (h.includes("claude")) return "claude";
+  return "other";
 }
 
 function agentStatusWord(status: string): string {

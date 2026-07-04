@@ -38,6 +38,7 @@ public class AgentMetricsReaderTests
         m.OutputTokens.ShouldBe(45);
         m.ToolCount.ShouldBe(6);
         m.Model.ShouldBe("claude-opus-4");
+        m.Harness.ShouldBe("claude-code", "the harness kind rides off the task envelope for the card's glyph");
         m.Goal.ShouldBe("do the thing", "the agent's goal becomes its display name so a plain node/map agent isn't shown as a structural map#N key");
     }
 
@@ -95,6 +96,7 @@ public class AgentMetricsReaderTests
 
         m.InputTokens.ShouldBeNull();
         m.Model.ShouldBeNull();
+        m.Harness.ShouldBeNull();        // unparseable task envelope → no harness glyph
         m.ToolCount.ShouldBe(1);         // the non-JSON figures still project
         m.DurationMs.ShouldBe(2_000);
         m.CostUsd.ShouldBeNull();        // no model/tokens → no cost

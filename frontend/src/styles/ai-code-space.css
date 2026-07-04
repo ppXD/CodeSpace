@@ -5574,6 +5574,10 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-arow-metaic { color: var(--muted-2); }
 /* Model id can be long (e.g. "claude-3-5-sonnet-…") — cap it so the row never overflows; full value stays in the title. */
 .room-arow-model { max-width: 18ch; overflow: hidden; }
+/* Harness glyph — a small tinted CLI mark; the tint reads codex vs claude at a glance, the full kind is in the title. */
+.room-arow-harness .room-arow-hic { color: var(--muted-2); }
+.room-arow-hn-claude .room-arow-hic { color: var(--accent); }
+.room-arow-hn-codex .room-arow-hic { color: var(--rm-good, #1f6b3f); }
 
 .room-fprev { display: flex; flex-direction: column; min-height: 100%; }
 .room-fprev-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--muted); padding: 32px 20px; }
