@@ -101,13 +101,19 @@ public class JournalStepDescriberRegistryTests
         // The verb rides off the timeline kind ("supervisor.<DecisionKind>") so the frontend renders a PLAN/DISPATCH/ASK
         // pill under one "Supervisor" actor lane, instead of tagging every beat a generic "decision". The DecisionKind is
         // the LOWERCASE/snake_case constant the ledger stores (SupervisorDecisionKinds), NOT PascalCase.
-        Registry.Describe(Event("supervisor", kind: timelineKind)).Verb.ShouldBe(expectedVerb);
+        var step = Registry.Describe(Event("supervisor", kind: timelineKind));
+
+        step.Verb.ShouldBe(expectedVerb);
+        step.Beat.ShouldBeTrue("a supervisor decision is an orchestration beat — it shows in the ③ timeline");
     }
 
     [Fact]
-    public void A_non_decision_step_has_no_verb()
+    public void A_non_decision_step_has_no_verb_and_is_not_a_beat()
     {
-        Registry.Describe(Event("tool-calls", kind: "tool.call")).Verb.ShouldBeNull("only a supervisor decision carries a verb pill");
+        var step = Registry.Describe(Event("tool-calls", kind: "tool.call"));
+
+        step.Verb.ShouldBeNull("only an orchestration beat carries a verb pill");
+        step.Beat.ShouldBeFalse("a tool call is background chatter — it folds, not a ③ beat");
     }
 
     [Fact]

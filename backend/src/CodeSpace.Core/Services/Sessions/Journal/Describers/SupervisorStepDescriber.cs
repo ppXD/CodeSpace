@@ -10,7 +10,7 @@ public sealed class SupervisorStepDescriber : IJournalStepDescriber, ISingletonD
 {
     public bool CanDescribe(RunTimelineEvent e) => e.SourceKey == SupervisorDecisionTimelineMap.Key;
 
-    public JournalStep Describe(RunTimelineEvent e) => JournalSteps.From(e, JournalStepKinds.Decision) with { Verb = ReadVerb(e.Kind) };
+    public JournalStep Describe(RunTimelineEvent e) => JournalSteps.From(e, JournalStepKinds.Decision) with { Beat = true, Verb = ReadVerb(e.Kind) };
 
     /// <summary>The decision verb off the timeline kind ("supervisor.spawn" → "spawn"). Null when the kind carries no verb suffix.</summary>
     private static string? ReadVerb(string kind)
