@@ -209,6 +209,9 @@ public static class WorkflowsTestSeed
             // of all-zeros, which would FK-violate).
             RunRequestId = requestId,
             SourceType = WorkflowRunSourceTypes.Manual,
+            // NOTE: this stages a SESSION-LESS run — unlike production, where RunManuallyAsync now opens a Workflow-kind
+            // WorkSession and stamps SessionId (so the run reaches its Room). The engine/ledger tests using this seed don't
+            // exercise sessions, so the mirror deliberately omits it; session-backing is covered by WorkflowRunSessionFlowTests.
             // Seed directly in Enqueued state to mirror what production produces at engine
             // entry. Production has WorkflowService.RunManuallyAsync calling
             // IWorkflowRunDispatcher.DispatchAsync, which performs the Pending→Enqueued CAS
