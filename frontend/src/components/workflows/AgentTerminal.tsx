@@ -149,13 +149,49 @@ function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; lo
 
   return (
     <ol className="agent-terminal-scroll">
-      {events.map((e) => (
-        <li key={e.sequence} className="agent-terminal-row" data-kind={lineKind(e.kind)}>
-          {isCommand(e.kind) && <span className="agent-terminal-prompt">❯ </span>}{e.text || humanize(e.kind)}
-        </li>
-      ))}
+      {events.map((e) => {
+        const line = codexLine(e);
+        if (line === null) return null; // a suppressed codex lifecycle line (a duplicate item.started / a bare turn.started)
+        return (
+          <li key={e.sequence} className="agent-terminal-row" data-kind={lineKind(e.kind)}>
+            {isCommand(e.kind) && <span className="agent-terminal-prompt">❯ </span>}{line}
+          </li>
+        );
+      })}
     </ol>
   );
+}
+
+/** Codex 0.142.x nests each event's readable payload under `item`. New runs are normalized at capture, but runs recorded
+ *  before the harness learned that schema stored the bare envelope name ("item.completed") as the text. When the text is a
+ *  bare name and the raw data is still on the wire, recover the readable line from it — the same fields the backend
+ *  normalizer extracts — so an OLD codex run reads like a NEW one. Returns null for a pure-lifecycle line that should drop,
+ *  and passes every non-codex / already-readable line straight through. */
+const CODEX_BARE = /^(thread|turn|item)\.(started|completed|failed)$/;
+function codexLine(e: AgentRunEventDto): string | null {
+  if (!CODEX_BARE.test(e.text)) return e.text || humanize(e.kind);
+  if (e.text === "item.started" || e.text === "turn.started") return null;
+  if (!e.data) return e.text; // offloaded payload — can't recover, keep the bare name rather than invent one
+
+  try {
+    const root = JSON.parse(e.data);
+    if (root?.type === "thread.started") return "Session started";
+    if (root?.type === "turn.completed") return "Turn complete";
+    if (root?.type === "turn.failed") return typeof root?.error?.message === "string" ? root.error.message : e.text;
+
+    const item = root?.item;
+    if (item && typeof item === "object") {
+      if (item.type === "todo_list" && Array.isArray(item.items)) {
+        const lines = item.items.filter((t: { text?: string }) => t?.text).map((t: { text: string; completed?: boolean }) => `${t.completed ? "[x]" : "[ ]"} ${t.text}`);
+        return lines.length > 0 ? lines.join("\n") : e.text;
+      }
+      for (const k of ["text", "message", "command", "aggregated_output"]) {
+        if (typeof item[k] === "string" && item[k]) return item[k];
+      }
+    }
+  } catch { /* malformed data — fall through to the bare name */ }
+
+  return e.text;
 }
 
 /** The Files tab — the files THIS agent changed. Each is openable (a preview) when the host provides `onOpenFile`, else a plain listing. */

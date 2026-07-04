@@ -6053,4 +6053,4 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jfold-steps { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 2px; }
 
 /* Supporting material (Files changed / Tools / Reasoning) — the collapsed stat rows below the result ⑥, set off by a hairline so they read as an appendix, never as part of the story. */
-.room-jsupport { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line-2); display: flex; flex-direction: column; gap: 2px; }
+.room-jsupport { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line-2); display: flex; flex-direction: column; gap: 8px; }

@@ -367,15 +367,16 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // result ⑥. Supporting stat rows (Files changed / Tools / Reasoning) drop to a collapsed strip AFTER the
                 // result so they never interrupt the story. Any block the journal doesn't deliberately replace — an
                 // unknown/future additive type — still falls through InnerBlock so it degrades to a faint line, never vanishes.
-                // The plan pinned at the top: the plan_checklist ② when a checklist exists, else the "Plan · N subtasks"
-                // stat — the room emits ONE or the OTHER (checklist-present vs null), never both, so a run without a
-                // checklist still shows its plan here instead of nowhere.
+                // The PRIMARY plan pinned at the top: the plan_checklist ② when a checklist exists, else the first
+                // "Plan · N subtasks" stat — the room emits ONE or the OTHER (checklist-present vs null), never both, so a
+                // run without a checklist still shows its plan here instead of nowhere.
                 const topPlan = turn.blocks.find((b) => b.type === "plan_checklist") ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks");
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
-                // Files changed / Tools / Reasoning as supporting rows after the result — but NOT any "Plan · N subtasks"
-                // stat, which is the plan already pinned at the top, so it isn't repeated as an appendix.
-                const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.kind !== "subtasks");
+                // Supporting rows AFTER the result — Files changed / Tools / Reasoning, PLUS any SECONDARY plan (a mid-run
+                // re-plan's "Plan · N subtasks" round) as its own collapsed card, so a later planning moment still surfaces
+                // generically; only the ONE block already pinned at the top is excluded.
+                const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id);
                 const passThrough = turn.blocks.filter((b) => !JOURNAL_HANDLED.has(b.type));
                 return (
                   <>
