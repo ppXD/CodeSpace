@@ -362,6 +362,120 @@ public class CodexHarnessTests
         Harness.ParseEvents("{\"type\":\"exec_command\",\"command\":\"npm test\"}").Single().Text.ShouldBe("npm test");
     }
 
+    // ── Codex 0.142.x THREADED schema — item.completed nests its content under `item` (verified against real captured
+    //    events). The old flat-schema tests above still pass because a flat line falls through to the top-level path. ──
+
+    [Theory]
+    [InlineData("agent_message", AgentEventKind.AssistantMessage)]
+    [InlineData("command_execution", AgentEventKind.CommandExecuted)]
+    [InlineData("todo_list", AgentEventKind.PlanUpdate)]
+    [InlineData("reasoning", AgentEventKind.Reasoning)]
+    [InlineData("error", AgentEventKind.Error)]
+    [InlineData("some_new_item_type", AgentEventKind.Warning)]   // unknown item type → never dropped, only unstyled
+    public void Classifies_a_threaded_item_completed_by_its_item_type(string itemType, AgentEventKind expected)
+    {
+        var line = "{\"type\":\"item.completed\",\"item\":{\"id\":\"x\",\"type\":\"" + itemType + "\",\"text\":\"t\"}}";
+        Harness.ParseEvents(line).Single().Kind.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Reads_the_agent_message_text_from_the_threaded_item()
+    {
+        Harness.ParseEvents("""{"type":"item.completed","item":{"id":"item_1","text":"PONG","type":"agent_message"}}""")
+            .Single().Text.ShouldBe("PONG", "the readable line comes from item.text, not the bare 'item.completed' envelope name");
+    }
+
+    [Fact]
+    public void Reads_the_command_from_a_threaded_command_execution()
+    {
+        Harness.ParseEvents("""{"type":"item.completed","item":{"id":"item_4","type":"command_execution","status":"completed","command":"pwd && ls -la","exit_code":0,"aggregated_output":""}}""")
+            .Single().Text.ShouldBe("pwd && ls -la");
+    }
+
+    [Fact]
+    public void Renders_a_threaded_todo_list_as_a_checklist()
+    {
+        var e = Harness.ParseEvents("""{"type":"item.completed","item":{"id":"item_2","type":"todo_list","items":[{"text":"Research naming","completed":true},{"text":"Write report","completed":false}]}}""").Single();
+
+        e.Kind.ShouldBe(AgentEventKind.PlanUpdate);
+        e.Text.ShouldBe("[x] Research naming\n[ ] Write report");
+    }
+
+    [Fact]
+    public void Reads_the_error_message_from_a_threaded_error_item()
+    {
+        var e = Harness.ParseEvents("""{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back to HTTPS: 401 Unauthorized"}}""").Single();
+
+        e.Kind.ShouldBe(AgentEventKind.Error);
+        e.Text.ShouldBe("Falling back to HTTPS: 401 Unauthorized");
+    }
+
+    [Theory]
+    [InlineData("""{"type":"turn.started"}""")]
+    [InlineData("""{"type":"item.started","item":{"id":"item_2","type":"command_execution","status":"in_progress","command":"pwd"}}""")]
+    public void Suppresses_pure_lifecycle_and_the_duplicate_item_started(string line)
+    {
+        // turn.started is pure lifecycle; item.started duplicates the terminal item.completed. No reader consumes them,
+        // so drop them rather than flood the terminal with bare names.
+        Harness.ParseEvents(line).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Surfaces_a_threaded_turn_failed_reason_as_an_error()
+    {
+        var e = Harness.ParseEvents("""{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized"}}""").Single();
+
+        e.Kind.ShouldBe(AgentEventKind.Error, "the failure reaches BuildResult's Error reader instead of a bare 'turn.failed'");
+        e.Text.ShouldBe("unexpected status 401 Unauthorized");
+    }
+
+    [Theory]
+    [InlineData("""{"type":"item.completed","item":"not-an-object"}""")]
+    [InlineData("""{"type":"item.completed","item":null}""")]
+    [InlineData("""{"type":"item.completed"}""")]
+    public void A_malformed_item_completed_never_reproduces_the_bare_envelope_name(string line)
+    {
+        // A truncated / non-object `item` must NOT fall back to the flat path and re-emit the "item.completed" token
+        // (the exact wall of noise this change removes) or be mis-styled as a lifecycle Completed.
+        var e = Harness.ParseEvents(line).Single();
+
+        e.Kind.ShouldBe(AgentEventKind.Warning, "an unclassifiable item is a Warning, not a lifecycle Completed");
+        e.Text.ShouldNotBe("item.completed");
+    }
+
+    [Fact]
+    public void An_empty_agent_message_renders_blank_not_its_kind_token()
+    {
+        // An empty final message must not surface the literal "agent_message" as the assistant's line (nor as the folded
+        // BuildResult summary) — a recognized kind with no content renders blank; the FE falls back to the humanized kind.
+        Harness.ParseEvents("""{"type":"item.completed","item":{"type":"agent_message","text":""}}""")
+            .Single().Text.ShouldBe("");
+    }
+
+    [Fact]
+    public void Keeps_thread_started_so_the_session_id_reader_still_finds_the_thread_id()
+    {
+        // thread.started MUST survive: AgentSessionIdReader scans event Data for thread_id — the handle a rerun threads
+        // back as `codex exec resume <id>`. Suppressing it would silently break continue.
+        var events = Harness.ParseEvents("""{"type":"thread.started","thread_id":"019f01b0-6aad-72a0-a14e-1c9fc9d1387a"}""");
+
+        events.Single().Text.ShouldBe("Session started");
+        AgentSessionIdReader.TryRead(events).ShouldBe("019f01b0-6aad-72a0-a14e-1c9fc9d1387a");
+    }
+
+    [Fact]
+    public void Keeps_turn_completed_so_the_token_usage_reader_still_finds_the_usage()
+    {
+        // turn.completed MUST survive: AgentTokenUsageReader scans event Data for the usage object — the run's token total.
+        var events = Harness.ParseEvents("""{"type":"turn.completed","usage":{"input_tokens":11860,"output_tokens":3}}""");
+
+        events.Single().Text.ShouldBe("Turn complete");
+        var usage = AgentTokenUsageReader.TryRead(events);
+        usage.ShouldNotBeNull();
+        usage!.InputTokens.ShouldBe(11860);
+        usage.OutputTokens.ShouldBe(3);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
