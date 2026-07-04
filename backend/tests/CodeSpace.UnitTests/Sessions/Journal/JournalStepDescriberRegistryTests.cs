@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Sessions.Journal;
 using CodeSpace.Core.Services.Sessions.Journal.Describers;
+using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Tasks.Timeline;
 using Shouldly;
@@ -16,7 +17,7 @@ namespace CodeSpace.UnitTests.Sessions.Journal;
 public class JournalStepDescriberRegistryTests
 {
     private static readonly IJournalStepDescriberRegistry Registry = new JournalStepDescriberRegistry(
-        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new LifecycleStepDescriber() },
+        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new MapDispatchStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new LifecycleStepDescriber() },
         new FallbackStepDescriber());
 
     private static RunTimelineEvent Event(string sourceKey, string kind = "k", string title = "t", string? summary = null,
@@ -105,6 +106,18 @@ public class JournalStepDescriberRegistryTests
 
         step.Verb.ShouldBe(expectedVerb);
         step.Beat.ShouldBeTrue("a supervisor decision is an orchestration beat — it shows in the ③ timeline");
+    }
+
+    [Fact]
+    public void A_flow_map_dispatch_is_a_beat_with_the_dispatch_verb()
+    {
+        // The generic-beat seam paying off: a NON-supervisor run's map fan-out becomes a "dispatch" beat, so it shows in
+        // the ③ timeline with its cards — no frontend change, no kind==="decision" hardcode.
+        var step = Registry.Describe(Event(MapDispatchTimelineMap.Key, kind: MapDispatchTimelineMap.DispatchKind, title: "Dispatched 5 agents"));
+
+        step.Beat.ShouldBeTrue("a map dispatch is an orchestration beat");
+        step.Verb.ShouldBe("dispatch");
+        step.Title.ShouldBe("Dispatched 5 agents");
     }
 
     [Fact]

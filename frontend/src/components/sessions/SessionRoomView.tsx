@@ -548,9 +548,11 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
     }
   }
 
-  // One lightweight actor lane names WHO is driving the turn, so every beat below reads as the supervisor's without
-  // repeating "Supervisor" on each line — the decisions carry only a semantic verb pill + a natural past-tense title.
+  // One lightweight actor lane names WHO is driving the turn, so every beat below reads as that actor's without
+  // repeating the name on each line. A supervisor run (its beats carry supervisor decision verbs) reads "Supervisor";
+  // a plain workflow / flow.map run (only node-dispatch beats) reads "Workflow" — the lane stays generic across shapes.
   const hasDecision = turn.steps.some((s) => s.beat && !isStopDecision(s));
+  const isSupervised = turn.steps.some((s) => s.beat && SUPERVISOR_VERBS.has(s.verb ?? ""));
 
   // The rich plan checklist card renders inline under the FIRST plan beat (its per-item status / artifacts / approval),
   // reusing the same component the room shows — not a re-implemented plain list.
@@ -561,8 +563,8 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
       {hasDecision && (
         <div className="room-jactor">
           <span className="room-jactor-dot" />
-          <span className="room-jactor-name">Supervisor</span>
-          <span className="room-jactor-sub">· coordinating this turn</span>
+          <span className="room-jactor-name">{isSupervised ? "Supervisor" : "Workflow"}</span>
+          <span className="room-jactor-sub">{isSupervised ? "· coordinating this turn" : "· running this turn"}</span>
         </div>
       )}
       <div className="room-jrnl">
@@ -620,10 +622,13 @@ function JournalStepRow({ step, muted, planCard }: { step: JournalStep; muted?: 
 function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }
 function jKindLabel(k: string): string { return k === "model_call" ? "model" : k; }
 /** The semantic pill for a supervisor decision verb — PLAN / DISPATCH / ASK / MERGE / RETRY / RESOLVE (rendered uppercase by CSS), so a beat says WHAT was decided, not a generic "decision". The backend emits the lowercase/snake_case DecisionKind (plan / spawn / ask_human / …); lowercased here for robustness. Unknown/missing verb falls back to "decision". */
+/** The supervisor decision verbs — a beat carrying one means the turn is supervisor-orchestrated (the actor lane reads "Supervisor"); a run with only node-dispatch beats reads "Workflow". */
+const SUPERVISOR_VERBS = new Set(["plan", "spawn", "merge", "ask_human", "retry", "resolve", "stop"]);
 function jVerbKey(verb: string | null | undefined): string {
   switch ((verb ?? "").toLowerCase()) {
     case "plan": return "plan";
-    case "spawn": return "dispatch";
+    case "spawn": return "dispatch";      // a supervisor spawn
+    case "dispatch": return "dispatch";   // a flow.map node's fan-out — same DISPATCH pill
     case "retry": return "retry";
     case "ask_human": return "ask";
     case "merge": return "merge";
