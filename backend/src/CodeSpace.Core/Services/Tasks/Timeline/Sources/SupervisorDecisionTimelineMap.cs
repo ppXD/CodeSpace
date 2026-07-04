@@ -61,7 +61,7 @@ public static class SupervisorDecisionTimelineMap
     /// <summary>A retry that SETTLED having staged NO agent re-ran nothing — the model authored a retry with no (or an unknown) subtask id, so the server no-op'd it. Say so, instead of "retried a subtask", which implies work happened. A still-in-flight retry (not yet settled) keeps the plain verb. Public so the Session room narrative reuses this ONE retry-copy authority.</summary>
     public static string RetryTitle(SupervisorDecisionRecord d) =>
         d.Status == SupervisorDecisionStatus.Succeeded && SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson).Count == 0
-            ? "Supervisor retried — no subtask to re-run"
+            ? "Supervisor reviewed the results — no retry needed"
             : "Supervisor retried a subtask";
 
     // A finished decision is Success, a failed one Error, a reaper-expired one Warning; everything still in flight

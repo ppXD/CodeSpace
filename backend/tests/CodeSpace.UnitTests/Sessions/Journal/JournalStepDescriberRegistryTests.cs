@@ -91,6 +91,25 @@ public class JournalStepDescriberRegistryTests
         Registry.Describe(Event("tool-calls", level: TimelineLevel.Detail)).Milestone.ShouldBeFalse();
     }
 
+    [Theory]
+    [InlineData("supervisor.plan", "plan")]
+    [InlineData("supervisor.spawn", "spawn")]
+    [InlineData("supervisor.ask_human", "ask_human")]
+    [InlineData("supervisor.merge", "merge")]
+    public void A_supervisor_decision_carries_its_verb_for_the_semantic_pill(string timelineKind, string expectedVerb)
+    {
+        // The verb rides off the timeline kind ("supervisor.<DecisionKind>") so the frontend renders a PLAN/DISPATCH/ASK
+        // pill under one "Supervisor" actor lane, instead of tagging every beat a generic "decision". The DecisionKind is
+        // the LOWERCASE/snake_case constant the ledger stores (SupervisorDecisionKinds), NOT PascalCase.
+        Registry.Describe(Event("supervisor", kind: timelineKind)).Verb.ShouldBe(expectedVerb);
+    }
+
+    [Fact]
+    public void A_non_decision_step_has_no_verb()
+    {
+        Registry.Describe(Event("tool-calls", kind: "tool.call")).Verb.ShouldBeNull("only a supervisor decision carries a verb pill");
+    }
+
     [Fact]
     public void With_no_specific_describer_every_event_falls_to_the_fallback()
     {
