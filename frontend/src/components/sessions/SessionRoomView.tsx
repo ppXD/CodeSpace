@@ -381,6 +381,13 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 const topPlan = hasInlinePlan ? undefined : (planCard ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
+                // A plain run with NO orchestration beat (a single agent, or a linear agent chain — no supervisor, no map
+                // fan-out) has no beat to hang its agent cards on, so the ③ skeleton would show only folded lifecycle and
+                // the agent's work would vanish. Render the room's own agent_group block(s) in that case — the SAME cards
+                // the room shows. When there IS a beat, the cards ride the beat (supervisor spawn / map dispatch) and this
+                // stays empty, so they're never doubled.
+                const hasBeat = journalTurn.steps.some((s) => s.beat);
+                const agentGroupBlocks = hasBeat ? [] : turn.blocks.filter((b) => b.type === "agent_group");
                 // Supporting rows AFTER the result — Files changed / Tools / Reasoning. Drop the "Plan · N subtasks" stat
                 // when the plan is shown inline (redundant); never re-render the one block pinned at the top.
                 const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id && !(hasInlinePlan && b.kind === "subtasks"));
@@ -389,6 +396,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                   <>
                     {topPlan && <InnerBlock key={topPlan.id} block={topPlan} pdById={pdById} onOpenRoom={onOpenRoom} />}
                     <JournalNarrative turn={journalTurn} planCard={hasInlinePlan ? planCard : undefined} />
+                    {agentGroupBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {liveBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {resultBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {statBlocks.length > 0 && (
