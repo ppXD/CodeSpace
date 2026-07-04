@@ -130,6 +130,39 @@ public class WorkflowRunSessionFlowTests
             .ShouldBe(WorkSessionKind.Task, "and it's the caller's own Task-kind session, not overwritten to Workflow");
     }
 
+    [Fact]
+    public async Task A_child_sub_workflow_run_stays_session_less_so_it_never_lists_as_an_orphan()
+    {
+        // A nested ChildWorkflow run is NOT a trigger — the session read layer keeps children OUT of the session model
+        // (they live inside the parent turn), so the seam must NOT mint them a standalone session, which would surface as
+        // a bare, badge-less orphan row in the sessions list. It rides the envelope's (inherited) session verbatim — here
+        // session-less, as sub-workflow dispatch supplies none.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, WorkflowsTestSeed.MinimalDefinition());
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = await scope.Resolve<IRunStarter>().StartAsync(new RunSourceEnvelope
+            {
+                TeamId = teamId,
+                WorkflowId = workflowId,
+                WorkflowVersion = 1,
+                SourceType = WorkflowRunSourceTypes.ChildWorkflow,
+                ActorType = WorkflowRunActorTypes.System,
+                ActorId = userId,
+                NormalizedPayloadJson = "{}",
+                CreatedBy = userId,
+            }, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).SessionId
+            .ShouldBeNull("a nested child run rides the parent's session (here none) — the seam must not mint it a standalone session that would list as an orphan");
+        (await db.WorkSession.AsNoTracking().CountAsync(s => s.TeamId == teamId))
+            .ShouldBe(0, "no session row was created for the child run");
+    }
+
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
