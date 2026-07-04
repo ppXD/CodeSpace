@@ -10,6 +10,7 @@ import type {
   ExecutionMapStep,
   ExecutionStepStatus,
   FinalAnswerBlock,
+  JournalAgentCard,
   JournalModelCall,
   JournalStep,
   JournalSubtask,
@@ -431,8 +432,11 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // when the plan is shown inline (redundant); never re-render the one block pinned at the top.
                 const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id && !(hasInlinePlan && b.kind === "subtasks"));
                 const passThrough = turn.blocks.filter((b) => !JOURNAL_HANDLED.has(b.type));
+                // The turn's agent cards by run id — so a plan item opens its agent's terminal with the SAME full metrics
+                // an agent-card row would (model · tokens · files · tools · duration · cost), not a bare id+title stub.
+                const agentCards = new Map(journalTurn.steps.flatMap((s) => s.agents).map((c) => [c.agentRunId, journalToRoomCard(c)] as const));
                 return (
-                  <>
+                  <PlanAgentCardsContext.Provider value={agentCards}>
                     {topPlan && <InnerBlock key={topPlan.id} block={topPlan} pdById={pdById} onOpenRoom={onOpenRoom} />}
                     <JournalNarrative turn={journalTurn} planCard={hasInlinePlan ? planCard : undefined} />
                     {agentGroupBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
@@ -444,7 +448,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                       </div>
                     )}
                     {passThrough.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
-                  </>
+                  </PlanAgentCardsContext.Provider>
                 );
               })() : (
                 turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
@@ -558,32 +562,37 @@ function jTitle(raw: string): string {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-/** Adapt a spawn/retry decision's journal agent cards into the Room's AgentGroupBlock so the wave renders with the SAME agent-card look and the SAME row-click → side-drawer (terminal / files / trace) as the room. */
-function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
+/** One journal agent card → the Room's RoomAgentCard shape, so it renders with the SAME agent-card look + the SAME
+ *  row-click → side-drawer (terminal / files / trace) as the room, and its full metrics (model · tokens · files · tools ·
+ *  duration · cost) carry into any drawer opened for it. The readable subtask title rides as summary (the row's hover) +
+ *  assignedSubtask (the drawer's allocation strip). */
+function journalToRoomCard(c: JournalAgentCard): RoomAgentCard {
   return {
-    type: "agent_group",
-    id: `jrnl-${step.id}-agents`,
-    seq: 0,
-    title: "Agents",
-    agents: step.agents.map((c) => ({
-      agentRunId: c.agentRunId,
-      label: c.label,
-      // The readable subtask title rides as summary (the row's hover) + assignedSubtask (the drawer's allocation strip),
-      // so the id header correlates with the deferred labels while the human title stays one hover / click away.
-      summary: c.assignedSubtask ?? null,
-      assignedSubtask: c.assignedSubtask ?? null,
-      status: c.status,
-      model: c.model ?? null,
-      harness: c.harness ?? null,
-      tokens: c.tokens ?? null,
-      costUsd: c.costUsd ?? null,
-      filesChanged: c.filesChanged ?? null,
-      changedFiles: c.files.map((f) => f.path),
-      toolCount: c.toolCount ?? null,
-      durationMs: c.durationMs ?? null,
-    })),
+    agentRunId: c.agentRunId,
+    label: c.label,
+    summary: c.assignedSubtask ?? null,
+    assignedSubtask: c.assignedSubtask ?? null,
+    status: c.status,
+    model: c.model ?? null,
+    harness: c.harness ?? null,
+    tokens: c.tokens ?? null,
+    costUsd: c.costUsd ?? null,
+    filesChanged: c.filesChanged ?? null,
+    changedFiles: c.files.map((f) => f.path),
+    toolCount: c.toolCount ?? null,
+    durationMs: c.durationMs ?? null,
   };
 }
+
+/** Adapt a spawn/retry decision's journal agent cards into the Room's AgentGroupBlock so the wave renders with the SAME agent-card look and the SAME row-click → side-drawer as the room. */
+function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
+  return { type: "agent_group", id: `jrnl-${step.id}-agents`, seq: 0, title: "Agents", agents: step.agents.map(journalToRoomCard) };
+}
+
+/** A turn's journal agent cards keyed by agent-run id — so a plan checklist item (which knows only its agent's id) can
+ *  open that agent's terminal with the SAME full metrics an agent-card row would, instead of a bare id+title stub.
+ *  Empty in Room mode (no journal), where the plan card falls back to the minimal stub. */
+const PlanAgentCardsContext = createContext<Map<string, RoomAgentCard>>(new Map());
 
 /** The chronological work timeline for one turn — the journal's ③, in the Room's mono style. Consecutive background steps collapse into one in-place disclosure so the story reads clean but nothing is lost. */
 function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: PlanChecklistBlock }) {
@@ -1149,6 +1158,7 @@ function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
 /** One checklist row. Opens the latest attempt's agent terminal from Details when an agent is linked. */
 function PlanItemRow({ it }: { it: PlanChecklistItem }) {
   const openDrawer = useRoomDrawer();
+  const agentCards = useContext(PlanAgentCardsContext);
   const run = useContext(RunActionsContext);
   const tone = planStateTone(it.state);
   const criteria = it.acceptanceCriteria ?? [];
@@ -1184,7 +1194,7 @@ function PlanItemRow({ it }: { it: PlanChecklistItem }) {
       <button
         className="room-prow-act"
         disabled={!canOpen}
-        onClick={() => canOpen && openDrawer({ kind: "agent", runId: run!.runId, agent: { agentRunId: it.agentRunId!, label: it.title, status: planAgentStatus(it.state) } })}
+        onClick={() => canOpen && openDrawer({ kind: "agent", runId: run!.runId, agent: agentCards.get(it.agentRunId!) ?? { agentRunId: it.agentRunId!, label: it.title, status: planAgentStatus(it.state) } })}
       >
         Details <Sym n="chevron-right" s={11} />
       </button>
