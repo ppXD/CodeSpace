@@ -26,7 +26,9 @@ public interface IModelCallDetailReader
 /// </summary>
 public sealed class ModelCallDetailReader : IModelCallDetailReader, IScopedDependency
 {
-    private static readonly JsonSerializerOptions Pretty = new() { WriteIndented = true };
+    // Relaxed encoder so non-ASCII (CJK, emoji) renders as itself, not "\uXXXX" escapes — the drawer shows real text.
+    // Safe here: the output is displayed in a React <pre> (which HTML-escapes), never injected into HTML/JS.
+    private static readonly JsonSerializerOptions Pretty = new() { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactStore _artifacts;
