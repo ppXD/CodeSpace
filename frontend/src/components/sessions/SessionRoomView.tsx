@@ -10,6 +10,9 @@ import type {
   ExecutionMapStep,
   ExecutionStepStatus,
   FinalAnswerBlock,
+  JournalStep,
+  JournalTurn,
+  JournalView,
   LiveActivityBlock,
   NarrativeStepBlock,
   PlanChecklistBlock,
@@ -49,6 +52,15 @@ const RoomDrawerContext = createContext<(t: DrawerTarget) => void>(() => {});
 const useRoomDrawer = () => useContext(RoomDrawerContext);
 
 /**
+ * The Session Journal, when the ?view=journal toggle is on — null in plain Room mode. When present, a turn REUSES the
+ * Room frame (header, execution map ①, plan checklist ②, result card ⑥, mono style) but replaces its narrative blocks
+ * (agent groups / supervisor steps / the live ticker) with the journal's CHRONOLOGICAL steps ③, so the journal is the
+ * Room with a better middle, not a different-looking page.
+ */
+const JournalContext = createContext<JournalView | null>(null);
+const useJournal = () => useContext(JournalContext);
+
+/**
  * The Session room — run-detail rendered from the backend-authored Session Room projection (`RoomView`) as a
  * Claude/Codex-style WORK TRANSCRIPT, replicating the exported Session.dc.html 1:1: a session header (breadcrumb +
  * title + status + meta chips), then turns as a message stream — a right-aligned user bubble, then the AI's reply
@@ -58,7 +70,7 @@ const useRoomDrawer = () => useContext(RoomDrawerContext);
  * owns no copy / order / status; an unknown block degrades to a faint line. The design palette IS the project warm
  * theme, but the design's deeper semantic colors (good/blue/err + bg/line variants) are scoped to `.room-room`.
  */
-export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: string; room: RoomView; onOpenRoom: (runId?: string) => void }) {
+export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamSlug: string; room: RoomView; onOpenRoom: (runId?: string) => void; journal?: JournalView | null }) {
   const navigate = useNavigate();
 
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -89,6 +101,7 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
 
   return (
+    <JournalContext.Provider value={journal ?? null}>
     <RoomDrawerContext.Provider value={setDrawer}>
     <section className="room-room" data-drawer={drawer ? true : undefined}>
       <header className="room-head">
@@ -146,6 +159,7 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom }: { teamSlug: stri
       {drawer && <RoomDrawer target={drawer} onClose={() => setDrawer(null)} />}
     </section>
     </RoomDrawerContext.Provider>
+    </JournalContext.Provider>
   );
 }
 
@@ -311,6 +325,12 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
   const liveDecisions = decisions.data ? decisionsForRun(decisions.data, turn.runId, agentIds) : [];
   const pdById = new Map(liveDecisions.map((d) => [d.id, d]));
 
+  // Journal mode: this turn's chronological steps replace the Room's narrative blocks (agent groups / supervisor steps /
+  // the live ticker) while the frame — execution map, plan checklist, result card — is reused as-is. Only the FOCUSED
+  // turn is walked into steps (others are collapsed with none), so a stepless turn keeps the Room narrative. Null in Room mode.
+  const journal = useJournal();
+  const journalTurn = journal?.turns.find((t) => t.turnIndex === turn.turnIndex && t.steps.length > 0) ?? null;
+
   // The outcome belongs at the END — the green RESULT card (success) or the red diagnostic (failure), never echoed at
   // the top. When the turn carries either, drop the opening lead so the top is just the execution map + the flow, and
   // the outcome reads once, at the bottom. A still-running turn has neither, so its lead surfaces the live one-liner.
@@ -341,7 +361,34 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
 
               {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} />}
 
-              {turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
+              {journalTurn ? (() => {
+                // Curated journal frame: TOP keeps only the primary plan checklist ② (execution map ① is already above).
+                // The middle is the decision skeleton ③, then the live "working…" ticker while the turn runs, then the
+                // result ⑥. Supporting stat rows (Files changed / Tools / Reasoning) drop to a collapsed strip AFTER the
+                // result so they never interrupt the story. Any block the journal doesn't deliberately replace — an
+                // unknown/future additive type — still falls through InnerBlock so it degrades to a faint line, never vanishes.
+                const topPlan = turn.blocks.find((b) => b.type === "plan_checklist");
+                const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
+                const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
+                const statBlocks = turn.blocks.filter((b) => b.type === "stat");
+                const passThrough = turn.blocks.filter((b) => !JOURNAL_HANDLED.has(b.type));
+                return (
+                  <>
+                    {topPlan && <InnerBlock key={topPlan.id} block={topPlan} pdById={pdById} onOpenRoom={onOpenRoom} />}
+                    <JournalNarrative turn={journalTurn} />
+                    {liveBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
+                    {resultBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
+                    {statBlocks.length > 0 && (
+                      <div className="room-jsupport">
+                        {statBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
+                      </div>
+                    )}
+                    {passThrough.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
+                  </>
+                );
+              })() : (
+                turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
+              )}
 
               <TurnActions actions={turn.actions} turn={turn} onOpenRoom={onOpenRoom} onOpenRun={onOpenRun} />
             </div>
@@ -426,6 +473,110 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
     </div>
   );
 }
+
+// ─── Journal mode: the chronological ③ timeline that replaces the Room's narrative blocks ───
+
+/** Result-family blocks rendered BELOW the journal timeline — the final answer / delivery / diagnostic ⑥ + any live pending decision. The supervisor "stop" is internal lifecycle, so its outcome lives HERE (the result card), never as a step in ③. */
+const JOURNAL_RESULT = new Set<RoomBlock["type"]>(["delivery", "final_answer", "diagnostic", "decision"]);
+
+/** Every KNOWN inner-block type the journal deliberately consumes or replaces: execution map ① (via turn.map), plan ②, the decision skeleton ③ in place of agent_group/narrative_step, the live ticker, the result ⑥, and the stat support strip. Anything NOT here is an unknown/future additive type and falls through InnerBlock so it degrades to a faint line rather than vanishing (matching the room's forward-compat contract). */
+const JOURNAL_HANDLED = new Set<RoomBlock["type"]>(["execution_map", "narrative_step", "agent_group", "plan_checklist", "stat", "live_activity", ...JOURNAL_RESULT]);
+
+/** The journal's ③ shows only the supervisor's decision skeleton (planned · dispatched · asked · merged). Everything else — thinking, tool calls, model calls, agent-file events, run/node lifecycle — folds into the "background steps" disclosure; the raw text lives in the trace drawer, never flat on the main transcript. */
+function isBackgroundStep(s: JournalStep): boolean {
+  return s.kind !== "decision";
+}
+
+/** The supervisor "stopped" decision is internal lifecycle — its outcome is the result card ⑥, so it never takes a step in ③. There's no verb field on the DTO yet, so match the backend's title (see SupervisorDecisionTimelineMap.TitleFor). */
+function isStopDecision(s: JournalStep): boolean {
+  return s.kind === "decision" && /\bstopped\b/i.test(s.title);
+}
+
+/** Strip the internal-actor "Supervisor " voice so a decision reads as a plain past-tense beat ("Planned the work", "Dispatched 4 agents", "Asked you", "Merged the results"). */
+function jTitle(raw: string): string {
+  const t = raw.replace(/^Supervisor[:\s]+/i, "").replace(/^spawned\b/i, "Dispatched");
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+/** Adapt a spawn/retry decision's journal agent cards into the Room's AgentGroupBlock so the wave renders with the SAME agent-card look and the SAME row-click → side-drawer (terminal / files / trace) as the room. */
+function journalAgentsGroup(step: JournalStep): AgentGroupBlock {
+  return {
+    type: "agent_group",
+    id: `jrnl-${step.id}-agents`,
+    seq: 0,
+    title: "Agents",
+    agents: step.agents.map((c) => ({
+      agentRunId: c.agentRunId,
+      label: c.label,
+      status: c.status,
+      model: c.model ?? null,
+      tokens: c.tokens ?? null,
+      costUsd: c.costUsd ?? null,
+      filesChanged: c.filesChanged ?? null,
+      changedFiles: c.files.map((f) => f.path),
+      toolCount: c.toolCount ?? null,
+      durationMs: c.durationMs ?? null,
+    })),
+  };
+}
+
+/** The chronological work timeline for one turn — the journal's ③, in the Room's mono style. Consecutive background steps collapse into one in-place disclosure so the story reads clean but nothing is lost. */
+function JournalNarrative({ turn }: { turn: JournalTurn }) {
+  const rows: ({ kind: "step"; step: JournalStep } | { kind: "fold"; steps: JournalStep[] })[] = [];
+  for (const step of turn.steps) {
+    if (isStopDecision(step)) continue; // the "stopped" outcome lives in the result card ⑥, not as a step
+
+    const last = rows[rows.length - 1];
+    if (isBackgroundStep(step)) {
+      if (last && last.kind === "fold") last.steps.push(step);
+      else rows.push({ kind: "fold", steps: [step] });
+    } else {
+      rows.push({ kind: "step", step });
+    }
+  }
+
+  return (
+    <div className="room-jrnl">
+      {rows.map((r, i) => (r.kind === "step" ? <JournalStepRow key={r.step.id} step={r.step} /> : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
+      {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
+    </div>
+  );
+}
+
+function JournalFold({ steps }: { steps: JournalStep[] }) {
+  const [open, setOpen] = useState(false);
+  const noun = steps.every((s) => s.kind === "thinking") ? "reasoning" : "background";
+  if (open) return <>{steps.map((s) => <JournalStepRow key={s.id} step={s} muted />)}</>;
+  return (
+    <div className="room-jfold">
+      <button onClick={() => setOpen(true)}>▸ {steps.length} {noun} {steps.length === 1 ? "step" : "steps"}</button>
+    </div>
+  );
+}
+
+function JournalStepRow({ step, muted }: { step: JournalStep; muted?: boolean }) {
+  // Raw thinking never renders flat on the main transcript — it lives in the trace drawer. A folded thinking step,
+  // even when its disclosure is opened, shows only its one-line title; the full chain-of-thought stays in the trace.
+  const showDetail = step.detail && step.kind !== "thinking";
+  return (
+    <div className={`room-jstep room-jtone-${jTone(step.tone)}${step.milestone ? " room-jkey" : ""}${muted ? " room-jmuted" : ""}`}>
+      <span className="room-jnode" />
+      <div className="room-jline">
+        <span className="room-jtime">{jTime(step.at)}</span>
+        <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>
+        <span className="room-jtitle">{step.kind === "decision" ? jTitle(step.title) : step.title}</span>
+      </div>
+      {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
+      {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}
+      {step.agents.length > 0 && <div className="room-jagents"><AgentSection group={journalAgentsGroup(step)} /></div>}
+      {step.deferred.length > 0 && <div className="room-jdeferred">{step.deferred.map((d) => <span key={d.subtaskId} className="room-jdefer">{d.subtaskId} · waiting on {d.waitingOn.join(", ")}</span>)}</div>}
+    </div>
+  );
+}
+
+function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }
+function jKindLabel(k: string): string { return k === "model_call" ? "model" : k; }
+function jTime(iso: string): string { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 
 /** One inner block, rendered by type as a Codex-style detail row / card. */
 function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: Map<string, PendingDecision>; onOpenRoom: (runId?: string) => void }) {
@@ -827,9 +978,10 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {(tokens > 0 || fileCount > 0) && (
+        {(tokens > 0 || fileCount > 0 || a.model) && (
           <span className="room-arow-meta">
             {tokens > 0 && <span className="room-arow-metaitem" title={`${tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-arow-metaic" /> {formatTokens(tokens)} tokens</span>}
+            {a.model && <span className="room-arow-metaitem room-arow-model" title={`Model · ${a.model}`}><Sym n="sparkle" s={10} cls="room-arow-metaic" /> {a.model}</span>}
             {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
           </span>
         )}

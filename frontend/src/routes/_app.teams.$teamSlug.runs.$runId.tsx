@@ -4,7 +4,6 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
-import { SessionJournalView } from "@/components/sessions/SessionJournalView";
 
 /**
  * The canonical run-detail page. A run is run-neutral (manual, scheduled, webhook, replay, task, child), so it lives
@@ -53,34 +52,35 @@ function ViewToggle({ journal }: { journal: boolean }) {
   );
 }
 
+// Journal mode REUSES the Room frame: it renders the same SessionRoomView (header · execution map ① · plan checklist ② ·
+// result card ⑥ · mono style) but passes the journal, so each turn's narrative blocks are replaced by the journal's
+// chronological steps ③. The journal is the Room with a better middle, not a different-looking page.
 function RunDetailJournal({ teamSlug, runId }: { teamSlug: string; runId: string }) {
   const navigate = useNavigate();
+  const room = useRunRoom(runId);
   const journal = useRunJournal(runId);
+  const [detailRunId, setDetailRunId] = useState<string | null>(null);
 
-  if (journal.data) {
+  if (room.data) {
     return (
-      <SessionJournalView
-        teamSlug={teamSlug}
-        journal={journal.data}
-        onFocusRun={(rid) =>
-          navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: rid }, search: { view: "journal" } })
-        }
-      />
+      <>
+        <SessionRoomView teamSlug={teamSlug} room={room.data} journal={journal.data ?? undefined} onOpenRoom={(rid) => setDetailRunId(rid ?? runId)} />
+        {detailRunId && <RunViewerDialog runId={detailRunId} onClose={() => setDetailRunId(null)} defaultView="trace" />}
+      </>
     );
   }
 
-  if (journal.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
+  if (room.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
 
-  if (journal.isError)
-    return (
-      <div className="run-outline-empty" style={{ padding: 48 }}>
-        Couldn't load the journal.
-        <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => void journal.refetch()}>Retry</button>
-      </div>
-    );
+  if (room.isError) return (
+    <div className="run-outline-empty" style={{ padding: 48 }}>
+      Couldn't load this run.
+      <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => void room.refetch()}>Retry</button>
+    </div>
+  );
 
-  // Session-less (legacy) run — no journal; fall back to the room pane (which opens the raw run detail).
-  return <RunDetailRoom teamSlug={teamSlug} runId={runId} />;
+  // Session-less (legacy) run — no room/journal; open the raw run detail directly.
+  return <RunViewerDialog runId={runId} onClose={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })} defaultView="trace" />;
 }
 
 function RunDetailRoom({ teamSlug, runId }: { teamSlug: string; runId: string }) {
