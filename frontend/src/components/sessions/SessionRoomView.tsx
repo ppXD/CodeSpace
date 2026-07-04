@@ -11,6 +11,7 @@ import type {
   ExecutionStepStatus,
   FinalAnswerBlock,
   JournalStep,
+  JournalSubtask,
   JournalTurn,
   JournalView,
   LiveActivityBlock,
@@ -371,7 +372,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // dispatch → agents), so nothing is pinned at the top and the redundant "Plan · N subtasks" stat is dropped.
                 // A run with NO plan step (e.g. a flow.map run whose plan comes from a planner node, or a legacy block-only
                 // run) still pins its plan block at the top so the plan never vanishes.
-                // Same predicate as firstPlanStepId (below) so the top-pin drop and the inline render stay in lockstep —
+                // Same predicate as planStepIds (below) so the top-pin drop and the inline render stay in lockstep —
                 // a plan-bearing step the inline path skips (a hidden stop) never leaves the plan neither pinned nor inline.
                 const hasInlinePlan = journalTurn.steps.some((s) => s.plan.length > 0 && !isStopDecision(s));
                 // The rich plan checklist card (per-item status / artifacts / details) rendered INLINE under the plan beat
@@ -554,9 +555,15 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
   const hasDecision = turn.steps.some((s) => s.beat && !isStopDecision(s));
   const isSupervised = turn.steps.some((s) => s.beat && SUPERVISOR_VERBS.has(s.verb ?? ""));
 
-  // The rich plan checklist card renders inline under the FIRST plan beat (its per-item status / artifacts / approval),
-  // reusing the same component the room shows — not a re-implemented plain list.
-  const firstPlanStepId = turn.steps.find((s) => s.plan.length > 0 && !isStopDecision(s))?.id;
+  // Each plan version renders its OWN card at its OWN beat, so a re-plan reads straight down the timeline —
+  // plan(v1) → asked → plan(v2) → asked — instead of the newest card jumping onto the oldest beat. The CURRENT version
+  // (the LATEST plan beat) gets the rich room card; it decides interactive-vs-read-only itself (buttons only while it's
+  // still awaiting confirmation on a live run). Every EARLIER version renders READ-ONLY from its own authored subtasks —
+  // it was superseded before it ran, so the bare titles ARE its truthful record, and its request-changes outcome shows
+  // on the ask beat right below it. The version number is the beat's 1-based rank among the turn's plan beats.
+  const planStepIds = turn.steps.filter((s) => s.plan.length > 0 && !isStopDecision(s)).map((s) => s.id);
+  const currentPlanStepId = planStepIds[planStepIds.length - 1];
+  const planVersionById = new Map(planStepIds.map((id, i) => [id, i + 1]));
 
   return (
     <>
@@ -569,7 +576,7 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
       )}
       <div className="room-jrnl">
         {rows.map((r, i) => (r.kind === "step"
-          ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === firstPlanStepId ? planCard : undefined} />
+          ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === currentPlanStepId ? planCard : undefined} planVersion={planVersionById.get(r.step.id)} planSuperseded={r.step.id !== currentPlanStepId} />
           : <JournalFold key={`fold-${i}`} steps={r.steps} />))}
         {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
       </div>
@@ -588,7 +595,7 @@ function JournalFold({ steps }: { steps: JournalStep[] }) {
   );
 }
 
-function JournalStepRow({ step, muted, planCard }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock }) {
+function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock; planVersion?: number; planSuperseded?: boolean }) {
   // Raw thinking never renders flat on the main transcript — it lives in the trace drawer. A folded thinking step,
   // even when its disclosure is opened, shows only its one-line title; the full chain-of-thought stays in the trace.
   const showDetail = step.detail && step.kind !== "thinking";
@@ -605,13 +612,11 @@ function JournalStepRow({ step, muted, planCard }: { step: JournalStep; muted?: 
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
       {showDetail && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>}
       {step.plan.length > 0 && (
-        planCard
-          ? <div className="room-jplan-card"><PlanChecklistCard plan={planCard} /></div>
-          : (
-            <ol className="room-jplan">
-              {step.plan.map((s, i) => <li key={s.subtaskId}><span className="room-jplan-n">{i + 1}.</span><span className="room-jplan-t">{s.title}</span></li>)}
-            </ol>
-          )
+        <div className="room-jplan-card">
+          {planCard
+            ? <PlanChecklistCard plan={planCard} />
+            : <PlanLiteCard subtasks={step.plan} version={planVersion} superseded={planSuperseded} />}
+        </div>
       )}
       {step.agents.length > 0 && <div className="room-jagents"><AgentSection group={journalAgentsGroup(step)} /></div>}
       {step.deferred.length > 0 && <div className="room-jdeferred">{step.deferred.map((d) => <span key={d.subtaskId} className="room-jdefer">{d.subtaskId} · waiting on {d.waitingOn.join(", ")}</span>)}</div>}
@@ -810,6 +815,38 @@ function FileRow({ item }: { item: StatItem }) {
 /** The run's plan as a live checklist — the whole current version, one checkable row per item: state icon ·
  *  title · contract chips (kind / dependencies / acceptance / criteria / attempts) · state word · Details. The
  *  backend owns every string; unknown states render neutral. Questions/assumptions are read-only here. */
+/**
+ * A read-only plan card for a version that carries no rich block — a SUPERSEDED supervisor plan, or a workflow
+ * planner's plan that was never up for confirmation. It reuses the room plan-card frame (same border / header / rows)
+ * so the version looks like the plan it was, built from the beat's OWN authored subtasks. No per-item status (a
+ * superseded version never ran), no edit box or approve/request-changes buttons (there is nothing to confirm — a
+ * superseded version's outcome shows on the ask beat that follows). The pending "square" icon matches the rich card's
+ * un-started rows. The "superseded" chip shows only for an earlier version; the current plan rendered lite (no rich
+ * block available) is not superseded, so it carries no chip.
+ */
+function PlanLiteCard({ subtasks, version, superseded }: { subtasks: JournalSubtask[]; version?: number; superseded?: boolean }) {
+  return (
+    <div className="room-plan">
+      <div className="room-plan-head">
+        <Sym n="list" s={14} cls="room-plan-ic" />
+        <span className="room-plan-title">Plan</span>
+        {version != null && <span className="room-plan-ver">v{version}</span>}
+        {superseded && <span className="room-plan-superseded">superseded</span>}
+      </div>
+      <div className="room-plan-rows">
+        {subtasks.map((s, i) => (
+          // Key by row index, not subtaskId — the plan validator tolerates duplicate subtask ids (a degenerate flat
+          // plan), so subtaskId can collide; this static read-only list never reorders, so the index is a stable key.
+          <div key={i} className="room-prow">
+            <span className="room-prow-ic room-prow-ic-idle"><Sym n="square" s={15} /></span>
+            <div className="room-prow-main"><div className="room-prow-title">{i + 1}. {s.title}</div></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
   const run = useContext(RunActionsContext);
   const queryClient = useQueryClient();
