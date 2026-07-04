@@ -16,6 +16,19 @@ public sealed record SupervisorDecision
     /// <summary>The emitted decision's canonical JSON — frozen into the ledger row + hashed into the idempotency key.</summary>
     public required string PayloadJson { get; init; }
 
+    /// <summary>The model call that AUTHORED this decision (model + tokens) — captured from the decider's LLM response. NOT part of the hashed payload / idempotency key (it never influences the decision's identity); the turn service folds it into the NON-hashed outcome so the journal can attribute how the decision was made. Null for a stub / no-model decision.</summary>
+    public SupervisorModelUsage? Usage { get; init; }
+
     /// <summary>True when this decision ends the turn loop (<see cref="SupervisorDecisionKinds.Stop"/>). The run then completes via the normal walk.</summary>
     public bool IsTerminal => Kind == SupervisorDecisionKinds.Stop;
+}
+
+/// <summary>The model call that authored a supervisor decision — the model id + its token usage, captured off the decider's LLM response. A data noun (Rule 18.1) folded into the decision's outcome so a read can attribute the decision.</summary>
+public sealed record SupervisorModelUsage
+{
+    public required string Model { get; init; }
+
+    public int? InputTokens { get; init; }
+
+    public int? OutputTokens { get; init; }
 }
