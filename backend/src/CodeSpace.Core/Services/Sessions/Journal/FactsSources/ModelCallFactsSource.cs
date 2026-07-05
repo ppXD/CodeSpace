@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Cost;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using Microsoft.EntityFrameworkCore;
@@ -78,7 +79,28 @@ public sealed class ModelCallFactsSource : IJournalFactsSource
             // The failed record carries WHY it failed (a Malformed / timeout gateway error) — surface it so a failed row
             // shows its reason instead of a bare red "FAILED". A completed call has none.
             Error = failed ? ReadString(completed, "error") : null,
+            // A completed-but-cut-off call (length cap / content filter) carries a caution off the SAME finish classifier
+            // the timeline beat reads, so the row doesn't read as a clean success on an incomplete answer. Null on a
+            // clean completion + on a failed call (its Error already carries the reason).
+            FinishNote = failed ? null : ModelCallFinish.Qualifier(ModelCallFinish.Classify(ReadFinishReason(completed))),
         };
+    }
+
+    /// <summary>The provider stop reason off the completion's nested <c>usage.finishReason</c> — null when absent/malformed (read as a clean stop, never a false truncation).</summary>
+    private static string? ReadFinishReason(WorkflowRunRecord r)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(r.PayloadJson);
+
+            if (!doc.RootElement.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object) return null;
+
+            return usage.TryGetProperty("finishReason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Input + output tokens off the completion's nested <c>usage</c>, each null when absent (so a usage-silent call reads unknown, not a bogus zero).</summary>

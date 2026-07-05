@@ -51,7 +51,7 @@ public static class SupervisorDecisionTimelineMap
         SupervisorDecisionKinds.Plan => PlanTitle(d),
         SupervisorDecisionKinds.Spawn => SpawnTitle(d),
         SupervisorDecisionKinds.Retry => RetryTitle(d),
-        SupervisorDecisionKinds.AskHuman => "Supervisor asked you",
+        SupervisorDecisionKinds.AskHuman => AskHumanTitle(d),
         SupervisorDecisionKinds.Merge => MergeTitle(d),
         SupervisorDecisionKinds.Resolve => ResolveTitle(d),
         SupervisorDecisionKinds.Stop => StopTitle(d),
@@ -76,6 +76,14 @@ public static class SupervisorDecisionTimelineMap
             return d.Status == SupervisorDecisionStatus.Succeeded ? "Supervisor spawned no agents" : "Supervisor spawned agents";
 
         return n == 1 ? "Supervisor spawned 1 agent" : $"Supervisor spawned {n} agents";
+    }
+
+    /// <summary>The ask_human headline reflects the human's response: a swept-unanswered ask (Expired/Failed status) says so (its Warning/Error status tone already rides the status axis), an answered ask reads "answered" (the full Q&amp;A rides the summary), and a still-parked ask keeps the plain verb.</summary>
+    private static string AskHumanTitle(SupervisorDecisionRecord d)
+    {
+        if (d.Status is SupervisorDecisionStatus.Expired or SupervisorDecisionStatus.Failed) return "Supervisor's question went unanswered";
+
+        return SupervisorOutcome.ReadAskHumanAnswer(d.OutcomeJson) != null ? "Supervisor asked you — answered" : "Supervisor asked you";
     }
 
     /// <summary>A retry that SETTLED having staged NO agent re-ran nothing — the model authored a retry with no (or an unknown) subtask id, so the server no-op'd it. Say so, instead of "retried a subtask", which implies work happened. A still-in-flight retry (not yet settled) keeps the plain verb. Public so the Session room narrative reuses this ONE retry-copy authority.</summary>

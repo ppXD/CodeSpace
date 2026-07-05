@@ -210,6 +210,23 @@ public class SupervisorDecisionTimelineMapTests
     // ── ask_human summary: question, then the answer once folded ────────────────────────────────────────────────
 
     [Fact]
+    public void Ask_human_title_reflects_the_human_response()
+    {
+        // A parked ask (no answer yet) → the plain verb.
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.AskHuman, outcome: SupervisorOutcome.FoldAnswer("Deploy?", "tok", answer: null))).Title
+            .ShouldBe("Supervisor asked you");
+
+        // Answered → the title says so (the full Q&A rides the summary).
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.AskHuman, outcome: SupervisorOutcome.FoldAnswer("Deploy?", "tok", "yes"))).Title
+            .ShouldBe("Supervisor asked you — answered");
+
+        // Swept unanswered (the reaper expired it) → the title says so; its Expired status already tones it Warning.
+        var expired = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.AskHuman, SupervisorDecisionStatus.Expired, outcome: SupervisorOutcome.FoldAnswer("Deploy?", "tok", answer: null)));
+        expired.Title.ShouldBe("Supervisor's question went unanswered");
+        expired.Severity.ShouldBe(TimelineSeverity.Warning);
+    }
+
+    [Fact]
     public void Ask_human_summary_is_the_question_until_the_answer_is_folded_in()
     {
         var asked = Decision(SupervisorDecisionKinds.AskHuman, outcome: SupervisorOutcome.FoldAnswer("Deploy to prod?", "tok", answer: null));

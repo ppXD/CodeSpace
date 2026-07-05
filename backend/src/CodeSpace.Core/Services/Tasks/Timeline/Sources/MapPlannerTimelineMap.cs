@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
 
 namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
@@ -6,8 +7,10 @@ namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
 /// <summary>
 /// Projects a flow.map run's PLANNER completion into ONE orchestration-beat timeline event — a generic "Planned N
 /// subtasks" moment at the planner node's completion, so a non-supervisor (flow.map) run surfaces its plan beat BEFORE
-/// its dispatch beat (the plan → dispatch → agents spine), mirroring a supervisor's PLAN → DISPATCH. Pure mapping; the
-/// source resolves the planner + its subtasks via <c>MapPlan</c>.
+/// its dispatch beat (the plan → dispatch → agents spine), mirroring a supervisor's PLAN → DISPATCH. A planner that
+/// FAILED reads "Planning failed" at Error tone with its node error (never a bland "Planned 0 subtasks" green), so a
+/// non-supervisor run's plan-time failure is as legible as a supervisor's. Pure mapping; the source resolves the
+/// planner + its subtasks via <c>MapPlan</c>.
 /// </summary>
 public static class MapPlannerTimelineMap
 {
@@ -24,12 +27,23 @@ public static class MapPlannerTimelineMap
     {
         Id = EventId(plannerNode.NodeId),
         Kind = PlanKind,
-        Title = $"Planned {subtaskCount} subtask{(subtaskCount == 1 ? "" : "s")}",
-        Severity = TimelineSeverity.Info,
+        Title = TitleFor(plannerNode, subtaskCount),
+        Summary = plannerNode.Status == NodeStatus.Failure ? plannerNode.Error : null,
+        Severity = SeverityFor(plannerNode.Status),
         Level = TimelineLevel.Milestone,   // an orchestration beat — it shows in the ③ timeline, never folds
         OccurredAt = at,
         Order = 0,
         NodeId = plannerNode.NodeId,
         SourceKey = Key,
     };
+
+    /// <summary>A failed planner reads "Planning failed" (its error rides the summary); a planner that produced no subtask says so; otherwise the subtask count.</summary>
+    private static string TitleFor(WorkflowRunNodeSummary plannerNode, int subtaskCount)
+    {
+        if (plannerNode.Status == NodeStatus.Failure) return "Planning failed";
+
+        return subtaskCount == 0 ? "Planned no subtasks" : $"Planned {subtaskCount} subtask{(subtaskCount == 1 ? "" : "s")}";
+    }
+
+    private static TimelineSeverity SeverityFor(NodeStatus status) => status == NodeStatus.Failure ? TimelineSeverity.Error : TimelineSeverity.Info;
 }

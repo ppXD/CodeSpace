@@ -32,6 +32,33 @@ public class ModelCallFactsSourceTests
         call.CostUsd.ShouldNotBeNull("claude-opus-4-8 is priced, so the per-call cost is known");
         call.Status.ShouldBe("completed");
         call.Error.ShouldBeNull("a completed call carries no error");
+        call.FinishNote.ShouldBeNull("a call with no finish reason completed cleanly");
+    }
+
+    [Theory]
+    // A completed-but-cut-off call carries a caution off the SAME finish classifier the timeline beat reads — so the
+    // row doesn't read as a clean success on an incomplete answer. Status stays "completed" (it DID complete).
+    [InlineData("max_tokens", "output truncated")]
+    [InlineData("length", "output truncated")]
+    [InlineData("content_filter", "content filtered")]
+    [InlineData("stop", null)]
+    [InlineData("end_turn", null)]
+    public void A_cut_off_completion_carries_a_finish_note(string finishReason, string? expectedNote)
+    {
+        var payload = "{\"kind\":\"llm.complete\",\"model\":\"m\",\"usage\":{\"inputTokens\":9,\"outputTokens\":4000,\"finishReason\":\"NR\"}}".Replace("NR", finishReason);
+
+        var call = ModelCallFactsSource.From(Record(WorkflowRunRecordTypes.InteractionCompleted, payload, At(0)), null);
+
+        call.Status.ShouldBe("completed", "a truncated/filtered call still COMPLETED — the note is orthogonal to status");
+        call.FinishNote.ShouldBe(expectedNote);
+    }
+
+    [Fact]
+    public void A_failed_call_carries_no_finish_note()
+    {
+        var failed = Record(WorkflowRunRecordTypes.InteractionFailed, "{\"kind\":\"llm.complete\",\"usage\":{\"finishReason\":\"max_tokens\"}}", At(0));
+
+        ModelCallFactsSource.From(failed, null).FinishNote.ShouldBeNull("a failed call's Error carries the reason, not a finish note");
     }
 
     [Fact]

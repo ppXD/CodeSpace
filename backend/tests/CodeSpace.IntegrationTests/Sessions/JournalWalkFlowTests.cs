@@ -48,7 +48,7 @@ public sealed class JournalWalkFlowTests
 
         // Chronological, interleaved across ALL four sources by the spine's merge: plan → agent edit → tool → stop.
         steps.Select(s => s.Kind).ShouldBe(new[] { JournalStepKinds.Decision, JournalStepKinds.Agent, JournalStepKinds.Tool, JournalStepKinds.Decision });
-        steps.Select(s => s.Title).ShouldBe(new[] { "Supervisor planned the work", "edited auth/session.ts", "Called git.open_pr", "Supervisor stopped" });
+        steps.Select(s => s.Title).ShouldBe(new[] { "Supervisor planned the work", "edited auth/session.ts", "Opened a pull request", "Supervisor stopped" });
         steps.Select(s => s.Cursor).ShouldAllBe(c => c.Length > 0, "every step carries a cursor");
         steps.Select(s => s.Cursor).Distinct().Count().ShouldBe(4, "each step across the merged spine gets a distinct cursor");
         steps.Single(s => s.Kind == JournalStepKinds.Agent).AgentRunId.ShouldBe(agentId.ToString(), "the agent step carries its provenance");
