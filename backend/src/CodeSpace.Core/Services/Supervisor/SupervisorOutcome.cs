@@ -103,6 +103,36 @@ public static class SupervisorOutcome
     /// <summary>The <c>stop</c> OUTCOME label — the <c>outcome</c> field of <c>{ stopped, outcome, summary }</c> (a genuine-success <c>completed</c>/<c>done</c> vs a graceful-failure <c>no-decision</c>/<c>no-model</c>/<c>unknown-decision</c>). Null when absent / malformed. The room decides whether the RESULT card renders degraded via <see cref="SupervisorStopPayload.IsSuccessOutcome"/> over this — so a fail-closed stop reads as degraded, not a green success.</summary>
     public static string? ReadStopOutcome(string? outcomeJson) => ReadStringField(outcomeJson, "outcome");
 
+    /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "budget exhausted"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
+    public static string? ReadStopReason(string? payloadJson) => ReadStringField(payloadJson, "reason");
+
+    /// <summary>
+    /// Classify a <c>stop</c> decision's terminal shape from its PAYLOAD (<c>{reason}</c> for a server-forced stop) plus
+    /// its OUTCOME (<c>{outcome, summary}</c> for a model-authored stop) — the single success/degraded verdict both the
+    /// RESULT card and the journal step consult (via <see cref="SupervisorStopClassification"/>), so the two can't drift.
+    /// A genuine SUCCESS is a model stop whose outcome is in the shared success set; a model stop with a non-success
+    /// outcome is a GIVE-UP; a payload-<c>reason</c> stop with no outcome is a server-FORCED stop; a stop with NEITHER
+    /// signal is treated as a bare success (defensive — an unclassifiable stop must never false-alarm as degraded).
+    /// The outcome is read first because it is the AUTHORED terminal state; the forced reason is the fallback shape.
+    /// </summary>
+    public static SupervisorStopClassification ClassifyStop(string? payloadJson, string? outcomeJson)
+    {
+        var outcome = ReadStopOutcome(outcomeJson);
+        var summary = ReadStopSummary(outcomeJson);
+
+        if (!string.IsNullOrWhiteSpace(outcome))
+            return SupervisorStopPayload.IsSuccessOutcome(outcome)
+                ? new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = summary }
+                : new SupervisorStopClassification { Kind = SupervisorStopKind.GaveUp, Summary = summary, Reason = outcome };
+
+        var reason = ReadStopReason(payloadJson);
+
+        if (!string.IsNullOrWhiteSpace(reason))
+            return new SupervisorStopClassification { Kind = SupervisorStopKind.Forced, Reason = reason };
+
+        return new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = summary };
+    }
+
     /// <summary>
     /// Fold the authoring model call (model + tokens) into a decision's OUTCOME under a <c>modelUsage</c> key — a
     /// NON-hashed enrichment (only the payload is hashed into the idempotency key), so it can never drift replay identity.

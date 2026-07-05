@@ -169,7 +169,7 @@ public sealed class JournalProjectorFlowTests
             view = await scope.Resolve<IJournalProjector>().ProjectByRunAsync(run1, teamId, CancellationToken.None);
 
         var steps = view!.Turns.Single(t => t.Focused).Steps;
-        steps[0].Title.ShouldBe("Supervisor planned the work");
+        steps[0].Title.ShouldBe("Supervisor planned 2 subtasks", "the plan headline names the authored subtask count");
         steps[0].Plan.Select(p => (p.SubtaskId, p.Title)).ShouldBe(new[] { ("s1", "Research the market"), ("s2", "Write the report") }, "the plan step carries its authored subtasks, rendered inline under it");
         steps[1].Plan.ShouldBeEmpty("the stop step is not a plan — it stays bare");
     }
