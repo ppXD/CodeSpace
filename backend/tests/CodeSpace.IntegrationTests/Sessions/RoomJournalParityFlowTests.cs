@@ -11,29 +11,25 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Sessions;
 
 /// <summary>
-/// 🟢 Integration — the P5 CUTOVER PARITY GATE. Seeds a golden-run corpus (<see cref="SessionCorpusSeed"/>) ONCE and
-/// projects each run through BOTH the real <see cref="IRoomProjector"/> and <see cref="IJournalProjector"/> over real
-/// Postgres, then asserts the permanent-HYBRID invariant that makes it safe to delete the room NARRATIVE stack (P6):
+/// 🟢 Integration — the CUTOVER PARITY GATE (post-P6). Seeds a golden-run corpus (<see cref="SessionCorpusSeed"/>) ONCE
+/// and projects each run through BOTH the real <see cref="IRoomProjector"/> and <see cref="IJournalProjector"/> over real
+/// Postgres, asserting the permanent-HYBRID invariant: the journal ③ IS the run's chronological narrative; the room FRAME
+/// + its rich/live block projectors are reused by the journal FE. The room NARRATIVE stack (<c>narrative_step</c>) was
+/// DELETED in P6 — the journal ③ owns that surface, so the room no longer emits it.
 ///
 /// <list type="number">
 /// <item><b>Structural tripwire</b> — every room block kind the focused turn emits is in the FE's <c>JOURNAL_HANDLED</c>
-/// set (either REPLACED by the journal ③ steps — only <c>narrative_step</c> — or REUSED from the room projector by the
-/// hybrid FE — the other 9). A room block kind outside that set would silently vanish in journal mode at cutover.</item>
-/// <item><b>Narrative coverage</b> — the journal ③ carries the same agents + the same retry/respawn beats the room's
-/// <c>narrative_step</c>s did, so no room block-level SURFACE is lost.</item>
+/// set (the retained rich/live blocks the hybrid FE reuses). A room block kind outside it would silently vanish in journal mode.</item>
+/// <item><b>Journal coverage</b> — the journal ③ carries the same agents + the retry/respawn beats (the events the room
+/// used to narrate before P6), so nothing the room narrated is lost.</item>
 /// <item><b>Retained-block liveness</b> — the room still projects each rich/live block the hybrid FE reuses
 /// (plan_checklist, final_answer, diagnostic, decision, live_activity) + the attempt ladder is journal-native.</item>
 /// </list>
 ///
-/// <para>SCOPE (honest): the room ALSO emits two SYNTHETIC connecting narrative lines with no decision backing — the crash
-/// beat ("its next step failed before it could decide") and the between-phase "reviewed N agents · planning the next step"
-/// label. The journal ③ does NOT reproduce these as beats; they are intentionally SUPERSEDED — the crash by the RETAINED
-/// diagnostic card (witnessed below), the transitions by the chronological beats themselves. So "narrative coverage" is a
-/// block-SURFACE claim, not a line-by-line one.</para>
-///
-/// <para>If this gate ever goes red, a room surface would disappear at cutover — classify it (retain the room projector
-/// for it, or cover it natively in the journal ③) before deleting the room narrative stack. The pure per-emitter richness
-/// stays covered by the RoomNarrative/RoomRounds unit tier — this proves only the cross-projection parity + DB wiring.</para>
+/// <para>The room's two SYNTHETIC connecting narrative lines (the crash beat + the between-phase "reviewed N" label) were
+/// retired with the rest of the narrative stack: the crash is covered by the RETAINED diagnostic card (witnessed below),
+/// the transitions by the chronological ③ beats themselves. If this gate goes red, a room surface would disappear in
+/// journal mode — classify it. Pure per-emitter richness stays in the RoomNarrative/RoomRounds unit tier.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -44,13 +40,13 @@ public sealed class RoomJournalParityFlowTests
     public RoomJournalParityFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     /// <summary>
-    /// The FE's <c>JOURNAL_HANDLED</c> set (SessionRoomView.tsx) mirrored on the backend: the room inner-block kinds the
-    /// journal mode explicitly handles — <c>narrative_step</c> is REPLACED by the ③ steps; the other nine are REUSED from
-    /// the room projection (the permanent-hybrid retained set). Keep in lockstep with the FE constant.
+    /// The FE's <c>JOURNAL_HANDLED</c> set (SessionRoomView.tsx) mirrored on the backend: the retained room inner-block
+    /// kinds the journal mode reuses from the room projection (the permanent-hybrid retained set). Keep in lockstep with
+    /// the FE constant. (<c>narrative_step</c> was DELETED in P6 — the journal ③ owns that surface, the room no longer emits it.)
     /// </summary>
     private static readonly IReadOnlySet<string> JournalHandled = new HashSet<string>
     {
-        "execution_map", "narrative_step", "agent_group", "plan_checklist", "stat", "live_activity",
+        "execution_map", "agent_group", "plan_checklist", "stat", "live_activity",
         "delivery", "final_answer", "diagnostic", "decision",
     };
 
@@ -94,11 +90,11 @@ public sealed class RoomJournalParityFlowTests
 
         // The gate isn't hollow: the corpus lights up every surface the tripwire guards (delivery aside — it needs an
         // open-PR node the corpus doesn't seed; it stays guarded by the tripwire, just not exercised here).
-        foreach (var kind in new[] { "narrative_step", "agent_group", "plan_checklist", "stat", "execution_map", "final_answer", "diagnostic", "decision", "live_activity" })
+        foreach (var kind in new[] { "agent_group", "plan_checklist", "stat", "execution_map", "final_answer", "diagnostic", "decision", "live_activity" })
             observed.ShouldContain(kind, $"the corpus should exercise the {kind} room surface so the parity gate runs over real data, not a vacuous fixture");
     }
 
-    // ─── Tier 2: narrative coverage (the journal ③ carries what the room narrative did) ──
+    // ─── Tier 2: journal coverage (the journal ③ carries the events the room used to narrate) ──
 
     [Theory]
     [InlineData(SessionCorpusSeed.Shape.SupervisorPlanSpawn)]
@@ -117,34 +113,29 @@ public sealed class RoomJournalParityFlowTests
     }
 
     [Fact]
-    public async Task The_retry_narrative_the_room_shows_is_carried_as_a_journal_beat_with_its_rationale()
+    public async Task The_retry_is_carried_as_a_journal_beat_with_its_rationale()
     {
+        // The retry the room USED to narrate (its narrative_step was deleted in P6) lives on the journal ③ as a beat with
+        // the supervisor's WHY — richer than the old room line.
         var seeded = await SessionCorpusSeed.SeedAsync(_fixture, SessionCorpusSeed.Shape.Retry);
-
-        var room = FocusedRoomTurn(await ProjectRoomAsync(seeded), seeded.RunId);
-        room.Blocks.OfType<NarrativeStepBlock>().Select(s => s.Text).ShouldContain("Supervisor retried a subtask",
-            "the room narrates the retry as a narrative_step — the surface P6 deletes");
 
         var journal = FocusedJournalTurn(await ProjectJournalAsync(seeded));
         var retryBeat = journal.Steps.SingleOrDefault(s => s.Beat && s.Title == "Supervisor retried a subtask");
 
-        retryBeat.ShouldNotBeNull("the retry the room narrated must survive as a journal ③ beat — else deleting the room narrative loses it");
-        retryBeat!.Rationale.ShouldNotBeNull("and the journal beat carries the supervisor's WHY (richer than the room narrative)");
+        retryBeat.ShouldNotBeNull("the retry surfaces as a journal ③ beat");
+        retryBeat!.Rationale.ShouldNotBeNull("and the journal beat carries the supervisor's WHY");
         retryBeat.Rationale!.ShouldContain("missed the edge cases", customMessage: "the retry rationale reads off the decision tape");
     }
 
     [Fact]
-    public async Task The_respawn_wave_the_room_narrates_is_carried_as_journal_spawn_beats()
+    public async Task The_respawn_wave_is_carried_as_journal_spawn_beats()
     {
+        // The re-spawn wave the room USED to narrate (deleted in P6) becomes two real chronological dispatch beats on ③.
         var seeded = await SessionCorpusSeed.SeedAsync(_fixture, SessionCorpusSeed.Shape.RespawnCrash);
-
-        var room = FocusedRoomTurn(await ProjectRoomAsync(seeded), seeded.RunId);
-        room.Blocks.OfType<NarrativeStepBlock>().Select(s => s.Text).ShouldContain("Supervisor spawned 2 agents again",
-            "the room narrates the re-spawn wave as a narrative_step");
 
         var journal = FocusedJournalTurn(await ProjectJournalAsync(seeded));
         journal.Steps.Count(s => s.Beat && s.Verb == "spawn").ShouldBeGreaterThanOrEqualTo(2,
-            "both spawn waves survive as chronological journal ③ beats — the room's synthetic 'again' narrative becomes two real dispatch beats");
+            "both spawn waves survive as chronological journal ③ beats");
     }
 
     [Fact]
@@ -236,7 +227,6 @@ public sealed class RoomJournalParityFlowTests
         UserMessageBlock => "user_message",
         AssistantTurnBlock => "assistant_turn",
         ExecutionMapBlock => "execution_map",
-        NarrativeStepBlock => "narrative_step",
         AgentGroupBlock => "agent_group",
         StatBlock => "stat",
         PlanChecklistBlock => "plan_checklist",

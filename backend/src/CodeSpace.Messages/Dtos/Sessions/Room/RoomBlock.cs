@@ -13,7 +13,6 @@ namespace CodeSpace.Messages.Dtos.Sessions.Room;
 [JsonDerivedType(typeof(UserMessageBlock), "user_message")]
 [JsonDerivedType(typeof(AssistantTurnBlock), "assistant_turn")]
 [JsonDerivedType(typeof(ExecutionMapBlock), "execution_map")]
-[JsonDerivedType(typeof(NarrativeStepBlock), "narrative_step")]
 [JsonDerivedType(typeof(AgentGroupBlock), "agent_group")]
 [JsonDerivedType(typeof(StatBlock), "stat")]
 [JsonDerivedType(typeof(PlanChecklistBlock), "plan_checklist")]
@@ -111,20 +110,6 @@ public enum ExecutionStepStatus
     Failed,
     Blocked,
     Skipped,
-}
-
-/// <summary>
-/// One line of the AI narrating its work — backend-authored natural language (what it's doing, the public rationale,
-/// a status). NEVER chain-of-thought: only the intentional, user-facing "I'll do X / I did Y" voice.
-/// </summary>
-public sealed record NarrativeStepBlock : RoomBlock
-{
-    public required string Text { get; init; }
-    public NarrativeTone Tone { get; init; } = NarrativeTone.Info;
-    public DateTimeOffset? At { get; init; }
-
-    /// <summary>An optional second line under the step — the supervisor's structured rationale for a retry (why + evidence), so a reader sees the decision, not just the beat. Null for a plain step.</summary>
-    public string? Detail { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

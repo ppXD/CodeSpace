@@ -158,7 +158,6 @@ interface RoomBlockBase {
 
 export interface UserMessageBlock extends RoomBlockBase { type: "user_message"; text: string; at?: string | null; }
 export interface ExecutionMapBlock extends RoomBlockBase { type: "execution_map"; steps: ExecutionMapStep[]; }
-export interface NarrativeStepBlock extends RoomBlockBase { type: "narrative_step"; text: string; tone?: NarrativeTone; at?: string | null; detail?: string | null; }
 export interface AgentGroupBlock extends RoomBlockBase { type: "agent_group"; title: string; agents: RoomAgentCard[]; }
 /// A collapsible stat row — one generic block for subtasks / files / tools / reasoning (the projector fills kind/label/detail/items).
 export interface StatBlock extends RoomBlockBase { type: "stat"; kind: string; label: string; detail?: string | null; items?: StatItem[] | null; }
@@ -283,7 +282,6 @@ export type RoomBlock =
   | UserMessageBlock
   | AssistantTurnBlock
   | ExecutionMapBlock
-  | NarrativeStepBlock
   | AgentGroupBlock
   | StatBlock
   | PlanChecklistBlock

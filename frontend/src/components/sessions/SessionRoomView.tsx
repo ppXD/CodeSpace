@@ -17,7 +17,6 @@ import type {
   JournalTurn,
   JournalView,
   LiveActivityBlock,
-  NarrativeStepBlock,
   PlanChecklistBlock,
   PlanChecklistItem,
   RoomAction,
@@ -543,8 +542,8 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
 /** Result-family blocks rendered BELOW the journal timeline — the final answer / delivery / diagnostic ⑥ + any live pending decision. The supervisor "stop" is internal lifecycle, so its outcome lives HERE (the result card), never as a step in ③. */
 const JOURNAL_RESULT = new Set<RoomBlock["type"]>(["delivery", "final_answer", "diagnostic", "decision"]);
 
-/** Every KNOWN inner-block type the journal deliberately consumes or replaces: execution map ① (via turn.map), plan ②, the decision skeleton ③ in place of agent_group/narrative_step, the live ticker, the result ⑥, and the stat support strip. Anything NOT here is an unknown/future additive type and falls through InnerBlock so it degrades to a faint line rather than vanishing (matching the room's forward-compat contract). */
-const JOURNAL_HANDLED = new Set<RoomBlock["type"]>(["execution_map", "narrative_step", "agent_group", "plan_checklist", "stat", "live_activity", ...JOURNAL_RESULT]);
+/** Every KNOWN inner-block type the journal deliberately consumes: execution map ① (via turn.map), plan ②, the decision skeleton ③ in place of agent_group, the live ticker, the result ⑥, and the stat support strip. Anything NOT here is an unknown/future additive type and falls through InnerBlock so it degrades to a faint line rather than vanishing (matching the room's forward-compat contract). (The room's narrative_step stack was deleted in P6 — the journal ③ owns that surface.) */
+const JOURNAL_HANDLED = new Set<RoomBlock["type"]>(["execution_map", "agent_group", "plan_checklist", "stat", "live_activity", ...JOURNAL_RESULT]);
 
 /** The journal's ③ shows only the supervisor's decision skeleton (planned · dispatched · asked · merged). Everything else — thinking, tool calls, model calls, agent-file events, run/node lifecycle — folds into the "background steps" disclosure; the raw text lives in the trace drawer, never flat on the main transcript. */
 function isBackgroundStep(s: JournalStep): boolean {
@@ -861,7 +860,6 @@ function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: M
   if (block.type === "stat") return <StatRow stat={block as StatBlock} />;
   if (block.type === "plan_checklist") return <PlanChecklistCard plan={block as PlanChecklistBlock} />;
   if (block.type === "agent_group") return <AgentSection group={block as AgentGroupBlock} />;
-  if (block.type === "narrative_step") return <SupervisorStep step={block as NarrativeStepBlock} />;
   if (block.type === "delivery") return <PrCard delivery={block as DeliveryBlock} />;
   if (block.type === "final_answer") return <FinalAnswer answer={block as FinalAnswerBlock} />;
   if (block.type === "live_activity") return <LiveTicker live={block as LiveActivityBlock} />;
@@ -872,20 +870,6 @@ function InnerBlock({ block, pdById, onOpenRoom }: { block: RoomBlock; pdById: M
     return liveD ? <div className="room-decision"><DecisionCard decision={liveD} /></div> : <DecisionPreview decision={d} />;
   }
   return <p className="room-para room-muted">{describeUnknown(block)}</p>;
-}
-
-/** A translated supervisor operation between rounds — a sparkle chip + the one-liner ("Merging results", "Deciding: X"). */
-function SupervisorStep({ step }: { step: NarrativeStepBlock }) {
-  const tone = step.tone === "Error" ? "err" : step.tone === "Success" ? "ok" : "info";
-  return (
-    <div className={`room-supstep room-supstep-${tone}${step.detail ? " room-supstep-2" : ""}`}>
-      <Sym n="sparkle" s={13} cls="room-supstep-ic" />
-      <span className="room-supstep-body">
-        <span className="room-supstep-text"><Inline text={step.text} /></span>
-        {step.detail && <span className="room-supstep-detail"><Inline text={step.detail} /></span>}
-      </span>
-    </div>
-  );
 }
 
 /** The rich final answer — the closing text, then attachments grouped by kind: inline images, file links (preview / download), and the PR. */

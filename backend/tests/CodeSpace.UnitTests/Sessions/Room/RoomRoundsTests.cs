@@ -11,8 +11,8 @@ namespace CodeSpace.UnitTests.Sessions.Room;
 
 /// <summary>
 /// The pure segmentation of a supervisor decision tape into ROUNDS — a Plan and every decision up to the NEXT Plan,
-/// in <c>Sequence</c> order (a re-plan opens a new round). Spawns/retries stage a round's agents; merge / resolve /
-/// ask-human translate into the round's closing operation copy. No DB — the projector reads the tape and hands it here.
+/// in <c>Sequence</c> order (a re-plan opens a new round). Spawns/retries stage a round's agents (the retained Agent
+/// groups). No DB — the projector reads the tape and hands it here.
 /// </summary>
 [Trait("Category", "Unit")]
 public class RoomRoundsTests
@@ -36,8 +36,6 @@ public class RoomRoundsTests
     }, AgentJson.Options);
 
     private static string Staged(params Guid[] ids) => JsonSerializer.Serialize(new { agentRunIds = ids.Select(g => g.ToString()).ToArray() });
-
-    private static string MergeClean(string branch) => JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch = branch } });
 
     [Fact]
     public void Empty_tape_yields_no_rounds()
@@ -104,30 +102,5 @@ public class RoomRoundsTests
         rounds[0].Index.ShouldBe(1);
         rounds[0].Subtasks.ShouldBeEmpty();
         rounds[0].AgentRunIds.ShouldBe(new[] { a });
-    }
-
-    [Fact]
-    public void A_clean_merge_becomes_the_rounds_closing_operation()
-    {
-        var rounds = RoomRounds.Segment(new[]
-        {
-            Decision(SupervisorDecisionKinds.Plan, 1, Plan("A")),
-            Decision(SupervisorDecisionKinds.Merge, 2, outcome: MergeClean("integration/work")),
-        });
-
-        rounds[0].Operation.ShouldNotBeNull();
-        rounds[0].Operation!.Kind.ShouldBe("merge");
-        rounds[0].Operation!.Text.ShouldBe("Merged results into integration/work");
-        rounds[0].Operation!.Tone.ShouldBe(NarrativeTone.Success);
-    }
-
-    [Theory]
-    [InlineData(SupervisorDecisionKinds.Plan)]
-    [InlineData(SupervisorDecisionKinds.Spawn)]
-    [InlineData(SupervisorDecisionKinds.Retry)]
-    [InlineData(SupervisorDecisionKinds.Stop)]
-    public void Plan_spawn_retry_and_stop_have_no_round_operation(string kind)
-    {
-        RoomRounds.OperationFor(Decision(kind, 1)).ShouldBeNull();
     }
 }

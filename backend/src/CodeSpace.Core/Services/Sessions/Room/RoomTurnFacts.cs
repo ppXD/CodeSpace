@@ -69,8 +69,8 @@ public sealed record RoomTurnFacts
     public static readonly RoomTurnFacts Empty = new();
 }
 
-/// <summary>One supervisor RETRY beat — the tape sequence it landed at, its user-facing line, the fresh agent it staged, and the model's STRUCTURED rationale (why it retried + the evidence it acted on) when authored. Rendered as a narrative step (with the rationale as its detail) + that agent's own card, so a reader sees the decision, not just that it retried. <see cref="AgentRunId"/> is null for a no-op retry; <see cref="Rationale"/> is null when the model gave none.</summary>
-public sealed record RoomRetryStep(long Sequence, string Text, Guid? AgentRunId, string? Rationale = null);
+/// <summary>One supervisor RETRY beat — the tape sequence it landed at and the fresh agent it staged (null for a no-op retry). Rendered as that agent's own "Retry" card so the recovery reads chronologically; the retry's line + rationale live on the Journal ③ beat now, not the room.</summary>
+public sealed record RoomRetryStep(long Sequence, Guid? AgentRunId);
 
 /// <summary>One supervisor RE-SPAWN wave — the tape sequence the additional Spawn decision landed at and the agent-run ids it staged for already-spawned subtasks (wave ≥ 2). Rendered as a narrative step ("Supervisor spawned N agents again") + that wave's agent cards, so the room shows EVERY spawn wave the run really ran, not just the first. Empty <see cref="AgentRunIds"/> can't occur (a wave with no re-spawned agent isn't emitted).</summary>
 public sealed record RoomRespawnStep(long Sequence, IReadOnlyList<Guid> AgentRunIds);
@@ -80,8 +80,8 @@ public sealed record ToolKindCount(string Kind, int Count);
 
 /// <summary>
 /// One supervisor ROUND — a Plan decision and every decision up to the next Plan, in tape order. The projector segments
-/// the raw decision tape on <c>Kind == Plan</c> (a re-plan opens a new round); the narrative renders one Plan-stat + this
-/// round's agent group + the closing operation per round.
+/// the raw decision tape on <c>Kind == Plan</c> (a re-plan opens a new round); it renders one Plan-stat + this round's
+/// agent group per round.
 /// </summary>
 public sealed record RoomRound
 {
@@ -93,13 +93,7 @@ public sealed record RoomRound
 
     /// <summary>This round's spawned / retried / resolved agent run ids, in tape (staging) order.</summary>
     public IReadOnlyList<Guid> AgentRunIds { get; init; } = Array.Empty<Guid>();
-
-    /// <summary>The round's closing supervisor operation (merge / resolve / ask-human / stop), translated to friendly copy. Null while the round is still spawning.</summary>
-    public RoomOperation? Operation { get; init; }
 }
-
-/// <summary>A supervisor operation translated to a user-facing one-liner — the "Merging results" / "Deciding: X" narration between rounds.</summary>
-public sealed record RoomOperation(string Kind, string Text, NarrativeTone Tone);
 
 /// <summary>The turn's rich final result — the closing text plus typed attachments (files / PR / images).</summary>
 public sealed record RoomFinalAnswer
