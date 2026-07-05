@@ -276,6 +276,13 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
 
+        // A stop is a clean terminal Success at the ENGINE level even when it's a fail-closed GIVE-UP (no-decision /
+        // no-model / unknown-decision — the supervisor couldn't produce a valid decision, no work delivered). Read the stop
+        // OUTCOME so the RESULT card renders DEGRADED (not a green success) for those — generic via the shared success
+        // predicate, never a per-kind string, so a future fail-closed outcome can't silently read as success.
+        var stopOutcome = SupervisorOutcome.ReadStopOutcome(stop?.OutcomeJson);
+        var degraded = !string.IsNullOrWhiteSpace(stopOutcome) && !SupervisorStopPayload.IsSuccessOutcome(stopOutcome);
+
         // The delivered answer text: the supervisor's stop summary, else — for a single-agent run with no supervisor —
         // that one agent's own final summary (its result IS the answer). A multi-agent run without a supervisor has no
         // synthesized answer, so it falls to the file attachments alone.
@@ -365,7 +372,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFiles, delivery),
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFiles, delivery, degraded),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             Subtasks = subtasks,
@@ -445,8 +452,8 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver.</summary>
-    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<string> files, RoomDelivery? pr)
+    /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="degraded"/> marks a fail-closed give-up stop so the card renders neutral, not a green success.</summary>
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<string> files, RoomDelivery? pr, bool degraded)
     {
         var attachments = new List<RoomAttachment>();
 
@@ -458,7 +465,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
-        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments };
+        return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments, Degraded = degraded };
     }
 
     /// <summary>

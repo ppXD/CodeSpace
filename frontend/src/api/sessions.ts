@@ -244,6 +244,7 @@ export interface FinalAnswerBlock extends RoomBlockBase {
   type: "final_answer";
   text?: string | null;
   attachments?: AnswerAttachment[] | null;
+  degraded?: boolean;
 }
 /// A live "working…" line pinned at the bottom of an active turn (latest public activity, never raw CoT).
 export interface LiveActivityBlock extends RoomBlockBase {
@@ -373,6 +374,7 @@ export interface JournalModelCall {
   latencyMs?: number | null;
   costUsd?: number | null;
   status: string;
+  error?: string | null;
 }
 
 /// The full, on-demand detail of one model call — mirrors backend `ModelCallDetail`. Fetched when the drawer opens; each

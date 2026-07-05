@@ -100,9 +100,8 @@ public static class SupervisorEvalScorecard
             or SupervisorStopReasons.DepthCapExceeded
             or SupervisorStopReasons.NoProgress;
 
-    /// <summary>A decider stop label that means "done well" (vs failed/abandoned). Case-insensitive; "completed"/"success"/"done"/"ok" count as success.</summary>
-    private static bool IsSuccessLabel(string label) =>
-        label.Trim().ToLowerInvariant() is "completed" or "complete" or "success" or "succeeded" or "done" or "ok";
+    /// <summary>A decider stop label that means "done well" (vs failed/abandoned) — the SHARED predicate the room degraded-render also uses (<see cref="SupervisorStopPayload.IsSuccessOutcome"/>), so eval + UI can't drift on which outcomes are success.</summary>
+    private static bool IsSuccessLabel(string label) => SupervisorStopPayload.IsSuccessOutcome(label);
 
     private static int Count(IReadOnlyList<SupervisorDecisionSummary> decisions, string kind) => decisions.Count(d => d.Kind == kind);
 

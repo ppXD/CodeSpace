@@ -63,7 +63,7 @@ public sealed class ModelCallFactsSource : IJournalFactsSource
         var tokens = input is null && output is null ? (int?)null : (input ?? 0) + (output ?? 0);
 
         var latency = start is null ? (long?)null : (long)(completed.OccurredAt - start.OccurredAt).TotalMilliseconds;
-        var status = completed.RecordType == WorkflowRunRecordTypes.InteractionFailed ? "failed" : "completed";
+        var failed = completed.RecordType == WorkflowRunRecordTypes.InteractionFailed;
 
         return new JournalModelCall
         {
@@ -74,7 +74,10 @@ public sealed class ModelCallFactsSource : IJournalFactsSource
             Tokens = tokens,
             LatencyMs = latency is >= 0 ? latency : null,
             CostUsd = string.IsNullOrWhiteSpace(model) || tokens is null ? null : AgentCostPricing.CostUsd(model, input ?? 0, output ?? 0),
-            Status = status,
+            Status = failed ? "failed" : "completed",
+            // The failed record carries WHY it failed (a Malformed / timeout gateway error) — surface it so a failed row
+            // shows its reason instead of a bare red "FAILED". A completed call has none.
+            Error = failed ? ReadString(completed, "error") : null,
         };
     }
 

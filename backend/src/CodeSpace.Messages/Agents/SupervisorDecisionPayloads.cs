@@ -130,6 +130,16 @@ public sealed record SupervisorStopPayload
     /// <summary>The fail-closed NON-CONFORMANT outcome label: the decider stamps this <see cref="Outcome"/> when the model produced no usable decision (a degraded / capability-miss reply) and it degraded to a clean stop rather than crashing. The shared signature a consumer (the decision-eval) keys on to reject a non-conformant reply that must NEVER score as a genuine 'stop' decision — pinned here so producer + consumer can't drift.</summary>
     public const string NonConformantOutcome = "no-decision";
 
+    /// <summary>
+    /// Whether a stop's <see cref="Outcome"/> label means the run finished WELL (a genuine task success) vs a
+    /// graceful-failure / abandoned stop (no-decision · no-model · unknown-decision · anything non-success). Case-insensitive;
+    /// the SINGLE shared success-word set producer + consumer agree on — the decision-eval scorecard AND the room's degraded
+    /// RESULT render both key on THIS, so a future non-success outcome (a new fail-closed stop) can't silently read as success.
+    /// A blank / unknown label is NOT success. Generic: never special-case the known degraded strings.
+    /// </summary>
+    public static bool IsSuccessOutcome(string? outcome) =>
+        outcome?.Trim().ToLowerInvariant() is "completed" or "complete" or "success" or "succeeded" or "done" or "ok";
+
     public required string Outcome { get; init; }
 
     public string Summary { get; init; } = "";
