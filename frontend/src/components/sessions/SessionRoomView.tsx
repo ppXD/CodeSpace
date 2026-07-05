@@ -677,6 +677,7 @@ function ModelCallRow({ step }: { step: JournalStep }) {
         {mc.tokens != null && mc.tokens > 0 && <span className="room-mcitem" title={`${mc.tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-mcic" /> {formatTokens(mc.tokens)} tokens</span>}
         {mc.latencyMs != null && <span className="room-mcitem" title="Latency"><Sym n="clock" s={10} cls="room-mcic" /> {formatLatencyMs(mc.latencyMs)}</span>}
         {mc.costUsd != null && <span className="room-mcitem room-mccost" title="Estimated cost">{formatCostUsd(mc.costUsd)}</span>}
+        {failed && mc.error && <span className="room-mcitem room-mcerr" title={mc.error}><Sym n="alert" s={10} cls="room-mcic" /> {mc.error.length > 72 ? mc.error.slice(0, 71) + "…" : mc.error}</span>}
       </span>
       <span className={`room-mcstatus${failed ? " room-mcstatus-err" : ""}`}>{failed ? "failed" : "done"}</span>
       {clickable && <Sym n="chevron-right" s={11} cls="room-mcchev" />}
@@ -881,9 +882,14 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
   const files = atts.filter((a) => a.kind === "FileLink");
   const prs = atts.filter((a) => a.kind === "Pr");
 
+  // A degraded stop (the supervisor gave up — no-decision / no-model — no work delivered) is NOT a success: render a
+  // neutral "Stopped" card with an alert glyph, not the green "Result", so its own "stopping cleanly" text isn't dressed
+  // up as done. The run status is still a clean terminal Success at the engine level; only the outcome reads degraded.
+  const degraded = answer.degraded === true;
+
   return (
-    <div className="room-final">
-      <div className="room-final-head"><Sym n="check" s={13} cls="room-final-ic" /> Result</div>
+    <div className={`room-final${degraded ? " room-final-degraded" : ""}`}>
+      <div className="room-final-head"><Sym n={degraded ? "alert" : "check"} s={13} cls="room-final-ic" /> {degraded ? "Stopped" : "Result"}</div>
       {answer.text && <p className="room-final-text"><Inline text={answer.text} /></p>}
       {images.length > 0 && (
         <div className="room-final-gallery">

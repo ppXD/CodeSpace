@@ -100,6 +100,9 @@ public sealed record RoomFinalAnswer
 {
     public string? Text { get; init; }
     public IReadOnlyList<RoomAttachment> Attachments { get; init; } = Array.Empty<RoomAttachment>();
+
+    /// <summary>True when the run STOPPED on a graceful FAILURE (a fail-closed no-decision / no-model / unknown-decision outcome — no task work delivered) rather than a genuine success. The card renders neutral/degraded, not a green "Result", so a supervisor that gave up doesn't read as done.</summary>
+    public bool Degraded { get; init; }
 }
 
 /// <summary>One typed final-answer attachment (a file, the PR, or an image).</summary>

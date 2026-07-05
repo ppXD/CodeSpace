@@ -33,4 +33,7 @@ public sealed record JournalModelCall
 
     /// <summary>The call's outcome — <c>completed</c> or <c>failed</c>.</summary>
     public required string Status { get; init; }
+
+    /// <summary>The failure reason when <see cref="Status"/> is <c>failed</c> — the error the <c>interaction.failed</c> record carries (e.g. a Malformed / timeout gateway error). Null for a completed call, so the row shows WHY a failed model call failed instead of a bare red "FAILED".</summary>
+    public string? Error { get; init; }
 }

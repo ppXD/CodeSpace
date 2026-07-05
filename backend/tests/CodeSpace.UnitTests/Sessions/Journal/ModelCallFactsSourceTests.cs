@@ -31,6 +31,7 @@ public class ModelCallFactsSourceTests
         call.LatencyMs.ShouldBe(5000, "the start→completion span");
         call.CostUsd.ShouldNotBeNull("claude-opus-4-8 is priced, so the per-call cost is known");
         call.Status.ShouldBe("completed");
+        call.Error.ShouldBeNull("a completed call carries no error");
     }
 
     [Fact]
@@ -62,6 +63,7 @@ public class ModelCallFactsSourceTests
         call.Status.ShouldBe("failed");
         call.Tokens.ShouldBeNull("no usage → unknown, not zero");
         call.CostUsd.ShouldBeNull("no tokens → no cost");
+        call.Error.ShouldBe("gateway timeout", "a failed call surfaces WHY it failed off the record, so the row shows the reason not a bare red 'FAILED'");
     }
 
     private static WorkflowRunRecord Record(string type, string payload, DateTimeOffset at) =>

@@ -31,7 +31,7 @@ public static class RoomNarrative
         // A supervisor turn draws a DYNAMIC map from its real phases (Start → Plan → each authored phase → Deliver);
         // a non-supervisor run keeps its structural node spine.
         var map = tape.Count > 0
-            ? BuildDynamicMap(idPrefix, seq, tape, authored, status, facts.AcceptancePassed)
+            ? BuildDynamicMap(idPrefix, seq, tape, authored, status, facts.AcceptancePassed, facts.FinalAnswer?.Degraded ?? false)
             : BuildMap(idPrefix, seq, structural);
 
         var blocks = BuildBlocks(idPrefix, seq, status, error, decisions, facts, tape.Count > 0 ? tape : structural, authored);
@@ -48,7 +48,7 @@ public static class RoomNarrative
     /// agent progress ("k of N" / "N agents"), the acceptance verdict, and the deliver outcome. Labels are the real
     /// phase titles, not per-run copy — the map GROWS as the supervisor re-plans / adds phases.
     /// </summary>
-    private static ExecutionMapBlock BuildDynamicMap(string idPrefix, long seq, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> authored, WorkflowRunStatus status, bool? acceptancePassed)
+    private static ExecutionMapBlock BuildDynamicMap(string idPrefix, long seq, IReadOnlyList<RunPhase> tape, IReadOnlyList<RunPhase> authored, WorkflowRunStatus status, bool? acceptancePassed, bool degraded)
     {
         var plan = tape.FirstOrDefault(p => p.Kind == SupervisorDecisionKinds.Plan);
         var agents = tape.Where(p => SupervisorDecisionKinds.StagesAgents(p.Kind)).SelectMany(p => p.Agents).ToList();
@@ -70,10 +70,10 @@ public static class RoomNarrative
         }
 
         var (workStatus, _) = WorkStage(plan != null, agents, active);
-        var (reviewStatus, reviewDetail) = ReviewStage(succeeded, failed, workStatus, acceptancePassed);
+        var (reviewStatus, reviewDetail) = ReviewStage(succeeded, failed, workStatus, acceptancePassed, degraded);
         steps.Add(Step($"{idPrefix}:review", "Review", reviewStatus, reviewDetail));
 
-        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed);
+        var (deliverStatus, deliverDetail) = DeliverStage(succeeded, failed, degraded);
         steps.Add(Step($"{idPrefix}:deliver", "Deliver", deliverStatus, deliverDetail));
 
         return new ExecutionMapBlock { Id = $"{idPrefix}:map", Seq = seq, Steps = steps };
@@ -121,9 +121,11 @@ public static class RoomNarrative
         return (ExecutionStepStatus.Done, AgentWord(agents.Count));
     }
 
-    /// <summary>Review folds from the objective acceptance verdict when graded, else from the run outcome: success → passed; failed-at-work → skipped; failed-at-review → failed; else queued / running once work is done.</summary>
-    private static (ExecutionStepStatus, string?) ReviewStage(bool succeeded, bool failed, ExecutionStepStatus work, bool? acceptancePassed)
+    /// <summary>Review folds from the objective acceptance verdict when graded, else from the run outcome: a DEGRADED stop (a fail-closed give-up) → stopped (never a green "passed" for a run that gave up); success → passed; failed-at-work → skipped; failed-at-review → failed; else queued / running once work is done.</summary>
+    private static (ExecutionStepStatus, string?) ReviewStage(bool succeeded, bool failed, ExecutionStepStatus work, bool? acceptancePassed, bool degraded)
     {
+        if (degraded) return (ExecutionStepStatus.Skipped, "stopped");
+
         if (acceptancePassed is true) return (ExecutionStepStatus.Done, "passed");
         if (acceptancePassed is false) return (ExecutionStepStatus.Failed, "failed");
 
@@ -132,9 +134,10 @@ public static class RoomNarrative
         return work == ExecutionStepStatus.Done ? (ExecutionStepStatus.Running, null) : (ExecutionStepStatus.Queued, "queued");
     }
 
-    /// <summary>Deliver folds from the run outcome: success → Done (the PR reference rides the delivery card); failed → skipped; else queued.</summary>
-    private static (ExecutionStepStatus, string?) DeliverStage(bool succeeded, bool failed)
+    /// <summary>Deliver folds from the run outcome: a DEGRADED stop delivered nothing → skipped; success → Done (the PR reference rides the delivery card); failed → skipped; else queued.</summary>
+    private static (ExecutionStepStatus, string?) DeliverStage(bool succeeded, bool failed, bool degraded)
     {
+        if (degraded) return (ExecutionStepStatus.Skipped, "stopped");
         if (succeeded) return (ExecutionStepStatus.Done, null);
         if (failed) return (ExecutionStepStatus.Skipped, "skipped");
         return (ExecutionStepStatus.Queued, "queued");
@@ -274,6 +277,7 @@ public static class RoomNarrative
         Id = $"{idPrefix}:final", Seq = seq,
         Text = fa.Text,
         Attachments = fa.Attachments.Select(a => Attach(a, producers)).ToList(),
+        Degraded = fa.Degraded,
     };
 
     /// <summary>Map a fact attachment to the DTO, attributing a FILE to its producing agent (so the RESULT never presents an intermediate agent's file as the final deliverable without saying whose it is).</summary>

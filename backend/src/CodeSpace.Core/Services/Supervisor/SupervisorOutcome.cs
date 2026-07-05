@@ -100,6 +100,9 @@ public static class SupervisorOutcome
     /// <summary>The model-authored closing line a <c>stop</c> outcome recorded — the <c>summary</c> field <c>ExecuteStop</c> wrote to <c>{ stopped, outcome, summary }</c>. The run's "here's what I did" narration; null when absent / malformed.</summary>
     public static string? ReadStopSummary(string? outcomeJson) => ReadStringField(outcomeJson, "summary");
 
+    /// <summary>The <c>stop</c> OUTCOME label — the <c>outcome</c> field of <c>{ stopped, outcome, summary }</c> (a genuine-success <c>completed</c>/<c>done</c> vs a graceful-failure <c>no-decision</c>/<c>no-model</c>/<c>unknown-decision</c>). Null when absent / malformed. The room decides whether the RESULT card renders degraded via <see cref="SupervisorStopPayload.IsSuccessOutcome"/> over this — so a fail-closed stop reads as degraded, not a green success.</summary>
+    public static string? ReadStopOutcome(string? outcomeJson) => ReadStringField(outcomeJson, "outcome");
+
     /// <summary>
     /// Fold the authoring model call (model + tokens) into a decision's OUTCOME under a <c>modelUsage</c> key — a
     /// NON-hashed enrichment (only the payload is hashed into the idempotency key), so it can never drift replay identity.

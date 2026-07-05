@@ -164,6 +164,39 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_non_conformant_give_up_stop_renders_a_degraded_result_not_a_green_success()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Gave up");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Delete the invalid usings", resultSummary: null);
+
+        // The supervisor's decision model produced a non-conformant reply → a fail-closed clean stop with a graceful-failure
+        // outcome (no work delivered), yet the run status is a clean terminal Success.
+        await SeedStopDecisionAsync(teamId, run, outcome: "no-decision", summary: "The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run.");
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var result = turn.Blocks.OfType<FinalAnswerBlock>().Single();
+        result.Degraded.ShouldBeTrue("a non-conformant give-up stop is a graceful FAILURE, not a green success — the card reads degraded");
+        result.Text.ShouldContain("did not conform");
+
+        turn.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("stopped", "the map must not show a green 'passed' for a run that gave up");
+    }
+
+    [Fact]
+    public async Task A_genuine_completed_stop_renders_a_normal_green_result()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Done well");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Delete the invalid usings", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Deleted 12 invalid usings across the project.");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+        result.Degraded.ShouldBeFalse("a genuine 'completed' stop is a real success — the green Result stays (regression guard)");
+    }
+
+    [Fact]
     public async Task A_supervisor_turn_aggregates_distinct_changed_files_across_its_agents()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -614,6 +647,23 @@ public class RoomProjectorFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"plan:{Guid.NewGuid():N}", InputHash = new string('0', 64),
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = "{}",
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stamp a supervisor STOP decision with its { stopped, outcome, summary } outcome — the terminal verb that drives the RESULT card. A non-success outcome (no-decision / no-model) marks a degraded give-up stop.</summary>
+    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string outcome, string summary)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary }),
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
