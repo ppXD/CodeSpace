@@ -118,6 +118,22 @@ public class RunRecordTimelineMapTests
         ev.Summary.ShouldBe("agent.critic · claude-opus-4-8 · 36 tokens", "the kind + model + total token cost — the attribution the timeline previously dropped");
     }
 
+    [Theory]
+    // A completed call whose provider finish reason says the answer was CUT OFF (length cap / content filter) escalates
+    // to a qualified Warning title, so a decision that ran on an incomplete answer never reads as a clean green completion.
+    [InlineData("max_tokens", "Model call — output truncated")]
+    [InlineData("length", "Model call — output truncated")]
+    [InlineData("content_filter", "Model call — content filtered")]
+    public void A_cut_off_model_call_reads_a_qualified_warning(string finishReason, string expectedTitle)
+    {
+        var payload = """{"kind":"llm.complete","model":"m","usage":{"inputTokens":9,"outputTokens":4000,"finishReason":"REASON"}}""".Replace("REASON", finishReason);
+
+        var ev = RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.InteractionCompleted, nodeId: "gen", payloadJson: payload)).ShouldNotBeNull();
+
+        ev.Title.ShouldBe(expectedTitle);
+        ev.Severity.ShouldBe(TimelineSeverity.Warning, "an answer cut off mid-generation is not a clean success");
+    }
+
     [Fact]
     public void A_completed_model_call_with_no_usage_omits_the_token_clause_rather_than_showing_zero()
     {

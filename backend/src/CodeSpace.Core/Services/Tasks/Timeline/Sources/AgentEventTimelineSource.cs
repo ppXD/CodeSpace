@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
 using Microsoft.EntityFrameworkCore;
 
@@ -24,22 +25,26 @@ public sealed class AgentEventTimelineSource : IRunTimelineSource, IScopedDepend
 
     public async Task<IReadOnlyList<RunTimelineEvent>> ContributeAsync(RunTimelineContext context, CancellationToken cancellationToken)
     {
-        var nodeByAgent = await LoadRunAgentsAsync(context, cancellationToken).ConfigureAwait(false);
+        var agents = await LoadRunAgentsAsync(context, cancellationToken).ConfigureAwait(false);
 
-        if (nodeByAgent.Count == 0) return Array.Empty<RunTimelineEvent>();
+        if (agents.Count == 0) return Array.Empty<RunTimelineEvent>();
+
+        var nodeByAgent = agents.ToDictionary(r => r.Id, r => r.NodeId);
+        var statusByAgent = agents.ToDictionary(r => r.Id, r => r.Status);
 
         var events = await LoadNarrativeEventsAsync(nodeByAgent.Keys.ToList(), cancellationToken).ConfigureAwait(false);
 
-        return events.Select(e => AgentEventTimelineMap.ToEvent(e, nodeByAgent)).ToList();
+        return events.Select(e => AgentEventTimelineMap.ToEvent(e, nodeByAgent, statusByAgent)).ToList();
     }
 
-    /// <summary>The run's agent runs (id → its node), read team-scoped. The run is already team-checked by the projector; the extra TeamId filter is defense in depth, matching the phase source.</summary>
-    private async Task<Dictionary<Guid, string?>> LoadRunAgentsAsync(RunTimelineContext context, CancellationToken cancellationToken) =>
-        (await _db.AgentRun.AsNoTracking()
+    /// <summary>The run's agent runs (id + its node + its terminal status), read team-scoped. The run is already team-checked by the projector; the extra TeamId filter is defense in depth, matching the phase source. The status feeds the FinalSummary tone so a failed agent's closing beat doesn't read as a success.</summary>
+    private async Task<List<RunAgent>> LoadRunAgentsAsync(RunTimelineContext context, CancellationToken cancellationToken) =>
+        await _db.AgentRun.AsNoTracking()
             .Where(r => r.TeamId == context.TeamId && r.WorkflowRunId == context.RunId)
-            .Select(r => new { r.Id, r.NodeId })
-            .ToListAsync(cancellationToken).ConfigureAwait(false))
-        .ToDictionary(r => r.Id, r => r.NodeId);
+            .Select(r => new RunAgent(r.Id, r.NodeId, r.Status))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    private sealed record RunAgent(Guid Id, string? NodeId, AgentRunStatus Status);
 
     /// <summary>The narrative-kind events for the run's agents, in chronological order. The kind filter runs in SQL (kind IN …) so verbose reasoning/tool chatter never loads.</summary>
     private async Task<List<AgentRunEvent>> LoadNarrativeEventsAsync(List<Guid> agentRunIds, CancellationToken cancellationToken) =>

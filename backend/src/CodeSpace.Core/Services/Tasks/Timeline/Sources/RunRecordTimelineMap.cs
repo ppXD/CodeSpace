@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Tasks.Timeline;
 
@@ -80,11 +81,40 @@ public static class RunRecordTimelineMap
             // record carries the kind + model + token usage; the failed one the error. The interaction.started open
             // bracket stays Trace-only (it adds no outcome). Generic over EVERY in-process call kind (llm.complete, a
             // plan-author's planner/critic, the supervisor's decision, the agent run's output-review critic).
-            WorkflowRunRecordTypes.InteractionCompleted => Event(r, "Model call", TimelineSeverity.Info, TimelineLevel.Detail, ModelCallSummary(r)),
+            WorkflowRunRecordTypes.InteractionCompleted => ModelCallEvent(r),
             WorkflowRunRecordTypes.InteractionFailed    => Event(r, "Model call failed", TimelineSeverity.Error, TimelineLevel.Detail, Join(ReadString(r, "kind"), ReadString(r, "error"))),
 
             _ => null,
         };
+    }
+
+    /// <summary>A completed model call is Info "Model call" UNLESS the provider's finish reason says the answer was CUT OFF — a length-cap truncation or a content filter escalates to Warning with a qualified title ("Model call — output truncated"), so a decision that ran on a cut-off answer never reads as a clean green completion. Reads the SAME finish classifier the fact row does.</summary>
+    private static RunTimelineEvent ModelCallEvent(WorkflowRunRecord r)
+    {
+        var finish = ModelCallFinish.Classify(ReadUsageFinishReason(r));
+        var qualifier = ModelCallFinish.Qualifier(finish);
+
+        var title = qualifier == null ? "Model call" : $"Model call — {qualifier}";
+        var severity = finish == ModelCallFinishKind.Clean ? TimelineSeverity.Info : TimelineSeverity.Warning;
+
+        return Event(r, title, severity, TimelineLevel.Detail, ModelCallSummary(r));
+    }
+
+    /// <summary>The provider stop reason off the completion's nested <c>usage.finishReason</c> — null when absent/malformed (a usage-silent call reads as a clean stop, never a false truncation).</summary>
+    private static string? ReadUsageFinishReason(WorkflowRunRecord r)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(r.PayloadJson);
+
+            if (!doc.RootElement.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object) return null;
+
+            return usage.TryGetProperty("finishReason", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Fold a completed model call's kind + model + total token usage into the summary — the per-call attribution + cost the timeline previously dropped. Absent fields are omitted (a null model / unpriced usage leaves no dangling separator). e.g. "llm.complete · claude-opus-4-8 · 36 tokens".</summary>

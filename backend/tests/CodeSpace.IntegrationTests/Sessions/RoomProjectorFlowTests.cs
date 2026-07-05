@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -194,6 +195,27 @@ public class RoomProjectorFlowTests
 
         var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
         result.Degraded.ShouldBeFalse("a genuine 'completed' stop is a real success — the green Result stays (regression guard)");
+    }
+
+    [Fact]
+    public async Task A_server_forced_budget_stop_renders_a_degraded_result_and_surfaces_the_reason()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ran out of budget");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the flaky tests", resultSummary: null);
+
+        // A budget/governance/bound trip forces a terminal stop that stamps {reason} on the PAYLOAD (no model outcome).
+        // The old degraded check read only the OUTCOME, so this rendered a green success with a BLANK result. It must
+        // now render degraded AND surface the bound that stopped it — the SAME classifier the give-up stop uses.
+        await SeedForcedStopDecisionAsync(teamId, run, reason: SupervisorStopReasons.BudgetExhausted);
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var result = turn.Blocks.OfType<FinalAnswerBlock>().Single();
+        result.Degraded.ShouldBeTrue("a run the server force-stopped on a bound did NOT finish the work — it is not a green success");
+        result.Text.ShouldBe("budget exhausted", "the RESULT never renders blank — it names the bound that stopped the run");
+
+        turn.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("stopped", "the map must not show a green 'passed' for a force-stopped run");
     }
 
     [Fact]
@@ -664,6 +686,23 @@ public class RoomProjectorFlowTests
             DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop:{Guid.NewGuid():N}", InputHash = new string('0', 64),
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
             OutcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome, summary }),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stamp a SERVER-FORCED stop — a budget/governance/bound trip that puts {reason} on the PAYLOAD, then records an outcome with a NULL outcome label (exactly what ExecuteStop writes for a forced stop). No success outcome, only a reason.</summary>
+    private async Task SeedForcedStopDecisionAsync(Guid teamId, Guid runId, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = JsonSerializer.Serialize(new { reason }),
+            OutcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome = (string?)null, summary = (string?)null }),
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();

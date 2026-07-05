@@ -276,17 +276,18 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var stop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
         var acceptance = SupervisorOutcome.ReadAcceptanceGradePassed(stop?.OutcomeJson);
 
-        // A stop is a clean terminal Success at the ENGINE level even when it's a fail-closed GIVE-UP (no-decision /
-        // no-model / unknown-decision — the supervisor couldn't produce a valid decision, no work delivered). Read the stop
-        // OUTCOME so the RESULT card renders DEGRADED (not a green success) for those — generic via the shared success
-        // predicate, never a per-kind string, so a future fail-closed outcome can't silently read as success.
-        var stopOutcome = SupervisorOutcome.ReadStopOutcome(stop?.OutcomeJson);
-        var degraded = !string.IsNullOrWhiteSpace(stopOutcome) && !SupervisorStopPayload.IsSuccessOutcome(stopOutcome);
+        // A stop is a clean terminal Success at the ENGINE level even when the run did NOT finish well — a fail-closed
+        // model GIVE-UP (no-decision / no-model / unknown-decision), OR a SERVER-FORCED stop (a budget / governance /
+        // bound trip stamping a {reason} with no outcome). Classify BOTH shapes through the ONE shared classifier the
+        // Journal ③ stop step also reads, so the RESULT card renders DEGRADED (not a green success) for either — and the
+        // step + the terminal can never drift. Generic: never a per-kind string.
+        var stopClass = SupervisorOutcome.ClassifyStop(stop?.PayloadJson, stop?.OutcomeJson);
+        var degraded = stopClass.Degraded;
 
-        // The delivered answer text: the supervisor's stop summary, else — for a single-agent run with no supervisor —
-        // that one agent's own final summary (its result IS the answer). A multi-agent run without a supervisor has no
-        // synthesized answer, so it falls to the file attachments alone.
-        var finalAnswerText = SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson)
+        // The delivered answer text: the supervisor's closing line (or, for a forced stop, WHY it stopped — "budget
+        // exhausted" — so the RESULT never renders blank), else — for a single-agent run with no supervisor — that one
+        // agent's own final summary (its result IS the answer). A multi-agent run without a supervisor falls to the files.
+        var finalAnswerText = stopClass.DisplayText
             ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
         // The retry beats — one per retry decision, in tape order — each carrying its FRESH agent so the room renders that

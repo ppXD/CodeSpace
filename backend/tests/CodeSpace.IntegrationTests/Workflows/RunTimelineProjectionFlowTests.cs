@@ -203,9 +203,9 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         var supervisor = events!.Where(e => e.SourceKey == "supervisor").ToList();
-        supervisor.Select(e => e.Title).ShouldBe(new[] { "Supervisor planned the work", "Supervisor spawned 2 agents", "Supervisor asked you", "Supervisor stopped" },
+        supervisor.Select(e => e.Title).ShouldBe(new[] { "Supervisor planned the work", "Supervisor spawned 2 agents", "Supervisor asked you — answered", "Supervisor stopped" },
             "the decision ledger projects chronologically as the dynamic-supervisor story line");
-        supervisor.Single(e => e.Title == "Supervisor asked you").Summary.ShouldBe("Proceed? — yes", "ask_human surfaces the question + the folded answer");
+        supervisor.Single(e => e.Title == "Supervisor asked you — answered").Summary.ShouldBe("Proceed? — yes", "ask_human surfaces the question + the folded answer");
     }
 
     [Fact]
@@ -273,11 +273,11 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         var tools = events!.Where(e => e.SourceKey == "tool-calls").ToList();
-        tools.Select(e => e.Title).ShouldBe(new[] { "Called git.open_pr", "Called git.commit" }, "the side-effecting tool calls surface chronologically, tagged");
+        tools.Select(e => e.Title).ShouldBe(new[] { "Opened a pull request", "Committing the changes failed" }, "the side-effecting tool calls surface chronologically, tagged, outcome-aware");
         tools.ShouldAllBe(e => e.AgentRunId == agentId.ToString());
         tools.ShouldAllBe(e => e.NodeId == "code");
 
-        var failed = tools.Single(e => e.Title == "Called git.commit");
+        var failed = tools.Single(e => e.Title == "Committing the changes failed");
         failed.Severity.ShouldBe(TimelineSeverity.Error);
         failed.Level.ShouldBe(TimelineLevel.Milestone, "a failed side effect is a milestone the operator must see");
         failed.Summary.ShouldBe("remote rejected: protected branch");
@@ -307,7 +307,7 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         var tools = events!.Where(e => e.SourceKey == "tool-calls").ToList();
-        tools.Select(e => e.Title).ShouldBe(new[] { "Called deploy.trigger" },
+        tools.Select(e => e.Title).ShouldBe(new[] { "Triggering the deploy — awaiting your approval" },
             "only the real side effect surfaces; BOTH decision.request rows (null-envelope AND envelope-set) are excluded by ToolKind");
         tools[0].Severity.ShouldBe(TimelineSeverity.Info, "an awaiting-approval real side effect is in-flight → Info");
     }
@@ -330,10 +330,10 @@ public sealed class RunTimelineProjectionFlowTests
 
         events.ShouldNotBeNull();
         var byTitle = events!.Where(e => e.SourceKey == "tool-calls").ToDictionary(e => e.Title);
-        byTitle["Called git.commit"].AgentRunId.ShouldBe(backend.ToString());
-        byTitle["Called git.commit"].NodeId.ShouldBe("backend-fix", "each agent's tool call carries ITS OWN node, never another agent's");
-        byTitle["Called git.open_pr"].AgentRunId.ShouldBe(frontend.ToString());
-        byTitle["Called git.open_pr"].NodeId.ShouldBe("frontend-fix");
+        byTitle["Committed the changes"].AgentRunId.ShouldBe(backend.ToString());
+        byTitle["Committed the changes"].NodeId.ShouldBe("backend-fix", "each agent's tool call carries ITS OWN node, never another agent's");
+        byTitle["Opened a pull request"].AgentRunId.ShouldBe(frontend.ToString());
+        byTitle["Opened a pull request"].NodeId.ShouldBe("frontend-fix");
     }
 
     [Fact]
@@ -353,7 +353,7 @@ public sealed class RunTimelineProjectionFlowTests
         var events = await ProjectAsync(userId, teamId, runId);
 
         events.ShouldNotBeNull();
-        events!.Select(e => e.Title).ShouldBe(new[] { "Run started", "Called git.open_pr", "Run completed" },
+        events!.Select(e => e.Title).ShouldBe(new[] { "Run started", "Opened a pull request", "Run completed" },
             "the tool call interleaves between the lifecycle records by OccurredAt — the cross-source merge");
     }
 

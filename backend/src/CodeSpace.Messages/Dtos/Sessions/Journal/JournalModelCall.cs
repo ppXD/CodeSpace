@@ -36,4 +36,7 @@ public sealed record JournalModelCall
 
     /// <summary>The failure reason when <see cref="Status"/> is <c>failed</c> — the error the <c>interaction.failed</c> record carries (e.g. a Malformed / timeout gateway error). Null for a completed call, so the row shows WHY a failed model call failed instead of a bare red "FAILED".</summary>
     public string? Error { get; init; }
+
+    /// <summary>A CAUTION on an otherwise-completed call — set when the provider's finish reason says the answer was CUT OFF ("output truncated" on a length cap, "content filtered" on a policy block) so a decision that ran on an incomplete answer isn't read as a clean success. Null on a clean completion (the common case) and on a failed call (its <see cref="Error"/> carries the reason). Orthogonal to <see cref="Status"/> — the call still COMPLETED, it just didn't finish cleanly.</summary>
+    public string? FinishNote { get; init; }
 }

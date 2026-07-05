@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
 
 namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;
@@ -35,16 +36,16 @@ public static class AgentEventTimelineMap
     /// <summary>The headline cap — a long FinalSummary (the whole report) is clamped here; the full text stays in the agent's own timeline + Trace.</summary>
     private const int MaxTitle = 200;
 
-    public static RunTimelineEvent ToEvent(AgentRunEvent e, IReadOnlyDictionary<Guid, string?> nodeByAgent)
+    public static RunTimelineEvent ToEvent(AgentRunEvent e, IReadOnlyDictionary<Guid, string?> nodeByAgent, IReadOnlyDictionary<Guid, AgentRunStatus> statusByAgent)
     {
-        var headline = string.IsNullOrWhiteSpace(e.Text) ? e.Kind.ToString() : e.Text;
+        var headline = string.IsNullOrWhiteSpace(e.Text) ? HeadlineFor(e.Kind) : e.Text;
 
         return new RunTimelineEvent
         {
             Id = $"agent-{e.Id:N}",
             Kind = $"agent.{e.Kind}",
             Title = Truncate(headline, MaxTitle),
-            Severity = SeverityFor(e.Kind),
+            Severity = SeverityFor(e, statusByAgent),
             Level = LevelFor(e.Kind),
             OccurredAt = e.OccurredAt,
             Order = e.Sequence,
@@ -53,6 +54,18 @@ public static class AgentEventTimelineMap
             SourceKey = Key,
         };
     }
+
+    /// <summary>A payload-less event's fallback headline — a human phrase per kind, never the raw enum token (a harness that emits an empty error/reasoning item must not surface a bare "Error"/"FinalSummary" as the story-line milestone). An unknown kind degrades to a run-neutral phrase, mirroring <c>SupervisorDecisionTimelineMap</c>'s open-verb default.</summary>
+    private static string HeadlineFor(AgentEventKind kind) => kind switch
+    {
+        AgentEventKind.Error => "The agent hit an error",
+        AgentEventKind.Warning => "The agent flagged a warning",
+        AgentEventKind.FinalSummary => "The agent finished",
+        AgentEventKind.TestOutput => "The agent ran tests",
+        AgentEventKind.FileChanged => "The agent edited a file",
+        AgentEventKind.Reasoning => "The agent reasoned",
+        _ => "The agent reported an update",
+    };
 
     // An agent's ERROR and its FINAL SUMMARY are story milestones (the failure + the conclusion the operator reads);
     // its file edits / test output / warnings are DETAIL the wave + the agent's own terminal already carry, so they
@@ -64,13 +77,27 @@ public static class AgentEventTimelineMap
         _ => TimelineLevel.Detail,
     };
 
-    // TestOutput is deliberately Info: its pass/fail detail lives in the event Text, and reading a failure marker out
-    // of the harness-specific DataJson to escalate to Warning/Error would couple this run-neutral source to one
-    // harness's payload shape. Per-result severity is a future refinement once a stable cross-harness marker exists.
-    private static TimelineSeverity SeverityFor(AgentEventKind kind) => kind switch
+    // Severity: an Error is always Error, a Warning always Warning. A FinalSummary — the CONCLUSION milestone the
+    // operator reads — rides the agent's TERMINAL run status so a failed / timed-out / cancelled / needs-review agent's
+    // closing beat doesn't read as a neutral success (it must not drift from its own agent card, which shows the same
+    // status). The status is the run-neutral AgentRun ROW status, never a harness-specific payload, so the source stays
+    // harness-neutral. TestOutput stays Info deliberately: its pass/fail detail lives in the event Text, and reading a
+    // failure marker out of the harness-specific DataJson would couple this run-neutral source to one harness's shape —
+    // a failing test run's overall verdict already lands on the agent's FinalSummary tone above.
+    private static TimelineSeverity SeverityFor(AgentRunEvent e, IReadOnlyDictionary<Guid, AgentRunStatus> statusByAgent) => e.Kind switch
     {
         AgentEventKind.Error => TimelineSeverity.Error,
         AgentEventKind.Warning => TimelineSeverity.Warning,
+        AgentEventKind.FinalSummary => FinalSummaryTone(statusByAgent.GetValueOrDefault(e.AgentRunId, AgentRunStatus.Running)),
+        _ => TimelineSeverity.Info,
+    };
+
+    /// <summary>The FinalSummary tone off the agent's TERMINAL status: a clean success is Success, a failed / timed-out / cancelled agent is Error, a needs-review agent is Warning, and an in-flight / unknown status is neutral Info.</summary>
+    private static TimelineSeverity FinalSummaryTone(AgentRunStatus status) => status switch
+    {
+        AgentRunStatus.Succeeded => TimelineSeverity.Success,
+        AgentRunStatus.Failed or AgentRunStatus.TimedOut or AgentRunStatus.Cancelled => TimelineSeverity.Error,
+        AgentRunStatus.NeedsReview => TimelineSeverity.Warning,
         _ => TimelineSeverity.Info,
     };
 
