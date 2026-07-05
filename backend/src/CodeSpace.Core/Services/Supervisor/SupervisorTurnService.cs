@@ -113,7 +113,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
-        if (preBound != null) return ForcedStop(preBound);
+        // A budget-exhausted stop carries the run's MaxRounds so the journal reads "reached the N-round budget" instead of
+        // a bare "budget exhausted" — deterministic (config-derived), so it never perturbs the idempotency key / replay.
+        if (preBound != null) return ForcedStop(preBound, preBound == SupervisorStopReasons.BudgetExhausted ? plan.MaxRounds : null);
 
         // D4c-2: BEFORE the delivery decider, drain this run's blocked child decisions — the arbiter auto-answers the
         // ones it is confident about (within the fail-closed floor) and leaves the rest in the cross-grain queue for a

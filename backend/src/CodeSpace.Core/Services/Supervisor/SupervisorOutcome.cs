@@ -106,6 +106,25 @@ public static class SupervisorOutcome
     /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "budget exhausted"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
     public static string? ReadStopReason(string? payloadJson) => ReadStringField(payloadJson, "reason");
 
+    /// <summary>The <c>maxRounds</c> a budget-exhausted forced stop stamped on its PAYLOAD — the round cap the run reached, so the journal reads "reached the N-round budget" instead of a bare "budget exhausted". Null when absent (a non-budget stop, or a pre-enrichment budget stop) / malformed.</summary>
+    public static int? ReadStopMaxRounds(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(payloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("maxRounds", out var m) && m.ValueKind == JsonValueKind.Number && m.TryGetInt32(out var n)
+                ? n
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Classify a <c>stop</c> decision's terminal shape from its PAYLOAD (<c>{reason}</c> for a server-forced stop) plus
     /// its OUTCOME (<c>{outcome, summary}</c> for a model-authored stop) — the single success/degraded verdict both the

@@ -116,13 +116,21 @@ public static class SupervisorDecisionTimelineMap
         _ => "Supervisor resolved a conflict",
     };
 
-    /// <summary>The stop headline reflects the SAME terminal classification the RESULT card reads: a server-FORCED stop names the bound that stopped it ("— budget exhausted"), a model GIVE-UP reads "stopped early", a genuine success (or bare/unclassifiable stop) reads the neutral verb — the green tone + the summary carry the success signal.</summary>
-    private static string StopTitle(SupervisorDecisionRecord d) => SupervisorOutcome.ClassifyStop(d.PayloadJson, d.OutcomeJson) switch
+    /// <summary>The stop headline reflects the SAME terminal classification the RESULT card reads: a server-FORCED stop names the bound that stopped it — a budget-exhausted stop that carries its round cap reads "reached the N-round budget" (the round count the reader also sees per step), any other forced stop reads "— {reason}"; a model GIVE-UP reads "stopped early"; a genuine success (or bare/unclassifiable stop) reads the neutral verb.</summary>
+    private static string StopTitle(SupervisorDecisionRecord d)
     {
-        { Kind: SupervisorStopKind.Forced, Reason: { } reason } => $"Supervisor stopped — {reason}",
-        { Kind: SupervisorStopKind.GaveUp } => "Supervisor stopped early",
-        _ => "Supervisor stopped",
-    };
+        var c = SupervisorOutcome.ClassifyStop(d.PayloadJson, d.OutcomeJson);
+
+        if (c.Kind == SupervisorStopKind.Forced && c.Reason == SupervisorStopReasons.BudgetExhausted && SupervisorOutcome.ReadStopMaxRounds(d.PayloadJson) is { } max)
+            return $"Supervisor stopped — reached the {max}-round budget";
+
+        return c switch
+        {
+            { Kind: SupervisorStopKind.Forced, Reason: { } reason } => $"Supervisor stopped — {reason}",
+            { Kind: SupervisorStopKind.GaveUp } => "Supervisor stopped early",
+            _ => "Supervisor stopped",
+        };
+    }
 
     // Severity rides the CLOSED status axis — a finished decision is Success, a failed one Error, a reaper-expired one
     // Warning, everything in flight Info — but a SUCCEEDED decision whose OUTCOME is degraded reads amber, not green,
