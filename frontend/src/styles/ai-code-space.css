@@ -5659,17 +5659,6 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-foot .room-btn, .room-foot .room-btn-ghost { height: 29px; padding: 0 11px; font-size: 12px; }
 
 /* decision */
-/* supervisor operation step (between rounds) */
-.room-supstep { display: inline-flex; align-items: center; gap: 7px; align-self: flex-start; padding: 5px 11px 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 12px; color: var(--ink-2); }
-.room-supstep-ic { color: var(--accent); }
-.room-supstep-ok .room-supstep-ic { color: var(--rm-good); }
-.room-supstep-err { border-color: var(--rm-err-line); background: var(--rm-err-bg); color: var(--rm-danger); }
-.room-supstep-err .room-supstep-ic { color: var(--rm-danger); }
-/* A supervisor step with a rationale detail — a rounded box (not a pill) whose body stacks the beat + the muted why/evidence. */
-.room-supstep-2 { border-radius: 12px; align-items: flex-start; padding: 8px 14px 9px 11px; }
-.room-supstep-2 .room-supstep-ic { margin-top: 1px; flex: none; }
-.room-supstep-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.room-supstep-detail { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 
 /* rich final answer */
 .room-final { border: 1px solid var(--rm-good-line); border-radius: 12px; background: var(--rm-good-bg); padding: 13px 15px; display: flex; flex-direction: column; gap: 10px; }

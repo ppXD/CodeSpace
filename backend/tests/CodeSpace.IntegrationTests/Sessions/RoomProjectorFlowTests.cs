@@ -318,13 +318,11 @@ public class RoomProjectorFlowTests
         cards.Count(c => c.AgentRunId == retryAgent).ShouldBe(1, "the retry agent renders EXACTLY once — as its own chronological card, never also lumped into the round group");
 
         // The retry's card is its OWN 'Retry' group, distinct from the initial-spawn group (chronological, not a lump).
+        // (Post-P6 the "Supervisor retried a subtask" narrative_step + its rationale detail live on the Journal ③ beat,
+        // not the room — the room keeps the retry's agent card.)
         var retryGroup = turn.Blocks.OfType<AgentGroupBlock>().Single(g => g.Agents.Any(a => a.AgentRunId == retryAgent));
         retryGroup.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgent);
-
-        var retryStep = turn.Blocks.OfType<NarrativeStepBlock>().Single(s => s.Text == "Supervisor retried a subtask");
-        retryStep.Detail.ShouldNotBeNull("the retry step carries the supervisor's structured rationale so a reader sees WHY");
-        retryStep.Detail!.ShouldContain("The first attempt missed the edge cases.", customMessage: "the why");
-        retryStep.Detail!.ShouldContain("attempt 1 failed its acceptance check.", customMessage: "the evidence");
+        retryGroup.Title.ShouldBe("Retry", "the retry's fresh agent is its own 'Retry'-titled group");
     }
 
     /// <summary>Seed a supervisor turn that FAILED a subtask then RETRIED it: a spawn staging one FAILED agent for subtask "s0", then a retry staging a fresh SUCCEEDED agent — plus both AgentRun rows (ground-truth status). Flat plan (the tape path).</summary>
@@ -379,9 +377,8 @@ public class RoomProjectorFlowTests
         var room = await ProjectByRunAsync(run, teamId);
         var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
 
-        // (a) the SECOND spawn wave renders as its own group — not collapsed into the first (the authored group anchors wave 1).
-        turn.Blocks.OfType<NarrativeStepBlock>().ShouldContain(s => s.Text == "Supervisor spawned 2 agents again", "the re-spawn wave Activity shows must render in the room too");
-
+        // (a) the SECOND spawn wave renders as its own group — not collapsed into the first (the authored group anchors
+        // wave 1). Post-P6 the "spawned N agents again" narrative_step lives on the Journal ③ beat; the room keeps the wave's cards.
         var waveGroup = turn.Blocks.OfType<AgentGroupBlock>().Single(g => g.Agents.Any(a => a.AgentRunId == w2b));
         waveGroup.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { w2a, w2b }, "the second wave shows exactly its own agents");
         waveGroup.Agents.Single(a => a.AgentRunId == w2b).Status.ShouldBe(nameof(AgentRunStatus.Failed), "the wave's FAILED agent is visible, as Activity shows");

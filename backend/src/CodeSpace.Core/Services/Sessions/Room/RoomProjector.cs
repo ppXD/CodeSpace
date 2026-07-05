@@ -282,18 +282,17 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var finalAnswerText = SupervisorOutcome.ReadStopSummary(stop?.OutcomeJson)
             ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
-        // The retry beats — one per retry decision, in tape order — each carrying its FRESH agent so the narrative can
-        // render "Supervisor retried a subtask" + that agent's own card, chronologically. Reuses the shared timeline
-        // copy authority for the line; a no-op retry (nothing staged) carries no agent.
+        // The retry beats — one per retry decision, in tape order — each carrying its FRESH agent so the room renders that
+        // agent's own "Retry" card chronologically. A no-op retry (nothing staged) carries no agent. (The retry's line +
+        // rationale live on the Journal ③ beat now.)
         var retrySteps = decisions
             .Where(d => d.DecisionKind == SupervisorDecisionKinds.Retry)
             .OrderBy(d => d.Sequence)
             .Select(d =>
             {
                 var agentId = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson).FirstOrDefault();
-                var (why, evidence) = SupervisorOutcome.ReadRetryRationale(d.PayloadJson);
 
-                return new RoomRetryStep(d.Sequence, SupervisorDecisionTimelineMap.RetryTitle(d), agentId == Guid.Empty ? null : agentId, FormatRationale(why, evidence));
+                return new RoomRetryStep(d.Sequence, agentId == Guid.Empty ? null : agentId);
             })
             .ToList();
 
@@ -460,15 +459,6 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
 
         return body == null && attachments.Count == 0 ? null : new RoomFinalAnswer { Text = body, Attachments = attachments };
-    }
-
-    /// <summary>The retry's structured rationale as one readable line — the reason, then the evidence it acted on. Null when the model authored neither.</summary>
-    private static string? FormatRationale(string? why, string? evidence)
-    {
-        var reason = string.IsNullOrWhiteSpace(why) ? null : why.Trim();
-        var basis = string.IsNullOrWhiteSpace(evidence) ? null : $"Evidence: {evidence.Trim()}";
-
-        return string.Join(" · ", new[] { reason, basis }.Where(p => p != null)) is { Length: > 0 } line ? line : null;
     }
 
     /// <summary>

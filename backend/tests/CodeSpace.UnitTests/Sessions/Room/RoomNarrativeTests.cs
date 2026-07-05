@@ -568,24 +568,23 @@ public class RoomNarrativeTests
             Metrics = new PhaseMetrics { AgentCount = 1, SucceededCount = 1 },
         };
 
-        var facts = new RoomTurnFacts { RetrySteps = new[] { new RoomRetryStep(3, "Supervisor retried a subtask", retryAgentId) } };
+        var facts = new RoomTurnFacts { RetrySteps = new[] { new RoomRetryStep(3, retryAgentId) } };
 
         var blocks = Build(new[] { authored, retryTape }, WorkflowRunStatus.Success, facts: facts).Blocks.ToList();
 
-        var retryIdx = blocks.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor retried a subtask");
-        retryIdx.ShouldBeGreaterThanOrEqualTo(0, "the retry beat renders as a step");
-
-        var retryCard = blocks.Skip(retryIdx + 1).OfType<AgentGroupBlock>().FirstOrDefault();
-        retryCard.ShouldNotBeNull("the retry's fresh agent renders as its OWN single-agent card, chronologically after the step");
-        retryCard!.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgentId, "the card is the retry's agent (self-labeled with its subtask), not lumped into the initial group");
+        // Post-P6 the retry narrative_step is gone (its line + rationale live on the Journal ③ beat); the room keeps the
+        // retry's fresh agent as its OWN "Retry" card, so the recovery is still visible chronologically.
+        var retryCard = blocks.OfType<AgentGroupBlock>().SingleOrDefault(g => g.Title == "Retry");
+        retryCard.ShouldNotBeNull("the retry's fresh agent renders as its own single-agent 'Retry' card");
+        retryCard!.Agents.ShouldHaveSingleItem().AgentRunId.ShouldBe(retryAgentId, "the card is the retry's agent, not lumped into the initial group");
     }
 
     [Fact]
-    public void No_retry_steps_render_no_retried_narrative_line()
+    public void No_retry_steps_render_no_retry_card()
     {
         var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Success);
 
-        n.Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("retried"), "no retries → no retry step (byte-identity floor)");
+        n.Blocks.OfType<AgentGroupBlock>().ShouldNotContain(g => g.Title == "Retry", "no retries → no Retry card (byte-identity floor)");
     }
 
     [Fact]
@@ -619,20 +618,11 @@ public class RoomNarrativeTests
 
         var blocks = Build(new[] { authored, spawn2 }, WorkflowRunStatus.Failure, facts: facts).Blocks.ToList();
 
-        var waveIdx = blocks.FindIndex(b => b is NarrativeStepBlock st && st.Text == "Supervisor spawned 2 agents again");
-        waveIdx.ShouldBeGreaterThanOrEqualTo(0, "the second spawn wave renders as its own step, not silently dropped");
-
-        var waveCard = blocks.Skip(waveIdx + 1).OfType<AgentGroupBlock>().FirstOrDefault();
-        waveCard.ShouldNotBeNull("the second wave's agents render as their OWN group after the wave step");
+        // Post-P6 the "spawned N agents again" narrative_step is gone; the second wave still renders as its OWN agent
+        // group, so a later wave (and its failed agent) is never silently dropped from the room.
+        var waveCard = blocks.OfType<AgentGroupBlock>().SingleOrDefault(g => g.Agents.Any(a => a.AgentRunId == wave2b));
+        waveCard.ShouldNotBeNull("the second wave's agents render as their own group");
         waveCard!.Agents.Select(a => a.AgentRunId).ShouldBe(new[] { wave2a, wave2b }, "the wave shows exactly the re-spawned agents (including the one that failed)");
-    }
-
-    [Fact]
-    public void No_re_spawn_waves_render_no_extra_group()
-    {
-        var n = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Success);
-
-        n.Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("again"), "no re-spawn → no wave step (byte-identity floor)");
     }
 
     [Fact]
@@ -659,35 +649,8 @@ public class RoomNarrativeTests
             .Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem().Text.ShouldBe("This turn ended with an error.");
     }
 
-    [Fact]
-    public void A_supervisor_crash_before_deciding_emits_a_connecting_beat_before_the_diagnostic()
-    {
-        // The reported case: plan → spawn(agents) with NO turn-closing decision, then Failure (the supervisor's NEXT
-        // decision died mid-LLM-call). The trajectory must not jump from the agents straight to the red error — a beat connects them.
-        var blocks = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 2) }, WorkflowRunStatus.Failure, error: "Node 'sup' failed.").Blocks.ToList();
-
-        var beatIdx = blocks.FindIndex(b => b is NarrativeStepBlock s && s.Text == "Supervisor's next step failed before it could decide.");
-        beatIdx.ShouldBeGreaterThanOrEqualTo(0, "a supervisor turn that crashed before its next decision shows a connecting beat");
-
-        blocks.FindIndex(b => b is DiagnosticBlock).ShouldBe(beatIdx + 1, "the beat sits immediately before the error diagnostic so the story reads continuously");
-    }
-
-    [Fact]
-    public void A_failed_turn_that_reached_a_terminal_decision_emits_no_next_step_beat()
-    {
-        // A supervisor that DID reach a clean stop (even with a failing outcome) didn't crash before deciding — no beat.
-        Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 2), Tape("stop", 3) }, WorkflowRunStatus.Failure)
-            .Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("next step failed"), "a terminal decision closes the turn → no crashed-before-deciding beat");
-    }
-
-    [Fact]
-    public void A_structural_fan_out_failure_emits_no_supervisor_next_step_beat()
-    {
-        // A flow.map fan-out failure has agent-bearing STRUCTURAL phases (never a supervisor closing verb); the beat is
-        // scoped to supervisor phases, so it must NOT false-fire here.
-        Build(new[] { Structural("map", "Fan out", 1, PhaseStatus.Failed, agentCount: 2) }, WorkflowRunStatus.Failure)
-            .Blocks.OfType<NarrativeStepBlock>().ShouldNotContain(s => s.Text.Contains("next step failed"), "a non-supervisor failure never shows the supervisor crash beat");
-    }
+    // (The "supervisor crashed before deciding" connecting narrative_step was retired in P6 — a failed turn's outcome is
+    // the retained diagnostic card, tested above; the journal ③ carries the chronological beats. No crash-beat tests.)
 
     [Fact]
     public void Checklist_questions_render_with_the_recommended_option_flagged()

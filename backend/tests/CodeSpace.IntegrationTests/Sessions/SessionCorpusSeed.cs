@@ -34,9 +34,9 @@ public static class SessionCorpusSeed
         SupervisorPlanSpawn,
         /// <summary>A plain single-agent run, no supervisor tape. Room: final_answer from the agent's own result; no beats in the journal.</summary>
         SingleAgent,
-        /// <summary>A supervisor turn that failed a subtask then retried it. Room: a retry narrative_step (+rationale) + the failed original and retry cards.</summary>
+        /// <summary>A supervisor turn that failed a subtask then retried it. Room: the failed original + the retry's own card (the retry line/rationale is a journal ③ beat post-P6).</summary>
         Retry,
-        /// <summary>A supervisor turn with a re-spawned wave and a deep node.failed error. Room: a respawn narrative_step, the wave's cards, and a diagnostic.</summary>
+        /// <summary>A supervisor turn with a re-spawned wave and a deep node.failed error. Room: the wave's cards + a diagnostic (the respawn line is a journal ③ beat post-P6).</summary>
         RespawnCrash,
         /// <summary>An ACTIVE run parked on a pending node decision. Room: a live decision block + the live_activity ticker (the interactive surfaces the journal leaves to the room frame).</summary>
         PendingDecision,

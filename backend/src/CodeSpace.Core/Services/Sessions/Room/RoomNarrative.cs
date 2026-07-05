@@ -164,20 +164,10 @@ public static class RoomNarrative
         if (authored.Count > 0)
         {
             for (var i = 0; i < authored.Count; i++)
-            {
                 EmitAuthoredRound(blocks, idPrefix, seq, authored[i], i + 1, facts);
-
-                // Between rounds, a supervisor "thinking" step — the analyze-then-plan-next beat that makes the chain legible.
-                if (i < authored.Count - 1 && authored[i].Agents.Count > 0)
-                    blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:think{i}", Seq = seq, Text = $"Supervisor reviewed {AgentWord(authored[i].Agents.Count)}' results · planning the next step", Tone = NarrativeTone.Info });
-            }
 
             EmitRetrySteps(blocks, idPrefix, seq, facts, agentById);
             EmitRespawnSteps(blocks, idPrefix, seq, facts, agentById);
-
-            // Authored phases don't carry the supervisor's closing operation — surface it from the tape.
-            foreach (var op in facts.Rounds.Select(r => r.Operation).Where(o => o != null).Select(o => o!).DistinctBy(o => o.Text))
-                blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:op:{op.Kind}", Seq = seq, Text = op.Text, Tone = op.Tone });
         }
         else if (facts.Rounds.Count > 0)
         {
@@ -198,13 +188,6 @@ public static class RoomNarrative
 
         // Pending decisions are "now" — the current ask.
         blocks.AddRange(decisions);
-
-        // A supervisor turn that FAILED after real agent work but never recorded a turn-closing decision (no
-        // stop/merge/ask_human) crashed on its NEXT decision — the decision loop died mid-LLM-call (e.g. an OpenAI
-        // gateway timeout) before it could persist. Emit a truthful connecting beat so the trajectory doesn't jump from
-        // the last agent group straight to the red error: the reader sees the supervisor WAS attempting its next step.
-        if (status == WorkflowRunStatus.Failure && SupervisorCrashedBeforeDeciding(narrativePhases))
-            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:next-step-failed", Seq = seq, Text = "Supervisor's next step failed before it could decide.", Tone = NarrativeTone.Info });
 
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             blocks.Add(RichDiagnostic(idPrefix, seq, status, error, facts, narrativePhases));
@@ -246,9 +229,6 @@ public static class RoomNarrative
 
         if (agents.Count > 0)
             blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:r{r.Index}:agents", Seq = seq, Title = IsActive(status) ? "Work" : "Agents", Agents = agents.Select(a => ToCard(a, facts)).ToList() });
-
-        if (r.Operation is { } op)
-            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:r{r.Index}:op", Seq = seq, Text = op.Text, Tone = op.Tone });
     }
 
     /// <summary>
@@ -261,12 +241,8 @@ public static class RoomNarrative
     private static void EmitRetrySteps(List<RoomBlock> blocks, string idPrefix, long seq, RoomTurnFacts facts, IReadOnlyDictionary<Guid, PhaseAgentRef> agentById)
     {
         foreach (var step in facts.RetrySteps)
-        {
-            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:retry:{step.Sequence}", Seq = seq, Text = step.Text, Tone = NarrativeTone.Info, Detail = step.Rationale });
-
             if (step.AgentRunId is { } id && agentById.TryGetValue(id, out var agent))
                 blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:retry:{step.Sequence}:agent", Seq = seq, Title = "Retry", Agents = new[] { ToCard(agent, facts) } });
-        }
     }
 
     /// <summary>
@@ -284,7 +260,6 @@ public static class RoomNarrative
 
             if (agents.Count == 0) continue;
 
-            blocks.Add(new NarrativeStepBlock { Id = $"{idPrefix}:respawn:{wave.Sequence}", Seq = seq, Text = $"Supervisor spawned {AgentWord(agents.Count)} again", Tone = NarrativeTone.Info });
             blocks.Add(new AgentGroupBlock { Id = $"{idPrefix}:respawn:{wave.Sequence}:agents", Seq = seq, Title = "Work", Agents = agents.Select(a => ToCard(a, facts)).ToList() });
         }
     }
@@ -341,17 +316,6 @@ public static class RoomNarrative
     private static bool IsActive(WorkflowRunStatus status) => status is WorkflowRunStatus.Pending or WorkflowRunStatus.Enqueued or WorkflowRunStatus.Running or WorkflowRunStatus.Suspended;
 
     private static bool IsTerminal(WorkflowRunStatus status) => status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
-
-    /// <summary>
-    /// Whether a FAILED supervisor turn ran real agent work yet its tape carries NO turn-closing decision (no
-    /// stop/merge/ask_human) — the decision loop crashed (e.g. an OpenAI gateway timeout) before it could record its
-    /// next verb. Scoped to SUPERVISOR phases so a flow.map fan-out failure — whose agent-bearing phases are structural
-    /// node phases, never a closing verb — does NOT false-fire. A clean stop, a mid-work failure that DID reach a
-    /// terminal decision, or a failure with no supervisor agents → false → the turn projects byte-identically.
-    /// </summary>
-    private static bool SupervisorCrashedBeforeDeciding(IReadOnlyList<RunPhase> narrativePhases) =>
-        narrativePhases.Any(p => p.SourceKey == SupervisorPhaseSource.Key && p.Agents.Count > 0)
-        && !narrativePhases.Any(p => p.SourceKey == SupervisorPhaseSource.Key && SupervisorDecisionKinds.ClosesTurn(p.Kind));
 
     // ─── the plan checklist (the whole current plan as a live tracker) ──────────────
 
