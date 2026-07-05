@@ -17,7 +17,10 @@ public sealed class DeepBoundsPreset : IBoundsPreset, ISingletonDependency
     public RouteCaps ToCaps() => new()
     {
         MaxParallelism = 5,
-        MaxRounds = 6,
+        // A sequential multi-subtask plan needs one spawn round PER subtask (a dependency chain can't parallelize) plus
+        // plan + confirm + a closing merge/stop — so 6 could not finish even a 4-subtask chain. 12 gives a real Deep plan
+        // room to run to completion with retry/merge slack; MaxTotalSpawns + the cost cap + no-progress still bound runaway.
+        MaxRounds = 12,
         MaxTotalSpawns = 20,
         AutonomyCeiling = "Standard",
         RequiresApproval = false,
