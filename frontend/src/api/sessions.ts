@@ -375,6 +375,9 @@ export interface JournalModelCall {
   costUsd?: number | null;
   status: string;
   error?: string | null;
+  /// A caution on an otherwise-completed call — "output truncated" / "content filtered" when the provider cut the answer
+  /// off (a length cap / policy block). Null on a clean completion and on a failed call (its `error` carries the reason).
+  finishNote?: string | null;
 }
 
 /// The full, on-demand detail of one model call — mirrors backend `ModelCallDetail`. Fetched when the drawer opens; each

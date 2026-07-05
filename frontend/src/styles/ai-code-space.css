@@ -6066,9 +6066,12 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-mccost { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .room-mcstatus { flex: none; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--rm-good); }
 .room-mcstatus-err { color: var(--rm-danger); }
+.room-mcstatus-warn { color: var(--rm-warn); }
 .room-mcrow-err .room-mcpurpose { color: var(--rm-danger); }
 .room-mcerr { color: var(--rm-danger); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .room-mcerr .room-mcic { color: var(--rm-danger); }
+.room-mcwarn { color: var(--rm-warn); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.room-mcwarn .room-mcic { color: var(--rm-warn); }
 
 /* The model-call drawer — Prompt / Result / Usage / Trace tabs over a scrollable monospace body. */
 .room-mctabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--line); }
