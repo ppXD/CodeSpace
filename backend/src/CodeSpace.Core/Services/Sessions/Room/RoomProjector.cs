@@ -284,10 +284,19 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var stopClass = SupervisorOutcome.ClassifyStop(stop?.PayloadJson, stop?.OutcomeJson);
         var degraded = stopClass.Degraded;
 
-        // The delivered answer text: the supervisor's closing line (or, for a forced stop, WHY it stopped — "budget
-        // exhausted" — so the RESULT never renders blank), else — for a single-agent run with no supervisor — that one
-        // agent's own final summary (its result IS the answer). A multi-agent run without a supervisor falls to the files.
-        var finalAnswerText = stopClass.DisplayText
+        // A budget-exhausted stop that carries its round cap reads "reached the N-round budget" on the RESULT — the SAME
+        // phrasing the Journal ③ stop step uses (SupervisorDecisionTimelineMap.StopTitle) — so the terminal explains WHY
+        // the run stopped SHORT of the plan, instead of the bare "budget exhausted".
+        var budgetText = SupervisorOutcome.ReadStopReason(stop?.PayloadJson) == SupervisorStopReasons.BudgetExhausted
+            && SupervisorOutcome.ReadStopMaxRounds(stop?.PayloadJson) is { } maxRounds
+            ? $"Reached the {maxRounds}-round budget before the plan finished."
+            : null;
+
+        // The delivered answer text: the round-budget line above, else the supervisor's closing line (or, for a forced
+        // stop, WHY it stopped — so the RESULT never renders blank), else — for a single-agent run with no supervisor —
+        // that one agent's own final summary (its result IS the answer). A multi-agent run without a supervisor falls to the files.
+        var finalAnswerText = budgetText
+            ?? stopClass.DisplayText
             ?? (decisions.Count == 0 && agentResults.Count == 1 ? agentResults[0].Summary : null);
 
         // The retry beats — one per retry decision, in tape order — each carrying its FRESH agent so the room renders that

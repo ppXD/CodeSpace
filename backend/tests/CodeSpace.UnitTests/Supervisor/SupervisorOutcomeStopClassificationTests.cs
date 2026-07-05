@@ -81,4 +81,16 @@ public class SupervisorOutcomeStopClassificationTests
     {
         SupervisorOutcome.ReadStopReason(payloadJson).ShouldBe(expected);
     }
+
+    [Theory]
+    [InlineData("""{"reason":"budget exhausted","maxRounds":12}""", 12)]
+    [InlineData("""{"reason":"budget exhausted"}""", null)]   // a pre-enrichment budget stop
+    [InlineData("{}", null)]
+    [InlineData(null, null)]
+    [InlineData("not json", null)]
+    [InlineData("""{"reason":"budget exhausted","maxRounds":"12"}""", null)]   // wrong type
+    public void ReadStopMaxRounds_reads_the_round_cap_off_a_budget_stop(string? payloadJson, int? expected)
+    {
+        SupervisorOutcome.ReadStopMaxRounds(payloadJson).ShouldBe(expected);
+    }
 }

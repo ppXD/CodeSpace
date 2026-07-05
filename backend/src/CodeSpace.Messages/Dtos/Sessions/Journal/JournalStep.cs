@@ -63,6 +63,9 @@ public sealed record JournalStep
     /// <summary>The structured facts of a MODEL-CALL step (purpose · model · tokens · latency · cost · status) — so the expanded model fold shows a legible row per call, not a bare "Model call" line. Null on every non-model-call step. Enriched by <c>ModelCallFactsSource</c>.</summary>
     public JournalModelCall? ModelCall { get; init; }
 
+    /// <summary>The 1-based SUPERVISOR ROUND this decision was — its turn in the run's decision loop. Rendered as a small "round N" tag so the trajectory reads legibly (which step was which round) and a terminal "budget exhausted" is a plain consequence of the round count. Null on every non-supervisor step. Enriched by <c>SupervisorRoundFactsSource</c>.</summary>
+    public int? Round { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 

@@ -29,7 +29,10 @@ public sealed record JournalStepFacts
     /// <summary>The structured facts of a MODEL-CALL step (purpose · model · tokens · latency · cost · status), so the expanded model fold shows a legible row. Null when the step isn't a model call.</summary>
     public JournalModelCall? ModelCall { get; init; }
 
-    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer · model-call) compose onto one step without clobbering each other.</summary>
+    /// <summary>The 1-based SUPERVISOR ROUND this decision was — its turn number (the decision's position in the run's decision loop). Rendered as a small "round N" tag so the trajectory is legible (which step was which round) and a terminal "budget exhausted" reads as a plain consequence of the round count. Null on a non-supervisor step (an agent event / tool call / lifecycle step has no round).</summary>
+    public int? Round { get; init; }
+
+    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer · model-call · round) compose onto one step without clobbering each other.</summary>
     public JournalStepFacts Merge(JournalStepFacts other) => new()
     {
         Rationale = other.Rationale ?? Rationale,
@@ -38,5 +41,6 @@ public sealed record JournalStepFacts
         Plan = other.Plan ?? Plan,
         Answer = other.Answer ?? Answer,
         ModelCall = other.ModelCall ?? ModelCall,
+        Round = other.Round ?? Round,
     };
 }
