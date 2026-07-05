@@ -407,6 +407,10 @@ export interface JournalStep {
   /// The structured facts of a MODEL_CALL step (purpose · model · tokens · latency · cost · status) — the expanded model
   /// fold renders these as a legible row. Null on every non-model-call step.
   modelCall?: JournalModelCall | null;
+  /// The 1-based SUPERVISOR ROUND this decision was — its turn in the run's decision loop. Rendered as a small "round N"
+  /// tag so the trajectory reads legibly and a "budget exhausted" terminal is a plain consequence of the round count.
+  /// Null on every non-supervisor step.
+  round?: number | null;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];
