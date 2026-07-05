@@ -665,6 +665,8 @@ function ModelCallRow({ step }: { step: JournalStep }) {
   const run = useContext(RunActionsContext);
   if (!mc) return <JournalStepRow step={step} muted />;
   const failed = mc.status === "failed";
+  // A completed-but-cut-off call (length cap / content filter) — surfaced as an amber caution, distinct from a hard failure.
+  const cutOff = !failed && !!mc.finishNote;
   const sequence = modelCallSequence(step.id);
   const clickable = run != null && sequence != null;
   return (
@@ -678,8 +680,9 @@ function ModelCallRow({ step }: { step: JournalStep }) {
         {mc.latencyMs != null && <span className="room-mcitem" title="Latency"><Sym n="clock" s={10} cls="room-mcic" /> {formatLatencyMs(mc.latencyMs)}</span>}
         {mc.costUsd != null && <span className="room-mcitem room-mccost" title="Estimated cost">{formatCostUsd(mc.costUsd)}</span>}
         {failed && mc.error && <span className="room-mcitem room-mcerr" title={mc.error}><Sym n="alert" s={10} cls="room-mcic" /> {mc.error.length > 72 ? mc.error.slice(0, 71) + "…" : mc.error}</span>}
+        {cutOff && <span className="room-mcitem room-mcwarn" title={`The answer was cut off — ${mc.finishNote}`}><Sym n="alert" s={10} cls="room-mcic" /> {mc.finishNote}</span>}
       </span>
-      <span className={`room-mcstatus${failed ? " room-mcstatus-err" : ""}`}>{failed ? "failed" : "done"}</span>
+      <span className={`room-mcstatus${failed ? " room-mcstatus-err" : cutOff ? " room-mcstatus-warn" : ""}`}>{failed ? "failed" : cutOff ? "cut off" : "done"}</span>
       {clickable && <Sym n="chevron-right" s={11} cls="room-mcchev" />}
     </button>
   );
