@@ -19,18 +19,38 @@ public static class SupervisorBounds
     /// <summary>
     /// The bounds that stop the run BEFORE the decider is even asked, in deterministic precedence so a re-entry
     /// re-derives the same forced stop: depth (a recursive supervisor nested too deep — checked at turn 0), then
-    /// the round budget, then the best-effort no-progress guard. Returns the terminal reason, or null to proceed.
+    /// the round budget (counted in PRODUCTIVE rounds — see <see cref="EffectiveRounds"/>), then the best-effort
+    /// no-progress guard. Returns the terminal reason, or null to proceed.
     /// </summary>
     public static string? PreDecision(SupervisorTurnContext context, SupervisorGoalPlan plan, int supervisorDepth)
     {
         if (supervisorDepth >= SupervisorLane.MaxSupervisorDepth) return SupervisorStopReasons.DepthCapExceeded;
 
-        if (context.TurnNumber >= plan.MaxRounds) return SupervisorStopReasons.BudgetExhausted;
+        if (EffectiveRounds(context) >= plan.MaxRounds) return SupervisorStopReasons.BudgetExhausted;
 
         if (context.NoProgressDecisions >= plan.MaxNoProgressDecisions) return SupervisorStopReasons.NoProgress;
 
         return null;
     }
+
+    /// <summary>
+    /// The PRODUCTIVE round count the budget bounds: the turn number MINUS the prior NO-OP spawn/retry decisions.
+    /// A settled spawn/retry that staged ZERO agents dispatched nothing — it made no progress toward the plan, so it
+    /// must not steal a round from it (the reported failure: a 4-subtask plan on a 6-round budget stalled because the
+    /// model burned 3 rounds on empty spawns). The TurnNumber fence still advances for EVERY decision (the idempotency
+    /// key + exactly-once replay are unperturbed); only the BUDGET check discounts the no-ops. This can't spin forever:
+    /// a no-op stages no new result, so it increments <c>NoProgressDecisions</c> — the no-progress guard (checked
+    /// above) stops a run that only ever no-ops. Replay-deterministic: read off the SAME durable prior-decision tape
+    /// every rehydrate folds. When no decision was a no-op (the common case), this equals <c>TurnNumber</c> exactly.
+    /// </summary>
+    internal static int EffectiveRounds(SupervisorTurnContext context) => context.TurnNumber - NoOpDecisions(context);
+
+    /// <summary>How many prior SETTLED spawn/retry decisions staged NO agent — the no-op dispatches that dispatched nothing. Read off the recorded staged-agent count (0 ⇒ no-op). Every other verb (plan / ask / merge / resolve / stop) is a real decision and is never discounted.</summary>
+    private static int NoOpDecisions(SupervisorTurnContext context) =>
+        context.PriorDecisions.Count(d =>
+            d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry
+            && d.Status == SupervisorDecisionStatus.Succeeded
+            && SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson) == 0);
 
     /// <summary>
     /// The bounds that refuse the DECIDER'S CHOSEN decision: a spawn decision whose fan-out K exceeds the
