@@ -482,8 +482,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                     { value: "Gate", label: "Gate — block a weak decision", desc: "Hard gate: a flagged decision does not execute — self-revise, re-review, then escalate to you" },
                     { value: "Improve", label: "Improve — revise once against the critique", desc: "One self-revision folds the critique in, then the decision executes" },
                   ]} onChange={v => setC({ decisionReview: v })} />
-                  <HelpTip title="Decision critic — the hard-gate ladder" note="Reviews every supervisor move before it takes effect. A failed review is fail-open; your approve absolves only the very next decision.">
-                    <DecisionLadderDiagram />
+                  <HelpTip title="Decision critic — what each option does" note="Your current choice is the vivid lane. Reviews every supervisor move BEFORE it takes effect; your approve on an escalation absolves only the very next decision.">
+                    <DecisionLadderDiagram current={cfg.decisionReview} />
                   </HelpTip>
                 </div>
               </> : (
@@ -509,8 +509,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                 {planCapable
                   ? <div className="lt3-hrow">
                       <Combo label="Plan critic" value={cfg.plannerReview} options={planCriticOpts} onChange={v => setC({ plannerReview: v })} />
-                      <HelpTip title="Plan critic — how Gate and Improve flow" note="A failed review is fail-open: the original plan proceeds. On Deep, Gate is the hard decision ladder instead — a flagged plan does not execute.">
-                        <PlanCriticDiagram />
+                      <HelpTip title="Plan critic — what each option does" note="Your current choice is the vivid lane. Reviewer model / Independent agent picks WHO reviews. On Deep, Gate is the hard ladder — a flagged plan does not execute.">
+                        <PlanCriticDiagram current={cfg.plannerReview} />
                       </HelpTip>
                     </div>
                   : <TierRow label="Plan critic" tier="Quick runs without a plan" />}
@@ -555,8 +555,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                     { value: "Gate", label: "Gate — flag a weak change for human review", desc: "Pick when you review results: a weak change lands NeedsReview for you, never silently consumed" },
                     { value: "Improve", label: "Improve — feed the critique back, agent revises", desc: "Pick for unattended runs: the critique feeds back and buys a self-revise round" },
                   ]} onChange={v => setC({ outputReview: v })} />
-                  <HelpTip title="Evaluation — how the result is judged" note="Checks verify objectively first; the critic judges against your criteria; failures buy bounded revise rounds before anything is flagged.">
-                    <EvaluationPipelineDiagram />
+                  <HelpTip title="Output critic — what each option does" note="Your current choice is the vivid lane. Reviewer = WHO judges (model reads the diff · real agent clones the repo). Self-revise = the ×N. Checks run first, objectively; criteria are the critic's yardstick.">
+                    <EvaluationPipelineDiagram current={cfg.outputReview} />
                   </HelpTip>
                 </div>
                 <Combo label="Reviewer" value={cfg.reviewerAgent ? "agent" : "model"} options={[
