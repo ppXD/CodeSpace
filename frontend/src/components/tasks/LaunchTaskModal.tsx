@@ -3,7 +3,9 @@ import { createPortal } from "react-dom";
 
 import type { TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
+import { presetOf, QUALITY_PRESETS } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
+import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
 import { usePopover } from "@/components/common/usePopover";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
@@ -88,6 +90,17 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Per-row tier honesty (the Coordination tab's lt3-cdisabled pattern, at row grain — these two tabs mix tiers):
   // an off-tier control renders as a muted read-only row instead of an armed switch the wire would silently drop.
   const planCapable = effort !== "quick";   // every tier that authors a plan can park on it + critique it
+
+  // TIER-AWARE Gate copy: the same "Plan critic = Gate" is a SOFT annotate-for-the-human on Standard (concerns land
+  // as risks on the plan / confirm card, the plan is never discarded) but the HARD decision ladder on Deep (a flagged
+  // plan does not execute — self-revise → re-review → escalate). Same wire value, different consequence — say so.
+  const planCriticOpts: Option[] = [
+    { value: "None", label: "Off", desc: "No plan review — fine for small tasks, or when you read the plan yourself" },
+    effort === "deep"
+      ? { value: "Gate", label: "Gate — block until the plan passes", desc: "Hard gate on Deep: a flagged plan does not execute — self-revise, re-review, then escalate to you" }
+      : { value: "Gate", label: "Gate — annotate concerns onto the plan", desc: "Pick when you will look: concerns + evidence land on the plan and the confirm card for your call" },
+    { value: "Improve", label: "Improve — one revision against the critique", desc: "Pick for unattended runs: one extra planner call folds the critique in automatically" },
+  ];
   // Design-ahead Customize config (interactive UI state; not yet sent to the launch command).
   const [cfg, setCfg] = useState({
     pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
@@ -384,6 +397,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               <button type="button" className="lt3-reset" onClick={resetTab}>Reset</button>
             </div>
 
+            <div className="lt3-presets" role="radiogroup" aria-label="Quality preset">
+              <span className="lt3-presets-l">Quality</span>
+              {QUALITY_PRESETS.map(p => (
+                <button key={p.id} type="button" className="lt3-preset" data-on={presetOf(cfg) === p.id} title={p.hint} onClick={() => setC(p.config)}>{p.label}</button>
+              ))}
+              {presetOf(cfg) === null && <span className="lt3-preset-custom">Custom mix</span>}
+            </div>
+
             <div className="lt3-cbody">
               {customizeTab === "execution" && <>
                 <div className="lt3-cnote">Default settings for agents created during the run.</div>
@@ -455,7 +476,16 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                 <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
                 <SToggleRow label="Integrate branches" on={cfg.integrateBranches} onToggle={() => setC({ integrateBranches: !cfg.integrateBranches })} />
-                <Combo label="Decision critic" value={cfg.decisionReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak decision" }, { value: "Improve", label: "Improve — revise once against the critique" }]} onChange={v => setC({ decisionReview: v })} />
+                <div className="lt3-hrow">
+                  <Combo label="Decision critic" value={cfg.decisionReview} options={[
+                    { value: "None", label: "Off", desc: "Decisions execute unreviewed — plan decisions can still use the Plan critic" },
+                    { value: "Gate", label: "Gate — block a weak decision", desc: "Hard gate: a flagged decision does not execute — self-revise, re-review, then escalate to you" },
+                    { value: "Improve", label: "Improve — revise once against the critique", desc: "One self-revision folds the critique in, then the decision executes" },
+                  ]} onChange={v => setC({ decisionReview: v })} />
+                  <HelpTip title="Decision critic — the hard-gate ladder" note="Reviews every supervisor move before it takes effect. A failed review is fail-open; your approve absolves only the very next decision.">
+                    <DecisionLadderDiagram />
+                  </HelpTip>
+                </div>
               </> : (
                 <div className="lt3-cdisabled">Coordination runs in <b>Deep</b> mode. Switch Effort to Deep to configure how multiple agents coordinate, review, and retry.</div>
               )}
@@ -476,7 +506,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
               {customizeTab === "planning" && <>
                 <div className="lt3-cnote">Think it through before any agent runs. Confirm-plan-first parks every plan for your approval (any answer that isn't "approve" becomes revision feedback). The plan critic reviews the PLAN itself on every tier; the reviewer model serves ALL critics (plan / decision / output).</div>
                 {planCapable ? <SToggleRow label="Confirm plan first" on={cfg.requirePlanConfirmation} onToggle={() => setC({ requirePlanConfirmation: !cfg.requirePlanConfirmation })} /> : <TierRow label="Confirm plan first" tier="Quick runs without a plan" />}
-                {planCapable ? <Combo label="Plan critic" value={cfg.plannerReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — annotate concerns onto the plan" }, { value: "Improve", label: "Improve — one revision against the critique" }]} onChange={v => setC({ plannerReview: v })} /> : <TierRow label="Plan critic" tier="Quick runs without a plan" />}
+                {planCapable
+                  ? <div className="lt3-hrow">
+                      <Combo label="Plan critic" value={cfg.plannerReview} options={planCriticOpts} onChange={v => setC({ plannerReview: v })} />
+                      <HelpTip title="Plan critic — how Gate and Improve flow" note="A failed review is fail-open: the original plan proceeds. On Deep, Gate is the hard decision ladder instead — a flagged plan does not execute.">
+                        <PlanCriticDiagram />
+                      </HelpTip>
+                    </div>
+                  : <TierRow label="Plan critic" tier="Quick runs without a plan" />}
                 <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent", desc: "Prefers a different model than the producer; a one-model pool falls back to the same model, independently prompted" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
               </>}
 
@@ -512,8 +549,20 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                       }} />
                   </div>
                 </RowPop>}
-                <Combo label="Agent output critic" value={cfg.outputReview} options={[{ value: "None", label: "Off" }, { value: "Gate", label: "Gate — flag a weak change for human review" }, { value: "Improve", label: "Improve — feed the critique back, agent revises" }]} onChange={v => setC({ outputReview: v })} />
-                <Combo label="Reviewer" value={cfg.reviewerAgent ? "agent" : "model"} options={[{ value: "model", label: "Model — in-process critic reads the diff" }, { value: "agent", label: "Independent agent — clones the branch, other harness" }]} onChange={v => setC({ reviewerAgent: v === "agent" })} />
+                <div className="lt3-hrow">
+                  <Combo label="Agent output critic" value={cfg.outputReview} options={[
+                    { value: "None", label: "Off", desc: "No result review — acceptance checks (if any) still verify objectively" },
+                    { value: "Gate", label: "Gate — flag a weak change for human review", desc: "Pick when you review results: a weak change lands NeedsReview for you, never silently consumed" },
+                    { value: "Improve", label: "Improve — feed the critique back, agent revises", desc: "Pick for unattended runs: the critique feeds back and buys a self-revise round" },
+                  ]} onChange={v => setC({ outputReview: v })} />
+                  <HelpTip title="Evaluation — how the result is judged" note="Checks verify objectively first; the critic judges against your criteria; failures buy bounded revise rounds before anything is flagged.">
+                    <EvaluationPipelineDiagram />
+                  </HelpTip>
+                </div>
+                <Combo label="Reviewer" value={cfg.reviewerAgent ? "agent" : "model"} options={[
+                  { value: "model", label: "Model — in-process critic reads the diff", desc: "Fast and cheap — judges the change as text" },
+                  { value: "agent", label: "Independent agent — clones the branch, other harness", desc: "Strongest — a real run inspects the actual repo (plans too); its approval is co-signed by a model" },
+                ]} onChange={v => setC({ reviewerAgent: v === "agent" })} />
                 {effort === "deep"
                   ? <TierRow label="Self-revise" tier="Deep units revise via the supervisor's retry loop" />
                   : <Combo label="Self-revise" value={cfg.reviseRounds} options={[{ value: "", label: "Auto — one round under Improve" }, { value: "0", label: "Off — a failure stands immediately" }, { value: "1", label: "1 round — feed the failure back once" }, { value: "2", label: "2 rounds" }]} onChange={v => setC({ reviseRounds: v })} />}
