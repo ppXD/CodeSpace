@@ -121,6 +121,18 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         args.Add("--append-system-prompt");
         args.Add(AgentOperatingContract.Compose(task.SystemPrompt));
 
+        // B1 skill-load fix: `claude --print` (headless/SDK) is HERMETIC — it loads NO filesystem setting sources by
+        // default, so the personal skills we project under CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md are IGNORED unless we
+        // opt the "user" source in (the CLI help: --setting-sources loads user|project|local; the print-mode default is
+        // none). CLAUDE_CONFIG_DIR is the per-run ISOLATED config home (§344), so `--setting-sources user` reads ONLY
+        // this run's projected skills — never the operator's ~/.claude, and never the target repo's .claude (project /
+        // local are deliberately omitted). Gated on skills present so a persona-only / bare run is argv byte-identical.
+        if (task.Skills is { Count: > 0 })
+        {
+            args.Add("--setting-sources");
+            args.Add("user");
+        }
+
         AppendSealedEgressSettings(args, task);
 
         // Omit --model when blank so the CLI picks its own default (the Model=empty rule).
