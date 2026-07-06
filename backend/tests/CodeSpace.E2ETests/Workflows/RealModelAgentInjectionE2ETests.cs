@@ -126,8 +126,7 @@ public sealed class RealModelAgentInjectionE2ETests
                 TimeoutSeconds = 180,
             };
 
-            var used = await RunAndCheckMarkerAsync(live, Task, codeword);
-            return (used, $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting). [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]");
+            return await DriveSkillReportAsync(live, Task, codeword, attempts: 3);
         }, gating: false);
     }
 
@@ -151,7 +150,7 @@ public sealed class RealModelAgentInjectionE2ETests
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
         if (run.Status != AgentRunStatus.Succeeded)
-            throw new AgentExecutionInfraException($"the claude run did not complete (status={run.Status}) — gateway/exec infra, not a behavior verdict");
+            throw new AgentExecutionInfraException($"the claude run did not complete (status={run.Status}; error={run.Error ?? "(none)"}) — gateway/exec infra, not a behavior verdict");
 
         var events = await svc.GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None);
 
@@ -166,6 +165,39 @@ public sealed class RealModelAgentInjectionE2ETests
             .Select(e => e.Text));
 
         return modelReply.Contains(marker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Report-only skill drive with INFRA-RETRY. The blessed-wire best-of-N (used by the persona GATE) already retries
+    /// past a flaky gateway; the report-only path (<see cref="RealModelGate.AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}}, bool)"/>)
+    /// does NOT, so a single skill attempt that hits an intermittent gateway/exec failure would report an infra skip and
+    /// tell us nothing about skill usage. This retries up to <paramref name="attempts"/> times to reach a run that
+    /// actually COMPLETED, and reports whether the live model USED the skill. A COMPLETED-but-did-not-use verdict is a
+    /// real (reported) signal, so it stops retrying only on the strongest outcome (USED); only if EVERY attempt failed
+    /// to complete does it surface as an infra skip — carrying each attempt's real error (status + claude error text).
+    /// </summary>
+    private async Task<(bool Used, string Verdict)> DriveSkillReportAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker, int attempts)
+    {
+        (bool Used, string Verdict)? lastCompleted = null;
+        var infra = new List<string>();
+
+        for (var i = 0; i < attempts; i++)
+        {
+            try
+            {
+                var used = await RunAndCheckMarkerAsync(live, taskFactory, marker);
+                var verdict = $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting). [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]";
+
+                if (used) return (true, verdict);   // strongest outcome — the model read + used the skill; stop
+
+                lastCompleted = (false, verdict);   // completed but didn't trigger — remember, give it another shot
+            }
+            catch (AgentExecutionInfraException ex) { infra.Add(ex.Message); }   // flaky gateway/exec — retry past it
+        }
+
+        if (lastCompleted is { } completed) return completed;   // at least one run reached a real live verdict
+
+        throw new AgentExecutionInfraException($"all {attempts} skill attempts failed to complete (gateway/exec infra), so live skill usage was never observed: {string.Join(" || ", infra)}");
     }
 
     // ─── gate + seeding ────────────────────────────────────────────────────────

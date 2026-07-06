@@ -145,7 +145,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
         if (run.Status != AgentRunStatus.Succeeded)
-            throw new AgentExecutionInfraException($"the codex run did not complete (status={run.Status}) — gateway/exec/wire infra (the shared gateway may not serve Codex's `responses` wire), not a behavior verdict");
+            throw new AgentExecutionInfraException($"the codex run did not complete (status={run.Status}; error={run.Error ?? "(none)"}) — gateway/exec/wire infra (the shared gateway may not serve Codex's `responses` wire), not a behavior verdict");
 
         var events = await svc.GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None);
 
