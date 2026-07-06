@@ -29,9 +29,6 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional cap on how many agents one spawn decision may fan out at once. Null = the schema's hard <c>maxItems</c> (20). Clamped to <c>[1, 20]</c> by the plan.</summary>
     public int? MaxParallelism { get; init; }
 
-    /// <summary>Optional cap on how many DECISIONS (turns) the supervisor may take before a fail-closed force-STOP. Null = the <c>SupervisorLane.DecisionBudget</c> default (30). Clamped to <c>[1, DecisionBudget]</c> — an operator may TIGHTEN the budget, never raise it past the hard ceiling.</summary>
-    public int? MaxRounds { get; init; }
-
     /// <summary>Optional cap on how many agents the supervisor may spawn IN TOTAL across the whole run (summed from the ledger). Null = the <c>SupervisorLane.DefaultMaxTotalSpawns</c> default. Clamped to <c>[1, MaxTotalSpawnsCeiling]</c>.</summary>
     public int? MaxTotalSpawns { get; init; }
 

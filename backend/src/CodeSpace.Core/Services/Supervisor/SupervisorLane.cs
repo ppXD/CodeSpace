@@ -10,12 +10,10 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorLane
 {
     /// <summary>
-    /// The hard cap on decisions one supervisor run may emit (PR-E E2). Load-bearing + fail-closed: the turn
-    /// loop counts DECIDED decisions from the durable ledger and, when the count would meet/exceed this,
-    /// forces a terminal <c>stop</c> ("budget exhausted") instead of asking the decider — so a runaway loop
-    /// always terminates. Counted from the ledger (never an in-memory tally), so it survives a restart/replay
-    /// and can't be reset by re-entering the node. An operator's <c>MaxRounds</c> may TIGHTEN it below this,
-    /// never raise it past this hard ceiling.
+    /// The CEILING for the best-effort no-progress guard (<c>SupervisorGoalPlan.NoProgressCeiling</c>): an
+    /// operator's <c>MaxNoProgressDecisions</c> is clamped to <c>[1, DecisionBudget]</c>. A supervised run has
+    /// no hard round cap — it loops until DONE, bounded only by the no-progress guard, the total-spawn cap, and
+    /// the cost cap. This constant just keeps the no-progress cap from being set implausibly high.
     /// </summary>
     public const int DecisionBudget = 30;
 

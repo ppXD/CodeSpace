@@ -125,7 +125,6 @@ public class SupervisorEvalScorecardTests
     }
 
     [Theory]
-    [InlineData(SupervisorStopReasons.BudgetExhausted, SupervisorOutcomes.BudgetExhausted)]
     [InlineData(SupervisorStopReasons.TotalSpawnCapReached, SupervisorOutcomes.BudgetExhausted)]
     [InlineData(SupervisorStopReasons.SpawnFanOutExceedsCap, SupervisorOutcomes.BudgetExhausted)]
     [InlineData(SupervisorStopReasons.DepthCapExceeded, SupervisorOutcomes.BudgetExhausted)]
@@ -174,7 +173,7 @@ public class SupervisorEvalScorecardTests
         SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.GovernanceDenied, acceptancePassed: false) }))
             .Outcome.ShouldBe(SupervisorOutcomes.GovernanceDenied);
 
-        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.BudgetExhausted, acceptancePassed: false) }))
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.NoProgress, acceptancePassed: false) }))
             .Outcome.ShouldBe(SupervisorOutcomes.BudgetExhausted);
     }
 
@@ -314,7 +313,7 @@ public class SupervisorEvalScorecardTests
         {
             Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed") }),
             Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed") }),
-            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.BudgetExhausted) }),
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.NoProgress) }),
             Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.GovernanceDenied) }),
             Run(new[] { Decision(SupervisorDecisionKinds.Plan) }, terminalStatus: null),   // not-scored → absent from the distribution
         });
@@ -344,7 +343,7 @@ public class SupervisorEvalScorecardTests
         {
             Run(new[] { Decision(SupervisorDecisionKinds.Spawn, staged: 2), Decision(SupervisorDecisionKinds.Stop, stopReason: "completed") },
                 spawnedStatuses: new[] { AgentRunStatus.Succeeded, AgentRunStatus.Failed }, timeToStopSeconds: 7, id: Guid.Parse("11111111-1111-1111-1111-111111111111")),
-            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.BudgetExhausted) },
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.NoProgress) },
                 timeToStopSeconds: 3, id: Guid.Parse("22222222-2222-2222-2222-222222222222")),
             Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: false) },
                 timeToStopSeconds: 5, id: Guid.Parse("33333333-3333-3333-3333-333333333333")),   // the acceptance-failed bucket participates in the snapshot

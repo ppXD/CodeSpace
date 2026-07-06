@@ -6,15 +6,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// EXACTLY which bound stopped the run (never a silent truncation, never an unbounded run). The literals are
 /// load-bearing (a re-entry after a bound tripped re-derives the same forced stop deterministically) + pinned
 /// by a unit test (Rule 8) so a rename is a visible decision.
-///
-/// <para><see cref="BudgetExhausted"/> stays on <c>SupervisorTurnService</c> as the historical E2 reason; the
-/// E5 reasons live here together so the full bound vocabulary is legible in one place.</para>
 /// </summary>
 public static class SupervisorStopReasons
 {
-    /// <summary>The round/decision budget (<c>MaxRounds</c>, ≤ <c>SupervisorLane.DecisionBudget</c>) was reached — the run can take no more decisions.</summary>
-    public const string BudgetExhausted = "budget exhausted";
-
     /// <summary>The total-spawned cap (<c>MaxTotalSpawns</c>) would be breached by a further spawn — the run has spawned its allotted agents.</summary>
     public const string TotalSpawnCapReached = "total spawn cap reached";
 

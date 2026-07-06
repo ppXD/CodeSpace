@@ -55,7 +55,6 @@ public sealed class AgentSupervisorNode : INodeRuntime
               "properties": {
                 "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns — the LLM decider folds it into the prompt that chooses each turn's decision (plan/spawn/retry/merge/ask_human/stop)." },
                 "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the supervisor posts its ask_human + approval questions into (and parks for the answer). Leave empty to disable mid-loop human questions + approval gating." },
-                "maxRounds": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Hard cap on how many decisions (turns) the supervisor may take before it force-stops. Defaults to 30; you can only tighten it below the ceiling." },
                 "maxParallelism": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max agents one spawn decision may fan out at once. Defaults to 20 (the schema ceiling)." },
                 "maxTotalSpawns": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Max agents the whole run may spawn in total before it force-stops. Defaults to 50." },
                 "maxCostUsd": { "type": "number", "minimum": 0, "description": "Optional USD budget for the run's realized agent token spend. Leave empty for no cost cap (the total-spawn cap still bounds the run). Spend above the budget force-stops the next spawn." },
@@ -124,7 +123,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         if (!TryReadRunIdentity(context, out var supervisorRunId, out var teamId))
             return NodeResult.Fail("agent.supervisor could not read the run id / team id from the system scope.");
 
-        var goalConfig = RelaxBoundsForReplay(ReadGoalConfig(context.Config), context);
+        var goalConfig = ReadGoalConfig(context.Config);
         var goal = ReadString(context.Config, "goal");
         var conversationId = ReadOptionalGuid(context.Config, "conversationId");
 
@@ -363,28 +362,6 @@ public sealed class AgentSupervisorNode : INodeRuntime
         catch (JsonException) { return null; }
     }
 
-    /// <summary>
-    /// On a REPLAY / RERUN, drop the frozen round + total-spawn ceilings so the run falls to the CURRENT back-stop
-    /// defaults (<c>SupervisorGoalPlan</c>) instead of a stale tier value baked into the snapshot at the original launch —
-    /// a rerun should LOOP UNTIL DONE under today's policy (concurrency + cost + no-progress), not the round budget the
-    /// original run happened to carry. A fresh (non-replay) run keeps an operator's explicit pin. This touches ONLY the
-    /// in-memory config the node reads: the frozen snapshot JSON + its tamper hash are untouched, and the decision
-    /// idempotency keys (kind + payload + turn, never the plan bounds) are unaffected — so a crash-replay of the SAME
-    /// rerun re-derives the SAME relaxed bounds every walk (the relaxation is a pure function of the durable source_type).
-    /// MaxParallelism / MaxCostUsd / MaxNoProgressDecisions are left exactly as the run carried them.
-    /// </summary>
-    private static SupervisorGoalConfig? RelaxBoundsForReplay(SupervisorGoalConfig? goalConfig, NodeRunContext context) =>
-        RelaxBoundsForReplay(goalConfig, ReadString(context.Scope.Sys, SystemScopeKeys.SourceType));
-
-    /// <summary>The pure relax rule — split out so it is unit-testable without a node context: a REPLAY/RERUN source drops the frozen round + total-spawn ceilings (→ current back-stop defaults); any other source (a fresh manual/api/schedule launch) keeps the config verbatim so an operator's explicit pin still applies.</summary>
-    internal static SupervisorGoalConfig? RelaxBoundsForReplay(SupervisorGoalConfig? goalConfig, string sourceType)
-    {
-        if (goalConfig == null) return null;
-
-        return sourceType is WorkflowRunSourceTypes.Replay or WorkflowRunSourceTypes.Rerun
-            ? goalConfig with { MaxRounds = null, MaxTotalSpawns = null }
-            : goalConfig;
-    }
-
+    /// <summary>Case-insensitive options for deserializing the node's <see cref="SupervisorGoalConfig"/> bag (the camelCase config keys the ConfigSchema declares).</summary>
     private static readonly JsonSerializerOptions GoalConfigOptions = new() { PropertyNameCaseInsensitive = true };
 }

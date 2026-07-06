@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 /// minimal lane graph the supervisor integration tests author — whose <c>agent.supervisor</c> node Config maps
 /// from the context's <see cref="TaskLaunchSeed.Goal"/>, the resolved <see cref="ResolvedAgentProfile"/>, and
 /// the route's <see cref="RouteCaps"/> onto the EXACT camelCase keys the node's ConfigSchema reads (a
-/// <c>SupervisorGoalConfig</c> shape): goal · agentProfile · maxParallelism / maxRounds / maxTotalSpawns ·
+/// <c>SupervisorGoalConfig</c> shape): goal · agentProfile · maxParallelism / maxTotalSpawns ·
 /// approvalPolicy. So a snapshot supervisor run executes IDENTICALLY to an authored agent.supervisor node — the
 /// turn service sees the same goal config.
 ///
@@ -23,7 +23,7 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 ///     <item><c>agentProfile</c> = the resolved profile field-for-field (repositoryId / harness / model /
 ///       agentDefinitionId / modelCredentialId / runnerKind / enableMcp / autonomyLevel) — the default envelope
 ///       every spawned agent inherits.</item>
-///     <item><c>maxParallelism</c> / <c>maxRounds</c> / <c>maxTotalSpawns</c> = the route's
+///     <item><c>maxParallelism</c> / <c>maxTotalSpawns</c> = the route's
 ///       <see cref="RouteCaps"/> (the RouteCaps→SupervisorGoalConfig fold) — the operator's safety bounds. The
 ///       node clamps each to its bounds ceiling at EXECUTION (this build never clamps).</item>
 ///     <item><c>approvalPolicy</c> = <c>"spawns"</c> when <c>Caps.RequiresApproval</c>, else <c>"none"</c>.</item>
@@ -81,7 +81,6 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         };
 
         AddIfPresent(config, "maxParallelism", context.Route.Caps.MaxParallelism);
-        AddIfPresent(config, "maxRounds", context.Route.Caps.MaxRounds);
         AddIfPresent(config, "maxTotalSpawns", context.Route.Caps.MaxTotalSpawns);
         // Forwards the cost cap the SAME way as the sibling caps — the operator's launch-surface budget
         // (TaskCapsOverride.MaxCostUsd → the router's CapsOverride seam → Route.Caps) reaches the supervisor config

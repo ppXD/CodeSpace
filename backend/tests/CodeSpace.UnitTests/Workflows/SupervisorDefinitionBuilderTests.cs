@@ -13,7 +13,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Pins the supervisor projection builder: the emitted graph is the minimal lane shape
 /// (<c>trigger.manual → agent.supervisor → builtin.terminal</c>), it ALWAYS passes the REAL
 /// <see cref="DefinitionValidator"/> over the real node manifests, and the <c>agent.supervisor</c> node Config
-/// carries the goal + the mapped agentProfile + the caps→bounds (maxParallelism / maxRounds / maxTotalSpawns
+/// carries the goal + the mapped agentProfile + the caps→bounds (maxParallelism / maxTotalSpawns
 /// from <c>Route.Caps</c>) + the approvalPolicy on the EXACT camelCase keys the node's ConfigSchema reads. The
 /// build is PURE (no lane check, no clamp) — the builder lifts bytes; the node clamps + gates at execution.
 /// </summary>
@@ -97,7 +97,7 @@ public class SupervisorDefinitionBuilderTests
     public void Output_passes_the_real_validator_for_a_full_context()
     {
         var profile = new ResolvedAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "claude-code", Model = "claude-sonnet", RunnerKind = "local", AutonomyLevel = "Trusted", EnableMcp = true };
-        var caps = new RouteCaps { MaxParallelism = 5, MaxRounds = 6, MaxTotalSpawns = 20, RequiresApproval = true };
+        var caps = new RouteCaps { MaxParallelism = 5, MaxTotalSpawns = 20, RequiresApproval = true };
 
         RealValidator().Validate(Builder.Build(Context(profile, caps))).IsValid.ShouldBeTrue();
     }
@@ -113,12 +113,11 @@ public class SupervisorDefinitionBuilderTests
     [Fact]
     public void Supervisor_config_folds_the_caps_into_the_bounds()
     {
-        var caps = new RouteCaps { MaxParallelism = 5, MaxRounds = 6, MaxTotalSpawns = 20, MaxCostUsd = 12.50m };
+        var caps = new RouteCaps { MaxParallelism = 5, MaxTotalSpawns = 20, MaxCostUsd = 12.50m };
 
         var sup = Builder.Build(Context(caps: caps)).Nodes.Single(n => n.Id == "sup");
 
         sup.Config.GetProperty("maxParallelism").GetInt32().ShouldBe(5, "the route's parallelism cap folds onto the supervisor bound");
-        sup.Config.GetProperty("maxRounds").GetInt32().ShouldBe(6);
         sup.Config.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(20);
         sup.Config.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12.50m, "the route's cost cap folds onto the supervisor bound as a JSON number (SOTA #4)");
     }
@@ -240,7 +239,6 @@ public class SupervisorDefinitionBuilderTests
 
         sup.Config.TryGetProperty("agentProfile", out _).ShouldBeFalse("an absent profile omits the nested object — a bare codex-cli/no-repo supervisor");
         sup.Config.TryGetProperty("maxParallelism", out _).ShouldBeFalse("an unset cap omits the key — the node falls to its SupervisorLane default");
-        sup.Config.TryGetProperty("maxRounds", out _).ShouldBeFalse();
         sup.Config.TryGetProperty("maxTotalSpawns", out _).ShouldBeFalse();
         sup.Config.TryGetProperty("maxCostUsd", out _).ShouldBeFalse("an unset cost cap omits the key — the run has no cost budget (SOTA #4 default)");
         sup.Config.TryGetProperty("supervisorModelId", out _).ShouldBeFalse("no resolved brain ⇒ no key — a hand-authored node keeps its own supervisorModelId, and an empty pool fails closed at decide time (the honest floor)");

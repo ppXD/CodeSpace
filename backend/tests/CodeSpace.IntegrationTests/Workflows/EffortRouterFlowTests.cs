@@ -205,7 +205,7 @@ public class EffortRouterFlowTests
         public const string FakeKind = "fake-bounds";
         public const int DistinctiveParallelism = 42;
         public string PresetKind => FakeKind;
-        public RouteCaps ToCaps() => new() { MaxParallelism = DistinctiveParallelism, MaxRounds = 7 };
+        public RouteCaps ToCaps() => new() { MaxParallelism = DistinctiveParallelism };
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

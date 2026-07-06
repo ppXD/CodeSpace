@@ -141,7 +141,6 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         return baseCaps with
         {
             MaxParallelism = @override.MaxParallelism ?? baseCaps.MaxParallelism,
-            MaxRounds = @override.MaxRounds ?? baseCaps.MaxRounds,
             MaxTotalSpawns = @override.MaxTotalSpawns ?? baseCaps.MaxTotalSpawns,
             MaxCostUsd = @override.MaxCostUsd ?? baseCaps.MaxCostUsd,
             AutonomyCeiling = TightenCeiling(baseCaps.AutonomyCeiling, @override.AutonomyCeiling),
@@ -180,7 +179,7 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         string.IsNullOrEmpty(value) ? value : char.ToUpperInvariant(value[0]) + value[1..];
 
     private static string BuildHint(RouteCaps caps) =>
-        $"parallelism {caps.MaxParallelism?.ToString() ?? "default"}, rounds {caps.MaxRounds?.ToString() ?? "default"}, spawns {caps.MaxTotalSpawns?.ToString() ?? "default"}";
+        $"parallelism {caps.MaxParallelism?.ToString() ?? "default"}, spawns {caps.MaxTotalSpawns?.ToString() ?? "default"}";
 
     private static RoutePlan BuildPlan(EffortDecision decision, bool wasAutoClassified, string effortMode, ITaskRecipe recipe, string projectionKind, IBoundsPreset? preset, RouteCaps caps, bool needsConfirmCard, ConfirmCard? confirm, string? degradedReason) => new()
     {

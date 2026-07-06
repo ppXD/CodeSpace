@@ -70,7 +70,6 @@ public class EffortRouterGenericityTests
         plan.ProjectionKind.ShouldBe(FakeRecipe.FakeProjection, "the fake recipe's default projection flowed through with no core edit");
         plan.BoundsPreset.ShouldBe(FakeBoundsKind, "the fake bounds preset resolved by the effort mode");
         plan.Caps.MaxParallelism.ShouldBe(FakeBounds.DistinctiveParallelism, "the fake preset's distinctive caps reached the plan");
-        plan.Caps.MaxRounds.ShouldBe(FakeBounds.DistinctiveRounds);
     }
 
     [Fact]
@@ -153,8 +152,7 @@ public class EffortRouterGenericityTests
     private sealed class FakeBounds : IBoundsPreset
     {
         public const int DistinctiveParallelism = 42;
-        public const int DistinctiveRounds = 7;
         public string PresetKind => FakeBoundsKind;
-        public RouteCaps ToCaps() => new() { MaxParallelism = DistinctiveParallelism, MaxRounds = DistinctiveRounds };
+        public RouteCaps ToCaps() => new() { MaxParallelism = DistinctiveParallelism };
     }
 }

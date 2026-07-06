@@ -40,7 +40,7 @@ public static class SupervisorDecisionKinds
     /// </summary>
     public const string Resolve = "resolve";
 
-    /// <summary>Terminate the supervisor turn loop — the run completes via the normal walk. The fail-closed budget-exhaustion verb too.</summary>
+    /// <summary>Terminate the supervisor turn loop — the run completes via the normal walk. The fail-closed force-stop verb too (a tripped bound / governance refusal stamps a Stop).</summary>
     public const string Stop = "stop";
 
     /// <summary>

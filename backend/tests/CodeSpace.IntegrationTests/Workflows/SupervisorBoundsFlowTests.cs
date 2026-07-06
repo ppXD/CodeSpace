@@ -31,8 +31,6 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   <item>APPROVAL POLICY gate-before-spawn: with <c>approvalPolicy: "spawns"</c>, the turn-1 spawn routes
 ///         through the HITL gate — it is rewritten into an ask_human APPROVAL card + parks on an Action wait
 ///         BEFORE any agent run is created (zero <c>agent.code</c> rows).</item>
-///   <item>ROUND BUDGET from the config: <c>maxRounds: 1</c> force-STOPs at turn 1 with "budget exhausted",
-///         honouring the operator's tightened budget below the lane default.</item>
 /// </list>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -223,42 +221,6 @@ public class SupervisorBoundsFlowTests : IDisposable
         finally
         {
             jobClient.AutoExecute = true;
-        }
-    }
-
-    // ── Round budget from the operator's config is honoured ──────────────────────────
-
-    [Fact]
-    public async Task The_config_round_budget_force_stops_the_run()
-    {
-        SetScript(s => s.PlanThenSpawnForever());   // a decider that would never stop on its own
-
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        // maxRounds = 1 → turn 0 plans + self-advances; turn 1 (TurnNumber == 1 == maxRounds) force-STOPs.
-        var workflowId = await CreateWorkflowAsync(teamId, userId, """{"goal":"ship it","maxRounds":1}""");
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-
-        var jobClient = ResolveJobClient();
-        jobClient.Clear();
-
-        // Turn 0 plan + self-advance; the drained self-advance runs turn 1 → the round budget force-stops it.
-        await RunEngineAsync(runId);
-        await jobClient.WaitForPendingAsync();
-
-        using (var verify = _fixture.BeginScope())
-        {
-            var db = verify.Resolve<CodeSpaceDbContext>();
-
-            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-                .ShouldBe(WorkflowRunStatus.Success, "the config round budget force-STOPS the run cleanly — the never-stopping decider never gets to spawn");
-
-            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
-                .ShouldBe(0, "the budget tripped before the spawn turn — no agents created");
-
-            var rows = await Ledger(db, runId, teamId);
-            rows.Select(r => r.DecisionKind).ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Stop }, "plan (turn 0) then the budget-forced stop (turn 1)");
-            rows.Single(r => r.DecisionKind == SupervisorDecisionKinds.Stop).PayloadJson
-                .ShouldContain(SupervisorStopReasons.BudgetExhausted, customMessage: "the forced stop records the budget-exhausted reason");
         }
     }
 

@@ -61,7 +61,6 @@ public class EffortRouterTests
         // The standard preset's caps flowed onto the plan — the tier tunes ONLY concurrency now; round / total-spawn are
         // no longer tier knobs (a supervised run loops until done, bounded by cost / no-progress / the model's stop).
         plan.Caps.MaxParallelism.ShouldBe(3);
-        plan.Caps.MaxRounds.ShouldBeNull("the tier no longer caps rounds — the run loops until done");
         plan.Caps.MaxTotalSpawns.ShouldBeNull("the tier no longer caps total spawns — concurrency is the only agent knob");
     }
 
@@ -111,7 +110,6 @@ public class EffortRouterTests
         var plan = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: overrideCaps), CancellationToken.None);
 
         plan.Caps.MaxParallelism.ShouldBe(2, "the set override field wins over the preset's 3");
-        plan.Caps.MaxRounds.ShouldBeNull("an unset override field keeps the preset's value — the preset no longer sets rounds");
         plan.Caps.MaxTotalSpawns.ShouldBeNull("an unset override field keeps the preset's value — the preset no longer sets total spawns");
         plan.Caps.RequiresApproval.ShouldBeTrue("the override tightened approval on");
     }

@@ -14,9 +14,6 @@ public sealed record RouteCaps
     /// <summary>Max branches a fan-out projection may run at once. Null = the projection default.</summary>
     public int? MaxParallelism { get; init; }
 
-    /// <summary>Max rounds / turns a looping projection may take. Null = the projection default.</summary>
-    public int? MaxRounds { get; init; }
-
     /// <summary>Max agents the run may spawn in total. Null = the projection default.</summary>
     public int? MaxTotalSpawns { get; init; }
 

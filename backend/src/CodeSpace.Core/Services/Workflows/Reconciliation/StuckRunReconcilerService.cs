@@ -74,7 +74,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// advance the supervisor's TurnNumber, and a re-dispatch RESETS <see cref="WorkflowRun.StartedAt"/> (the
     /// engine's Enqueued→Running CAS stamps it), so an UNBOUNDED recovery would re-dispatch a DETERMINISTICALLY
     /// crashing run every ~30 min forever — the run never terminates, never fails, and the supervisor's own
-    /// MaxRounds/no-progress bounds can't catch it because the turn never settles. So we count the durable
+    /// no-progress bound can't catch it because the turn never settles. So we count the durable
     /// <c>supervisor.run_recovered</c> ledger records per run and STOP recovering at this cap; a run at/over it is
     /// left Running for <see cref="MarkAbandonedRunningAsync"/> to fail cleanly. Counted from the ledger (never an
     /// in-memory tally), so the bound survives a restart + can't be reset by re-dispatching. Small by design — a
