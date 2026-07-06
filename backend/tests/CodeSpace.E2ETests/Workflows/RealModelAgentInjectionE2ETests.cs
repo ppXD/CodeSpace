@@ -81,8 +81,10 @@ public sealed class RealModelAgentInjectionE2ETests
                 TimeoutSeconds = 180,
             };
 
-            var applied = await RunAndCheckMarkerAsync(live, Task, $"PERSONA-APPLIED-{token}");
-            return (applied, $"{Provider} '{live.Model}': the real claude agent {(applied ? "APPLIED" : "did NOT apply")} its injected persona (marker {(applied ? "present" : "absent")} in the transcript)");
+            var (applied, _) = await RunAndCheckMarkerAsync(live, Task, $"PERSONA-APPLIED-{token}");
+            var verdict = $"{Provider} '{live.Model}': the real claude agent {(applied ? "APPLIED" : "did NOT apply")} its injected persona (marker {(applied ? "present" : "absent")} in the model's reply)";
+            Console.WriteLine($"[injection-e2e] persona: {verdict}");   // ALSO to stdout — the step-summary sink isn't greppable from the CLI/API
+            return (applied, verdict);
         });
     }
 
@@ -132,8 +134,8 @@ public sealed class RealModelAgentInjectionE2ETests
 
     // ─── shared drive ──────────────────────────────────────────────────────────
 
-    /// <summary>Seed a fresh credential + run ONE real claude agent for <paramref name="taskFactory"/>, and report whether <paramref name="marker"/> reached its transcript. A run that did not COMPLETE is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip), NEVER a false behavior miss.</summary>
-    private async Task<bool> RunAndCheckMarkerAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker)
+    /// <summary>Seed a fresh credential + run ONE real claude agent for <paramref name="taskFactory"/>, and return whether <paramref name="marker"/> reached the model's OWN reply, ALONG WITH that reply text (for a diagnostic snippet on a miss). A run that did not COMPLETE is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip), NEVER a false behavior miss.</summary>
+    private async Task<(bool Found, string ModelReply)> RunAndCheckMarkerAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker)
     {
         var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
         var task = taskFactory(credId);
@@ -164,7 +166,7 @@ public sealed class RealModelAgentInjectionE2ETests
             .Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.FinalSummary)
             .Select(e => e.Text));
 
-        return modelReply.Contains(marker, StringComparison.Ordinal);
+        return (modelReply.Contains(marker, StringComparison.Ordinal), modelReply);
     }
 
     /// <summary>
@@ -185,8 +187,14 @@ public sealed class RealModelAgentInjectionE2ETests
         {
             try
             {
-                var used = await RunAndCheckMarkerAsync(live, taskFactory, marker);
-                var verdict = $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting). [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]";
+                var (used, reply) = await RunAndCheckMarkerAsync(live, taskFactory, marker);
+
+                // On a miss, carry a bounded snippet of the model's ACTUAL reply — it disambiguates a load gap ("I don't
+                // have a codeword") from a trigger gap (a greeting that simply omitted it). The codeword is a random
+                // per-run token, not a secret, so echoing the reply leaks nothing.
+                var detail = used ? "" : $" — model said: \"{Snippet(reply)}\"";
+                var verdict = $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting){detail}. [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]";
+                Console.WriteLine($"[injection-e2e] skill: {verdict}");   // ALSO to stdout — the step-summary sink isn't greppable from the CLI/API
 
                 if (used) return (true, verdict);   // strongest outcome — the model read + used the skill; stop
 
@@ -198,6 +206,15 @@ public sealed class RealModelAgentInjectionE2ETests
         if (lastCompleted is { } completed) return completed;   // at least one run reached a real live verdict
 
         throw new AgentExecutionInfraException($"all {attempts} skill attempts failed to complete (gateway/exec infra), so live skill usage was never observed: {string.Join(" || ", infra)}");
+    }
+
+    /// <summary>A bounded, single-line snippet of a model reply for a diagnostic verdict — collapses newlines and caps length.</summary>
+    private static string Snippet(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "(empty reply)";
+
+        var oneLine = text.ReplaceLineEndings(" ").Trim();
+        return oneLine.Length <= 200 ? oneLine : oneLine[..200] + "…";
     }
 
     // ─── gate + seeding ────────────────────────────────────────────────────────
