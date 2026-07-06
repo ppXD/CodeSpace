@@ -38,11 +38,10 @@ export interface LaunchFormState {
   tools: string[];
   /** "Publish branch" — per-run opt-in to publishing the agent's diff as a branch even when the ambient push flag is off. Default false ⇒ omitted ⇒ defer to the ambient flag (byte-identical). Sent (as `pushBranch:true`) only when on. All tiers. */
   pushBranch: boolean;
-  /** Coordination "Limits" — supervisor fan-out bounds. Only meaningful on deep/auto (see effort gate). */
+  /** Coordination "Limits" — the max agents that run CONCURRENTLY (the only agent knob; a supervised run loops until
+   *  done, bounded by the cost budget + no-progress, not a round/total-agent count). Only meaningful on deep/auto. */
   maxParallel: string;
-  maxRounds: string;
-  maxAgents: string;
-  /** Coordination "Budget" — `"none"` or a dollar amount string (`"5"`/`"10"`/`"25"`). */
+  /** Coordination "Budget" — `"none"` or a dollar amount string (`"5"`/`"10"`/`"25"`). The realized-spend cap that bounds a loop-until-done run. */
   budget: string;
   /** Coordination "Agent model pool" — credentialed-model ROW ids the dispatched agents may use. Empty = all. */
   agentModels: string[];
@@ -221,11 +220,8 @@ function buildCaps(state: LaunchFormState) {
   const maxParallelism = posIntCap(state.maxParallel);
   if (maxParallelism !== undefined) caps.maxParallelism = maxParallelism;
 
-  const maxRounds = posIntCap(state.maxRounds);
-  if (maxRounds !== undefined) caps.maxRounds = maxRounds;
-
-  const maxTotalSpawns = posIntCap(state.maxAgents);
-  if (maxTotalSpawns !== undefined) caps.maxTotalSpawns = maxTotalSpawns;
+  // Rounds + total-spawn are NOT operator knobs — a supervised run loops until done, bounded by cost + no-progress +
+  // the model's stop (the round/total ceilings survive only as hidden backend back-stops). So the launch never sends them.
 
   if (state.budget !== "none") {
     const cost = Number(state.budget);
