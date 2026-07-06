@@ -24,6 +24,9 @@ public sealed class AgentPlanReviewerTests
         body.ShouldContain("go unplanned", customMessage: "check (4): completeness against the goal");
         body.ShouldContain("You did not write the plan", customMessage: "the independence framing");
         body.ShouldContain("Do NOT modify anything", customMessage: "the reviewer READS — it never writes");
+        body.ShouldContain("READ-ONLY and command-restricted", customMessage: "the capability context — the reviewer's sandbox is restricted BY DESIGN");
+        body.ShouldContain("Never judge the plan's feasibility from your own write/exec failures", customMessage: "a real run was derailed by a reviewer inferring the EXECUTORS' environment from its own sandbox wall");
+        body.ShouldContain("WRITABLE workspaces", customMessage: "the executors' actual capabilities are stated so the reviewer can't mistake its cage for theirs");
         body.ShouldContain("ship the feature", customMessage: "the goal is the reviewer's yardstick");
         body.ShouldContain("- t: i", customMessage: "the rendered plan rides verbatim");
     }

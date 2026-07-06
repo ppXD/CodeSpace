@@ -75,6 +75,7 @@ public sealed class AgentOutputReviewerTests
         review.Goal.ShouldContain(AgentReviewRunner.VerdictMarker, customMessage: "the goal quotes the exact final-message contract");
         review.Goal.ShouldContain("add validation", customMessage: "the producer's goal is the reviewer's yardstick");
         review.Goal.ShouldContain("src/login.cs");
+        review.Goal.ShouldContain("READ-ONLY and command-restricted", customMessage: "the capability context — the reviewer must never infer the producer's environment from its own sandbox wall");
     }
 
     [Fact]

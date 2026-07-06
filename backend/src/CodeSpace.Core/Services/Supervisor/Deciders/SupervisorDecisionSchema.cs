@@ -129,8 +129,8 @@ public static class SupervisorDecisionSchema
                       "subtaskId": { "type": "string", "description": "The plan-local subtask this agent runs (its fan-out key)." },
                       "role": { "type": "string", "description": "Optional semantic role for this agent (e.g. 'backend implementer', 'security reviewer') — descriptive context, never a privilege." },
                       "goalOverride": { "type": "string", "description": "Optional replacement instruction for this agent's subtask." },
-                      "repositoryId": { "type": "string", "description": "Optional primary repository (must be one the operator already bound; clamped server-side)." },
-                      "targetRepos": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "repositoryId": { "type": "string" }, "alias": { "type": "string" }, "access": { "type": "string", "enum": ["read", "write"] } }, "required": ["repositoryId"] }, "description": "Optional related-repo subset for this agent — clamped to a subset of the operator's bound repos with no access upgrade." },
+                      "repositoryId": { "type": "string", "description": "Optional primary repository — the EXACT repository id (a uuid) as listed under 'Bound repositories' in the capability catalog, NEVER a name or alias (a non-uuid value is ignored and the run-level repository applies). Clamped server-side." },
+                      "targetRepos": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "repositoryId": { "type": "string", "description": "The EXACT repository id (a uuid) from the capability catalog — never a name or alias." }, "alias": { "type": "string" }, "access": { "type": "string", "enum": ["read", "write"] } }, "required": ["repositoryId"] }, "description": "Optional related-repo subset for this agent — clamped to a subset of the operator's bound repos with no access upgrade." },
                       "harness": { "type": "string", "description": "Optional harness request (granted only if the operator allow-list permits)." },
                       "model": { "type": "string", "description": "Optional model request." },
                       "autonomyLevel": { "type": "string", "enum": ["confined", "standard", "trusted", "unleashed"], "description": "Optional autonomy request (one of the four tiers) — clamped to the run profile's ceiling, never raised past it." },
@@ -203,10 +203,39 @@ public static class SupervisorDecisionSchema
         }
         """).RootElement.Clone();
 
-    /// <summary>Deserialization options for mapping a schema-valid object back into <c>SupervisorModelDecision</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>.</summary>
+    /// <summary>Deserialization options for mapping a schema-valid object back into <c>SupervisorModelDecision</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>; the lenient Guid converter absorbs a non-uuid PROPOSAL (a repo alias where an id belongs) as an absent field instead of killing the whole decision.</summary>
     public static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() },
+        Converters = { new JsonStringEnumConverter(), new LenientGuidConverter() },
     };
+}
+
+/// <summary>
+/// A PROPOSAL-tolerant <see cref="Guid"/>? reader for the decider's bind step: the JSON schema types id fields as
+/// plain strings (a JSON schema cannot enforce uuid-ness), so a model may propose a NAME where an id belongs — e.g.
+/// <c>"repositoryId": "backend"</c> (the exact miss that killed a real run: schema-valid, bind-fatal). Every such
+/// field is an OPTIONAL override the server clamps anyway, so the intelligent degrade is field-level: an unparseable
+/// value reads as null (the override is dropped, the run-level profile applies) rather than the whole decision dying
+/// on one bad leaf. Writes stay standard (round-trip safe). Registered ONLY on the decider's deserialize options —
+/// canonical payload serialization is untouched.
+/// </summary>
+public sealed class LenientGuidConverter : JsonConverter<Guid?>
+{
+    public override Guid? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null) return null;
+
+        if (reader.TokenType == JsonTokenType.String && Guid.TryParse(reader.GetString(), out var guid)) return guid;
+
+        reader.Skip();   // a name, a number, an object — a proposal the server could never honor; drop the field, keep the decision
+
+        return null;
+    }
+
+    public override void Write(Utf8JsonWriter writer, Guid? value, JsonSerializerOptions options)
+    {
+        if (value is { } guid) writer.WriteStringValue(guid);
+        else writer.WriteNullValue();
+    }
 }

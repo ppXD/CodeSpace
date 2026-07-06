@@ -1,14 +1,14 @@
+using CodeSpace.Core.Services.Agents.Review;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 
 namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 
 /// <summary>
-/// Enriches each REVIEW beat (a reviewer run's final-summary step, classified by <c>AgentEventStepDescriber</c>) with
-/// the PARSED verdict — approved/flagged, the rationale, the evidence-attached issues, and the reviewer run to
-/// deep-link — keyed by the verdict event's own timeline id, so the walk hangs it on the exact beat. The describer owns
-/// the classification and the human title; THIS source owns the verdict truth (read off the reviewer's durable result,
-/// never re-derived from the clamped event text, which may truncate the <c>VERDICT: {json}</c> line). A reviewer run
-/// still in flight / off-contract contributes nothing — the bare review beat stands.
+/// Enriches each REVIEW beat (the synthetic <c>review.verdict</c> event, one per landed reviewer verdict) with the
+/// PARSED verdict — approved/flagged, the rationale, the evidence-attached issues, and the reviewer run to deep-link —
+/// keyed by the SAME deterministic id the timeline source emits (<see cref="ReviewVerdictTimelineMap.EventId"/>), so
+/// the walk hangs it on the exact beat regardless of which harness the reviewer ran on. A reviewer run still in
+/// flight / off-contract contributes nothing.
 /// </summary>
 public sealed class ReviewVerdictFactsSource : IJournalFactsSource
 {
@@ -20,8 +20,6 @@ public sealed class ReviewVerdictFactsSource : IJournalFactsSource
     {
         var rows = await _verdicts.ReadForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return rows
-            .Where(r => r.FinalSummaryEventId != Guid.Empty)
-            .ToDictionary(r => AgentEventTimelineMap.EventId(r.FinalSummaryEventId), r => new JournalStepFacts { Review = r.Verdict });
+        return rows.ToDictionary(r => ReviewVerdictTimelineMap.EventId(r.Verdict.ReviewerRunId), r => new JournalStepFacts { Review = r.Verdict });
     }
 }
