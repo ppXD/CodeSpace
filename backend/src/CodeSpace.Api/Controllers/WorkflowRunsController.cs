@@ -176,7 +176,7 @@ public class WorkflowRunsController : ControllerBase
             : Ok(new { outcome = outcome.ToString(), reissued = outcome == ReissueWaitOutcome.Reissued });
     }
 
-    /// <summary>Continue a STRANDED Suspended run (no pending wait) on demand — the user-triggered twin of the reconciler's re-dispatch. Team-scoped; foreign → 404. Returns <c>{ continued }</c>.</summary>
+    /// <summary>Continue a run IN PLACE (same run id, never a fork): a STRANDED Suspended run (the reconciler's re-dispatch twin), a terminal FAILURE run (re-run the halting node[s]), or a terminal CANCELLED run the operator stopped mid-flight (re-run the interrupted frontier). Team-scoped; foreign → 404. Returns <c>{ continued }</c> — false when the state can't continue in place (Success/Running, or nothing incomplete to resume) so the caller falls back to replay / rerun.</summary>
     [HttpPost("{runId:guid}/continue")]
     public async Task<IActionResult> Continue([FromRoute] Guid runId, CancellationToken cancellationToken)
     {

@@ -43,7 +43,7 @@ import { formatTokens } from "@/components/workflows/runActivity";
 import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
-import { isRunActive, useCancelRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+import { isRunActive, useCancelRun, useContinueRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -1463,6 +1463,7 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
 function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenRoom: (runId?: string) => void; onOpenRun: (runId: string) => void }) {
   const replay = useReplayRun();
   const cancel = useCancelRun(turn.runId);
+  const cont = useContinueRun(turn.runId);
   const confirm = useConfirm();
   if (actions.length === 0) return null;
 
@@ -1473,8 +1474,17 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     onOpenRun(result.runId);
   };
 
+  // Resume the stopped/failed turn IN PLACE (same run id) — re-runs the interrupted frontier where it halted. If nothing
+  // is left to resume (a stop that landed on a wave boundary), offer a fresh Re-run instead of a silent no-op.
+  const onContinue = async () => {
+    const res = await cont.mutateAsync();
+    if (res.continued) return;   // resumed in place — the hook's invalidation refreshes the room to its now-live status
+    const rerun = await confirm({ title: "Nothing to resume", message: "This turn has no interrupted step left to continue in place. Start a fresh Re-run instead?", confirmLabel: "Re-run", cancelLabel: "Not now" });
+    if (rerun) { const result = await replay.mutateAsync(turn.runId); onOpenRun(result.runId); }
+  };
+
   const onStop = async () => {
-    const ok = await confirm({ title: "Stop this run?", message: "Cancels the run and kills any in-flight agents. It can't be undone — you can Re-run a fresh copy.", confirmLabel: "Stop run", cancelLabel: "Keep running", destructive: true });
+    const ok = await confirm({ title: "Stop this run?", message: "Cancels the run and kills any in-flight agents. You can Continue it later to resume where it stopped, or Re-run a fresh copy.", confirmLabel: "Stop run", cancelLabel: "Keep running", destructive: true });
     if (ok) cancel.mutate();
   };
 
@@ -1487,6 +1497,7 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     <div className="room-foot">
       {doing.map((a) => {
         if (a.kind === "Stop") return <button key={a.kind} className="room-btn-stop" onClick={() => void onStop()} disabled={cancel.isPending}><i className="room-stop-pulse" /> {cancel.isPending ? "Stopping…" : "Stop"}</button>;
+        if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
         if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
         if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
         return null;
@@ -1671,9 +1682,10 @@ function describeUnknown(block: RoomBlock): string {
 type SymName =
   | "chevron-right" | "chevron-down" | "chevron-up" | "check" | "x" | "dot" | "file" | "terminal" | "sparkle"
   | "zap" | "lock" | "folder" | "send" | "rerun" | "more" | "alert" | "clock" | "link" | "branch"
-  | "pr" | "stop" | "edit" | "list" | "cpu" | "download" | "square" | "square-check" | "square-x";
+  | "pr" | "stop" | "edit" | "list" | "cpu" | "download" | "square" | "square-check" | "square-x" | "play";
 
 const ICONS: Record<SymName, { fill?: boolean; sw?: number; body: ReactNode }> = {
+  play: { fill: true, body: <path d="M7 5v14l11-7z" /> },
   "chevron-right": { sw: 1.9, body: <path d="M9 18l6-6-6-6" /> },
   "chevron-down": { sw: 1.9, body: <path d="M6 9l6 6 6-6" /> },
   "chevron-up": { sw: 1.9, body: <path d="M18 15l-6-6-6 6" /> },

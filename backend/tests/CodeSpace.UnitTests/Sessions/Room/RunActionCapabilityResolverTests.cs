@@ -36,6 +36,14 @@ public class RunActionCapabilityResolverTests
         stop.Enabled.ShouldBe(!terminal, "stop is offered only on a live turn");
         (stop.DisabledReason == null).ShouldBe(!terminal);
 
+        // Continue resumes IN PLACE — offered ONLY on a stopped (Cancelled) or failed turn (Success has nothing to
+        // resume; an active turn stops first; a Suspended turn resumes via its wait), matching ContinueRunAsync.
+        var continuable = status is WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure;
+        var cont = actions.Single(a => a.Kind == RoomActionKind.Continue);
+        cont.Enabled.ShouldBe(continuable, "continue is offered only on a stopped or failed turn");
+        cont.Attempt.ShouldBeFalse("continue revives the SAME run in place — it is not a fresh attempt");
+        (cont.DisabledReason == null).ShouldBe(continuable, "a disabled continue carries a reason");
+
         var trace = actions.Single(a => a.Kind == RoomActionKind.OpenTrace);
         trace.Enabled.ShouldBeTrue("view-trace is always available");
         trace.Target.ShouldBe(runId.ToString());
