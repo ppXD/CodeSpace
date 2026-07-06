@@ -63,6 +63,12 @@ public sealed record JournalStep
     /// <summary>The structured facts of a MODEL-CALL step (purpose · model · tokens · latency · cost · status) — so the expanded model fold shows a legible row per call, not a bare "Model call" line. Null on every non-model-call step. Enriched by <c>ModelCallFactsSource</c>.</summary>
     public JournalModelCall? ModelCall { get; init; }
 
+    /// <summary>The independent reviewer's VERDICT on a REVIEW step (approved/flagged · rationale · evidence-attached issues · the reviewer run to deep-link) — so the review beat renders the verdict card, not the reviewer's raw final message. Null on every non-review step. Enriched by <c>ReviewVerdictFactsSource</c>.</summary>
+    public JournalReviewVerdict? Review { get; init; }
+
+    /// <summary>Whether an ASK step is a REVIEW-GATE ESCALATION — the hard-Gate ladder exhausted (critic disapproved, the revision was re-reviewed and still disapproved) and the run parked on the human. The frontend frames the ask with a "review-blocked" chip. False on every other step. Enriched off the ask payload's escalation marker.</summary>
+    public bool ReviewEscalation { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 

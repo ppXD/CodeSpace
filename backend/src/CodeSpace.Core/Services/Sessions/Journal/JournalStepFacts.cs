@@ -29,7 +29,13 @@ public sealed record JournalStepFacts
     /// <summary>The structured facts of a MODEL-CALL step (purpose · model · tokens · latency · cost · status), so the expanded model fold shows a legible row. Null when the step isn't a model call.</summary>
     public JournalModelCall? ModelCall { get; init; }
 
-    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer · model-call) compose onto one step without clobbering each other.</summary>
+    /// <summary>The independent reviewer's VERDICT on a REVIEW step (the reviewer's verdict beat). Null when the step isn't a landed review.</summary>
+    public JournalReviewVerdict? Review { get; init; }
+
+    /// <summary>Whether an ASK step is a review-gate ESCALATION (the hard-Gate ladder parked the run on the human). False when the step isn't an ask / isn't escalated.</summary>
+    public bool ReviewEscalation { get; init; }
+
+    /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer · model-call · review) compose onto one step without clobbering each other.</summary>
     public JournalStepFacts Merge(JournalStepFacts other) => new()
     {
         Rationale = other.Rationale ?? Rationale,
@@ -38,5 +44,7 @@ public sealed record JournalStepFacts
         Plan = other.Plan ?? Plan,
         Answer = other.Answer ?? Answer,
         ModelCall = other.ModelCall ?? ModelCall,
+        Review = other.Review ?? Review,
+        ReviewEscalation = other.ReviewEscalation || ReviewEscalation,
     };
 }

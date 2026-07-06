@@ -145,6 +145,10 @@ export interface RoomAgentCard {
   /// history and switch between attempts, like Activity. Null for a supervisor-spawned agent (no workflow cell to switch).
   nodeId?: string | null;
   iterationKey?: string | null;
+  /// Whether this agent CONTINUED a prior conversation (a retry resumed the earlier session) — the "⟳ resumed" chip.
+  resumed?: boolean;
+  /// The LATEST independent reviewer's verdict on this agent's output — the "✓ reviewed" / "⚠ flagged" chip.
+  review?: JournalReviewVerdict | null;
 }
 
 export interface RoomDecisionOption {
@@ -351,6 +355,23 @@ export interface JournalAgentCard {
   filesChanged?: number | null;
   files: JournalFileStat[];
   resumed: boolean;
+  /// The LATEST independent reviewer's verdict on this agent's produced work — the "✓ reviewed" / "⚠ flagged" chip
+  /// + the reviewer-run deep-link. Null when the output was never agent-reviewed (or the review hasn't landed).
+  review?: JournalReviewVerdict | null;
+}
+
+/// An independent reviewer's VERDICT (a real reviewer agent run's conclusion) — rides a REVIEW step and the reviewed
+/// producer's card. Mirrors backend `JournalReviewVerdict`.
+export interface JournalReviewVerdict {
+  approved: boolean;
+  rationale: string;
+  /// Evidence-attached issues, each pre-rendered "text (evidence: …)". Empty on an approval.
+  issues: string[];
+  /// The reviewer's own agent run — deep-linked as "view reviewer run →".
+  reviewerRunId: string;
+  reviewerHarness?: string | null;
+  /// What was reviewed — "output" (a produced change) or "plan" (a plan verified against the repository).
+  scope: string;
 }
 
 /// A planned subtask still blocked by an unmet dependency at a wave (the "waiting on #n"). Mirrors backend `JournalDeferredSubtask`.
@@ -411,6 +432,10 @@ export interface JournalStep {
   /// The structured facts of a MODEL_CALL step (purpose · model · tokens · latency · cost · status) — the expanded model
   /// fold renders these as a legible row. Null on every non-model-call step.
   modelCall?: JournalModelCall | null;
+  /// The independent reviewer's verdict on a REVIEW step — rendered as the verdict card under the beat. Null on every non-review step.
+  review?: JournalReviewVerdict | null;
+  /// Whether an ASK step is a review-gate ESCALATION (the hard-Gate ladder parked the run on the human) — the "review-blocked" framing chip.
+  reviewEscalation?: boolean;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];

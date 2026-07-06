@@ -25,6 +25,12 @@ public static class JournalStepKinds
     /// <summary>A model call's outcome (the supervisor brain / a node LLM call) — the "deciding…" beat with its token cost.</summary>
     public const string ModelCall = "model_call";
 
+    /// <summary>An INDEPENDENT REVIEWER's beat — an event of a real reviewer agent run (an output review cloning the produced branch, a grounded plan review cloning the repo). The reviewer's verdict beat renders as a REVIEW milestone carrying the evidence-attached verdict; its other events fold as background under the same kind.</summary>
+    public const string Review = "review";
+
+    /// <summary>A REVISE round's beat — the producer agent re-entering its own work against the reviewer's / oracle's feedback (the S6 bounded revise loop). Renders as an amber REVISE milestone so the adversarial exchange reads review → revise → review.</summary>
+    public const string Revise = "revise";
+
     /// <summary>The generic FALLBACK kind — an event no specific describer claimed still renders as a plain step under this kind (never dropped).</summary>
     public const string Event = "event";
 }

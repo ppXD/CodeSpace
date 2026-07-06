@@ -40,6 +40,9 @@ public sealed record RunTimelineEvent
     /// <summary>The agent run this event belongs to, when applicable (null otherwise).</summary>
     public string? AgentRunId { get; init; }
 
+    /// <summary>The agent run's CELL key (its <c>IterationKey</c> — e.g. <c>map#0</c>, <c>boss#turn1#0</c>, or a reviewer run's <c>…#review</c> / <c>#plan-review</c> suffix key), when applicable. Null for non-agent events / a keyless run. Lets a downstream describer classify by the run's ROLE without a database read.</summary>
+    public string? IterationKey { get; init; }
+
     /// <summary>Which <c>IRunTimelineSource</c> produced this event (its SourceKey) — provenance + the merge tie-break.</summary>
     public required string SourceKey { get; init; }
 }

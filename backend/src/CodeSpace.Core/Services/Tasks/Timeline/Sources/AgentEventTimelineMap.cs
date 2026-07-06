@@ -22,6 +22,15 @@ public static class AgentEventTimelineMap
     /// <summary>The timeline <see cref="RunTimelineEvent.Kind"/> a reasoning event carries (<c>agent.Reasoning</c>) — the one string the journal describer matches to classify a THINKING step, so the sub-classification can't drift from the emitted kind.</summary>
     public const string ReasoningKind = "agent." + nameof(AgentEventKind.Reasoning);
 
+    /// <summary>The timeline kind a final-summary event carries (<c>agent.FinalSummary</c>) — matched by the journal describer to classify a reviewer run's VERDICT beat.</summary>
+    public const string FinalSummaryKind = "agent." + nameof(AgentEventKind.FinalSummary);
+
+    /// <summary>The timeline kind a warning event carries (<c>agent.Warning</c>) — matched by the journal describer to classify a producer's REVISE-round announcement.</summary>
+    public const string WarningKind = "agent." + nameof(AgentEventKind.Warning);
+
+    /// <summary>The timeline event id for one <c>agent_run_event</c> row — the SAME id a journal facts source keys by (so the verdict facts land on the verdict beat), pinned in one place so the two can't drift.</summary>
+    public static string EventId(Guid agentRunEventId) => $"agent-{agentRunEventId:N}";
+
     /// <summary>The narrative-worthy harness event kinds — the ONLY kinds that surface on the run story line. Also the source's SQL filter (kind IN …), so a verbose run doesn't flood the timeline. Reasoning rides at <see cref="TimelineLevel.Detail"/> (folded), bounded per thinking-block.</summary>
     public static readonly AgentEventKind[] Narrative =
     {
@@ -36,13 +45,13 @@ public static class AgentEventTimelineMap
     /// <summary>The headline cap — a long FinalSummary (the whole report) is clamped here; the full text stays in the agent's own timeline + Trace.</summary>
     private const int MaxTitle = 200;
 
-    public static RunTimelineEvent ToEvent(AgentRunEvent e, IReadOnlyDictionary<Guid, string?> nodeByAgent, IReadOnlyDictionary<Guid, AgentRunStatus> statusByAgent)
+    public static RunTimelineEvent ToEvent(AgentRunEvent e, IReadOnlyDictionary<Guid, string?> nodeByAgent, IReadOnlyDictionary<Guid, AgentRunStatus> statusByAgent, IReadOnlyDictionary<Guid, string>? keyByAgent = null)
     {
         var headline = string.IsNullOrWhiteSpace(e.Text) ? HeadlineFor(e.Kind) : e.Text;
 
         return new RunTimelineEvent
         {
-            Id = $"agent-{e.Id:N}",
+            Id = EventId(e.Id),
             Kind = $"agent.{e.Kind}",
             Title = Truncate(headline, MaxTitle),
             Severity = SeverityFor(e, statusByAgent),
@@ -51,6 +60,7 @@ public static class AgentEventTimelineMap
             Order = e.Sequence,
             NodeId = nodeByAgent.TryGetValue(e.AgentRunId, out var node) ? node : null,
             AgentRunId = e.AgentRunId.ToString(),
+            IterationKey = keyByAgent is not null && keyByAgent.TryGetValue(e.AgentRunId, out var key) && key.Length > 0 ? key : null,
             SourceKey = Key,
         };
     }

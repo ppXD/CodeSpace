@@ -21,10 +21,10 @@ public class JournalStepDescriberRegistryTests
         new FallbackStepDescriber());
 
     private static RunTimelineEvent Event(string sourceKey, string kind = "k", string title = "t", string? summary = null,
-        TimelineSeverity sev = TimelineSeverity.Info, TimelineLevel level = TimelineLevel.Detail, string? agentRunId = null, string? nodeId = null) => new()
+        TimelineSeverity sev = TimelineSeverity.Info, TimelineLevel level = TimelineLevel.Detail, string? agentRunId = null, string? nodeId = null, string? iterationKey = null) => new()
     {
         Id = "id-1", Kind = kind, Title = title, Summary = summary, Severity = sev, Level = level,
-        OccurredAt = DateTimeOffset.UtcNow, Order = 0, SourceKey = sourceKey, AgentRunId = agentRunId, NodeId = nodeId,
+        OccurredAt = DateTimeOffset.UtcNow, Order = 0, SourceKey = sourceKey, AgentRunId = agentRunId, NodeId = nodeId, IterationKey = iterationKey,
     };
 
     [Theory]
@@ -58,6 +58,63 @@ public class JournalStepDescriberRegistryTests
     {
         Registry.Describe(Event("agent-events", kind: agentKind)).Kind.ShouldBe(expectedKind);
     }
+
+    // ── The adversarial exchange: review / revise classification (E) ─────────
+
+    [Theory]
+    [InlineData("map#0#review", "Independent reviewer inspected the produced work")]
+    [InlineData("#plan-review", "Independent reviewer verified the plan against the repository")]
+    [InlineData("boss#turn1#0#review", "Independent reviewer inspected the produced work")]
+    public void A_reviewer_runs_final_summary_is_the_REVIEW_beat_with_a_human_title(string iterationKey, string expectedTitle)
+    {
+        // The reviewer's raw final message is the VERDICT contract line ("Reviewed. VERDICT: {json}") — the beat replaces
+        // it with a human headline per scope; ReviewVerdictFactsSource attaches the parsed verdict as structured facts.
+        var step = Registry.Describe(Event("agent-events", kind: "agent.FinalSummary", title: """Reviewed. VERDICT: {"approved": false}""", iterationKey: iterationKey));
+
+        step.Kind.ShouldBe(JournalStepKinds.Review);
+        step.Beat.ShouldBeTrue("the reviewer's verdict is a first-class orchestration beat — the adversarial exchange shows in the ③ timeline");
+        step.Verb.ShouldBe("review", "the frontend's REVIEW pill");
+        step.Milestone.ShouldBeTrue();
+        step.Title.ShouldBe(expectedTitle, "the raw VERDICT contract line never leaks into the journal");
+        step.Detail.ShouldBeNull();
+    }
+
+    [Fact]
+    public void A_reviewer_runs_other_events_fold_as_review_background()
+    {
+        var step = Registry.Describe(Event("agent-events", kind: "agent.Warning", title: "cloning the produced branch", iterationKey: "map#0#review"));
+
+        step.Kind.ShouldBe(JournalStepKinds.Review, "every reviewer event groups under the review kind");
+        step.Beat.ShouldBeFalse("only the verdict is a beat — the reviewer's working chatter folds");
+        step.Title.ShouldBe("cloning the produced branch", "a non-verdict event keeps its own words");
+    }
+
+    [Fact]
+    public void A_producers_revise_announcement_is_the_REVISE_beat()
+    {
+        var step = Registry.Describe(Event("agent-events", kind: "agent.Warning",
+            title: "Verification failed — revising (round 1 of 2). the reviewer flagged a placeholder hack", iterationKey: "map#0", sev: TimelineSeverity.Warning));
+
+        step.Kind.ShouldBe(JournalStepKinds.Revise);
+        step.Beat.ShouldBeTrue("a revise round is a first-class beat — the exchange reads review → revise → review");
+        step.Verb.ShouldBe("revise");
+        step.Title.ShouldContain("round 1 of 2", customMessage: "the announcement keeps its round + reason");
+        step.Tone.ShouldBe(TimelineSeverity.Warning);
+    }
+
+    [Fact]
+    public void An_ordinary_agent_warning_is_not_a_revise_beat()
+    {
+        var step = Registry.Describe(Event("agent-events", kind: "agent.Warning", title: "low disk space", iterationKey: "map#0"));
+
+        step.Kind.ShouldBe(JournalStepKinds.Agent, "only the pinned revise announcement classifies as a revise beat");
+        step.Beat.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_producers_final_summary_with_no_iteration_key_stays_a_plain_agent_step() =>
+        Registry.Describe(Event("agent-events", kind: "agent.FinalSummary", title: "done", iterationKey: null))
+            .Kind.ShouldBe(JournalStepKinds.Agent, "a keyless run (a standalone agent) can never be mistaken for a reviewer");
 
     [Fact]
     public void An_unknown_source_still_becomes_a_step_via_the_fallback()

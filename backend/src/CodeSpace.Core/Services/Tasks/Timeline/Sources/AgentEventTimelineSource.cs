@@ -31,20 +31,21 @@ public sealed class AgentEventTimelineSource : IRunTimelineSource, IScopedDepend
 
         var nodeByAgent = agents.ToDictionary(r => r.Id, r => r.NodeId);
         var statusByAgent = agents.ToDictionary(r => r.Id, r => r.Status);
+        var keyByAgent = agents.ToDictionary(r => r.Id, r => r.IterationKey);
 
         var events = await LoadNarrativeEventsAsync(nodeByAgent.Keys.ToList(), cancellationToken).ConfigureAwait(false);
 
-        return events.Select(e => AgentEventTimelineMap.ToEvent(e, nodeByAgent, statusByAgent)).ToList();
+        return events.Select(e => AgentEventTimelineMap.ToEvent(e, nodeByAgent, statusByAgent, keyByAgent)).ToList();
     }
 
-    /// <summary>The run's agent runs (id + its node + its terminal status), read team-scoped. The run is already team-checked by the projector; the extra TeamId filter is defense in depth, matching the phase source. The status feeds the FinalSummary tone so a failed agent's closing beat doesn't read as a success.</summary>
+    /// <summary>The run's agent runs (id + its node + its terminal status + its cell key), read team-scoped. The run is already team-checked by the projector; the extra TeamId filter is defense in depth, matching the phase source. The status feeds the FinalSummary tone so a failed agent's closing beat doesn't read as a success; the IterationKey rides each event so the journal can classify a reviewer run's events by its <c>#review</c>/<c>#plan-review</c> suffix.</summary>
     private async Task<List<RunAgent>> LoadRunAgentsAsync(RunTimelineContext context, CancellationToken cancellationToken) =>
         await _db.AgentRun.AsNoTracking()
             .Where(r => r.TeamId == context.TeamId && r.WorkflowRunId == context.RunId)
-            .Select(r => new RunAgent(r.Id, r.NodeId, r.Status))
+            .Select(r => new RunAgent(r.Id, r.NodeId, r.Status, r.IterationKey))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-    private sealed record RunAgent(Guid Id, string? NodeId, AgentRunStatus Status);
+    private sealed record RunAgent(Guid Id, string? NodeId, AgentRunStatus Status, string IterationKey);
 
     /// <summary>The narrative-kind events for the run's agents, in chronological order. The kind filter runs in SQL (kind IN …) so verbose reasoning/tool chatter never loads.</summary>
     private async Task<List<AgentRunEvent>> LoadNarrativeEventsAsync(List<Guid> agentRunIds, CancellationToken cancellationToken) =>
