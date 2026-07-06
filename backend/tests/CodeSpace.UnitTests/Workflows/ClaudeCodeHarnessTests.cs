@@ -45,12 +45,23 @@ public class ClaudeCodeHarnessTests
         spec.ConfigHomeFiles.Select(f => f.RelativePath).ShouldBe(new[] { "skills/tdd/SKILL.md" },
             customMessage: "Claude Code scans CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md — the config-home the runner sets");
         spec.ConfigHomeFiles.Single().Content.ShouldContain("Write the test first.");
+
+        // B1 skill-load fix: --print is hermetic, so the projected skill is INERT unless the "user" setting-source is
+        // opted in. The pair is adjacent + is "user" ONLY (never project/local, which would read the target repo's
+        // .claude and break config isolation).
+        var args = spec.Args.ToList();
+        var at = args.IndexOf("--setting-sources");
+        at.ShouldBeGreaterThanOrEqualTo(0, "a bound skill MUST opt the user setting-source in, else claude --print ignores CLAUDE_CONFIG_DIR/skills entirely");
+        args[at + 1].ShouldBe("user", "only the per-run-isolated user source loads — never project/local (the target repo's .claude)");
     }
 
     [Fact]
-    public void No_skills_means_no_config_home_files()
+    public void No_skills_means_no_config_home_files_and_no_setting_sources()
     {
-        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldBeEmpty();
+        var spec = Harness.BuildInvocation(Task());
+
+        spec.ConfigHomeFiles.ShouldBeEmpty();
+        spec.Args.ShouldNotContain("--setting-sources", "a bare / persona-only run is argv byte-identical — the setting-source opt-in rides ONLY with a projected skill");
     }
 
     [Fact]
