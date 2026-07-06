@@ -383,10 +383,10 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
-      # best-of-3 capability-floor for the blessed (Claude) behavioral gates: a persona is always-in-context (near
-      # deterministic), but a SKILL's auto-trigger is PROGRESSIVE-DISCLOSURE (the model DECIDES to load it by description
-      # match), so a spare attempt absorbs a one-off non-trigger without flaky-red-ing main, while a persistent non-apply
-      # still REDs. Codex is informational, so it ignores this (one reported attempt).
+      # best-of-3 capability-floor for the blessed Claude PERSONA gate (near-deterministic — the system prompt is always
+      # in context; the spare attempts just absorb a rare gateway hiccup). The SKILL gate is REPORT-ONLY — a loaded
+      # skill is applied only via the model's auto-invocation (progressive disclosure, a model decision), which we
+      # surface but do NOT gate main on — so it takes one reported attempt; Codex is informational likewise.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
       # Run the deterministic real-codex-binary proofs (RealCodexResume) — dummy key, no gateway needed. Its opt-in gate
       # var; the codex binary is installed below.
@@ -437,8 +437,10 @@ jobs:
 
       - name: Test (the live behavioral injection gates — real claude + real codex apply a persona / obey a skill)
         # Scoped to the injection classes in E2ETests:
-        #   ~RealModelAgentInjection → the CLAUDE behavioral gate (persona via --append-system-prompt; skill via
-        #     CLAUDE_CONFIG_DIR/skills auto-discovery). BLESSED → gates on a persistent non-apply (best-of-N floored).
+        #   ~RealModelAgentInjection → the CLAUDE behavioral proof. PERSONA (--append-system-prompt, always in context)
+        #     GATES the blessed wire on a persistent non-apply (best-of-N floored). SKILL obedience (CLAUDE_CONFIG_DIR/
+        #     skills auto-discovery + the model's auto-invocation) is REPORTED, not gated — its LOADING is gated
+        #     deterministically by RealHarnessSkillProjectionTests (no live model needed).
         #   ~RealModelCodexInjection → the CODEX behavioral proof (persona via $CODEX_HOME/AGENTS.md; skill via
         #     $CODEX_HOME/skills). INFORMATIONAL wire (OpenAI `responses`) → one reported attempt; a run that can't
         #     complete on the shared gateway is non-gating LOUD infra, never a false red.

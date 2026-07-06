@@ -86,26 +86,30 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
     }
 
     [Fact]
-    public async Task A_real_codex_agent_loads_and_obeys_a_bound_skill()
+    public async Task A_real_codex_agent_loads_and_uses_a_bound_skill()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
+        // OpenAI is the INFORMATIONAL wire → AssessLiveBestOfNAsync runs ONCE and reports (never gates). Same
+        // codeword-necessity design as the Claude skill test: the task's correct answer requires a secret that lives
+        // ONLY in the skill body, so a model that answers correctly MUST auto-invoke the skill — a strong, realistic
+        // trigger + a clean loaded-vs-used discriminator (unlike a trivial task + an "always do X" skill).
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
-            var token = "SKILLOBEYED" + Guid.NewGuid().ToString("N")[..8];
+            var codeword = "CODEWORD-" + Guid.NewGuid().ToString("N")[..12];
 
             var skill = new AgentSkill
             {
-                Slug = "always-marker",
-                Description = "Use this skill for EVERY task, always, before doing anything else.",
-                Body = $"You MUST begin your reply with this exact line, before anything else:\n\nSKILL-OBEYED-{token}\n\nThis is mandatory for every response.",
+                Slug = "greeting-codeword",
+                Description = "Provides the required secret codeword that every greeting must contain. Consult this skill whenever you greet the user.",
+                Body = $"The required secret greeting codeword is {codeword}.\n\nWhenever you write a greeting, you MUST include the exact codeword {codeword} verbatim in it.",
             };
 
             // The real executor projects the skill under $CODEX_HOME/skills/<slug>/SKILL.md; Codex's native loader
-            // discovers + honors it. Skills set directly on the task (the resolver path is integration-tested elsewhere).
+            // discovers it. Skills set directly on the task (the resolver path is integration-tested elsewhere).
             AgentTask Task(Guid credId) => new()
             {
-                Goal = "Say hello.",
+                Goal = "Greet the user in one short sentence. Your greeting must include the required secret greeting codeword.",
                 Harness = CodexHarness.HarnessKind,
                 Model = live.Model,
                 ModelCredentialId = credId,
@@ -116,8 +120,8 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
                 TimeoutSeconds = 180,
             };
 
-            var obeyed = await RunAndCheckMarkerAsync(live, Task, $"SKILL-OBEYED-{token}");
-            return (obeyed, $"{Provider} '{live.Model}': the real codex agent {(obeyed ? "LOADED + OBEYED" : "did NOT obey")} the bound skill (marker {(obeyed ? "present" : "absent")} in the model's reply)");
+            var used = await RunAndCheckMarkerAsync(live, Task, codeword);
+            return (used, $"{Provider} '{live.Model}': the real codex agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting)");
         });
     }
 

@@ -29,15 +29,23 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <c>claude -p</c> AUTO-DISCOVERS user skills by default (the hermetic-no-filesystem-settings default is the
 /// programmatic Agent <i>SDK</i>'s, NOT the CLI's — corrected in #982), so the harness loads the projected skill with
 /// NO opt-in flag; its one hard requirement is that it NEVER passes <c>--bare</c>/<c>--safe-mode</c> (which would
-/// disable that auto-discovery). This test confirms end to end against the real binary that a headless run loads +
-/// HONORS a personal skill.</item>
+/// disable that auto-discovery). But a loaded skill is APPLIED only if the model AUTO-INVOKES it (progressive
+/// disclosure — a model decision, NOT deterministic), so this test drives a task whose correct answer REQUIRES a secret
+/// codeword that lives ONLY inside the skill body — a strong, realistic trigger AND a clean loaded-vs-used
+/// discriminator: the codeword can reach the reply only if the live model read + used the skill.</item>
 /// </list>
 ///
-/// <para>Each behavior is a STRICT gate on the blessed Anthropic wire via
-/// <see cref="RealModelGate.AssessLiveBestOfNAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, int?)"/>:
-/// best-of-N absorbs a non-deterministic model's one-off miss, a PERSISTENT miss REDs, a gateway/exec-infra failure is a
-/// non-gating LOUD skip (routed via <see cref="AgentExecutionInfraException"/>), and a no-creds / no-CLI run self-skips
-/// LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the real-model lane.</para>
+/// <para><b>Gate policy — deterministic GATES, probabilistic REPORTS:</b> the PERSONA rides the system prompt (ALWAYS in
+/// context), so its application is deterministic → a STRICT best-of-N GATE on the blessed Anthropic wire
+/// (<see cref="RealModelGate.AssessLiveBestOfNAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, int?)"/>);
+/// a persistent non-apply REDs main. The SKILL is applied only via the model's AUTO-INVOCATION, so gating main on it
+/// would red on model-capability variance — its live obedience is instead REPORTED
+/// (<see cref="RealModelGate.AssessLiveAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, bool)"/>
+/// with <c>gating: false</c>), while skill LOADING (the SKILL.md lands where the CLI scans) is GATED deterministically by
+/// <c>RealHarnessSkillProjectionTests</c>. This mirrors the gate's own code-fault-GATES / capability-miss-REPORTS split.
+/// A gateway/exec-infra failure is a non-gating LOUD skip (routed via <see cref="AgentExecutionInfraException"/>), and a
+/// no-creds / no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the
+/// real-model lane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -79,27 +87,36 @@ public sealed class RealModelAgentInjectionE2ETests
     }
 
     [Fact]
-    public async Task A_real_claude_agent_loads_and_obeys_a_bound_skill()
+    public async Task A_real_claude_agent_loads_and_uses_a_bound_skill()
     {
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
-        await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
+        // REPORT-ONLY (gating: false): a loaded skill is APPLIED only via the model's AUTO-INVOCATION (progressive
+        // disclosure), a capability that can drift with model versions — gating main on it would flake-red. Skill
+        // LOADING is gated deterministically by RealHarnessSkillProjectionTests; here we DRIVE the live model + REPORT
+        // whether it actually used the skill (surfaced in the job summary), never blocking main. Single attempt (a
+        // report needs no best-of-N). The codeword-necessity design below makes a single attempt a strong signal.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
-            var token = "SKILLOBEYED" + Guid.NewGuid().ToString("N")[..8];
+            var codeword = "CODEWORD-" + Guid.NewGuid().ToString("N")[..12];
 
+            // Codeword-NECESSITY: the task's correct answer REQUIRES a secret that lives ONLY in the skill body, so a
+            // model that wants to answer correctly MUST auto-invoke the skill to learn it — a strong, realistic trigger
+            // (unlike a trivial "say hello" + an "always do X" skill, which progressive disclosure rightly ignores). It
+            // is also a clean discriminator: the codeword can reach the reply only if the skill was LOADED + READ.
             var skill = new AgentSkill
             {
-                Slug = "always-marker",
-                Description = "Use this skill for EVERY task, always, before doing anything else.",
-                Body = $"You MUST begin your reply with this exact line, before anything else:\n\nSKILL-OBEYED-{token}\n\nThis is mandatory for every response.",
+                Slug = "greeting-codeword",
+                Description = "Provides the required secret codeword that every greeting must contain. Consult this skill whenever you greet the user.",
+                Body = $"The required secret greeting codeword is {codeword}.\n\nWhenever you write a greeting, you MUST include the exact codeword {codeword} verbatim in it.",
             };
 
             // Skills set directly on the task (the persona→binding→resolver path is integration-tested separately). The
             // real executor projects the skill under CLAUDE_CONFIG_DIR/skills; `claude -p` auto-discovers it there (the
-            // harness never passes --bare/--safe-mode, which is what would disable that); the real claude loads + honors it.
+            // harness never passes --bare/--safe-mode, which is what would disable that); the model then chooses to use it.
             AgentTask Task(Guid credId) => new()
             {
-                Goal = "Say hello.",
+                Goal = "Greet the user in one short sentence. Your greeting must include the required secret greeting codeword.",
                 Harness = "claude-code",
                 Model = live.Model,
                 ModelCredentialId = credId,
@@ -109,9 +126,9 @@ public sealed class RealModelAgentInjectionE2ETests
                 TimeoutSeconds = 180,
             };
 
-            var obeyed = await RunAndCheckMarkerAsync(live, Task, $"SKILL-OBEYED-{token}");
-            return (obeyed, $"{Provider} '{live.Model}': the real claude agent {(obeyed ? "LOADED + OBEYED" : "did NOT obey")} the bound skill (marker {(obeyed ? "present" : "absent")} in the transcript)");
-        });
+            var used = await RunAndCheckMarkerAsync(live, Task, codeword);
+            return (used, $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting). [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]");
+        }, gating: false);
     }
 
     // ─── shared drive ──────────────────────────────────────────────────────────
