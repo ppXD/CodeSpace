@@ -572,6 +572,7 @@ function journalToRoomCard(c: JournalAgentCard): RoomAgentCard {
     summary: c.assignedSubtask ?? null,
     assignedSubtask: c.assignedSubtask ?? null,
     status: c.status,
+    error: c.error ?? null,
     model: c.model ?? null,
     harness: c.harness ?? null,
     tokens: c.tokens ?? null,
@@ -1300,6 +1301,7 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
         <span className={`room-arow-state room-arow-state-${cls}`}>{agentStatusWord(a.status)}</span>
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
       </button>
+      {cls === "err" && a.error && <div className="room-arow-err" title={a.error}><Sym n="alert" s={11} cls="room-arow-erric" /> {a.error}</div>}
     </div>
   );
 }

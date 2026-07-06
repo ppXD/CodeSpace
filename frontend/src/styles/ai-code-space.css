@@ -5556,6 +5556,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-arow-state-run { color: var(--rm-blue); }
 .room-arow-state-err { color: var(--rm-danger); }
 .room-arow-state-idle { color: var(--muted); }
+.room-arow-err { display: flex; align-items: flex-start; gap: 6px; margin: 1px 9px 5px 31px; font-size: 11.5px; line-height: 1.5; color: var(--rm-danger); overflow: hidden; text-overflow: ellipsis; }
+.room-arow-erric { flex: none; margin-top: 2px; color: var(--rm-danger); }
 .room-arow-act { display: inline-flex; align-items: center; gap: 3px; flex: none; font-size: 11px; color: var(--muted-2); }
 .room-arow:hover .room-arow-act { color: var(--ink-2); }
 /* right-side preview drawer — scoped INSIDE the room panel (not the viewport); agent shows its terminal / file shows its preview */
