@@ -76,10 +76,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return NonConformantStop();
         }
 
-        var model = TryDeserialize(completion.Json);
+        var model = TryDeserialize(completion.Json, out var bindError);
 
-        // A reply that did not parse to a decision (wrong shape) or carried no kind is the same model-side MISS — fail closed.
-        if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop();
+        // A reply that passed the JSON schema but did not BIND to the decision record is a schema↔type DRIFT signal
+        // (the validator and the C# shape disagree) or a near-miss the lenient converters couldn't absorb. Before
+        // failing closed, buy ONE bounded REPAIR round-trip: hand the model its own reply + the exact binding error
+        // and ask for the same decision corrected — the cheapest self-heal, mirroring the S6 revise philosophy at
+        // the decision grain. A repair that itself fails (or still doesn't bind) falls to the clean stop, WITH the
+        // precise path in the stop summary so the journal names the drift instead of a bare "did not conform".
+        if (model is null || string.IsNullOrWhiteSpace(model.Kind))
+        {
+            completion = await TryRepairAsync(structured, pick, completion, bindError, cancellationToken).ConfigureAwait(false) ?? completion;
+            model = TryDeserialize(completion.Json, out bindError);
+        }
+
+        if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop(bindError);
 
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
         // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
@@ -90,16 +101,52 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         };
     }
 
+    /// <summary>
+    /// One bounded REPAIR round-trip after a bind failure: the model receives its OWN schema-valid-but-unbindable
+    /// reply plus the exact binding error (the JSON path + why), and must re-emit the SAME decision corrected. Runs
+    /// on the same pinned brain row + the same schema constraint (the structured client re-validates). Returns null
+    /// when the repair itself is a model-side miss (fail toward the clean stop) — a genuine INFRA fault propagates,
+    /// exactly like the primary call.
+    /// </summary>
+    private static async Task<StructuredLLMCompletion?> TryRepairAsync(IStructuredLLMClient structured, ModelPoolPick pick, StructuredLLMCompletion broken, string? bindError, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = "You repair one malformed supervisor decision. Reply with ONLY the corrected decision JSON object — same intent, no commentary, no new decisions.",
+                UserPrompt = $"Your previous reply matched the JSON schema but could not be bound to the decision contract.\n\nBinding error: {bindError ?? "(unspecified)"}\n\nYour previous reply:\n{broken.Json.GetRawText()}\n\nRe-emit the SAME decision with that error corrected.",
+                JsonSchema = SupervisorDecisionSchema.ResponseSchema,
+                MaxOutputTokens = 4096,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
     /// <summary>Whether an LLM transport failure is a MODEL-side capability miss (the model could not produce a usable structured decision) rather than a gateway/credential INFRA fault. Capability misses fail closed to a clean stop (never crash the run); infra faults (Transient / RateLimited / AuthFailed) propagate so the engine fails the run and the live-gate treats them as non-gating infra. This is the decider's "fail closed on a model miss, surface real infra" split.</summary>
     private static bool IsModelCapabilityMiss(LlmErrorCategory category) => category is
         LlmErrorCategory.Malformed or LlmErrorCategory.ContextLengthExceeded or
         LlmErrorCategory.ContentFiltered or LlmErrorCategory.BadRequest;
 
-    /// <summary>Deserialize the model's structured reply to a decision, returning null on ANY non-conformant shape (a wrong top-level type, malformed JSON) so the caller fails closed — the decider never crashes the durable run on a degraded gateway reply.</summary>
-    private static SupervisorModelDecision? TryDeserialize(JsonElement json)
+    /// <summary>Deserialize the model's structured reply to a decision, returning null on ANY non-conformant shape (a wrong top-level type, malformed JSON) so the caller fails closed — the decider never crashes the durable run on a degraded gateway reply. The binding error (the JSON path + why) rides out so the repair prompt and the stop summary can NAME the miss.</summary>
+    private static SupervisorModelDecision? TryDeserialize(JsonElement json, out string? bindError)
     {
-        try { return json.Deserialize<SupervisorModelDecision>(SupervisorDecisionSchema.Options); }
-        catch (JsonException) { return null; }
+        try
+        {
+            bindError = null;
+            return json.Deserialize<SupervisorModelDecision>(SupervisorDecisionSchema.Options);
+        }
+        catch (JsonException ex)
+        {
+            bindError = ex.Path is null ? ex.Message : $"at {ex.Path}: {ex.Message}";
+            return null;
+        }
     }
 
     private async Task<string> BuildCapabilityCatalogAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -114,7 +161,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             .Where(p => context.AllowedAgentDefinitionIds is not { Count: > 0 } pool || pool.Contains(p.Id))
             .Select(p => new PersonaCatalogInfo(p.Slug, p.Name, p.Description)).ToList();
 
-        return RenderCatalog(_harnesses.All, pool, personas);
+        return RenderCatalog(_harnesses.All, pool, personas) + RenderBoundRepositories(context);
     }
 
     /// <summary>
@@ -130,6 +177,48 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// </summary>
     internal static string RenderCatalog(IReadOnlyList<IAgentHarness> harnesses, IReadOnlyList<PoolModelInfo> pool, IReadOnlyList<PersonaCatalogInfo>? personas = null) =>
         CapabilityCatalog.Render(harnesses, pool, personas);
+
+    /// <summary>
+    /// The run's BOUND repositories, appended to the capability catalog so an <c>agents[].repositoryId</c> proposal has
+    /// an EXACT id to cite — without this the model can only guess a name (the exact miss that killed a real run:
+    /// <c>"repositoryId": "backend"</c>, schema-valid, bind-dead). Rendered straight off the run profile (no DB read):
+    /// the primary repo's id + each related repo's id/alias/access. A repo-less (analysis-only) run appends nothing.
+    /// Internal for direct prompt pinning.
+    /// </summary>
+    internal static string RenderBoundRepositories(SupervisorTurnContext context)
+    {
+        var primary = context.AgentProfile?.RepositoryId;
+        var related = ParseRelatedRepositories(context.AgentProfile?.RelatedRepositories);
+
+        if (primary is null && related.Count == 0) return "";
+
+        var builder = new StringBuilder();
+
+        builder.AppendLine().AppendLine("Bound repositories (agents[].repositoryId / targetRepos[].repositoryId must cite one of these EXACT ids — never a name):");
+        if (primary is { } p) builder.AppendLine($"- {p} — the run's primary repository");
+        foreach (var r in related) builder.AppendLine($"- {r.Id}{(string.IsNullOrWhiteSpace(r.Alias) ? "" : $" (alias '{r.Alias}')")}{(string.IsNullOrWhiteSpace(r.Access) ? "" : $" — {r.Access}")}");
+
+        return builder.ToString();
+    }
+
+    /// <summary>Minimal read of the profile's raw related-repos array ({repositoryId, alias?, access?}) for catalog rendering — defensive: a malformed element is skipped, never a crash (the executor's authoring path stays the real parser).</summary>
+    private static IReadOnlyList<(string Id, string? Alias, string? Access)> ParseRelatedRepositories(JsonElement? raw)
+    {
+        if (raw is not { ValueKind: JsonValueKind.Array } array) return Array.Empty<(string, string?, string?)>();
+
+        var repos = new List<(string, string?, string?)>();
+
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("repositoryId", out var id) || id.ValueKind != JsonValueKind.String) continue;
+
+            repos.Add((id.GetString()!,
+                item.TryGetProperty("alias", out var alias) && alias.ValueKind == JsonValueKind.String ? alias.GetString() : null,
+                item.TryGetProperty("access", out var access) && access.ValueKind == JsonValueKind.String ? access.GetString() : null));
+        }
+
+        return repos;
+    }
 
     private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick, string catalog) => new()
     {
@@ -349,11 +438,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         return -1;
     }
 
-    /// <summary>Fail-closed terminal stop when the model's response did NOT conform to the decision schema (it did not parse to a decision, or carried no kind) — a model-side miss handled the SAME way as no-model and an unknown kind (the projector already maps an unknown verb to stop): a clean one-turn no-op stop, never an unhandled crash mid-run. Keeps the decider's "fail closed, never crash" contract WHOLE — a degraded/flaky gateway reply stops the run cleanly rather than faulting the durable engine. Deterministic so a replay re-derives it.</summary>
-    private static SupervisorDecision NonConformantStop() => new()
+    /// <summary>Fail-closed terminal stop when the model's response did NOT conform to the decision schema (it did not parse to a decision, or carried no kind) — a model-side miss handled the SAME way as no-model and an unknown kind (the projector already maps an unknown verb to stop): a clean one-turn no-op stop, never an unhandled crash mid-run. Keeps the decider's "fail closed, never crash" contract WHOLE — a degraded/flaky gateway reply stops the run cleanly rather than faulting the durable engine. Deterministic so a replay re-derives it. The binding detail (when known) rides the summary so the journal NAMES the miss — a schema↔type drift is diagnosable from the run page, not just the database.</summary>
+    private static SupervisorDecision NonConformantStop(string? bindError = null) => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = SupervisorStopPayload.NonConformantOutcome, Summary = "The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run." }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = SupervisorStopPayload.NonConformantOutcome, Summary = $"The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run.{(string.IsNullOrWhiteSpace(bindError) ? "" : $" ({bindError})")}" }, AgentJson.Options),
     };
 
     /// <summary>Fail-closed terminal stop when the operator did not pick a required supervisor brain model (<c>supervisorModelId</c>). The decision is the operator's — the supervisor never guesses its own model. Deterministic so a replay re-derives it.</summary>

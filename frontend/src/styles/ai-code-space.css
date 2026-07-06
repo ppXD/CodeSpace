@@ -5735,9 +5735,11 @@ body.chat-resizing .acs-root .app { transition: none; }
 .lt3-preset[data-on="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
 .lt3-preset-custom { font-size: 11px; color: #a89f93; font-style: italic; margin-left: 2px; }
 
-/* A settings row with a hover "?" — the row's own bottom border moves to the wrapper so the separator spans the ?. */
+/* A settings row with a hover "?" — the row's own bottom border moves to the wrapper so the separator spans the ?,
+   and the LAST row drops it exactly like a bare .lt3-srow:last-child (no doubled hairline, no 1px-taller last row). */
 .lt3-hrow { display: flex; align-items: stretch; border-bottom: 1px solid #eee8df; }
 .lt3-hrow .lt3-srow { flex: 1; min-width: 0; border-bottom: 0; }
+.lt3-hrow:last-child { border-bottom: 0; }
 .lt3-help { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-right: 10px; border: 0; border-radius: 50%; background: transparent; color: #b7ada0; cursor: help; }
 .lt3-help:hover { background: #f4efe8; color: var(--accent); }
 .lt3-helpcard { z-index: 240; background: #fffdf9; border: 1px solid #e5ddd1; border-radius: 10px; box-shadow: 0 10px 32px rgba(60, 50, 40, .16); padding: 12px 14px 12px; }

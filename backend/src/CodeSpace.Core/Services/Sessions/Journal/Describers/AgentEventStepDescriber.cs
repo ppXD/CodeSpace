@@ -40,10 +40,11 @@ public sealed class AgentEventStepDescriber : IJournalStepDescriber, ISingletonD
     }
 
     /// <summary>
-    /// A reviewer run's event — every one classifies <c>review</c> so the fold groups them; the FINAL SUMMARY is the
-    /// VERDICT BEAT: its raw title (the <c>VERDICT: {json}</c> contract line) is replaced with a human headline per
-    /// review scope, and the parsed verdict rides in as facts. The beat keeps the event's tone (the reviewer run's
-    /// terminal status); the approve/flag truth renders off the verdict facts, not the tone.
+    /// A reviewer run's event — every one classifies <c>review</c> so the fold groups them as reviewer background.
+    /// The FINAL SUMMARY still replaces its raw title (the <c>VERDICT: {json}</c> contract line must never leak) but
+    /// is NOT the beat: THE verdict beat is the synthetic <c>review.verdict</c> event
+    /// (<see cref="ReviewVerdictStepDescriber"/>), read off the durable result so it surfaces for EVERY harness —
+    /// codex-cli emits no final-summary event at all, which once hid a real run's verdict entirely.
     /// </summary>
     private static JournalStep DescribeReviewer(RunTimelineEvent e)
     {
@@ -53,7 +54,7 @@ public sealed class AgentEventStepDescriber : IJournalStepDescriber, ISingletonD
             ? "Independent reviewer verified the plan against the repository"
             : "Independent reviewer inspected the produced work";
 
-        return JournalSteps.From(e, JournalStepKinds.Review) with { Title = title, Detail = null, Beat = true, Verb = ReviewVerb, Milestone = true };
+        return JournalSteps.From(e, JournalStepKinds.Review) with { Title = title, Detail = null, Milestone = false };
     }
 
     /// <summary>A reviewer run's event — its cell key carries a review suffix (<c>{producer}#review</c> for an output review; the fixed <c>#plan-review</c> for a grounded plan review).</summary>

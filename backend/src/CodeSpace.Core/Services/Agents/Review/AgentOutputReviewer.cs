@@ -52,6 +52,7 @@ public sealed class AgentOutputReviewer : IAgentOutputReviewer, IScopedDependenc
 
         return
             "You are an INDEPENDENT reviewer. This workspace is checked out at the branch another agent produced — inspect the ACTUAL repository state (read the changed files, their neighbours, run greps) and judge whether the change soundly achieves the goal below. You did not write it; judge it strictly on its merits. Do NOT modify anything.\n\n" +
+            "IMPORTANT — your sandbox is NOT the producing environment: your clone is deliberately READ-ONLY and command-restricted (write probes and builds WILL fail here by design). Never infer anything about the producer's capabilities, or the change's viability, from your own write/exec failures — judge the CODE.\n\n" +
             $"Goal the change should serve:\n{producerGoal}\n\n" +
             $"Changed files: {files}";
     }

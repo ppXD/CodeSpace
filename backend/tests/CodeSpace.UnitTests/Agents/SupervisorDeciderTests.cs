@@ -653,6 +653,101 @@ public class SupervisorDeciderTests
         client.LastUserPrompt!.ShouldContain("security-reviewer — Security Reviewer — Audits for vulnerabilities", Case.Sensitive, "the team's personas reach the live decide prompt so the brain can author one per agent");
     }
 
+    // ── G②: the bind-salvage ladder — lenient id proposals → one repair call → a precise stop ──
+
+    [Fact]
+    public async Task A_repo_name_proposal_degrades_to_no_override_never_a_dead_decision()
+    {
+        // The exact miss that killed a real run: schema-valid `"repositoryId": "backend"` (a NAME where a uuid
+        // belongs) — the lenient converter drops the FIELD (the run-level repo applies), never the whole decision.
+        var reply = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["scan"],"agents":[{"subtaskId":"scan","role":"scanner","repositoryId":"backend"}]},"rationale":{"why":"fan out the ready subtask"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(reply);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "one bad optional leaf must not kill the decision");
+        decision.PayloadJson.ShouldNotContain("backend", customMessage: "the unhonorable proposal is dropped — the server-clamped run-level repository applies");
+        decision.PayloadJson.ShouldContain("scanner", customMessage: "the rest of the per-agent spec survives");
+        client.Requests.Count.ShouldBe(1, "a leniency save needs no repair round-trip");
+    }
+
+    [Fact]
+    public async Task An_unbindable_reply_buys_ONE_repair_call_carrying_the_bind_error()
+    {
+        var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;   // a string where an array belongs — validator-shaped drift
+        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["oops"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(broken, repaired);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the repaired reply lands as the decision");
+        client.Requests.Count.ShouldBe(2, "exactly one bounded repair round-trip");
+        client.Requests[1].UserPrompt.ShouldContain("$.spawn", customMessage: "the repair prompt NAMES the bind path so the model fixes the right leaf");
+        client.Requests[1].UserPrompt.ShouldContain("\"oops\"", customMessage: "the model repairs its OWN reply, not a fresh decide");
+        client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
+    }
+
+    [Fact]
+    public async Task A_repair_that_still_cannot_bind_stops_with_the_precise_path()
+    {
+        var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(broken);   // the repair replays the same broken reply
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "fail closed after the ladder exhausts — never crash the run");
+        decision.PayloadJson.ShouldContain("$.spawn", customMessage: "the stop summary NAMES the drift so it is diagnosable from the run page, not the database");
+        client.Requests.Count.ShouldBe(2, "primary + one repair, never an unbounded loop");
+    }
+
+    [Fact]
+    public void The_full_featured_decision_shape_binds_and_projects_end_to_end()
+    {
+        // The schema↔type drift pin: an instance exercising EVERY agents[] field (the real run's attempt 3, with a
+        // proper uuid) must bind and project — the validator and the C# contract can no longer silently disagree.
+        var repo = Guid.NewGuid();
+        var json = JsonDocument.Parse("""
+            {"kind":"spawn","rationale":{"why":"ready","evidence":"frontier shows scan ready"},
+             "spawn":{"subtaskIds":["scan"],"agents":[{"subtaskId":"scan","role":"scanner","goalOverride":"scan it",
+               "repositoryId":"__REPO__","targetRepos":[{"repositoryId":"__REPO__","alias":"be","access":"read"}],
+               "harness":"claude-code","model":"m1","autonomyLevel":"standard","agentDefinition":"backend"}]}}
+            """.Replace("__REPO__", repo.ToString())).RootElement;
+
+        var model = json.Deserialize<SupervisorModelDecision>(SupervisorDecisionSchema.Options);
+
+        model.ShouldNotBeNull();
+        model!.Spawn!.Agents![0].RepositoryId.ShouldBe(repo);
+        model.Spawn.Agents[0].AgentDefinition.ShouldBe("backend");
+        SupervisorDecisionProjector.Project(model).Kind.ShouldBe(SupervisorDecisionKinds.Spawn);
+    }
+
+    [Fact]
+    public void The_catalog_lists_bound_repositories_with_exact_ids()
+    {
+        var primary = Guid.NewGuid();
+        var related = Guid.NewGuid();
+        var context = Context() with
+        {
+            AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile
+            {
+                RepositoryId = primary,
+                RelatedRepositories = JsonDocument.Parse("""[{"repositoryId":"__REPO__","alias":"fe","access":"write"}]""".Replace("__REPO__", related.ToString())).RootElement,
+            },
+        };
+
+        var section = LlmSupervisorDecider.RenderBoundRepositories(context);
+
+        section.ShouldContain(primary.ToString(), customMessage: "the primary repo's EXACT id is citable — without it the model can only guess a name");
+        section.ShouldContain(related.ToString());
+        section.ShouldContain("alias 'fe'");
+        section.ShouldContain("EXACT ids");
+
+        LlmSupervisorDecider.RenderBoundRepositories(Context()).ShouldBe("", "an analysis-only run appends nothing");
+    }
+
     private static SupervisorDecision Project(string kind, Func<SupervisorModelDecision, SupervisorModelDecision> fill) =>
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
@@ -705,6 +800,27 @@ public class SupervisorDeciderTests
 
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new StructuredLLMCompletion { Json = _raw, Model = request.Model });
+    }
+
+    /// <summary>Returns a SEQUENCE of raw replies (the last one repeats) and records every request — the repair arc's seam: first the unbindable reply, then the repaired one, with the repair prompt pinned off the recorded request.</summary>
+    private sealed class SequencedRawJsonStructuredClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly Queue<JsonElement> _replies;
+        public readonly List<StructuredLLMCompletionRequest> Requests = new();
+
+        public SequencedRawJsonStructuredClient(params JsonElement[] replies) => _replies = new Queue<JsonElement>(replies);
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            var json = _replies.Count > 1 ? _replies.Dequeue() : _replies.Peek();
+            return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model });
+        }
     }
 
     /// <summary>Throws a typed <see cref="LlmApiException"/> of a given category from the structured call — pins the decider's "fail-closed on a model-capability miss, propagate real infra" split without a real gateway.</summary>

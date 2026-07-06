@@ -17,7 +17,7 @@ namespace CodeSpace.UnitTests.Sessions.Journal;
 public class JournalStepDescriberRegistryTests
 {
     private static readonly IJournalStepDescriberRegistry Registry = new JournalStepDescriberRegistry(
-        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new MapPlannerStepDescriber(), new MapDispatchStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new LifecycleStepDescriber() },
+        new IJournalStepDescriber[] { new SupervisorStepDescriber(), new MapPlannerStepDescriber(), new MapDispatchStepDescriber(), new ToolStepDescriber(), new AgentEventStepDescriber(), new ReviewVerdictStepDescriber(), new LifecycleStepDescriber() },
         new FallbackStepDescriber());
 
     private static RunTimelineEvent Event(string sourceKey, string kind = "k", string title = "t", string? summary = null,
@@ -61,20 +61,37 @@ public class JournalStepDescriberRegistryTests
 
     // ── The adversarial exchange: review / revise classification (E) ─────────
 
-    [Theory]
-    [InlineData("map#0#review", "Independent reviewer inspected the produced work")]
-    [InlineData("#plan-review", "Independent reviewer verified the plan against the repository")]
-    [InlineData("boss#turn1#0#review", "Independent reviewer inspected the produced work")]
-    public void A_reviewer_runs_final_summary_is_the_REVIEW_beat_with_a_human_title(string iterationKey, string expectedTitle)
+    [Fact]
+    public void The_synthetic_verdict_event_is_THE_review_beat_for_every_harness()
     {
-        // The reviewer's raw final message is the VERDICT contract line ("Reviewed. VERDICT: {json}") — the beat replaces
-        // it with a human headline per scope; ReviewVerdictFactsSource attaches the parsed verdict as structured facts.
-        var step = Registry.Describe(Event("agent-events", kind: "agent.FinalSummary", title: """Reviewed. VERDICT: {"approved": false}""", iterationKey: iterationKey));
+        // The verdict beat rides the SYNTHETIC review.verdict event (read off the reviewer's durable result), NOT the
+        // harness event log — codex-cli emits no final-summary event at all, which once hid a real run's verdict.
+        var step = Registry.Describe(Event(ReviewVerdictTimelineMap.Key, kind: ReviewVerdictTimelineMap.VerdictKind,
+            title: "Independent reviewer flagged the plan — 2 issues", summary: "the plan schedules finished work",
+            sev: TimelineSeverity.Warning, level: TimelineLevel.Milestone, iterationKey: "#plan-review"));
 
         step.Kind.ShouldBe(JournalStepKinds.Review);
         step.Beat.ShouldBeTrue("the reviewer's verdict is a first-class orchestration beat — the adversarial exchange shows in the ③ timeline");
         step.Verb.ShouldBe("review", "the frontend's REVIEW pill");
         step.Milestone.ShouldBeTrue();
+        step.Title.ShouldBe("Independent reviewer flagged the plan — 2 issues");
+        step.Detail.ShouldBeNull("the verdict card (facts) carries the rationale — not a duplicated detail line");
+        step.Tone.ShouldBe(TimelineSeverity.Warning, "a flagged verdict reads warm, an approval green — the tone carries the outcome");
+    }
+
+    [Theory]
+    [InlineData("map#0#review", "Independent reviewer inspected the produced work")]
+    [InlineData("#plan-review", "Independent reviewer verified the plan against the repository")]
+    [InlineData("boss#turn1#0#review", "Independent reviewer inspected the produced work")]
+    public void A_reviewer_runs_final_summary_folds_as_review_background_with_a_human_title(string iterationKey, string expectedTitle)
+    {
+        // The raw final message is the VERDICT contract line ("Reviewed. VERDICT: {json}") — it must never leak, but it
+        // is NOT the beat either (the synthetic review.verdict event is) — so it folds as reviewer background.
+        var step = Registry.Describe(Event("agent-events", kind: "agent.FinalSummary", title: """Reviewed. VERDICT: {"approved": false}""", iterationKey: iterationKey));
+
+        step.Kind.ShouldBe(JournalStepKinds.Review);
+        step.Beat.ShouldBeFalse("the synthetic verdict event is the one beat — the harness's own final message folds");
+        step.Milestone.ShouldBeFalse();
         step.Title.ShouldBe(expectedTitle, "the raw VERDICT contract line never leaks into the journal");
         step.Detail.ShouldBeNull();
     }

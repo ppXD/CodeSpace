@@ -34,7 +34,7 @@ public sealed class AgentPlanReviewer : IAgentPlanReviewer, IScopedDependency
             ReviewerModelId = request.ReviewerModelId,
         }, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>The grounded plan-review body: verify the plan against the REAL tree — assumptions, feasibility, completeness, already-done work. Internal for direct unit pinning.</summary>
+    /// <summary>The grounded plan-review body: verify the plan against the REAL tree — assumptions, feasibility, completeness, already-done work. The capability-context clause is load-bearing: the reviewer's OWN clone is deliberately read-only, and a real run was once derailed by a reviewer that probed <c>touch</c>/<c>dotnet build</c>, hit its own sandbox wall, and concluded the plan itself was unachievable — the executing agents' environment must never be inferred from the reviewer's. Internal for direct unit pinning.</summary>
     internal static string BuildReviewInstructions(string planArtifact, string goal)
     {
         return
@@ -42,6 +42,9 @@ public sealed class AgentPlanReviewer : IAgentPlanReviewer, IScopedDependency
             "VERIFY the plan against the ACTUAL code — read the files it presumes, run greps: (1) do its assumptions hold (files, frameworks, test infrastructure it names or implies)? " +
             "(2) is each step feasible and necessary in THIS codebase? (3) is anything the plan schedules already done? (4) does anything essential for the goal go unplanned? " +
             "You did not write the plan; judge it strictly against what you can see in the tree. Do NOT modify anything.\n\n" +
+            "IMPORTANT — your sandbox is NOT the executing environment: your clone is deliberately READ-ONLY and command-restricted (write probes and builds WILL fail here by design). " +
+            "The agents that will execute this plan run with WRITABLE workspaces and can run builds and tests. " +
+            "Never judge the plan's feasibility from your own write/exec failures — judge it from the CODE.\n\n" +
             $"Goal the plan should serve:\n{goal}\n\n" +
             $"The plan under review:\n{planArtifact}";
     }

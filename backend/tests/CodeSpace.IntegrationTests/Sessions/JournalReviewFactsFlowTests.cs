@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Review;
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -51,19 +52,17 @@ public sealed class JournalReviewFactsFlowTests
             resultSummary: """VERDICT: {"approved": false, "rationale": "the plan schedules finished work", "issues": [{"issue": "step 2 already done", "evidence": "src/auth.cs already validates"}]}""",
             harness: "codex-cli");
 
-        var flaggedBeatEvent = SeedFinalSummary(db, reviewer1);
-        var approvedBeatEvent = SeedFinalSummary(db, reviewer2);
-        var planBeatEvent = SeedFinalSummary(db, planReviewer);
-
         await db.SaveChangesAsync();
 
         var reader = scope.Resolve<ReviewerVerdictReader>();
 
-        // The verdict-beat facts: every landed verdict keys to ITS OWN final-summary event.
+        // The verdict-beat facts key by the SYNTHETIC verdict event's deterministic id — read off the durable result,
+        // so NO final-summary event is seeded here on purpose: a codex-cli reviewer emits none, and the beat must
+        // surface for every harness alike (the regression that hid a real run's verdict).
         var facts = await scope.Resolve<ReviewVerdictFactsSource>().GatherAsync(runId, teamId, CancellationToken.None);
 
         facts.Count.ShouldBe(3, "every landed reviewer verdict becomes beat facts — both rounds AND the plan review");
-        var flagged = facts[AgentEventTimelineMap.EventId(flaggedBeatEvent)].Review!;
+        var flagged = facts[ReviewVerdictTimelineMap.EventId(reviewer1)].Review!;
         flagged.Approved.ShouldBeFalse();
         flagged.Rationale.ShouldBe("placeholder hack");
         flagged.Issues.ShouldContain("hack committed (evidence: feature.txt line 1)", "the evidence-attached issue renders S8a-style");
@@ -71,9 +70,9 @@ public sealed class JournalReviewFactsFlowTests
         flagged.ReviewerHarness.ShouldBe("claude-code");
         flagged.Scope.ShouldBe(JournalReviewVerdict.OutputScope);
 
-        facts[AgentEventTimelineMap.EventId(approvedBeatEvent)].Review!.Approved.ShouldBeTrue();
+        facts[ReviewVerdictTimelineMap.EventId(reviewer2)].Review!.Approved.ShouldBeTrue();
 
-        var plan = facts[AgentEventTimelineMap.EventId(planBeatEvent)].Review!;
+        var plan = facts[ReviewVerdictTimelineMap.EventId(planReviewer)].Review!;
         plan.Scope.ShouldBe(JournalReviewVerdict.PlanScope);
         plan.Approved.ShouldBeFalse();
 
@@ -140,12 +139,4 @@ public sealed class JournalReviewFactsFlowTests
         return id;
     }
 
-    private static Guid SeedFinalSummary(CodeSpaceDbContext db, Guid agentRunId)
-    {
-        var id = Guid.NewGuid();
-
-        db.AgentRunEvent.Add(new AgentRunEvent { Id = id, AgentRunId = agentRunId, Sequence = 1, Kind = AgentEventKind.FinalSummary, Text = "final", OccurredAt = DateTimeOffset.UtcNow });
-
-        return id;
-    }
 }
