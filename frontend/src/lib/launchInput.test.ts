@@ -25,8 +25,6 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   tools: [],
   pushBranch: false,
   maxParallel: "5",
-  maxRounds: "6",
-  maxAgents: "20",
   budget: "none",
   agentModels: [],
   agentPool: [],
@@ -302,29 +300,29 @@ describe("buildLaunchInput — caps (Limits + Budget)", () => {
     expect(buildLaunchInput(form({ effort: "standard", maxParallel: "3" }))).not.toHaveProperty("caps");
   });
 
-  it("sends the full caps on a deep run", () => {
-    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "4", maxRounds: "8", maxAgents: "12", budget: "25" }));
-    expect(input.caps).toEqual({ maxParallelism: 4, maxRounds: 8, maxTotalSpawns: 12, maxCostUsd: 25 });
+  it("sends only concurrency + cost on a deep run — a supervised run loops until done, not a round/total-agent count", () => {
+    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "4", budget: "25" }));
+    expect(input.caps).toEqual({ maxParallelism: 4, maxCostUsd: 25 });
   });
 
   it("sends caps on auto (the tier resolves server-side, the operator saw the limits)", () => {
     const input = buildLaunchInput(form({ effort: "auto", budget: "5" }));
-    expect(input.caps).toEqual({ maxParallelism: 5, maxRounds: 6, maxTotalSpawns: 20, maxCostUsd: 5 });
+    expect(input.caps).toEqual({ maxParallelism: 5, maxCostUsd: 5 });
   });
 
   it("omits maxCostUsd when the budget is 'none'", () => {
     const input = buildLaunchInput(form({ effort: "deep", budget: "none" }));
     expect(input.caps).not.toHaveProperty("maxCostUsd");
-    expect(input.caps).toEqual({ maxParallelism: 5, maxRounds: 6, maxTotalSpawns: 20 });
+    expect(input.caps).toEqual({ maxParallelism: 5 });
   });
 
-  it("omits a non-positive or non-numeric limit field", () => {
-    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "0", maxRounds: "", maxAgents: "abc", budget: "none" }));
+  it("omits a non-positive or non-numeric concurrency", () => {
+    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "0", budget: "none" }));
     expect(input).not.toHaveProperty("caps");
   });
 
-  it("keeps only the valid limit fields", () => {
-    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "2", maxRounds: "-1", maxAgents: "", budget: "none" }));
+  it("keeps only the valid concurrency field", () => {
+    const input = buildLaunchInput(form({ effort: "deep", maxParallel: "2", budget: "none" }));
     expect(input.caps).toEqual({ maxParallelism: 2 });
   });
 });

@@ -92,7 +92,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const [cfg, setCfg] = useState({
     pushBranch: false, tools: [] as string[], enableMcp: false, cwdMode: "auto",
     agentModels: [] as string[], agentPool: [] as string[],
-    maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none",
+    maxParallel: "5", budget: "none",
     integrateBranches: false, autonomyCeiling: "",
     acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [] as string[],
     decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
@@ -103,7 +103,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
-    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", decisionReview: "None" });
+    else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", budget: "none", integrateBranches: false, autonomyCeiling: "", decisionReview: "None" });
     else if (customizeTab === "evaluation") setC({ acceptance: [...DEFAULT_ACCEPTANCE], acceptanceChecks: [], outputReview: "None", reviseRounds: "", reviewerAgent: false });
     else setC({ decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
@@ -198,7 +198,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     const modelCredentialModelId = credModels.data?.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId ?? "";
     const input = buildLaunchInput({
       taskText, surface, sessionId, workspace, effort, autonomy, model, modelCredentialId, modelCredentialModelId, harness, agentDefinitionId, runnerKind, cwdMode: cfg.cwdMode, enableMcp: cfg.enableMcp, tools: cfg.tools, pushBranch: cfg.pushBranch,
-      maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
+      maxParallel: cfg.maxParallel, budget: cfg.budget,
       agentModels: cfg.agentModels, agentPool: cfg.agentPool, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
       requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
@@ -446,12 +446,11 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                     {allPersonas.length === 0 && <div className="lt3-rempty">No agent definitions.</div>}
                   </div>
                 </RowPop>
-                <RowPop label="Limits" value={`${cfg.maxParallel} parallel · ${cfg.maxRounds} rounds · ${cfg.maxAgents} agents`}>
+                <RowPop label="Concurrency" value={`${cfg.maxParallel} agents at once`}>
                   <div className="lt3-limits">
-                    <input value={cfg.maxParallel} onChange={e => setC({ maxParallel: e.target.value })} aria-label="Max parallel" /><span>parallel</span>
-                    <input value={cfg.maxRounds} onChange={e => setC({ maxRounds: e.target.value })} aria-label="Max rounds" /><span>rounds</span>
-                    <input value={cfg.maxAgents} onChange={e => setC({ maxAgents: e.target.value })} aria-label="Max agents" /><span>agents</span>
+                    <input value={cfg.maxParallel} onChange={e => setC({ maxParallel: e.target.value })} aria-label="Max agents at once" /><span>agents at once</span>
                   </div>
+                  <div className="lt3-poolhint">The run keeps working the plan until it's done — bounded by this concurrency and the Budget, not a fixed round or agent count.</div>
                 </RowPop>
                 <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
