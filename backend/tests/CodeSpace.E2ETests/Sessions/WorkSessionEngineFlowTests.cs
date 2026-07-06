@@ -13,13 +13,14 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Sessions;
 
 /// <summary>
-/// The WorkSession layer (S1) against the ASSEMBLED engine — proves the additive migration 0069 is non-breaking on
-/// the headline run flow AND that the session binding survives a FULL real-engine walk (the executor's status /
-/// timestamp / outputs writes do not clobber <c>session_id</c> / <c>session_turn_index</c>):
-///   (a) a snapshot run with NO session walks start → terminal Success and lands with both columns NULL —
-///       byte-identical to pre-session behaviour, proven through the whole engine, not just the starter;
+/// The WorkSession layer against the ASSEMBLED engine — proves run→session genericity (EVERY run gets a per-run
+/// WorkSession: the staging seam opens a default one when none is supplied) AND that the session binding survives a FULL
+/// real-engine walk (the executor's status / timestamp / outputs writes do not clobber <c>session_id</c> /
+/// <c>session_turn_index</c>):
+///   (a) a snapshot run staged with NO session gets a DEFAULT per-run session opened at the staging seam, walks
+///       start → terminal Success, and STILL carries that auto-opened SessionId + turn ordinal afterwards;
 ///   (b) a snapshot run staged WITH a pre-resolved <see cref="SessionAssignment"/> walks to terminal Success and
-///       STILL carries its SessionId + turn ordinal afterwards.
+///       STILL carries ITS SessionId + turn ordinal afterwards.
 ///
 /// <para>Tier: high-fidelity E2E (Surface=Engine) — real <see cref="IRunFromSnapshotStarter"/> + real
 /// <see cref="IWorkflowEngine"/> over real Postgres, no mocks.</para>
@@ -34,18 +35,20 @@ public class WorkSessionEngineFlowTests
     public WorkSessionEngineFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Session_less_run_walks_to_terminal_with_null_session_columns()
+    public async Task Session_less_staging_gets_a_default_per_run_session_that_survives_the_engine_walk()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
+        // Staged with NO session: the run→session-genericity seam opens a DEFAULT per-run session (the staging path
+        // "can't produce a session-less run"), and the run must still walk to terminal Success carrying that binding.
         var runId = await StartSnapshotAsync(teamId, userId, session: null);
         await RunEngineAsync(runId);
 
         var run = await LoadRunAsync(runId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
             customMessage: "the headline snapshot-run flow must still reach terminal Success with the new schema");
-        run.SessionId.ShouldBeNull("the additive session columns default NULL end-to-end through the engine");
-        run.SessionTurnIndex.ShouldBeNull();
+        run.SessionId.ShouldNotBeNull("run→session genericity opens a default per-run session at staging when none is supplied — no run is session-less");
+        run.SessionTurnIndex.ShouldNotBeNull("the auto-opened session binds the run to a turn ordinal, and the engine walk must not clobber it");
     }
 
     [Fact]
