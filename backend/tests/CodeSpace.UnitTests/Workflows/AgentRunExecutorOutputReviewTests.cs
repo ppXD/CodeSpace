@@ -158,27 +158,102 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope.ShouldBeNull("no workflow run ⇒ no scope pushed ⇒ the call records nothing (fail-open)");
     }
 
+    // ── D②: the approve co-sign — an AGENT reviewer's approval needs an independent MODEL consensus ──
+
+    [Fact]
+    public async Task An_agent_approval_with_a_model_disagreement_re_grades_to_needs_review_with_both_sides()
+    {
+        var (runId, executor, runs, critic) = NewExecutor(
+            new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the diff hardcodes the fixture", Issues = new[] { new CriticIssue { Text = "hardcoded expected value", Evidence = "src/foo.cs line 3" } } },
+            agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "approval requires CONSENSUS across the two independent channels — a disagreement fails toward the human, never a silent pass");
+        result.ReviewFeedback.ShouldContain("The reviewer agent approved, but the independent model co-check disagreed: the diff hardcodes the fixture");
+        result.ReviewFeedback.ShouldContain("hardcoded expected value (evidence: src/foo.cs line 3)", customMessage: "the co-check's evidence rides the feedback");
+        critic.CallCount.ShouldBe(1, "the one model call IS the co-sign — the ladder never ran because the agent produced a verdict");
+        runs.AppendedEvents.Count.ShouldBe(1, "the operator sees WHY the consensus broke");
+    }
+
+    [Fact]
+    public async Task An_agent_approval_the_model_co_signs_passes_clean()
+    {
+        var (runId, executor, runs, critic) = NewExecutor(
+            new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "agree" },
+            agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "consensus across both independent channels ⇒ a clean pass");
+        critic.CallCount.ShouldBe(1, "the co-sign is the only model call");
+        runs.AppendedEvents.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_failed_co_check_keeps_the_agent_approval()
+    {
+        var (runId, executor, runs, critic) = NewExecutor(
+            CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"),
+            agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "a broken co-check must not manufacture a flag — fail-open to the agent's approval");
+        critic.CallCount.ShouldBe(1);
+        runs.AppendedEvents.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_agent_disapproval_stands_without_a_co_sign()
+    {
+        var (runId, executor, _, critic) = NewExecutor(
+            new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "would have passed" },
+            agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "placeholder hack", Issues = new[] { new CriticIssue { Text = "hack committed", Evidence = "feature.txt line 1" } } });
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview);
+        result.ReviewFeedback.ShouldBe("placeholder hack Issues: hack committed (evidence: feature.txt line 1)", "the agent's grounded verdict is the feedback, un-diluted");
+        critic.Called.ShouldBeFalse("a DISAPPROVING agent needs no co-sign — the worst case of a wrong block is one wasted revise round, not a silent pass");
+    }
+
+    [Fact]
+    public async Task A_failed_agent_review_ladders_to_the_model_critic_without_a_co_sign()
+    {
+        var (runId, executor, _, critic) = NewExecutor(
+            new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "model ok" },
+            agentVerdict: CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: no produced branch"));
+
+        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        critic.CallCount.ShouldBe(1, "the model call is the LADDER — a laddered model approval never co-signs itself");
+    }
+
     private static AgentRun Run(Guid id, Guid? workflowRunId = null, string? nodeId = null, string iterationKey = "") =>
         new() { Id = id, TeamId = Guid.NewGuid(), WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey };
 
     private static AgentTask DefaultTask => new() { Goal = "g", Harness = "codex-cli" };   // OutputReviewMode = None
     private static AgentTask GatedTask => new() { Goal = "g", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate };
+    private static AgentTask AgentReviewedTask => new() { Goal = "g", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerAgent = true };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null)
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId);
         var critic = new RecordingCritic { Verdict = verdict };
-        var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision));
+        var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
         var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs, critic);
     }
 
-    /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard) plus the record logger + offloader the recording scope pulls from a fresh scope.</summary>
+    /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard), the record logger + offloader the recording scope pulls, and (when configured) the S8/D② agent reviewer.</summary>
     private sealed class FakeScopeFactory : IServiceScopeFactory, IServiceScope, IServiceProvider
     {
         private readonly IToolCallLedgerService _ledger;
-        public FakeScopeFactory(IToolCallLedgerService ledger) { _ledger = ledger; }
+        private readonly CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer? _agentReviewer;
+        public FakeScopeFactory(IToolCallLedgerService ledger, CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer? agentReviewer = null) { _ledger = ledger; _agentReviewer = agentReviewer; }
 
         public IServiceScope CreateScope() => this;
         public IServiceProvider ServiceProvider => this;
@@ -186,8 +261,17 @@ public sealed class AgentRunExecutorOutputReviewTests
             serviceType == typeof(IToolCallLedgerService) ? _ledger
             : serviceType == typeof(IRunRecordLogger) ? new NoopRecordLogger()
             : serviceType == typeof(IArtifactOffloader) ? new NoopOffloader()
+            : serviceType == typeof(CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer) ? _agentReviewer
             : null;
         public void Dispose() { }
+    }
+
+    /// <summary>The S8 agent reviewer the executor resolves from its fresh scope — answers a fixed verdict.</summary>
+    private sealed class FakeAgentReviewer : CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer
+    {
+        private readonly CriticVerdict _verdict;
+        public FakeAgentReviewer(CriticVerdict verdict) { _verdict = verdict; }
+        public Task<CriticVerdict> ReviewAsync(AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken) => Task.FromResult(_verdict);
     }
 
     /// <summary>The offloader carried on the pushed scope. Never exercised here (the fake critic short-circuits before any decorator) — it only needs to be resolvable and non-null so the scope can be constructed.</summary>
@@ -253,6 +337,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         public CriticVerdict Verdict { get; set; } = new() { Mode = ReviewMode.Gate };
         public bool Called { get; private set; }
+        public int CallCount { get; private set; }
 
         /// <summary>The ambient LlmCallScope in flight when the critic was invoked — the executor's recording push, or null when none.</summary>
         public LlmCallScope? ObservedScope { get; private set; }
@@ -260,6 +345,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         public Task<CriticVerdict> ReviewAsync(CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
         {
             Called = true;
+            CallCount++;
             ObservedScope = LlmCallContext.Current;
             return Task.FromResult(Verdict);
         }

@@ -56,4 +56,18 @@ public sealed record WorkflowPlanRequest
 
     /// <summary>INTERNAL — the reviewer's critique folded back for the IMPROVE re-plan (set by the decorator, never from the wire). When present, the planner revises against it.</summary>
     public string? ReviewerCritique { get; init; }
+
+    /// <summary>
+    /// D①: review the plan with a REAL independent agent — a read-only run that CLONES <see cref="RepositoryId"/> and
+    /// verifies the plan's assumptions against the actual code (files it presumes, work already done, feasibility) —
+    /// instead of only the in-process model critic. The decorator ladders agent → model critic → fail-open. Only
+    /// meaningful when <see cref="Review"/> is not None AND a repository is bound; false ⇒ byte-identical.
+    /// </summary>
+    public bool ReviewerAgent { get; init; }
+
+    /// <summary>The workflow run the reviewer AgentRun links to (its observability cell) — set by the plan nodes; null on the run-less plan-from-task path (the reviewer then runs unlinked but still team-scoped).</summary>
+    public Guid? WorkflowRunId { get; init; }
+
+    /// <summary>The node id the reviewer AgentRun links to — set by the plan nodes alongside <see cref="WorkflowRunId"/>.</summary>
+    public string? NodeId { get; init; }
 }

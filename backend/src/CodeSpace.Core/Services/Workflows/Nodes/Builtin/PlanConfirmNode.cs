@@ -70,7 +70,9 @@ public sealed class PlanConfirmNode : INodeRuntime
                 "reviewMode": { "type": "integer", "enum": [0, 1, 2], "default": 0, "description": "Independent reviewer over each REVISED plan: 0 = off, 1 = Gate, 2 = Improve — the same critic the original planner ran under." },
                 "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the revision reviewer runs on. Leave empty to auto-pick." },
                 "flatPlan": { "type": "boolean", "default": false, "description": "Constrain REVISIONS to independent subtasks (no dependsOn) — set by parallel fan-out projections, mirroring the plan.author upstream." },
-                "maxRevisions": { "type": "integer", "minimum": 1, "default": 5, "description": "Revisions allowed before the node fails legibly instead of looping the planner forever." }
+                "maxRevisions": { "type": "integer", "minimum": 1, "default": 5, "description": "Revisions allowed before the node fails legibly instead of looping the planner forever." },
+                "reviewerAgent": { "type": "boolean", "default": false, "description": "D①: review each REVISED plan with a REAL independent agent that clones the repository below and verifies it against the actual code, instead of only the in-process model critic. Only used when reviewMode is not 0 AND repositoryId is set." },
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when reviewerAgent is on." }
               }
             }
             """),
@@ -171,7 +173,7 @@ public sealed class PlanConfirmNode : INodeRuntime
             ? cv.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString() ?? "").ToList()
             : (IReadOnlyList<string>)Array.Empty<string>();
 
-        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, PlanAuthorNode.ComposeGoalWithCriteria(goal, criteria), ReadString(context.Inputs, "grounding"), feedback: answer);
+        var request = PlanAuthorNode.BuildPlanRequest(context.Config, teamId, PlanAuthorNode.ComposeGoalWithCriteria(goal, criteria), ReadString(context.Inputs, "grounding"), feedback: answer, workflowRunId, context.NodeId);
 
         PlannedWorkflow plan;
         try

@@ -88,6 +88,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>The PLAN-scoped critic (S4e — the tier-generic "plan critic" on the Deep tier): reviews ONLY the supervisor's <c>plan</c> decisions, so the operator can critique plans without paying a critic call on every spawn/merge/stop. A plan decision uses THIS mode when set, else falls under <see cref="DecisionReviewMode"/>. None (default) ⇒ plans review like any other decision.</summary>
     public ReviewMode PlanReviewMode { get; init; } = ReviewMode.None;
 
+    /// <summary>D①: review each PLAN decision with a REAL independent agent that clones the run's repository and verifies the plan against the actual code, instead of only the in-process model critic (agent → model → fail-open ladder). Only meaningful when a plan-scoped review mode is active AND the profile binds a repository.</summary>
+    public bool ReviewerAgent { get; init; }
+
     /// <summary>The credentialed-model ROW the decision critic runs on (a <c>ModelCredentialModel</c> id) — the INDEPENDENT reviewer, ideally distinct from <see cref="SupervisorModelId"/>. Null ⇒ the critic auto-picks the team's strongest structured-eligible brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
 

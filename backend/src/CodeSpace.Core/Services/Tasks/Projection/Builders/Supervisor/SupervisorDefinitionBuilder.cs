@@ -100,6 +100,8 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The tier-generic PLAN critic (S4e) — on Deep it scopes to the supervisor's plan decisions, so "critique
         // the plan before it runs" works identically on every tier. Omitted when off (byte-identical).
         AddIfPresent(config, "planReviewMode", context.PlannerReviewMode == ReviewMode.None ? (object?)null : (int)context.PlannerReviewMode);
+        // D①: plan decisions review via a REAL agent grounded in the repo (agent → model → fail-open) when opted in.
+        AddIfPresent(config, "reviewerAgent", context.PlannerReviewMode != ReviewMode.None && context.AgentProfile?.ReviewerAgent == true && context.AgentProfile?.RepositoryId is not null ? (object?)true : null);
         AddIfPresent(config, "reviewerModelId", context.ReviewerModelId?.ToString());
         // The operator's allowed model pool (credentialed-model row ids) for the agents this supervisor dispatches —
         // baked as a string-uuid array onto the node's allowedModelIds, where a dispatched model out of the pool fails

@@ -53,7 +53,9 @@ public sealed class PlanAuthorNode : INodeRuntime
                 "plannerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the planner reasons on. Leave empty to auto-pick the team's strongest structured-eligible model." },
                 "reviewMode": { "type": "integer", "enum": [0, 1, 2], "default": 0, "description": "Independent reviewer over the produced plan: 0 = off, 1 = Gate (flag concerns onto the plan's risks), 2 = Improve (one bounded revision against the critique)." },
                 "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the plan reviewer runs on (ideally distinct from the planner). Leave empty to auto-pick. Only used when reviewMode is not 0." },
-                "flatPlan": { "type": "boolean", "default": false, "description": "Constrain the plan to INDEPENDENT subtasks (no dependsOn) — set by parallel fan-out projections (flow.map runs every item concurrently, so ordering could not be honored). Authored dependencies are stripped as a fail-safe (logged)." }
+                "flatPlan": { "type": "boolean", "default": false, "description": "Constrain the plan to INDEPENDENT subtasks (no dependsOn) — set by parallel fan-out projections (flow.map runs every item concurrently, so ordering could not be honored). Authored dependencies are stripped as a fail-safe (logged)." },
+                "reviewerAgent": { "type": "boolean", "default": false, "description": "D①: review the plan with a REAL independent agent that clones the repository below and verifies the plan against the actual code (assumptions, feasibility, already-done work), instead of only the in-process model critic. Falls back to the model critic when the agent cannot produce a verdict. Only used when reviewMode is not 0 AND repositoryId is set." },
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when reviewerAgent is on." }
               }
             }
             """),
@@ -99,7 +101,7 @@ public sealed class PlanAuthorNode : INodeRuntime
         if (!NodeScopeReader.TryReadWorkflowRunId(context, out var workflowRunId))
             return NodeResult.Fail("The run carries no run id — plan.author persists the plan against the run.");
 
-        var request = BuildPlanRequest(context.Config, teamId, ComposeGoalWithCriteria(goal, criteria), grounding, feedback);
+        var request = BuildPlanRequest(context.Config, teamId, ComposeGoalWithCriteria(goal, criteria), grounding, feedback, workflowRunId, context.NodeId);
 
         using var scope = _scopeFactory.CreateScope();
 
@@ -165,8 +167,8 @@ public sealed class PlanAuthorNode : INodeRuntime
     /// <summary>The flat-plan constraint line appended to the task text — the planner must author parallel-safe subtasks. Pinned by a unit test (the map projections depend on it).</summary>
     public const string FlatPlanConstraint = "Constraint: author INDEPENDENT subtasks only — they run in PARALLEL, so do NOT use dependsOn.";
 
-    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change (a flat plan additionally appends <see cref="FlatPlanConstraint"/>); defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws).</summary>
-    internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, string goal, string grounding, string feedback) => new()
+    /// <summary>Map config → the planner request. The feedback (when present) rides the task text so EVERY planner backend revises against it without a contract change (a flat plan additionally appends <see cref="FlatPlanConstraint"/>); defensive reads per the node convention (an out-of-range reviewMode degrades to off, never throws). The run/node linkage (D①) lets the grounded plan reviewer land its AgentRun on this node's cell.</summary>
+    internal static WorkflowPlanRequest BuildPlanRequest(IReadOnlyDictionary<string, JsonElement> config, Guid teamId, string goal, string grounding, string feedback, Guid? workflowRunId = null, string? nodeId = null) => new()
     {
         TaskText = ReadFlatPlan(config) ? $"{ComposeTaskText(goal, feedback)}\n\n{FlatPlanConstraint}" : ComposeTaskText(goal, feedback),
         TeamId = teamId,
@@ -174,7 +176,16 @@ public sealed class PlanAuthorNode : INodeRuntime
         BrainModelId = ReadGuid(config, "plannerModelId"),
         Review = ReadReviewMode(config),
         ReviewerModelId = ReadGuid(config, "reviewerModelId"),
+        // D① grounded plan review: a real read-only agent verifies the plan against this repository's actual tree.
+        ReviewerAgent = ReadBool(config, "reviewerAgent"),
+        RepositoryId = ReadGuid(config, "repositoryId"),
+        WorkflowRunId = workflowRunId,
+        NodeId = nodeId,
     };
+
+    /// <summary>Defensive bool config read — absent / non-bool ⇒ false, mirroring the node convention.</summary>
+    private static bool ReadBool(IReadOnlyDictionary<string, JsonElement> config, string key) =>
+        config.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.True;
 
     /// <summary>Fold the operator's acceptance criteria into the goal (S5b) — the plan AND its per-item contracts must target the operator's definition of done, and the plan critic judges against the same yardstick (its Goal is this task text). Empty ⇒ the goal verbatim (byte-identical). Pinned by a unit test.</summary>
     internal static string ComposeGoalWithCriteria(string goal, IReadOnlyList<string> criteria)

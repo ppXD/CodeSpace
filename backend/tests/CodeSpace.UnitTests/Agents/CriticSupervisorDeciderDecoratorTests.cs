@@ -24,7 +24,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic();
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var decision = await decorator.DecideAsync(Context(ReviewMode.None), CancellationToken.None);
 
@@ -38,7 +38,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Improve, Critique = "spawn fewer agents", Rationale = "over-fanned" } };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         await decorator.DecideAsync(Context(ReviewMode.Improve), CancellationToken.None);
 
@@ -57,7 +57,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound" } };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
 
@@ -72,7 +72,7 @@ public class CriticSupervisorDeciderDecoratorTests
         var inner = new FakeDecider();
         var critic = new FakeCritic();
         critic.Queue(Disapproved("over-fanned"), new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "revision is sound" });
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
 
@@ -89,7 +89,7 @@ public class CriticSupervisorDeciderDecoratorTests
         var inner = new FakeDecider();
         var critic = new FakeCritic();
         critic.Queue(Disapproved("premature"), Disapproved("still premature"));
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
 
@@ -104,7 +104,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = Disapproved("would block again") };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var context = Context(ReviewMode.Gate) with { PriorDecisions = new[] { AnsweredEscalation("approve — proceed") } };
         var decision = await decorator.DecideAsync(context, CancellationToken.None);
@@ -118,7 +118,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "redirected fine" } };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         var context = Context(ReviewMode.Gate) with { PriorDecisions = new[] { AnsweredEscalation("split it into two smaller spawns") } };
         await decorator.DecideAsync(context, CancellationToken.None);
@@ -131,7 +131,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "ok" } };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         // The answered escalation is followed by a later decision — no longer the LATEST → no bypass.
         var priors = new[] { AnsweredEscalation("approve"), Prior(SupervisorDecisionKinds.Spawn) };
@@ -180,7 +180,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = CriticVerdict.ReviewFailed(ReviewMode.Improve, "no reviewer model") };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         await decorator.DecideAsync(Context(ReviewMode.Improve), CancellationToken.None);
 
@@ -192,7 +192,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var inner = new FakeDecider();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Improve, Critique = "   ", Rationale = "ok" } };
-        var decorator = new CriticSupervisorDeciderDecorator(inner, critic);
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
 
         await decorator.DecideAsync(Context(ReviewMode.Improve), CancellationToken.None);
 
@@ -209,12 +209,33 @@ public class CriticSupervisorDeciderDecoratorTests
 
     private sealed class FakeDecider : ISupervisorDecider
     {
+        public string Kind { get; set; } = SupervisorDecisionKinds.Spawn;
         public List<SupervisorTurnContext> Contexts { get; } = new();
 
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
         {
             Contexts.Add(context);
-            return Task.FromResult(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{\"agents\":[]}" });
+            return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = "{\"agents\":[]}" });
+        }
+    }
+
+    /// <summary>No grounded review requested — every call ladders straight to the model critic (the unit tier's default).</summary>
+    private sealed class NoAgentPlanReviewer : CodeSpace.Core.Services.Agents.Review.IAgentPlanReviewer
+    {
+        public Task<CriticVerdict> ReviewAsync(CodeSpace.Core.Services.Agents.Review.PlanReviewRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: not requested"));
+    }
+
+    /// <summary>The D① grounded reviewer: records every request, answers a fixed verdict (default: a failed review, i.e. the ladder falls through).</summary>
+    private sealed class RecordingAgentPlanReviewer : CodeSpace.Core.Services.Agents.Review.IAgentPlanReviewer
+    {
+        public CriticVerdict Verdict { get; set; } = CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: staging failed");
+        public List<CodeSpace.Core.Services.Agents.Review.PlanReviewRequest> Requests { get; } = new();
+
+        public Task<CriticVerdict> ReviewAsync(CodeSpace.Core.Services.Agents.Review.PlanReviewRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            return Task.FromResult(Verdict);
         }
     }
 
@@ -251,4 +272,124 @@ public class CriticSupervisorDeciderDecoratorTests
 
         CriticSupervisorDeciderDecorator.ReviewModeFor(context, decision).ShouldBe(expected);
     }
+
+    // ── D①: the grounded plan-review ladder on the supervisor tier — real agent first → model critic → fail-open ──
+
+    [Fact]
+    public async Task A_plan_decision_with_the_grounded_opt_in_reviews_via_the_real_agent_first()
+    {
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic();
+        var agent = new RecordingAgentPlanReviewer { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "grounded and sound" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+        var context = GroundedContext(ReviewMode.Gate, Guid.NewGuid());
+
+        var decision = await decorator.DecideAsync(context, CancellationToken.None);
+
+        agent.Requests.Count.ShouldBe(1, "a PLAN decision with the opt-in reviews GROUNDED first");
+        critic.Requests.ShouldBeEmpty("a usable agent verdict means the model critic is never consulted");
+
+        var sent = agent.Requests[0];
+        sent.RepositoryId.ShouldBe(context.AgentProfile!.RepositoryId!.Value, "the run's authored repository is the ground");
+        sent.TeamId.ShouldBe(context.TeamId);
+        sent.WorkflowRunId.ShouldBe(context.SupervisorRunId, "the reviewer run lands on the supervisor run's cell");
+        sent.NodeId.ShouldBe(context.NodeId);
+        sent.ReviewerModelId.ShouldBe(context.ReviewerModelId);
+        sent.Goal.ShouldContain("ship the feature", customMessage: "the goal is the yardstick");
+        sent.Goal.ShouldContain("tests pass", customMessage: "the acceptance criteria ride the yardstick");
+        sent.PlanArtifact.ShouldContain(SupervisorDecisionKinds.Plan, customMessage: "the rendered decision is the artifact under review");
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "an approved Gate returns the decision unchanged");
+        inner.Contexts.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_non_plan_decision_never_consults_the_plan_reviewer()
+    {
+        var inner = new FakeDecider();   // Spawn
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "fine" } };
+        var agent = new RecordingAgentPlanReviewer();
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+        var context = GroundedContext(ReviewMode.None, Guid.NewGuid()) with { DecisionReviewMode = ReviewMode.Gate };
+
+        await decorator.DecideAsync(context, CancellationToken.None);
+
+        agent.Requests.ShouldBeEmpty("grounding is a PLAN affordance — spawns/merges/stops never stage a repo-cloning agent");
+        critic.Requests.Count.ShouldBe(1, "the ordinary decision critic still reviews");
+    }
+
+    [Fact]
+    public async Task A_failed_grounded_review_ladders_down_to_the_model_critic()
+    {
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "fine" } };
+        var agent = new RecordingAgentPlanReviewer();   // fixed: a failed review
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        await decorator.DecideAsync(GroundedContext(ReviewMode.Gate, Guid.NewGuid()), CancellationToken.None);
+
+        agent.Requests.Count.ShouldBe(1, "the grounded review was attempted");
+        critic.Requests.Count.ShouldBe(1, "a grounded review that can't produce a verdict ladders DOWN to the text review");
+        critic.Requests[0].ArtifactKind.ShouldBe("workflow plan");
+    }
+
+    [Fact]
+    public async Task A_grounded_disapproval_drives_the_hard_gate_ladder_to_escalation()
+    {
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic();
+        var agent = new RecordingAgentPlanReviewer { Verdict = Disapproved("grounded: the plan schedules finished work") };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        var result = await decorator.DecideAsync(GroundedContext(ReviewMode.Gate, Guid.NewGuid()), CancellationToken.None);
+
+        inner.Contexts.Count.ShouldBe(2, "one bounded re-decide against the grounded critique");
+        inner.Contexts[1].ReviewerCritique.ShouldBe("grounded: the plan schedules finished work Issues: premature stop (evidence: two subtasks remain unfinished)");
+        agent.Requests.Count.ShouldBe(2, "the revision earns a fresh GROUNDED review — the second pass rides the same ladder");
+        critic.Requests.ShouldBeEmpty("both passes produced agent verdicts — the model critic never ran");
+        result.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a still-disapproved plan escalates to the human — the full ladder: agent-critic → self-revision → human");
+    }
+
+    [Fact]
+    public async Task An_improve_plan_with_an_agent_disapproval_re_decides_on_the_composed_critique()
+    {
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic();
+        var agent = new RecordingAgentPlanReviewer { Verdict = Disapproved("weak") };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        await decorator.DecideAsync(GroundedContext(ReviewMode.Improve, Guid.NewGuid()), CancellationToken.None);
+
+        inner.Contexts.Count.ShouldBe(2, "an agent disapproval under IMPROVE buys one re-decide");
+        inner.Contexts[1].ReviewerCritique.ShouldBe("weak Issues: premature stop (evidence: two subtasks remain unfinished)",
+            customMessage: "the agent's Gate-shaped verdict composes rationale + evidence-attached issues into the critique");
+        inner.Contexts[1].PlanReviewMode.ShouldBe(ReviewMode.None, "the re-decide can never recurse into another review");
+        critic.Requests.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_improve_plan_with_an_agent_approval_keeps_the_original_decision()
+    {
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic();
+        var agent = new RecordingAgentPlanReviewer { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "grounded and sound" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        await decorator.DecideAsync(GroundedContext(ReviewMode.Improve, Guid.NewGuid()), CancellationToken.None);
+
+        inner.Contexts.Count.ShouldBe(1, "an approval yields nothing to revise against — keep the original");
+    }
+
+    private static SupervisorTurnContext GroundedContext(ReviewMode planMode, Guid repositoryId) => new()
+    {
+        Goal = "ship the feature",
+        TeamId = Guid.NewGuid(),
+        SupervisorRunId = Guid.NewGuid(),
+        NodeId = "supervisor",
+        PlanReviewMode = planMode,
+        ReviewerAgent = true,
+        ReviewerModelId = Guid.NewGuid(),
+        AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repositoryId },
+        AcceptanceCriteria = new[] { "tests pass" },
+    };
 }

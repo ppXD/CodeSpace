@@ -113,6 +113,9 @@ public sealed record SupervisorTurnContext
     /// <summary>The PLAN-scoped critic (S4e): a <c>plan</c> decision reviews under THIS mode when set (else under <c>DecisionReviewMode</c>); non-plan decisions never use it. None (default) ⇒ byte-identical.</summary>
     public ReviewMode PlanReviewMode { get; init; } = ReviewMode.None;
 
+    /// <summary>D①: PLAN decisions review via a REAL independent agent (grounded against the repo) before the model critic. Carried from <c>SupervisorGoalConfig.ReviewerAgent</c>.</summary>
+    public bool ReviewerAgent { get; init; }
+
     /// <summary>
     /// The tool allow-list each spawned agent is restricted to (P2-3) — the supervisor config's REUSED
     /// <c>AllowedTools</c> threaded into <c>AgentTask.Tools</c>. Tri-state, matching the task envelope: <c>null</c>
