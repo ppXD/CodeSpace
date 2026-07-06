@@ -6,9 +6,15 @@ namespace CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 
 /// <summary>
 /// The <c>deep</c> bounds preset (Rule 18.3 — one impl beside its variant folder) — the most generous tier:
-/// wide parallelism, many rounds, a large spawn budget for risky / expensive work. Self-registers via
-/// <see cref="ISingletonDependency"/>; the kind string matches <see cref="TaskEffortModes.Deep"/> so the router
-/// resolves it by the effort mode. Caps are advisory at L2 (the single-agent builder does not consume them).
+/// wide parallelism for risky / expensive work. Self-registers via <see cref="ISingletonDependency"/>; the kind
+/// string matches <see cref="TaskEffortModes.Deep"/> so the router resolves it by the effort mode. Caps are advisory
+/// at L2 (the single-agent builder does not consume them).
+///
+/// <para>The tier tunes ONLY the agent CONCURRENCY (<see cref="RouteCaps.MaxParallelism"/> — how many agents run at
+/// once). A supervised run LOOPS UNTIL DONE: it terminates on the model's own success stop, the operator's cost cap
+/// (realized token spend), or the best-effort no-progress guard — NOT an arbitrary round or total-spawn count (those
+/// strangled real multi-subtask plans). The round / total-spawn ceilings survive ONLY as hidden runaway back-stops
+/// (their defaults in <c>SupervisorGoalPlan</c>), never a tuned tier knob.</para>
 /// </summary>
 public sealed class DeepBoundsPreset : IBoundsPreset, ISingletonDependency
 {
@@ -17,11 +23,6 @@ public sealed class DeepBoundsPreset : IBoundsPreset, ISingletonDependency
     public RouteCaps ToCaps() => new()
     {
         MaxParallelism = 5,
-        // A sequential multi-subtask plan needs one spawn round PER subtask (a dependency chain can't parallelize) plus
-        // plan + confirm + a closing merge/stop — so 6 could not finish even a 4-subtask chain. 12 gives a real Deep plan
-        // room to run to completion with retry/merge slack; MaxTotalSpawns + the cost cap + no-progress still bound runaway.
-        MaxRounds = 12,
-        MaxTotalSpawns = 20,
         AutonomyCeiling = "Standard",
         RequiresApproval = false,
     };

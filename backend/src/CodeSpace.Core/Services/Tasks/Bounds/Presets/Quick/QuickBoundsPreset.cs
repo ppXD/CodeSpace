@@ -17,8 +17,6 @@ public sealed class QuickBoundsPreset : IBoundsPreset, ISingletonDependency
     public RouteCaps ToCaps() => new()
     {
         MaxParallelism = 1,
-        MaxRounds = 1,
-        MaxTotalSpawns = 1,
         AutonomyCeiling = "Standard",
         RequiresApproval = false,
     };
