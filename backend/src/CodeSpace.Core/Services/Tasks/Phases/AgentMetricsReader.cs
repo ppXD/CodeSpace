@@ -38,12 +38,12 @@ public sealed class AgentMetricsReader : IScopedDependency
 
         var rows = await _db.AgentRun.AsNoTracking()
             .Where(r => r.TeamId == teamId && ids.Contains(r.Id))
-            .Select(r => new Row(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson))
+            .Select(r => new Row(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson, r.Error))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var toolCounts = await ToolCountsByAgentAsync(_db, teamId, ids, cancellationToken).ConfigureAwait(false);
 
-        return rows.ToDictionary(r => r.Id, r => Build(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson, toolCounts.GetValueOrDefault(r.Id), now));
+        return rows.ToDictionary(r => r.Id, r => Build(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson, r.Error, toolCounts.GetValueOrDefault(r.Id), now));
     }
 
     /// <summary>
@@ -66,7 +66,7 @@ public sealed class AgentMetricsReader : IScopedDependency
     }
 
     /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses + the cost pricing live in one unit-testable place. Tokens/files null until the result lands; model null when the task left it blank; cost null when the model is unpriced (fail-open).</summary>
-    public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, int toolCount, DateTimeOffset now)
+    public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, string? rowError, int toolCount, DateTimeOffset now)
     {
         var result = TryDeserialize<ResultSlice>(resultJson);
         var task = TryDeserialize<TaskSlice>(taskJson);
@@ -78,6 +78,7 @@ public sealed class AgentMetricsReader : IScopedDependency
         return new AgentRunMetrics
         {
             Status = status,
+            Error = FailureError(status, result?.Error, rowError),
             Goal = DeriveTitle(task?.Goal),
             DurationMs = ComputeDuration(startedAt, completedAt, now),
             InputTokens = tokens?.InputTokens,
@@ -115,8 +116,31 @@ public sealed class AgentMetricsReader : IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
-    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats);
+    /// <summary>The (already secret-redacted) failure reason for a non-succeeded agent: the RESULT's error (the harness's real cause — an LLM 4xx, a build failure) preferred over the ROW's error (set when the agent was cancelled / abandoned before it wrote a result). Null on a succeeded run (a green agent never shows a stray error) and when neither carries one. Bounded to a short single-line snippet so it never bloats the card.</summary>
+    private static string? FailureError(AgentRunStatus status, string? resultError, string? rowError)
+    {
+        if (status == AgentRunStatus.Succeeded) return null;
+
+        var raw = !string.IsNullOrWhiteSpace(resultError) ? resultError : rowError;
+
+        return string.IsNullOrWhiteSpace(raw) ? null : Truncate(raw.ReplaceLineEndings(" ").Trim(), MaxErrorChars);
+    }
+
+    /// <summary>The card's error snippet cap — enough to read the cause (an LLM 4xx / a build error line) without carrying a full stack / litellm dump onto the poll payload.</summary>
+    private const int MaxErrorChars = 400;
+
+    /// <summary>Clamp to <paramref name="max"/> chars with an ellipsis, backing off a split surrogate pair (mirrors <c>AgentEventTimelineMap.Truncate</c>) so an astral char never leaves a lone surrogate.</summary>
+    private static string Truncate(string text, int max)
+    {
+        if (text.Length <= max) return text;
+
+        var cut = char.IsHighSurrogate(text[max - 1]) ? max - 1 : max;
+
+        return string.Concat(text.AsSpan(0, cut).TrimEnd(), "…");
+    }
+
+    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat + the failure error — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
+    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error);
 
     /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + resume marker + harness kind — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
     private sealed record TaskSlice(string? Model, string? Goal, string? ResumeFromSessionId, string? Harness);
@@ -140,7 +164,7 @@ public sealed class AgentMetricsReader : IScopedDependency
         return line.Length <= max ? line : line[..max].TrimEnd() + "…";
     }
 
-    private sealed record Row(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? ResultJson, string? TaskJson);
+    private sealed record Row(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? ResultJson, string? TaskJson, string? Error);
 
     private static readonly IReadOnlyDictionary<Guid, AgentRunMetrics> Empty = new Dictionary<Guid, AgentRunMetrics>();
     private static readonly IReadOnlyDictionary<Guid, int> EmptyCounts = new Dictionary<Guid, int>();

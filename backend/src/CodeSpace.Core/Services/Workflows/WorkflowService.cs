@@ -1383,9 +1383,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var toolCounts = await Tasks.Phases.AgentMetricsReader.ToolCountsByAgentAsync(_db, teamId, agentRunIds, cancellationToken).ConfigureAwait(false);
         var metricsByAgent = (await _db.AgentRun.AsNoTracking()
                 .Where(a => a.TeamId == teamId && agentRunIds.Contains(a.Id))
-                .Select(a => new { a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson })
+                .Select(a => new { a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson, a.Error })
                 .ToListAsync(cancellationToken).ConfigureAwait(false))
-            .ToDictionary(a => a.Id, a => Tasks.Phases.AgentMetricsReader.Build(a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson, toolCounts.GetValueOrDefault(a.Id), now));
+            .ToDictionary(a => a.Id, a => Tasks.Phases.AgentMetricsReader.Build(a.Id, a.Status, a.StartedAt, a.CompletedAt, a.ResultJson, a.TaskJson, a.Error, toolCounts.GetValueOrDefault(a.Id), now));
 
         // Only the attempts that actually RAN the cell (have a node row); attempt number is the run's lineage position.
         var ran = lineage.Select((r, i) => (r.Id, r.CreatedDate, AttemptNumber: i + 1)).Where(x => statusByRun.ContainsKey(x.Id)).ToList();

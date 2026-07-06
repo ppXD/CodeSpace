@@ -21,13 +21,23 @@ public class AgentCardFactsSourceTests
 {
     private static AgentRunMetrics Metrics(string? goal = "Build the login form", AgentRunStatus status = AgentRunStatus.Succeeded,
         int? inTok = 1200, int? outTok = 340, int tools = 6, string? model = "claude-opus-4-8", decimal? cost = 0.42m, long? durationMs = 45000,
-        int? files = 3, FileDiffStat[]? stats = null, string? harness = "codex-cli") =>
+        int? files = 3, FileDiffStat[]? stats = null, string? harness = "codex-cli", string? error = null) =>
         new()
         {
-            Status = status, Goal = goal, DurationMs = durationMs, InputTokens = inTok, OutputTokens = outTok,
+            Status = status, Goal = goal, Error = error, DurationMs = durationMs, InputTokens = inTok, OutputTokens = outTok,
             ToolCount = tools, Model = model, Harness = harness, CostUsd = cost, FilesChanged = files,
             ChangedFileStats = stats ?? new[] { new FileDiffStat("auth/session.ts", 42, 3) }, Resumed = true,
         };
+
+    [Fact]
+    public void Carries_the_failure_error_onto_a_failed_card_and_never_onto_a_succeeded_one()
+    {
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(status: AgentRunStatus.Failed, error: "litellm.BadRequestError: Unexpected message role"), allocation: null, compact: null)
+            .Error.ShouldBe("litellm.BadRequestError: Unexpected message role", "a failed card names WHY it failed, not a bare FAILED");
+
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: null)
+            .Error.ShouldBeNull("a succeeded card never shows an error (the metrics gate it to null on success)");
+    }
 
     private static AgentAllocation Alloc(string? role = null, string? subtask = null, string? id = null) => new(role, subtask, id);
 
