@@ -121,12 +121,17 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         args.Add("--append-system-prompt");
         args.Add(AgentOperatingContract.Compose(task.SystemPrompt));
 
-        // B1 skill-load fix: `claude --print` (headless/SDK) is HERMETIC — it loads NO filesystem setting sources by
-        // default, so the personal skills we project under CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md are IGNORED unless we
-        // opt the "user" source in (the CLI help: --setting-sources loads user|project|local; the print-mode default is
-        // none). CLAUDE_CONFIG_DIR is the per-run ISOLATED config home (§344), so `--setting-sources user` reads ONLY
-        // this run's projected skills — never the operator's ~/.claude, and never the target repo's .claude (project /
-        // local are deliberately omitted). Gated on skills present so a persona-only / bare run is argv byte-identical.
+        // B1 config isolation (CORRECTED — the earlier "print is hermetic, skills need --setting-sources" rationale was
+        // wrong: that hermetic default is the programmatic Agent SDK's, NOT the `claude` CLI's). The CLI `claude -p`
+        // AUTO-DISCOVERS + loads personal skills from CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md by DEFAULT — official docs:
+        // headless.md "Without --bare, `claude -p` loads the same context an interactive session would, including
+        // anything configured in ... ~/.claude"; cli-reference `--bare` = "skip auto-discovery of ... skills". So our
+        // projected skills load with NO extra flag; the REAL requirement is that we NEVER pass --bare / --safe-mode
+        // (guarded by a unit test). `--setting-sources` (user|project|local) instead controls which settings.json LAYERS
+        // load (sdk-headless "To restrict which sources load, set settingSources"), NOT skill discovery. We pass
+        // `--setting-sources user` when we project skills to PIN settings to the isolated per-run user config home (§344)
+        // — so the run inherits ONLY our config, never the TARGET REPO's `.claude` project/local settings (an untrusted
+        // -input vector). Byte-identical argv for a skill-less run. The real-model E2E is the live arbiter of application.
         if (task.Skills is { Count: > 0 })
         {
             args.Add("--setting-sources");

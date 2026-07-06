@@ -46,12 +46,12 @@ public class ClaudeCodeHarnessTests
             customMessage: "Claude Code scans CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md — the config-home the runner sets");
         spec.ConfigHomeFiles.Single().Content.ShouldContain("Write the test first.");
 
-        // B1 skill-load fix: --print is hermetic, so the projected skill is INERT unless the "user" setting-source is
-        // opted in. The pair is adjacent + is "user" ONLY (never project/local, which would read the target repo's
-        // .claude and break config isolation).
+        // B1 config isolation: the CLI `claude -p` auto-discovers the projected skill on its own (see the never-disables
+        // test); `--setting-sources user` pins settings to the isolated per-run user config home so the run never inherits
+        // the TARGET REPO's .claude project/local settings. Adjacent + "user" ONLY (never project/local).
         var args = spec.Args.ToList();
         var at = args.IndexOf("--setting-sources");
-        at.ShouldBeGreaterThanOrEqualTo(0, "a bound skill MUST opt the user setting-source in, else claude --print ignores CLAUDE_CONFIG_DIR/skills entirely");
+        at.ShouldBeGreaterThanOrEqualTo(0, "a skill-bearing run pins settings to the isolated user config home");
         args[at + 1].ShouldBe("user", "only the per-run-isolated user source loads — never project/local (the target repo's .claude)");
     }
 
@@ -61,7 +61,27 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.ConfigHomeFiles.ShouldBeEmpty();
-        spec.Args.ShouldNotContain("--setting-sources", "a bare / persona-only run is argv byte-identical — the setting-source opt-in rides ONLY with a projected skill");
+        spec.Args.ShouldNotContain("--setting-sources", "a bare / persona-only run is argv byte-identical — the setting-source pin rides ONLY with a projected skill");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Never_disables_skill_or_persona_auto_discovery(bool withSkill)
+    {
+        // THE real guarantee that a projected skill + the --append-system-prompt persona actually load in headless mode.
+        // Per the official docs, `claude -p` auto-discovers skills/agents/CLAUDE.md from CLAUDE_CONFIG_DIR by DEFAULT —
+        // UNLESS `--bare` ("skip auto-discovery of ... skills", cli-reference) or `--safe-mode` ("skills ... do not load")
+        // is passed. The harness must therefore NEVER pass either, or every bound skill silently goes inert. Pinned so a
+        // future flag addition can't regress skill/persona loading without turning this red (Rule 8).
+        var task = withSkill
+            ? Task() with { Skills = new[] { new AgentSkill { Slug = "s", Description = "d", Body = "b" } } }
+            : Task();
+
+        var args = Harness.BuildInvocation(task).Args;
+
+        args.ShouldNotContain("--bare", "--bare skips auto-discovery of skills → a bound skill would silently never load");
+        args.ShouldNotContain("--safe-mode", "--safe-mode disables all customizations incl. skills → a bound skill would silently never load");
     }
 
     [Fact]
