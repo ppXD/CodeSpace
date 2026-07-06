@@ -43,9 +43,12 @@ namespace CodeSpace.E2ETests.Workflows;
 /// (<see cref="RealModelGate.AssessLiveAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, bool)"/>
 /// with <c>gating: false</c>), while skill LOADING (the SKILL.md lands where the CLI scans) is GATED deterministically by
 /// <c>RealHarnessSkillProjectionTests</c>. This mirrors the gate's own code-fault-GATES / capability-miss-REPORTS split.
-/// A gateway/exec-infra failure is a non-gating LOUD skip (routed via <see cref="AgentExecutionInfraException"/>), and a
-/// no-creds / no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the
-/// real-model lane.</para>
+/// Only a GATEWAY/transport/auth failure is a non-gating LOUD skip (classified by <c>RealModelRunClassifier</c>); an
+/// injection/CODE fault — a non-Succeeded run that is NOT a recognised gateway signature (a malformed
+/// <c>--append-system-prompt</c>, a throwing operating contract, arg-ordering swallowing the Goal) — is a REAL miss the
+/// gate REDS on, so the persona gate can red on the exact regression class it exists to catch, never collapsing it to a
+/// green skip. A no-creds / no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it
+/// runs ONLY on the real-model lane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -81,8 +84,10 @@ public sealed class RealModelAgentInjectionE2ETests
                 TimeoutSeconds = 180,
             };
 
-            var (applied, _) = await RunAndCheckMarkerAsync(live, Task, $"PERSONA-APPLIED-{token}");
-            var verdict = $"{Provider} '{live.Model}': the real claude agent {(applied ? "APPLIED" : "did NOT apply")} its injected persona (marker {(applied ? "present" : "absent")} in the model's reply)";
+            var (applied, reply) = await RunAndCheckMarkerAsync(live, Task, $"PERSONA-APPLIED-{token}");
+            var verdict = applied
+                ? $"{Provider} '{live.Model}': the real claude agent APPLIED its injected persona (marker present in the model's reply)"
+                : $"{Provider} '{live.Model}': the real claude agent did NOT apply its injected persona — {(reply.StartsWith("[run", StringComparison.Ordinal) ? reply : $"marker absent in the reply: \"{Snippet(reply)}\"")}";
             Console.WriteLine($"[injection-e2e] persona: {verdict}");   // ALSO to stdout — the step-summary sink isn't greppable from the CLI/API
             return (applied, verdict);
         });
@@ -152,7 +157,18 @@ public sealed class RealModelAgentInjectionE2ETests
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
         if (run.Status != AgentRunStatus.Succeeded)
-            throw new AgentExecutionInfraException($"the claude run did not complete (status={run.Status}; error={run.Error ?? "(none)"}) — gateway/exec infra, not a behavior verdict");
+        {
+            var reason = $"status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}";
+
+            // A GATEWAY/transport/auth failure is non-gating infra (skip). An injection/CODE fault — a malformed
+            // --append-system-prompt, a throwing operating contract, arg-ordering that swallows the Goal — is a REAL
+            // miss the gate MUST red on, NEVER a silent skip. Classify so the persona GATE actually reds on the exact
+            // regression class it exists to catch (else every non-Succeeded status collapses to a green skip).
+            if (RealModelRunClassifier.IsGatewayInfra(run))
+                throw new AgentExecutionInfraException($"the claude run did not complete — gateway/exec infra (non-gating skip): {reason}");
+
+            return (false, $"[run did NOT complete — likely an injection/CODE fault, not gateway infra: {reason}]");
+        }
 
         var events = await svc.GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None);
 
@@ -162,6 +178,8 @@ public sealed class RealModelAgentInjectionE2ETests
         // satisfy it without the model actually applying the instruction. Restricting to assistant/final output means the
         // marker can only appear because the MODEL emitted it — genuine proof of apply/obey. (The stream parser drops the
         // system prompt entirely and routes tool_results to non-assistant kinds, so this is a clean output-only view.)
+        // AssistantMessage is the CARRIER for the Claude parser (it emits the reply text as AssistantMessage and never a
+        // FinalSummary); FinalSummary stays in the filter for parity / forward-compat with a harness that emits one.
         var modelReply = string.Join("\n", events
             .Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.FinalSummary)
             .Select(e => e.Text));
@@ -190,9 +208,10 @@ public sealed class RealModelAgentInjectionE2ETests
                 var (used, reply) = await RunAndCheckMarkerAsync(live, taskFactory, marker);
 
                 // On a miss, carry a bounded snippet of the model's ACTUAL reply — it disambiguates a load gap ("I don't
-                // have a codeword") from a trigger gap (a greeting that simply omitted it). The codeword is a random
-                // per-run token, not a secret, so echoing the reply leaks nothing.
-                var detail = used ? "" : $" — model said: \"{Snippet(reply)}\"";
+                // have a codeword") from a trigger gap (a greeting that simply omitted it). A code-fault reply (the run
+                // did not complete, not gateway infra) is rendered verbatim. The codeword is a random per-run token, not
+                // a secret, so echoing the reply leaks nothing.
+                var detail = used ? "" : (reply.StartsWith("[run", StringComparison.Ordinal) ? $" — {reply}" : $" — model said: \"{Snippet(reply)}\"");
                 var verdict = $"{Provider} '{live.Model}': the real claude agent {(used ? "LOADED + USED" : "did NOT use")} the bound skill (skill-only codeword {(used ? "present" : "absent")} in the model's greeting){detail}. [report-only — skill LOADING is gated deterministically by RealHarnessSkillProjectionTests; live auto-invocation is a reported capability]";
                 Console.WriteLine($"[injection-e2e] skill: {verdict}");   // ALSO to stdout — the step-summary sink isn't greppable from the CLI/API
 

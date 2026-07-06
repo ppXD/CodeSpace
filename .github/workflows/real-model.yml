@@ -467,3 +467,11 @@ jobs:
             echo "::error::Expected the RealModel injection gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
             exit 1
           fi
+          # The aggregate executed>=1 is NOT enough: this lane's REASON TO EXIST is the persona KILL-GATE. An FQN/trait
+          # drift that de-selects ONLY the gating arm while the informational Codex + deterministic RealCodexResume arms
+          # still match would keep executed>=1 and pass GREEN with the kill-gate running on NOTHING. Require the gating
+          # test BY NAME so a de-selected gate reds this lane instead of silently passing.
+          if ! grep -q "A_real_claude_agent_applies_its_injected_persona" "$trx"; then
+            echo "::error::The persona KILL-GATE (A_real_claude_agent_applies_its_injected_persona) did not run — it was de-selected while other arms matched. Other arms passing green is NOT the gate running."
+            exit 1
+          fi

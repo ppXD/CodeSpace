@@ -38,8 +38,10 @@ namespace CodeSpace.E2ETests.Workflows;
 /// the credential as the non-blessed <c>OpenAI</c> wire: <see cref="RealModelGate.AssessLiveBestOfNAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, int?)"/>
 /// runs it ONCE and REPORTS its verdict (an operator blesses it via <c>CODESPACE_REALMODEL_REQUIRED_PROVIDERS</c> once
 /// their gateway serves the responses wire), and a non-completing run is a non-gating LOUD skip (routed via
-/// <see cref="AgentExecutionInfraException"/>). The DETERMINISTIC, gateway-free floor for Codex persona + skill LOADING
-/// is <see cref="RealCodexResumeE2ETests"/> (real binary, rollout-level). A no-creds / no-CLI run self-skips LOUDLY
+/// <see cref="AgentExecutionInfraException"/>). The DETERMINISTIC, gateway-free floors are separate: Codex PERSONA
+/// LOADING is proven by <see cref="RealCodexResumeE2ETests"/> (real binary, rollout-level), and Codex SKILL LOADING by
+/// <c>RealHarnessSkillProjectionTests</c> ([InlineData("codex-cli")] — the real executor+harness+runner materialize
+/// SKILL.md where Codex's native loader scans). A no-creds / no-CLI run self-skips LOUDLY
 /// (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the real-model lane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -145,7 +147,18 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         var run = await svc.GetAsync(runId, CancellationToken.None);
 
         if (run.Status != AgentRunStatus.Succeeded)
-            throw new AgentExecutionInfraException($"the codex run did not complete (status={run.Status}; error={run.Error ?? "(none)"}) — gateway/exec/wire infra (the shared gateway may not serve Codex's `responses` wire), not a behavior verdict");
+        {
+            var reason = $"status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}";
+
+            // A GATEWAY/wire failure (the shared gateway doesn't serve Codex's `responses` wire → its POST 404s) is
+            // non-gating infra. A real CODE fault is a reported miss, not a silent skip — same classifier the (gating)
+            // Claude test uses. Codex is the informational wire, so either way it never reds main; classifying keeps the
+            // REPORT honest.
+            if (RealModelRunClassifier.IsGatewayInfra(run))
+                throw new AgentExecutionInfraException($"the codex run did not complete — gateway/exec/wire infra (non-gating skip): {reason}");
+
+            return false;
+        }
 
         var events = await svc.GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None);
 
