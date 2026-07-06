@@ -409,9 +409,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // grade I/O runs at most once per committed stop; a no-acceptance stop is a byte-identical no-op.
         execution = await ApplyStopAcceptanceGradeAsync(execution, context, decision, teamId, cancellationToken).ConfigureAwait(false);
 
-        // Fold the authoring model call (model + tokens) into the NON-hashed outcome — never the payload, so it can't drift
-        // the idempotency key — so the journal can attribute how the decision was made. Null usage (a stub) is a no-op.
-        await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), error: null, cancellationToken).ConfigureAwait(false);
+        // Fold the authoring model call (model + tokens) AND the model-critic review chain (draft → verdict → revision)
+        // into the NON-hashed outcome — never the payload, so neither can drift the idempotency key — so the journal can
+        // attribute how the decision was made and SHOW the adversarial middle. Null usage / no reviews are no-ops.
+        await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), decision.Reviews), error: null, cancellationToken).ConfigureAwait(false);
 
         return execution;
     }

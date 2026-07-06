@@ -380,6 +380,105 @@ public class CriticSupervisorDeciderDecoratorTests
         inner.Contexts.Count.ShouldBe(1, "an approval yields nothing to revise against — keep the original");
     }
 
+    // ── H1: the draft→verdict→revision chain rides the surviving decision (the adversarial middle on the tape) ──
+
+    [Fact]
+    public async Task An_improve_revision_carries_the_model_verdict_with_the_drafts_attribution()
+    {
+        var inner = new FakeDecider();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Improve, Critique = "spawn fewer agents", Rationale = "over-fanned" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var decision = await decorator.DecideAsync(Context(ReviewMode.Improve), CancellationToken.None);
+
+        decision.Reviews.Count.ShouldBe(1, "the once-invisible middle now rides the tape");
+        decision.Reviews[0].Approved.ShouldBeFalse();
+        decision.Reviews[0].Rationale.ShouldBe("spawn fewer agents", "the Improve critique IS the review's content");
+        decision.Reviews[0].DraftAttribution.ShouldNotBeNull("the discarded draft is attributed — no more anonymous model call");
+        decision.Reviews[0].DraftAttribution!.ShouldContain("spawn draft");
+    }
+
+    [Fact]
+    public async Task An_approved_decision_carries_the_approving_verdict()
+    {
+        var inner = new FakeDecider();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
+
+        decision.Reviews.Count.ShouldBe(1);
+        decision.Reviews[0].Approved.ShouldBeTrue();
+        decision.Reviews[0].DraftAttribution.ShouldBeNull("nothing was discarded — an approval attributes no draft");
+    }
+
+    [Fact]
+    public async Task The_gate_ladder_carries_both_rungs_and_the_escalation_inherits_the_chain()
+    {
+        var inner = new FakeDecider();
+        var critic = new FakeCritic();
+        critic.Queue(Disapproved("first"), Disapproved("second"));
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var result = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
+
+        result.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "still-disapproved escalates");
+        result.Reviews.Count.ShouldBe(2, "the parked ask card tells the WHOLE ladder — first flagged + still-flagged revision");
+        result.Reviews[0].Rationale.ShouldContain("first");
+        result.Reviews[0].DraftAttribution.ShouldNotBeNull("the first rung discarded the draft");
+        result.Reviews[1].Rationale.ShouldContain("second");
+        result.Reviews[1].DraftAttribution.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task An_agent_verdict_is_never_folded_onto_the_decision()
+    {
+        // The grounded reviewer's run is ALREADY a first-class journal beat — folding its verdict here would double it.
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
+        var critic = new FakeCritic();
+        var agent = new RecordingAgentPlanReviewer { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "grounded ok" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        var decision = await decorator.DecideAsync(GroundedContext(ReviewMode.Gate, Guid.NewGuid()), CancellationToken.None);
+
+        decision.Reviews.ShouldBeEmpty("an agent verdict rides its reviewer run's own beat, not the decision outcome");
+    }
+
+    [Fact]
+    public void The_reviews_fold_round_trips_and_an_empty_chain_is_byte_identical()
+    {
+        var reviews = new[]
+        {
+            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens" },
+            new SupervisorDecisionReview { Approved = true, Rationale = "fixed", Scope = "plan" },
+        };
+
+        var outcome = SupervisorOutcome.WriteReviews("""{"outcome":"planned"}""", reviews);
+        var read = SupervisorOutcome.ReadReviews(outcome);
+
+        read.Count.ShouldBe(2);
+        read[0].Approved.ShouldBeFalse();
+        read[0].Rationale.ShouldBe("thin");
+        read[0].Issues.ShouldBe(new[] { "no tests (evidence: none named)" });
+        read[0].Scope.ShouldBe("plan");
+        read[0].DraftAttribution.ShouldBe("plan draft · authored via m1 · 8,200 tokens");
+        read[1].Approved.ShouldBeTrue();
+
+        SupervisorOutcome.WriteReviews("""{"outcome":"planned"}""", Array.Empty<SupervisorDecisionReview>())
+            .ShouldBe("""{"outcome":"planned"}""", "no reviews ⇒ byte-identical — every pre-chain decision replays exactly as before");
+        SupervisorOutcome.ReadReviews("""{"outcome":"planned"}""").ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void The_draft_attribution_names_the_verb_and_the_authoring_call()
+    {
+        CriticSupervisorDeciderDecorator.DescribeDraft(new SupervisorDecision { Kind = SupervisorDecisionKinds.Plan, PayloadJson = "{}", Usage = new SupervisorModelUsage { Model = "metis-coder-max", InputTokens = 8000, OutputTokens = 231 } })
+            .ShouldBe("plan draft · authored via metis-coder-max · 8,231 tokens", "the once-anonymous model call reads as the flagged draft");
+
+        CriticSupervisorDeciderDecorator.DescribeDraft(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" })
+            .ShouldBe("spawn draft", "no usage ⇒ verb only");
+    }
+
     private static SupervisorTurnContext GroundedContext(ReviewMode planMode, Guid repositoryId) => new()
     {
         Goal = "ship the feature",

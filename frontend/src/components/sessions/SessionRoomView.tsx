@@ -832,37 +832,51 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
   );
 }
 
-/** The independent reviewer's verdict card under a REVIEW beat — approve/flag badge, rationale, evidence-attached
- *  issues, and the independence line ("└ via · claude-code — an independent output review") with a deep-link into the
- *  reviewer's OWN run, so the adversarial exchange is inspectable, not just narrated. */
+/** The reviewer's verdict card under a REVIEW beat — COLLAPSED by default to one line (badge + rationale + chevron)
+ *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues, the discarded
+ *  draft's attribution, and the independence line — "independent agent · claude-code" with a deep-link into the
+ *  reviewer's OWN run, or "model critic — independently prompted" when the verdict came from the in-process critic. */
 function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
   const openDrawer = useRoomDrawer();
   const run = useContext(RunActionsContext);
+  const [open, setOpen] = useState(false);
   const n = review.issues.length;
+  const reviewerRunId = review.reviewerRunId ?? null;
   return (
-    <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`}>
-      <div className="room-jverdict-head">
+    <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`} data-open={open}>
+      <button type="button" className="room-jverdict-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         <span className="room-jverdict-badge">{review.approved ? "✓ approved" : `⚠ flagged${n > 0 ? ` · ${n} issue${n === 1 ? "" : "s"}` : ""}`}</span>
-        <span className="room-jverdict-rationale">{review.rationale}</span>
-      </div>
-      {review.issues.map((issue, i) => <div key={i} className="room-jverdict-issue">└ {issue}</div>)}
-      <div className="room-jverdict-via">
-        <span className="room-jmodel-l">└ via · </span>
-        <span className="room-jmodel-model">{review.reviewerHarness ?? "agent"}</span>
-        <span className="room-jmodel-x"> — an independent {review.scope === "plan" ? "grounded plan" : "output"} review</span>
-        {run && (
-          <button className="room-jverdict-open" onClick={() => openDrawer({ kind: "agent", agent: reviewerCard(review), runId: run.runId })}>
-            view reviewer run <Sym n="chevron-right" s={11} />
-          </button>
-        )}
-      </div>
+        <span className="room-jverdict-rationale" data-clamp={!open || undefined}>{review.rationale}</span>
+        <Sym n={open ? "chevron-down" : "chevron-right"} s={12} cls="room-jverdict-chev" />
+      </button>
+      {open && <>
+        {review.issues.map((issue, i) => <div key={i} className="room-jverdict-issue">└ {issue}</div>)}
+        {review.draftAttribution && <div className="room-jverdict-issue room-jverdict-draft">└ discarded: {review.draftAttribution}</div>}
+        <div className="room-jverdict-via">
+          <span className="room-jmodel-l">└ via · </span>
+          {reviewerRunId
+            ? <>
+                <span className="room-jmodel-model">independent agent · {review.reviewerHarness ?? "agent"}</span>
+                <span className="room-jmodel-x"> — a real {review.scope === "plan" ? "grounded plan" : "output"} review</span>
+              </>
+            : <>
+                <span className="room-jmodel-model">model critic</span>
+                <span className="room-jmodel-x"> — independently prompted, {review.scope} review</span>
+              </>}
+          {run && reviewerRunId && (
+            <button className="room-jverdict-open" onClick={(e) => { e.stopPropagation(); openDrawer({ kind: "agent", agent: reviewerCard(review, reviewerRunId), runId: run.runId }); }}>
+              view reviewer run <Sym n="chevron-right" s={11} />
+            </button>
+          )}
+        </div>
+      </>}
     </div>
   );
 }
 
 /** A minimal drawer card for the reviewer's OWN run — enough identity for the terminal / trace drawer to load by id. */
-function reviewerCard(review: JournalReviewVerdict): RoomAgentCard {
-  return { agentRunId: review.reviewerRunId, label: review.scope === "plan" ? "plan reviewer" : "reviewer", status: "Succeeded", harness: review.reviewerHarness ?? null };
+function reviewerCard(review: JournalReviewVerdict, reviewerRunId: string): RoomAgentCard {
+  return { agentRunId: reviewerRunId, label: review.scope === "plan" ? "plan reviewer" : "reviewer", status: "Succeeded", harness: review.reviewerHarness ?? null };
 }
 
 function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }

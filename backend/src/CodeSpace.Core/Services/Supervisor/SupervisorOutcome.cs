@@ -160,6 +160,88 @@ public static class SupervisorOutcome
         return obj.ToJsonString();
     }
 
+    /// <summary>
+    /// Fold the MODEL-critic review chain (the adversarial middle: draft flagged → revised → re-reviewed) into a
+    /// decision's OUTCOME under a <c>reviews</c> key — NON-hashed like <see cref="WriteModelUsage"/>, so replay
+    /// identity never drifts. An empty chain returns the outcome unchanged (byte-identical — the common no-critic case).
+    /// </summary>
+    public static string WriteReviews(string? outcomeJson, IReadOnlyList<SupervisorDecisionReview> reviews)
+    {
+        if (reviews.Count == 0) return outcomeJson ?? "{}";
+
+        System.Text.Json.Nodes.JsonNode? root;
+
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(string.IsNullOrWhiteSpace(outcomeJson) ? "{}" : outcomeJson); }
+        catch (JsonException) { return outcomeJson ?? "{}"; }
+
+        if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
+
+        var array = new System.Text.Json.Nodes.JsonArray();
+
+        foreach (var r in reviews)
+        {
+            var issues = new System.Text.Json.Nodes.JsonArray();
+            foreach (var issue in r.Issues) issues.Add(issue);
+
+            array.Add(new System.Text.Json.Nodes.JsonObject
+            {
+                ["approved"] = r.Approved,
+                ["rationale"] = r.Rationale,
+                ["issues"] = issues,
+                ["scope"] = r.Scope,
+                ["draftAttribution"] = r.DraftAttribution,
+            });
+        }
+
+        obj["reviews"] = array;
+
+        return obj.ToJsonString();
+    }
+
+    /// <summary>Read the model-critic review chain folded by <see cref="WriteReviews"/>. Empty when absent / malformed — a pre-chain decision reads exactly as before.</summary>
+    public static IReadOnlyList<SupervisorDecisionReview> ReadReviews(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorDecisionReview>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("reviews", out var arr) || arr.ValueKind != JsonValueKind.Array) return Array.Empty<SupervisorDecisionReview>();
+
+            var reviews = new List<SupervisorDecisionReview>();
+
+            foreach (var r in arr.EnumerateArray())
+            {
+                if (r.ValueKind != JsonValueKind.Object) continue;
+
+                var rationale = r.TryGetProperty("rationale", out var rat) && rat.ValueKind == JsonValueKind.String ? rat.GetString() : null;
+
+                if (string.IsNullOrWhiteSpace(rationale)) continue;
+
+                var issues = new List<string>();
+                if (r.TryGetProperty("issues", out var iss) && iss.ValueKind == JsonValueKind.Array)
+                    foreach (var i in iss.EnumerateArray())
+                        if (i.ValueKind == JsonValueKind.String && i.GetString() is { Length: > 0 } text) issues.Add(text);
+
+                reviews.Add(new SupervisorDecisionReview
+                {
+                    Approved = r.TryGetProperty("approved", out var ap) && ap.ValueKind == JsonValueKind.True,
+                    Rationale = rationale!,
+                    Issues = issues,
+                    Scope = r.TryGetProperty("scope", out var sc) && sc.ValueKind == JsonValueKind.String ? sc.GetString()! : "decision",
+                    DraftAttribution = r.TryGetProperty("draftAttribution", out var da) && da.ValueKind == JsonValueKind.String ? da.GetString() : null,
+                });
+            }
+
+            return reviews;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorDecisionReview>();
+        }
+    }
+
     /// <summary>Read the authoring model call folded into a decision's outcome by <see cref="WriteModelUsage"/>. Null when absent / malformed / no model.</summary>
     public static SupervisorModelUsage? ReadModelUsage(string? outcomeJson)
     {

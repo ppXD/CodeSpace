@@ -134,6 +134,34 @@ public class JournalStepDescriberRegistryTests
             .Kind.ShouldBe(JournalStepKinds.Agent, "a keyless run (a standalone agent) can never be mistaken for a reviewer");
 
     [Fact]
+    public void A_model_critic_verdict_event_rides_the_same_review_grammar()
+    {
+        // H1: model-critic verdicts (folded on the decision tape) share the review-verdict provenance key, so the SAME
+        // describer renders them — one grammar for every reviewer, model or agent.
+        var step = Registry.Describe(Event(ReviewVerdictTimelineMap.Key, kind: ReviewVerdictTimelineMap.VerdictKind,
+            title: "Model critic flagged the plan draft — 2 issues", sev: TimelineSeverity.Warning, level: TimelineLevel.Milestone));
+
+        step.Kind.ShouldBe(JournalStepKinds.Review);
+        step.Beat.ShouldBeTrue();
+        step.Verb.ShouldBe("review");
+    }
+
+    [Fact]
+    public void The_decision_review_map_pins_the_id_and_the_headline()
+    {
+        var id = Guid.NewGuid();
+
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.EventId(id, 1).ShouldBe($"review-d{id:N}-1");
+
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = false, Rationale = "r", Issues = new[] { "a", "b" }, Scope = "plan", DraftAttribution = "plan draft" })
+            .ShouldBe("Model critic flagged the plan draft — 2 issues", "WHO + outcome + WHAT (the discarded draft)");
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = true, Rationale = "r", Scope = "decision" })
+            .ShouldBe("Model critic approved the decision");
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = false, Rationale = "r", Scope = "decision" })
+            .ShouldBe("Model critic flagged the decision", "no draft ⇒ the decision itself was flagged (the escalation's second rung)");
+    }
+
+    [Fact]
     public void An_unknown_source_still_becomes_a_step_via_the_fallback()
     {
         // THE genericity guarantee: a future source / kind no describer claims is NEVER dropped — it degrades to a
