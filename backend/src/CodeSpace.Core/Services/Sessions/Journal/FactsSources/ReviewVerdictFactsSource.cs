@@ -20,6 +20,6 @@ public sealed class ReviewVerdictFactsSource : IJournalFactsSource
     {
         var rows = await _verdicts.ReadForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return rows.ToDictionary(r => ReviewVerdictTimelineMap.EventId(r.Verdict.ReviewerRunId), r => new JournalStepFacts { Review = r.Verdict });
+        return rows.ToDictionary(r => ReviewVerdictTimelineMap.EventId(r.Verdict.ReviewerRunId!.Value), r => new JournalStepFacts { Review = r.Verdict });
     }
 }

@@ -56,14 +56,17 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         if (SupervisorGateEscalation.TryReadAnswer(context.PriorDecisions, out var humanApproved) && humanApproved)
             return decision;
 
-        var verdict = await ReviewAsync(mode, decision, context, cancellationToken).ConfigureAwait(false);
+        var (verdict, agentReviewed) = await ReviewAsync(mode, decision, context, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed) return decision;   // fail-open — a failed review is never worse than no review
+
+        var scope = decision.Kind == SupervisorDecisionKinds.Plan ? "plan" : "decision";
 
         // IMPROVE: fold the critique into ONE bounded re-decide (BOTH review modes reset to None ⇒ no recursion),
         // so the decider revises against it. An AGENT verdict is Gate-shaped (no critique field) — its disapproval
         // composes the critique from rationale + evidence-attached issues; an agent APPROVAL (or a blank critique)
-        // falls through to the original.
+        // falls through to the original. The MODEL verdict rides the surviving decision (draft attributed) so the
+        // journal shows the exchange — an AGENT verdict never rides here (its reviewer run is its own beat).
         if (mode == ReviewMode.Improve)
         {
             var critique = !string.IsNullOrWhiteSpace(verdict.Critique) ? verdict.Critique
@@ -71,28 +74,68 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
                 : null;
 
             if (!string.IsNullOrWhiteSpace(critique))
-                return await RedecideAsync(context, critique, cancellationToken).ConfigureAwait(false);
+            {
+                var revision = await RedecideAsync(context, critique, cancellationToken).ConfigureAwait(false);
 
-            return decision;
+                return CarryReview(revision, verdict, agentReviewed, scope, draft: decision);
+            }
+
+            return CarryReview(decision, verdict, agentReviewed, scope, draft: null);
         }
 
         // GATE (S8 hard semantics): a disapproved decision does NOT execute. The ladder — one bounded re-decide
         // against the critique (the same self-heal Improve gets), a SECOND independent review of the revision, and
         // only a still-disapproved decision escalates: the run parks on the standard ask card carrying the blocked
         // verb + the evidence-attached critique, and the HUMAN rules (approve = one-shot absolution next turn;
-        // anything else = guidance the next decide reads). Fail-open on a failed second review.
+        // anything else = guidance the next decide reads). Fail-open on a failed second review. Every rung's MODEL
+        // verdict rides the surviving decision so the journal shows the whole ladder.
         if (mode == ReviewMode.Gate && !verdict.Approved)
         {
             var revised = await RedecideAsync(context, ComposeGateCritique(verdict), cancellationToken).ConfigureAwait(false);
 
-            var second = await ReviewAsync(ReviewMode.Gate, revised, context, cancellationToken).ConfigureAwait(false);
+            revised = CarryReview(revised, verdict, agentReviewed, scope, draft: decision);
 
-            if (second.Failed || second.Approved) return revised;
+            var (second, secondByAgent) = await ReviewAsync(ReviewMode.Gate, revised, context, cancellationToken).ConfigureAwait(false);
 
-            return SupervisorGateEscalation.IntoAskHuman(revised, second);
+            if (second.Failed || second.Approved) return CarryReview(revised, second, secondByAgent, scope, draft: null);
+
+            // The escalation ask INHERITS the ladder's whole chain (first flagged verdict + draft attribution + the
+            // still-disapproving second verdict) — the parked card is the ladder's product, so its tape row tells it.
+            return SupervisorGateEscalation.IntoAskHuman(revised, second) with { Reviews = revised.Reviews.Concat(ToReviews(second, secondByAgent, scope, null)).ToList() };
         }
 
-        return decision;
+        return CarryReview(decision, verdict, agentReviewed, scope, draft: null);
+    }
+
+    /// <summary>Append a MODEL verdict to the decision's carried review chain — an AGENT verdict is skipped (its reviewer run is already a first-class journal beat) and a FAILED verdict never reaches here. The draft, when a revision followed, is attributed by verb + the model call that authored it.</summary>
+    private static SupervisorDecision CarryReview(SupervisorDecision survivor, CriticVerdict verdict, bool agentReviewed, string scope, SupervisorDecision? draft) =>
+        survivor with { Reviews = survivor.Reviews.Concat(ToReviews(verdict, agentReviewed, scope, draft)).ToList() };
+
+    private static IReadOnlyList<SupervisorDecisionReview> ToReviews(CriticVerdict verdict, bool agentReviewed, string scope, SupervisorDecision? draft)
+    {
+        if (agentReviewed || verdict.Failed) return Array.Empty<SupervisorDecisionReview>();
+
+        return new[]
+        {
+            new SupervisorDecisionReview
+            {
+                Approved = verdict.Approved,
+                Rationale = !string.IsNullOrWhiteSpace(verdict.Critique) ? verdict.Critique! : verdict.Rationale,
+                Issues = verdict.Issues.Select(i => i.ToString()).ToList(),
+                Scope = scope,
+                DraftAttribution = draft is null ? null : DescribeDraft(draft),
+            },
+        };
+    }
+
+    /// <summary>The discarded draft's attribution line — its verb + the model call that authored it, so the once-anonymous "model call · N tokens" reads as "the flagged draft". Internal for direct unit pinning.</summary>
+    internal static string DescribeDraft(SupervisorDecision draft)
+    {
+        if (draft.Usage is not { } usage) return $"{draft.Kind} draft";
+
+        var tokens = (usage.InputTokens ?? 0) + (usage.OutputTokens ?? 0);
+
+        return tokens > 0 ? $"{draft.Kind} draft · authored via {usage.Model} · {tokens:N0} tokens" : $"{draft.Kind} draft · authored via {usage.Model}";
     }
 
     /// <summary>
@@ -101,7 +144,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
     /// the run's repository and verifies the plan against the actual tree, laddering down to the in-process model
     /// critic when the agent can't produce a verdict (a grounded review is never worse than a text review).
     /// </summary>
-    private async Task<CriticVerdict> ReviewAsync(ReviewMode mode, SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<(CriticVerdict Verdict, bool AgentReviewed)> ReviewAsync(ReviewMode mode, SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         var verdict = decision.Kind == SupervisorDecisionKinds.Plan && context.ReviewerAgent && context.AgentProfile?.RepositoryId is { } repositoryId
             ? await _agentPlanReviewer.ReviewAsync(new PlanReviewRequest
@@ -116,11 +159,11 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
             }, cancellationToken).ConfigureAwait(false)
             : CriticVerdict.ReviewFailed(mode, "agent-reviewer: not requested");
 
-        if (!verdict.Failed) return verdict;
+        if (!verdict.Failed) return (verdict, true);
 
-        return await _critic.ReviewAsync(
+        return (await _critic.ReviewAsync(
             new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? "workflow plan" : "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
-            context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false), false);
     }
 
     /// <summary>ONE bounded re-decide against a critique — both review modes reset to None so the re-decide can never recurse into another review.</summary>

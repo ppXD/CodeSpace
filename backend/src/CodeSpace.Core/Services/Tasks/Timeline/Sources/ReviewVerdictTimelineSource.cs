@@ -45,7 +45,7 @@ public static class ReviewVerdictTimelineMap
 
     public static RunTimelineEvent ToEvent(ReviewerVerdictRow row) => new()
     {
-        Id = EventId(row.Verdict.ReviewerRunId),
+        Id = EventId(row.Verdict.ReviewerRunId!.Value),
         Kind = VerdictKind,
         Title = TitleFor(row.Verdict),
         Summary = row.Verdict.Rationale,

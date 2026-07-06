@@ -360,18 +360,20 @@ export interface JournalAgentCard {
   review?: JournalReviewVerdict | null;
 }
 
-/// An independent reviewer's VERDICT (a real reviewer agent run's conclusion) — rides a REVIEW step and the reviewed
-/// producer's card. Mirrors backend `JournalReviewVerdict`.
+/// A reviewer's VERDICT — a real reviewer agent run's conclusion, or an in-process MODEL critic's — rides a REVIEW
+/// step and the reviewed producer's card. Mirrors backend `JournalReviewVerdict`.
 export interface JournalReviewVerdict {
   approved: boolean;
   rationale: string;
   /// Evidence-attached issues, each pre-rendered "text (evidence: …)". Empty on an approval.
   issues: string[];
-  /// The reviewer's own agent run — deep-linked as "view reviewer run →".
-  reviewerRunId: string;
+  /// The reviewer's own agent run — deep-linked as "view reviewer run →". NULL for a model critic (no run to open).
+  reviewerRunId?: string | null;
   reviewerHarness?: string | null;
-  /// What was reviewed — "output" (a produced change) or "plan" (a plan verified against the repository).
+  /// What was reviewed — "output" / "plan" / "decision".
   scope: string;
+  /// The discarded draft this verdict flagged, pre-rendered ("plan draft · authored via metis-coder-max · 8,231 tokens"). Null when nothing was discarded.
+  draftAttribution?: string | null;
 }
 
 /// A planned subtask still blocked by an unmet dependency at a wave (the "waiting on #n"). Mirrors backend `JournalDeferredSubtask`.

@@ -48,7 +48,10 @@ public sealed class AgentEventStepDescriber : IJournalStepDescriber, ISingletonD
     /// </summary>
     private static JournalStep DescribeReviewer(RunTimelineEvent e)
     {
-        if (e.Kind != AgentEventTimelineMap.FinalSummaryKind) return JournalSteps.From(e, JournalStepKinds.Review);
+        // A reviewer's working chatter — INCLUDING its errors/warnings (harness stderr, metadata gripes) — is never a
+        // milestone on the PRODUCER's journal: the verdict beat is the reviewer's one first-class moment; everything
+        // else folds. Without this, a reviewer's internal noise renders as a red unfolded line above the plan beat.
+        if (e.Kind != AgentEventTimelineMap.FinalSummaryKind) return JournalSteps.From(e, JournalStepKinds.Review) with { Milestone = false };
 
         var title = IsPlanReview(e.IterationKey)
             ? "Independent reviewer verified the plan against the repository"
