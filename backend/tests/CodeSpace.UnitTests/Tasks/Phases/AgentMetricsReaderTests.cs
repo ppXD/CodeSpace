@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Tasks.Phases;
@@ -24,13 +25,21 @@ public class AgentMetricsReaderTests
     private static string Task(string? model, string goal = "do the thing") =>
         JsonSerializer.Serialize(new AgentTask { Goal = goal, Harness = "claude-code", Model = model }, AgentJson.Options);
 
+    /// <summary>A failed agent's result blob carrying its error (the harness's real cause).</summary>
+    private static string FailedResult(string error) =>
+        JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "error", Error = error }, AgentJson.Options);
+
+    /// <summary>Thin wrapper so the existing (rowError-less) calls keep compiling — rowError defaults to null; the error tests pass it explicitly. Param names mirror the real Build so named-arg calls resolve.</summary>
+    private static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, int toolCount, DateTimeOffset now, string? rowError = null) =>
+        AgentMetricsReader.Build(id, status, startedAt, completedAt, resultJson, taskJson, rowError, toolCount, now);
+
     [Fact]
     public void Projects_tokens_model_and_a_final_duration_from_the_persisted_blobs()
     {
         var started = Now.AddSeconds(-30);
         var completed = Now.AddSeconds(-8);   // a 22s run
 
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, started, completed, Result(120, 45), Task("claude-opus-4"), toolCount: 6, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Succeeded, started, completed, Result(120, 45), Task("claude-opus-4"), toolCount: 6, Now);
 
         m.Status.ShouldBe(AgentRunStatus.Succeeded);
         m.DurationMs.ShouldBe(22_000);
@@ -49,14 +58,45 @@ public class AgentMetricsReaderTests
     [InlineData("   ", null)]                                                                               // blank goal → null, so the row keeps its structural fallback
     public void Names_the_agent_by_a_concise_title_from_its_goal(string goal, string? expected)
     {
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, goal), 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, goal), 0, Now)
             .Goal.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_failed_agent_surfaces_the_results_error_preferring_it_over_the_row_error()
+    {
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Failed, Now.AddSeconds(-9), Now, FailedResult("litellm.BadRequestError: Unexpected message role. Model Group=metis-coder"), Task("metis-coder"), toolCount: 0, Now, rowError: "generic row error");
+
+        m.Error.ShouldBe("litellm.BadRequestError: Unexpected message role. Model Group=metis-coder", "the harness result error is the real cause, preferred over the row error");
+    }
+
+    [Fact]
+    public void A_cancelled_agent_with_no_result_falls_back_to_the_row_error()
+    {
+        Build(Guid.NewGuid(), AgentRunStatus.Cancelled, Now.AddSeconds(-2), Now, resultJson: null, taskJson: Task(null), toolCount: 0, now: Now, rowError: "the run was cancelled before it wrote a result")
+            .Error.ShouldBe("the run was cancelled before it wrote a result");
+    }
+
+    [Fact]
+    public void A_succeeded_agent_never_shows_an_error_even_if_the_row_carries_one()
+    {
+        Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-2), Now, Result(10, 5), Task("m"), toolCount: 0, now: Now, rowError: "a stale row error")
+            .Error.ShouldBeNull("a green agent never shows a stray error — Error is gated on a non-succeeded status");
+    }
+
+    [Fact]
+    public void A_very_long_agent_error_is_capped_with_an_ellipsis()
+    {
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Failed, Now.AddSeconds(-2), Now, null, Task(null), toolCount: 0, now: Now, rowError: new string('e', 900));
+
+        m.Error!.Length.ShouldBe(401, "400 chars + the … ellipsis — the card never carries a full litellm dump");
+        m.Error.ShouldEndWith("…");
     }
 
     [Fact]
     public void A_very_long_goal_title_is_capped_with_an_ellipsis()
     {
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, new string('x', 200)), 0, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, new string('x', 200)), 0, Now);
 
         m.Goal!.Length.ShouldBe(141);          // 140 chars + the … ellipsis
         m.Goal.ShouldEndWith("…");
@@ -65,24 +105,24 @@ public class AgentMetricsReaderTests
     [Fact]
     public void Duration_is_live_elapsed_while_running_and_null_before_start()
     {
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-10), completedAt: null, resultJson: null, taskJson: Task(null), toolCount: 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-10), completedAt: null, resultJson: null, taskJson: Task(null), toolCount: 0, Now)
             .DurationMs.ShouldBe(10_000);   // live elapsed (now − started), not yet terminal
 
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Queued, startedAt: null, completedAt: null, resultJson: null, taskJson: null, toolCount: 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Queued, startedAt: null, completedAt: null, resultJson: null, taskJson: null, toolCount: 0, Now)
             .DurationMs.ShouldBeNull();      // hasn't started
     }
 
     [Fact]
     public void Duration_clamps_a_negative_span_to_zero()
     {
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now, Now.AddSeconds(-5), resultJson: null, taskJson: null, toolCount: 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now, Now.AddSeconds(-5), resultJson: null, taskJson: null, toolCount: 0, Now)
             .DurationMs.ShouldBe(0);   // completed before started (clock skew) → 0, never negative
     }
 
     [Fact]
     public void Tokens_and_model_stay_null_when_the_blobs_are_absent_or_blank()
     {
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-3), completedAt: null, resultJson: null, taskJson: Task("   "), toolCount: 0, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-3), completedAt: null, resultJson: null, taskJson: Task("   "), toolCount: 0, Now);
 
         m.InputTokens.ShouldBeNull();    // no result yet → no tokens
         m.OutputTokens.ShouldBeNull();
@@ -92,7 +132,7 @@ public class AgentMetricsReaderTests
     [Fact]
     public void A_malformed_blob_reads_as_unknown_never_throws()
     {
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Failed, Now.AddSeconds(-2), Now, resultJson: "{ not json", taskJson: "also not json", toolCount: 1, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Failed, Now.AddSeconds(-2), Now, resultJson: "{ not json", taskJson: "also not json", toolCount: 1, Now);
 
         m.InputTokens.ShouldBeNull();
         m.Model.ShouldBeNull();
@@ -114,7 +154,7 @@ public class AgentMetricsReaderTests
             ChangedFiles = new[] { "src/A.cs", "src/B.cs", "README.md" },
         }, AgentJson.Options);
 
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
 
         m.CostUsd.ShouldBe(30m, "1M in × $5/M + 1M out × $25/M = $30 — computed once, server-side");
         m.FilesChanged.ShouldBe(3);
@@ -131,7 +171,7 @@ public class AgentMetricsReaderTests
             FileStats = new[] { new FileDiffStat("src/A.cs", 42, 3), new FileDiffStat("img/logo.png", null, null) },
         }, AgentJson.Options);
 
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
 
         m.ChangedFileStats.Select(f => (f.Path, f.Additions, f.Deletions))
             .ShouldBe(new[] { ("src/A.cs", (int?)42, (int?)3), ("img/logo.png", null, null) }, "the per-file diffstat projects verbatim, binary counts null");
@@ -144,7 +184,7 @@ public class AgentMetricsReaderTests
     {
         var taskJson = JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", ResumeFromSessionId = resumeFromSessionId }, AgentJson.Options);
 
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, resultJson: null, taskJson, toolCount: 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, resultJson: null, taskJson, toolCount: 0, Now)
             .Resumed.ShouldBe(expectedResumed, "an agent whose task carried a resume session id continued a prior conversation");
     }
 
@@ -158,7 +198,7 @@ public class AgentMetricsReaderTests
             Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/A.cs" },
         }, AgentJson.Options);
 
-        AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now)
+        Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now)
             .ChangedFileStats.ShouldBeEmpty("a result with no FileStats projects an empty diffstat, never null");
     }
 
@@ -166,7 +206,7 @@ public class AgentMetricsReaderTests
     public void Cost_is_null_for_an_unpriced_model_but_tokens_and_a_zero_file_count_still_project()
     {
         // An OpenAI/Codex model is intentionally absent from the price table → fail-open NULL cost (never a misleading 0).
-        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, Result(500, 200), Task("gpt-5-codex"), toolCount: 0, Now);
+        var m = Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, Result(500, 200), Task("gpt-5-codex"), toolCount: 0, Now);
 
         m.InputTokens.ShouldBe(500);
         m.CostUsd.ShouldBeNull("an unpriced model fails open to null cost, never 0");

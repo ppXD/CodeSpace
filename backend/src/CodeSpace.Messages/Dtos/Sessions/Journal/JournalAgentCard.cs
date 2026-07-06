@@ -25,6 +25,9 @@ public sealed record JournalAgentCard
     /// <summary>The agent's ground-truth lifecycle status (the <c>AgentRunStatus</c>).</summary>
     public required AgentRunStatus Status { get; init; }
 
+    /// <summary>The (already secret-redacted) failure reason for a NON-succeeded agent — the real cause (e.g. an LLM 4xx like "Unexpected message role") so the card shows WHY it failed, not a bare "FAILED". Bounded to a short single-line snippet. Null on a succeeded card.</summary>
+    public string? Error { get; init; }
+
     /// <summary>The model the agent ran on (from its task envelope). Null when unpinned.</summary>
     public string? Model { get; init; }
 

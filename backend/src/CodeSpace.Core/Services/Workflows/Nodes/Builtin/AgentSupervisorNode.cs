@@ -124,7 +124,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         if (!TryReadRunIdentity(context, out var supervisorRunId, out var teamId))
             return NodeResult.Fail("agent.supervisor could not read the run id / team id from the system scope.");
 
-        var goalConfig = ReadGoalConfig(context.Config);
+        var goalConfig = RelaxBoundsForReplay(ReadGoalConfig(context.Config), context);
         var goal = ReadString(context.Config, "goal");
         var conversationId = ReadOptionalGuid(context.Config, "conversationId");
 
@@ -361,6 +361,29 @@ public sealed class AgentSupervisorNode : INodeRuntime
     {
         try { return JsonSerializer.Deserialize<SupervisorGoalConfig>(JsonSerializer.Serialize(bag), GoalConfigOptions); }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// On a REPLAY / RERUN, drop the frozen round + total-spawn ceilings so the run falls to the CURRENT back-stop
+    /// defaults (<c>SupervisorGoalPlan</c>) instead of a stale tier value baked into the snapshot at the original launch —
+    /// a rerun should LOOP UNTIL DONE under today's policy (concurrency + cost + no-progress), not the round budget the
+    /// original run happened to carry. A fresh (non-replay) run keeps an operator's explicit pin. This touches ONLY the
+    /// in-memory config the node reads: the frozen snapshot JSON + its tamper hash are untouched, and the decision
+    /// idempotency keys (kind + payload + turn, never the plan bounds) are unaffected — so a crash-replay of the SAME
+    /// rerun re-derives the SAME relaxed bounds every walk (the relaxation is a pure function of the durable source_type).
+    /// MaxParallelism / MaxCostUsd / MaxNoProgressDecisions are left exactly as the run carried them.
+    /// </summary>
+    private static SupervisorGoalConfig? RelaxBoundsForReplay(SupervisorGoalConfig? goalConfig, NodeRunContext context) =>
+        RelaxBoundsForReplay(goalConfig, ReadString(context.Scope.Sys, SystemScopeKeys.SourceType));
+
+    /// <summary>The pure relax rule — split out so it is unit-testable without a node context: a REPLAY/RERUN source drops the frozen round + total-spawn ceilings (→ current back-stop defaults); any other source (a fresh manual/api/schedule launch) keeps the config verbatim so an operator's explicit pin still applies.</summary>
+    internal static SupervisorGoalConfig? RelaxBoundsForReplay(SupervisorGoalConfig? goalConfig, string sourceType)
+    {
+        if (goalConfig == null) return null;
+
+        return sourceType is WorkflowRunSourceTypes.Replay or WorkflowRunSourceTypes.Rerun
+            ? goalConfig with { MaxRounds = null, MaxTotalSpawns = null }
+            : goalConfig;
     }
 
     private static readonly JsonSerializerOptions GoalConfigOptions = new() { PropertyNameCaseInsensitive = true };

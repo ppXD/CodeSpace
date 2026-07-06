@@ -17,6 +17,9 @@ public sealed record AgentRunMetrics
 {
     public required AgentRunStatus Status { get; init; }
 
+    /// <summary>The (already secret-redacted) failure reason for a NON-succeeded agent — the result's error, else the row's error (a cancelled / abandoned agent that never wrote a result). The REAL cause (e.g. an LLM 4xx like "Unexpected message role") so the card shows WHY the agent failed instead of a bare "FAILED". Bounded to a short single-line snippet. Null on a succeeded run.</summary>
+    public string? Error { get; init; }
+
     /// <summary>A concise one-line title derived from the agent's goal (its instruction), for the run-detail display NAME of a plain node / map agent that has no model-authored role. Null when the task carried no goal.</summary>
     public string? Goal { get; init; }
 

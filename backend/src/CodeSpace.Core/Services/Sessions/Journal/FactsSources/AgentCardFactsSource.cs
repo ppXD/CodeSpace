@@ -82,6 +82,9 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
             Label = FirstNonBlank(allocation?.SubtaskId, allocation?.Role, allocation?.SubtaskTitle, m.Goal) ?? "Agent",
             AssignedSubtask = allocation?.SubtaskTitle,
             Status = m.Status,
+            // The failure cause on a NON-succeeded card — already gated to null on a succeeded run + secret-redacted at
+            // the write path, so a green card never shows a stray error and the failed card names WHY (an LLM 4xx, etc.).
+            Error = m.Error,
             Model = m.Model,
             Harness = m.Harness,
             DurationMs = m.DurationMs,
