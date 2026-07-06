@@ -107,17 +107,40 @@ public class AgentRunOrphanSweepFlowTests
     }
 
     [Fact]
-    public async Task Standalone_queued_run_with_no_parent_run_is_left_alone()
+    public async Task Fresh_parentless_queued_run_within_the_liveness_window_is_left_alone()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var runId = await SeedQueuedAgentRunAsync(teamId, workflowRunId: null);
+        var runId = await SeedQueuedAgentRunAsync(teamId, workflowRunId: null);   // CreatedDate ≈ now → still inside the window
 
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-            .ShouldBe(AgentRunStatus.Queued, "a standalone run has no parent — the WorkflowRunId != null guard skips it");
+            .ShouldBe(AgentRunStatus.Queued, "a fresh parentless run may be about to claim inline (e.g. a benchmark run) — only a STALE one past the window is collected");
+    }
+
+    [Fact]
+    public async Task Stale_parentless_queued_run_with_no_wait_is_cancelled_and_frees_the_admission_slot()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedQueuedAgentRunAsync(teamId, workflowRunId: null);
+        await BackdateColumnAsync(runId, "created_date", AgentRunLiveness.Window * 2);   // past the liveness window → uncollectable orphan (derived, not hardcoded, so it stays stale under any configured window)
+
+        var before = await CountInflightAsync(teamId);
+
+        AgentRunReconcileSummary summary;
+        using (var scope = _fixture.BeginScope())
+            summary = await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        summary.CancelledParentlessQueued.ShouldBeGreaterThanOrEqualTo(1, "a parentless run stuck Queued past the window is collected — no other sweep can reach it");
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(AgentRunStatus.Cancelled, "the parentless orphan is reaped to a legible terminal state");
+        run.Error.ShouldBe(AgentRunReconcilerService.OrphanedNoParentQueuedError, "the run names WHY it was collected");
+
+        (await CountInflightAsync(teamId)).ShouldBe(before - 1, "collecting the orphan frees its admission-cap slot");
     }
 
     /// <summary>Count the team's in-flight (Queued + Running) agent runs — the exact set the admission cap counts.</summary>
@@ -126,6 +149,14 @@ public class AgentRunOrphanSweepFlowTests
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
             .CountAsync(r => r.TeamId == teamId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running));
+    }
+
+    /// <summary>Backdate a timestamp column via raw SQL (bypassing the CreatedDate interceptor) so a fresh row looks stuck past the liveness window.</summary>
+    private async Task BackdateColumnAsync(Guid agentRunId, string column, TimeSpan ago)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database
+            .ExecuteSqlRawAsync($"UPDATE agent_run SET {column} = {{0}} WHERE id = {{1}}", DateTimeOffset.UtcNow - ago, agentRunId);
     }
 
     /// <summary>Seed a parent workflow run (request + run) in the given status — WorkflowId null (no Workflow row needed; the FK is optional).</summary>
