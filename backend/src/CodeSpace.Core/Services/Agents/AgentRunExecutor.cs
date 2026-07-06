@@ -1055,10 +1055,28 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             ? await ReviewWithAgentAsync(task, result, run, cancellationToken).ConfigureAwait(false)
             : CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: not requested");
 
+        var agentReviewed = !verdict.Failed;
+
         if (verdict.Failed)
             verdict = await ReviewRecordedAsync(
                 new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
                 run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+
+        // D② approve co-sign: an AGENT reviewer's APPROVAL gets a cheap independent MODEL co-check before it counts.
+        // The reviewer agent READS the produced tree — hostile committed content could try to instruct it to approve
+        // (the injection prize) — so approval requires CONSENSUS across the two independent channels: a model
+        // disagreement fails toward the human (NeedsReview carrying both sides), never a silent pass. A FAILED
+        // co-check keeps the agent's approval (fail-open — a broken co-check must not manufacture a flag), and a
+        // DISAPPROVING agent verdict needs no co-sign (the worst case of a wrong block is one wasted revise round).
+        if (agentReviewed && verdict.Approved)
+        {
+            var coSign = await ReviewRecordedAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal },
+                run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+
+            if (!coSign.Failed && !coSign.Approved)
+                verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
+        }
 
         if (verdict.Failed || verdict.Approved) return result;   // fail-open, or a clean pass ⇒ byte-identical
 

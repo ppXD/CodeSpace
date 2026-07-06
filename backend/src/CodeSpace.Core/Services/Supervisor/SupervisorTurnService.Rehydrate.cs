@@ -108,6 +108,7 @@ public sealed partial class SupervisorTurnService
             SupervisorModelId = goalConfig?.SupervisorModelId,
             DecisionReviewMode = goalConfig?.DecisionReviewMode ?? ReviewMode.None,
             PlanReviewMode = goalConfig?.PlanReviewMode ?? ReviewMode.None,
+            ReviewerAgent = goalConfig?.ReviewerAgent ?? false,
             ReviewerModelId = goalConfig?.ReviewerModelId,
             PendingChildDecisions = pendingChildDecisions,
         };

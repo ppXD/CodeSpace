@@ -1,4 +1,5 @@
 using System.Text;
+using CodeSpace.Core.Services.Agents.Review;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Agents;
@@ -27,11 +28,13 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
 {
     private readonly ISupervisorDecider _inner;
     private readonly IStructuredCritic _critic;
+    private readonly IAgentPlanReviewer _agentPlanReviewer;
 
-    public CriticSupervisorDeciderDecorator(ISupervisorDecider inner, IStructuredCritic critic)
+    public CriticSupervisorDeciderDecorator(ISupervisorDecider inner, IStructuredCritic critic, IAgentPlanReviewer agentPlanReviewer)
     {
         _inner = inner;
         _critic = critic;
+        _agentPlanReviewer = agentPlanReviewer;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -58,9 +61,20 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         if (verdict.Failed) return decision;   // fail-open — a failed review is never worse than no review
 
         // IMPROVE: fold the critique into ONE bounded re-decide (BOTH review modes reset to None ⇒ no recursion),
-        // so the decider revises against it. A blank critique falls through to the original.
-        if (mode == ReviewMode.Improve && !string.IsNullOrWhiteSpace(verdict.Critique))
-            return await RedecideAsync(context, verdict.Critique, cancellationToken).ConfigureAwait(false);
+        // so the decider revises against it. An AGENT verdict is Gate-shaped (no critique field) — its disapproval
+        // composes the critique from rationale + evidence-attached issues; an agent APPROVAL (or a blank critique)
+        // falls through to the original.
+        if (mode == ReviewMode.Improve)
+        {
+            var critique = !string.IsNullOrWhiteSpace(verdict.Critique) ? verdict.Critique
+                : verdict.Mode == ReviewMode.Gate && !verdict.Approved ? ComposeGateCritique(verdict)
+                : null;
+
+            if (!string.IsNullOrWhiteSpace(critique))
+                return await RedecideAsync(context, critique, cancellationToken).ConfigureAwait(false);
+
+            return decision;
+        }
 
         // GATE (S8 hard semantics): a disapproved decision does NOT execute. The ladder — one bounded re-decide
         // against the critique (the same self-heal Improve gets), a SECOND independent review of the revision, and
@@ -81,11 +95,33 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         return decision;
     }
 
-    /// <summary>One independent review of a decision under the given mode — the shared call the first pass and the hard-Gate's second pass both use.</summary>
-    private async Task<CriticVerdict> ReviewAsync(ReviewMode mode, SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken) =>
-        await _critic.ReviewAsync(
+    /// <summary>
+    /// One independent review of a decision under the given mode — the shared call the first pass and the hard-Gate's
+    /// second pass both use. A PLAN decision with the D① opt-in reviews GROUNDED first: a real read-only agent clones
+    /// the run's repository and verifies the plan against the actual tree, laddering down to the in-process model
+    /// critic when the agent can't produce a verdict (a grounded review is never worse than a text review).
+    /// </summary>
+    private async Task<CriticVerdict> ReviewAsync(ReviewMode mode, SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var verdict = decision.Kind == SupervisorDecisionKinds.Plan && context.ReviewerAgent && context.AgentProfile?.RepositoryId is { } repositoryId
+            ? await _agentPlanReviewer.ReviewAsync(new PlanReviewRequest
+            {
+                PlanArtifact = Render(decision),
+                Goal = ComposeYardstick(context),
+                RepositoryId = repositoryId,
+                TeamId = context.TeamId,
+                WorkflowRunId = context.SupervisorRunId,
+                NodeId = context.NodeId,
+                ReviewerModelId = context.ReviewerModelId,
+            }, cancellationToken).ConfigureAwait(false)
+            : CriticVerdict.ReviewFailed(mode, "agent-reviewer: not requested");
+
+        if (!verdict.Failed) return verdict;
+
+        return await _critic.ReviewAsync(
             new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? "workflow plan" : "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>ONE bounded re-decide against a critique — both review modes reset to None so the re-decide can never recurse into another review.</summary>
     private async Task<SupervisorDecision> RedecideAsync(SupervisorTurnContext context, string critique, CancellationToken cancellationToken) =>

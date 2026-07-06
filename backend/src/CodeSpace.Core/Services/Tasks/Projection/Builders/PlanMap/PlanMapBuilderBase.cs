@@ -105,6 +105,11 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         AddIfPresent(config, "plannerModelId", context.PlannerModelRowId?.ToString());
         AddIfPresent(config, "reviewMode", context.PlannerReviewMode != ReviewMode.None ? (int)context.PlannerReviewMode : null);
         AddIfPresent(config, "reviewerModelId", context.PlannerReviewMode != ReviewMode.None ? context.ReviewerModelId?.ToString() : null);
+        // D① grounded plan review — a real read-only agent verifies the plan against the bound repository's tree.
+        // Rides only when a plan review is active AND the profile binds a repo (else omitted — byte-identical).
+        var reviewerAgentOn = context.PlannerReviewMode != ReviewMode.None && context.AgentProfile?.ReviewerAgent == true && context.AgentProfile?.RepositoryId is not null;
+        AddIfPresent(config, "reviewerAgent", reviewerAgentOn ? true : (bool?)null);
+        AddIfPresent(config, "repositoryId", reviewerAgentOn ? context.AgentProfile!.RepositoryId!.Value.ToString() : null);
 
         return JsonSerializer.SerializeToElement(config);
     }

@@ -23,7 +23,7 @@ public class PlanAuthorNodeTests
         node.TypeKey.ShouldBe("plan.author");
         node.Manifest.IsSideEffecting.ShouldBeTrue("one structured LLM call per execution — billing, like llm.complete");
 
-        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan" }, ignoreOrder: true);
+        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan", "reviewerAgent", "repositoryId" }, ignoreOrder: true);
         InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback", "criteria" }, ignoreOrder: true);
         OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
 
