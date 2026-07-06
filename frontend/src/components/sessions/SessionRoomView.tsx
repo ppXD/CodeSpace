@@ -791,7 +791,6 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
           ? <span className={`room-jpill room-jpill-${jVerbKey(step.verb)}`}>{jVerbKey(step.verb)}</span>
           : <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>}
         <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
-        {step.beat && step.round != null && <span className="room-jround" title={`Supervisor round ${step.round}`}>round {step.round}</span>}
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
       {showDetail && (ask

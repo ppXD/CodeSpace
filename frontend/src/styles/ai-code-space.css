@@ -6022,7 +6022,6 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jkind-thinking { background: var(--panel-2); color: var(--muted); }
 .room-jtitle { font-size: 13px; color: var(--ink-2); } .room-jtitle b { color: var(--ink); }
 .room-jstep.room-jtone-err .room-jtitle { color: var(--rm-danger); }
-.room-jround { flex: none; margin-left: auto; font-size: 10px; color: var(--muted-2); font-variant-numeric: tabular-nums; letter-spacing: .02em; white-space: nowrap; }
 
 .room-jwhy { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; font-style: italic; max-width: 68ch; }
 .room-jwhy-l { font-style: normal; color: var(--muted-2); font-size: 10.5px; }
