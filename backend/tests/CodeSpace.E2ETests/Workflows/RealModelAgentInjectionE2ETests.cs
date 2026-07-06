@@ -25,11 +25,12 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <list type="bullet">
 /// <item><b>Persona</b> rides Claude's native <c>--append-system-prompt</c>: the model ALWAYS sees the system prompt, so
 /// a persona instruction is followed directly — a high-confidence gate.</item>
-/// <item><b>Skill</b> is projected as <c>CLAUDE_CONFIG_DIR/skills/&lt;slug&gt;/SKILL.md</c>. <c>claude --print</c> is
-/// HERMETIC (loads no filesystem settings by default), so the harness now passes <c>--setting-sources user</c> to opt
-/// the per-run config home in — WITHOUT which the projected skill is inert. This test is what confirms that fix end to
-/// end against the real binary + resolves the open question of whether a headless run loads + honors a personal
-/// skill.</item>
+/// <item><b>Skill</b> is projected as <c>CLAUDE_CONFIG_DIR/skills/&lt;slug&gt;/SKILL.md</c>. The headless CLI
+/// <c>claude -p</c> AUTO-DISCOVERS user skills by default (the hermetic-no-filesystem-settings default is the
+/// programmatic Agent <i>SDK</i>'s, NOT the CLI's — corrected in #982), so the harness loads the projected skill with
+/// NO opt-in flag; its one hard requirement is that it NEVER passes <c>--bare</c>/<c>--safe-mode</c> (which would
+/// disable that auto-discovery). This test confirms end to end against the real binary that a headless run loads +
+/// HONORS a personal skill.</item>
 /// </list>
 ///
 /// <para>Each behavior is a STRICT gate on the blessed Anthropic wire via
@@ -94,8 +95,8 @@ public sealed class RealModelAgentInjectionE2ETests
             };
 
             // Skills set directly on the task (the persona→binding→resolver path is integration-tested separately). The
-            // real executor projects the skill under CLAUDE_CONFIG_DIR/skills; the harness's --setting-sources user opts
-            // it in; the real claude loads + honors it.
+            // real executor projects the skill under CLAUDE_CONFIG_DIR/skills; `claude -p` auto-discovers it there (the
+            // harness never passes --bare/--safe-mode, which is what would disable that); the real claude loads + honors it.
             AgentTask Task(Guid credId) => new()
             {
                 Goal = "Say hello.",
