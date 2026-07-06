@@ -206,7 +206,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
                 repositoryId = repo,
                 effort = "deep",
                 surfaceKind = "chat",
-                caps = new { maxParallelism = 3, maxRounds = 4, maxTotalSpawns = 5, maxCostUsd = 12 },
+                caps = new { maxParallelism = 3, maxTotalSpawns = 5, maxCostUsd = 12 },
             }),
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
@@ -226,7 +226,6 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         var sup = ReadSupervisorConfig(run.DefinitionSnapshotJson!);
         sup.GetProperty("maxParallelism").GetInt32().ShouldBe(3, "the launch caps must bind through real HTTP into the supervisor bounds");
-        sup.GetProperty("maxRounds").GetInt32().ShouldBe(4);
         sup.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(5);
         sup.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12m, "the operator's budget must reach the supervisor's force-stop bound");
     }

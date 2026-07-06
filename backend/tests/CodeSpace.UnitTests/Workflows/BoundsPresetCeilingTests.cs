@@ -39,7 +39,6 @@ public class BoundsPresetCeilingTests
         caps.AutonomyCeiling.ShouldBe("Standard",
             customMessage: "even the generous Deep tier holds autonomy at Standard — raising it is a reviewed decision, not a silent edit");
         caps.MaxParallelism.ShouldBe(5, "Deep's parallelism is load-bearing too — it is frozen into the flow.map config when deep degrades to map-fanout (fix #2)");
-        caps.MaxRounds.ShouldBeNull("the tier no longer caps rounds — a supervised run loops until done (round is a hidden runaway back-stop, not a tier knob)");
         caps.MaxTotalSpawns.ShouldBeNull("the tier no longer caps total spawns — concurrency (MaxParallelism) is the only agent knob");
     }
 }

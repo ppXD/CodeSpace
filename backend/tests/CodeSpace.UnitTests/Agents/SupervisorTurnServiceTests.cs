@@ -18,7 +18,7 @@ namespace CodeSpace.UnitTests.Agents;
 /// <see cref="ISupervisorDecisionLog"/> (a faithful model of the E1 unique-index dedup + Pending→Running
 /// claim + terminal record — the real ledger is pinned over Postgres at the integration tier). Pins:
 /// RehydrateFromDecisionLog folds a terminal decision + identifies the in-flight one; turn 1 plans + parks
-/// with TurnNumber+1; turn 2 stops + finishes; budget-exhausted forces a clean terminal stop; a replay
+/// with TurnNumber+1; turn 2 stops + finishes; the no-progress guard forces a clean terminal stop; a replay
 /// (re-running a turn whose decision already settled) does NOT re-execute the side effect (no double-plan).
 /// </summary>
 [Trait("Category", "Unit")]
@@ -82,25 +82,25 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Select(r => r.DecisionKind).ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Stop });
     }
 
-    // ── Budget exhausted → forced terminal stop (fail-closed, counted from the ledger) ──
+    // ── No-progress guard → forced terminal stop (fail-closed, counted from the ledger) ──
 
     [Fact]
-    public async Task Budget_exhausted_forces_a_clean_terminal_stop()
+    public async Task The_no_progress_guard_forces_a_clean_terminal_stop()
     {
         var ledger = new FakeSupervisorDecisionLog();
 
-        // Seed DecisionBudget decided decisions so TurnNumber == budget → the decider is never asked.
-        for (var i = 0; i < SupervisorLane.DecisionBudget; i++)
+        // Seed MaxNoProgressDecisions result-less plan decisions → the no-progress guard trips → the decider is never asked.
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
             ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
 
-        // A decider that would NEVER stop on its own — proving the budget, not the decider, terminates.
+        // A decider that would NEVER stop on its own — proving the bound, not the decider, terminates.
         var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
-        result.IsFinished.ShouldBeTrue("the budget forces a terminal stop");
+        result.IsFinished.ShouldBeTrue("the no-progress guard forces a terminal stop");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
-        result.TerminalReason.ShouldBe(SupervisorTurnService.BudgetExhaustedReason);
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
     }
 
     // ── Governance DENY → force-STOP=GovernanceDenied, no agent staged (the fail-closed branch) ──
@@ -367,22 +367,22 @@ public class SupervisorTurnServiceTests
     }
 
     [Fact]
-    public async Task A_budget_forced_stop_is_never_graded_even_with_a_final_branch_and_repo()
+    public async Task A_no_progress_forced_stop_is_never_graded_even_with_a_final_branch_and_repo()
     {
-        // A FORCED stop (budget/governance) carries only {"reason":...} — no model acceptance — so it is never graded,
+        // A FORCED stop (no-progress/governance) carries only {"reason":...} — no model acceptance — so it is never graded,
         // EVEN when the run has a final reviewable branch + repo (so the skip is the forced-stop shape, not no-branch).
         var ledger = SeedRunWithCleanMerge();   // Sequence 1: a clean merge → a final branch exists
 
-        for (var i = 0; i < SupervisorLane.DecisionBudget - 1; i++)
-            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");   // fill the round budget
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");   // trip the no-progress guard
 
         var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = true, Detail = "would-pass" });
-        var service = ServiceWith(ledger, new AlwaysPlanDecider(), grader);   // the decider is never asked — the budget forces the stop
+        var service = ServiceWith(ledger, new AlwaysPlanDecider(), grader);   // the decider is never asked — the no-progress guard forces the stop
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
 
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
-        result.TerminalReason.ShouldBe(SupervisorTurnService.BudgetExhaustedReason, "the budget forced the stop");
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress, "the no-progress guard forced the stop");
         grader.CallCount.ShouldBe(0, "a forced stop has no model acceptance command → it is never graded");
         result.AcceptancePassed.ShouldBeNull("a forced stop reports Completed, never AcceptanceFailed");
     }
@@ -657,20 +657,18 @@ public class SupervisorTurnServiceTests
     [Fact]
     public async Task The_release_flip_lands_even_when_a_pre_bound_stop_takes_the_turn()
     {
-        // The approve arrives on the run's LAST budgeted turn: the stop must not strand AwaitingConfirmation.
-        var ledger = new FakeSupervisorDecisionLog();
-        for (var i = 0; i < SupervisorLane.DecisionBudget; i++)
-            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
-
+        // The approve arrives on a turn where a pre-decision bound (no-progress) force-stops: the stop must not
+        // strand AwaitingConfirmation — the answered confirmation must settle FIRST.
         var row = PlanRow(CodeSpace.Messages.Plans.WorkPlanStatuses.AwaitingConfirmation);
         var store = new FakeWorkPlanStore(row);
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
-        var context = GateContext(TerminalPlan(), AnsweredConfirmation("approve")) with { TurnNumber = SupervisorLane.DecisionBudget };
+        // NoProgressDecisions at the cap → the pre-decision no-progress guard force-stops this turn.
+        var context = GateContext(TerminalPlan(), AnsweredConfirmation("approve")) with { NoProgressDecisions = SupervisorLane.DefaultMaxNoProgressDecisions };
 
         var decision = await service.ChooseDecisionAsync(context, SupervisorGoalPlan.From(null), depth: 0, CancellationToken.None);
 
-        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "the budget still stops the run");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "the no-progress bound still stops the run");
         row.Status.ShouldBe(CodeSpace.Messages.Plans.WorkPlanStatuses.Confirmed, "but the answered confirmation settled FIRST — the persisted status never lies");
     }
 

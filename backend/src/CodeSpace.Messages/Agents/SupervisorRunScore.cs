@@ -54,7 +54,7 @@ public static class SupervisorOutcomes
     /// <summary>The supervisor decided it was done — a decider <c>stop</c> with a success-ish label (the default for a normal completion).</summary>
     public const string Completed = "completed";
 
-    /// <summary>A fail-closed bound force-stopped the run (round/decision budget, total-spawn cap, depth cap, no-progress).</summary>
+    /// <summary>A fail-closed bound force-stopped the run (total-spawn cap, depth cap, no-progress).</summary>
     public const string BudgetExhausted = "budget-exhausted";
 
     /// <summary>The governance gate denied a side-effecting decision → fail-closed force-stop.</summary>

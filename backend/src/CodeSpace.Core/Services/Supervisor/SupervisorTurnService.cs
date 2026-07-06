@@ -94,9 +94,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// order is deterministic so a re-entry re-derives the SAME forced stop:
     /// <list type="number">
     ///   <item>PRE-DECISION bounds (the run can't even ask for one more decision): depth cap (a supervisor nested
-    ///         beyond <c>MaxSupervisorDepth</c> supervisor-ancestors), round budget (<c>TurnNumber</c> ≥ the run's
-    ///         <c>MaxRounds</c>), best-effort no-progress (consecutive no-new-result decisions ≥ the cap). Each
-    ///         FORCE-STOPs with a distinct terminal reason instead of asking the decider.</item>
+    ///         beyond <c>MaxSupervisorDepth</c> supervisor-ancestors), best-effort no-progress (consecutive
+    ///         no-new-result decisions ≥ the cap). Each FORCE-STOPs with a distinct terminal reason instead of
+    ///         asking the decider.</item>
     ///   <item>ask the decider for the next decision;</item>
     ///   <item>POST-DECISION bounds + GOVERNANCE on the chosen decision: a spawn whose K exceeds the per-decision
     ///         fan-out cap, or whose total would breach <c>MaxTotalSpawns</c>, is REFUSED → force-STOP; a

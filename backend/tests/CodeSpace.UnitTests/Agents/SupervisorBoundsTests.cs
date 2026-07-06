@@ -24,7 +24,6 @@ public class SupervisorBoundsTests
     {
         var plan = SupervisorGoalPlan.From(null);
 
-        plan.MaxRounds.ShouldBe(SupervisorLane.DecisionBudget, "no config → the historical decision budget (pre-E5 behaviour)");
         plan.MaxParallelism.ShouldBe(SupervisorGoalPlan.SpawnKCeiling);
         plan.MaxTotalSpawns.ShouldBe(SupervisorLane.DefaultMaxTotalSpawns);
         plan.MaxNoProgressDecisions.ShouldBe(SupervisorLane.DefaultMaxNoProgressDecisions);
@@ -37,20 +36,7 @@ public class SupervisorBoundsTests
         // A supervisor authored before E5 (goal only, no limits) must behave EXACTLY as today.
         var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { Goal = "ship it" });
 
-        plan.MaxRounds.ShouldBe(SupervisorLane.DecisionBudget);
         plan.ApprovalPolicy.ShouldBe(SupervisorApprovalPolicy.None);
-    }
-
-    [Theory]
-    [InlineData(10, 10)]   // an operator may TIGHTEN the budget
-    [InlineData(0, 1)]     // below the floor → clamped to 1 (mirrors AdmissionController.ParseCap clamp semantics)
-    [InlineData(999, SupervisorLane.DecisionBudget)]  // above the hard ceiling → clamped to the ceiling
-    public void MaxRounds_is_clamped_to_the_decision_budget_ceiling(int configured, int expected)
-    {
-        SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = configured }).MaxRounds.ShouldBe(expected);
-
-        // ...and an UNSET (null) value falls back to the default (distinct from an out-of-range explicit value).
-        SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = null }).MaxRounds.ShouldBe(SupervisorLane.DecisionBudget);
     }
 
     [Theory]
@@ -111,57 +97,6 @@ public class SupervisorBoundsTests
     }
 
     [Fact]
-    public void Round_budget_force_stops_at_the_max_rounds_limit()
-    {
-        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = 5 });
-
-        SupervisorBounds.PreDecision(Context(turn: 5), plan, supervisorDepth: 0).ShouldBe(SupervisorStopReasons.BudgetExhausted);
-        SupervisorBounds.PreDecision(Context(turn: 4), plan, supervisorDepth: 0).ShouldBeNull("turn 4 of a 5-round budget still proceeds");
-    }
-
-    [Fact]
-    public void A_no_op_spawn_that_staged_no_agent_does_not_consume_a_round()
-    {
-        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = 6 });
-
-        // The reported failure — b87a0e37: a 4-subtask plan on a 6-round budget. The model burned 3 rounds on empty
-        // spawns before the first real dispatch. At turn 6 the OLD budget (TurnNumber >= 6) force-stopped before the plan
-        // could finish. Discounting the 3 no-ops, the effective productive rounds are 6 − 3 = 3, so the run PROCEEDS.
-        var prior = new[] { PriorSpawn(0), PriorSpawn(0), PriorSpawn(0) };
-
-        SupervisorBounds.PreDecision(Context(turn: 6, prior: prior), plan, supervisorDepth: 0)
-            .ShouldBeNull("3 no-op spawns are discounted, so 6 turns is only 3 productive rounds — the plan continues");
-
-        // The budget stops when the PRODUCTIVE round count reaches the cap: turn 9 with the 3 no-ops = 6 productive → stop.
-        SupervisorBounds.PreDecision(Context(turn: 9, prior: prior), plan, supervisorDepth: 0)
-            .ShouldBe(SupervisorStopReasons.BudgetExhausted, "6 productive rounds (9 turns − 3 no-ops) reaches the cap");
-    }
-
-    [Fact]
-    public void A_real_spawn_still_counts_toward_the_budget()
-    {
-        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = 3 });
-
-        // Real dispatches (≥1 agent) are NOT discounted — 3 turns of real spawns hits the 3-round budget.
-        var prior = new[] { PriorSpawn(1), PriorSpawn(2), PriorSpawn(1) };
-
-        SupervisorBounds.PreDecision(Context(turn: 3, prior: prior), plan, supervisorDepth: 0)
-            .ShouldBe(SupervisorStopReasons.BudgetExhausted, "real spawns count — no discount");
-    }
-
-    [Fact]
-    public void An_infinite_no_op_spin_is_still_bounded_by_the_no_progress_guard()
-    {
-        // Discounting no-ops from the ROUND budget can't loop forever: a no-op stages no result → it increments
-        // NoProgressDecisions, and the no-progress guard force-stops a run that only ever no-ops.
-        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = 6, MaxNoProgressDecisions = 4 });
-        var prior = Enumerable.Range(0, 8).Select(_ => PriorSpawn(0)).ToArray();
-
-        SupervisorBounds.PreDecision(Context(turn: 8, noProgress: 4, prior: prior), plan, supervisorDepth: 0)
-            .ShouldBe(SupervisorStopReasons.NoProgress, "8 no-ops are budget-free but trip the no-progress backstop");
-    }
-
-    [Fact]
     public void No_progress_guard_force_stops_after_the_streak_cap()
     {
         var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxNoProgressDecisions = 3 });
@@ -171,10 +106,10 @@ public class SupervisorBoundsTests
     }
 
     [Fact]
-    public void Pre_decision_precedence_is_depth_then_budget_then_no_progress()
+    public void Pre_decision_precedence_is_depth_then_no_progress()
     {
-        // All three trip at once → depth wins (the deterministic precedence a re-entry re-derives).
-        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxRounds = 1, MaxNoProgressDecisions = 1 });
+        // Both trip at once → depth wins (the deterministic precedence a re-entry re-derives). There is no round budget.
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxNoProgressDecisions = 1 });
 
         SupervisorBounds.PreDecision(Context(turn: 30, noProgress: 30), plan, supervisorDepth: SupervisorLane.MaxSupervisorDepth)
             .ShouldBe(SupervisorStopReasons.DepthCapExceeded);
@@ -304,7 +239,6 @@ public class SupervisorBoundsTests
     {
         // Surfaced as the node's terminal reason + load-bearing for the deterministic re-derived stop. A rename
         // changes what an operator sees — pin the literals (Rule 8).
-        SupervisorStopReasons.BudgetExhausted.ShouldBe("budget exhausted");
         SupervisorStopReasons.TotalSpawnCapReached.ShouldBe("total spawn cap reached");
         SupervisorStopReasons.CostCapReached.ShouldBe("cost cap reached");
         SupervisorStopReasons.SpawnFanOutExceedsCap.ShouldBe("spawn fan-out exceeds cap");
@@ -316,19 +250,8 @@ public class SupervisorBoundsTests
 
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-    private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0, decimal runSpend = 0m, IReadOnlyList<SupervisorPriorDecision>? prior = null) =>
-        new() { Goal = "g", TurnNumber = turn, TotalSpawnedAgents = totalSpawned, NoProgressDecisions = noProgress, RunSpendUsd = runSpend, PriorDecisions = prior ?? Array.Empty<SupervisorPriorDecision>() };
-
-    /// <summary>A settled spawn prior-decision that staged <paramref name="agentCount"/> agents — 0 is the no-op ("no subtasks to spawn") the budget must discount; ≥1 is a real dispatch that counts.</summary>
-    private static SupervisorPriorDecision PriorSpawn(int agentCount) => new()
-    {
-        Id = Guid.NewGuid(),
-        Sequence = 1,
-        DecisionKind = SupervisorDecisionKinds.Spawn,
-        Status = SupervisorDecisionStatus.Succeeded,
-        PayloadJson = "{}",
-        OutcomeJson = JsonSerializer.Serialize(new { agentCount, agentRunIds = Enumerable.Range(0, agentCount).Select(_ => Guid.NewGuid().ToString()).ToArray() }),
-    };
+    private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0, decimal runSpend = 0m) =>
+        new() { Goal = "g", TurnNumber = turn, TotalSpawnedAgents = totalSpawned, NoProgressDecisions = noProgress, RunSpendUsd = runSpend };
 
     private static SupervisorDecision Spawn(params string[] ids) => new()
     {

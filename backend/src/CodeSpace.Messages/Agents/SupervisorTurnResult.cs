@@ -4,7 +4,7 @@ namespace CodeSpace.Messages.Agents;
 /// What one supervisor turn resolved to (a data noun, Rule 18.1) — the turn service's instruction to the
 /// node. FOUR shapes (the three resume paths, PR-E E4):
 /// <list type="bullet">
-///   <item>FINISH — a terminal <c>stop</c> / budget-exhausted decision reached its outcome; the node returns
+///   <item>FINISH — a terminal <c>stop</c> / forced-stop decision reached its outcome; the node returns
 ///         a terminal node result + the run completes via the normal walk.</item>
 ///   <item>SELF-ADVANCE PARK — a SYNCHRONOUS non-terminal decision (plan / merge) settled in-process; the node
 ///         suspends on a <c>SupervisorDecision</c> wait under the next-turn IterationKey, self-advancing into
@@ -25,7 +25,7 @@ public sealed record SupervisorTurnResult
     /// <summary>The decision kind this turn settled (audit/output surface).</summary>
     public required string DecisionKind { get; init; }
 
-    /// <summary>The terminal reason on finish (e.g. the stop reason, or "budget exhausted"). Null while parking.</summary>
+    /// <summary>The terminal reason on finish (e.g. the stop reason, or "no progress"). Null while parking.</summary>
     public string? TerminalReason { get; init; }
 
     /// <summary>

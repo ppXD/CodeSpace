@@ -9,7 +9,7 @@ namespace CodeSpace.Messages.Tasks;
 /// default, etc.), so a bare task launches identically to an authored bare <c>agent.code</c> node. <see cref="Harness"/>
 /// / <see cref="RunnerKind"/> are OPEN STRINGS (the registries resolve them).
 ///
-/// <para>Safety-budget caps (MaxParallelism / MaxTotalSpawns / MaxCostUsd / MaxRounds) are NOT here — they are a
+/// <para>Safety-budget caps (MaxParallelism / MaxTotalSpawns / MaxCostUsd) are NOT here — they are a
 /// supervisor / cost concern carried by the sibling <see cref="TaskCapsOverride"/>, which rides the router's
 /// <c>CapsOverride</c> seam. ApprovalPolicy rides the autonomy tier separately.</para>
 /// </summary>

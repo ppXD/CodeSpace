@@ -19,20 +19,18 @@ public class TaskCapsOverrideTests
         new TaskCapsOverride().IsEmpty.ShouldBeTrue("all caps null → no override");
         new TaskCapsOverride { MaxCostUsd = 5m }.IsEmpty.ShouldBeFalse();
         new TaskCapsOverride { MaxParallelism = 2 }.IsEmpty.ShouldBeFalse();
-        new TaskCapsOverride { MaxRounds = 3 }.IsEmpty.ShouldBeFalse();
         new TaskCapsOverride { MaxTotalSpawns = 4 }.IsEmpty.ShouldBeFalse();
     }
 
     [Fact]
     public void ToRouteCaps_carries_the_numeric_caps_and_leaves_autonomy_and_approval_at_defaults()
     {
-        var caps = new TaskCapsOverride { MaxCostUsd = 12.50m, MaxParallelism = 3, MaxRounds = 7, MaxTotalSpawns = 9 };
+        var caps = new TaskCapsOverride { MaxCostUsd = 12.50m, MaxParallelism = 3, MaxTotalSpawns = 9 };
 
         var route = caps.ToRouteCaps();
 
         route.MaxCostUsd.ShouldBe(12.50m);
         route.MaxParallelism.ShouldBe(3);
-        route.MaxRounds.ShouldBe(7);
         route.MaxTotalSpawns.ShouldBe(9);
         route.AutonomyCeiling.ShouldBe("", "a launch cap never sets the autonomy ceiling — the router merge keeps the preset's (tighten-only elsewhere)");
         route.RequiresApproval.ShouldBeFalse("a launch cap never sets approval — the router merge keeps the preset's (OR-only elsewhere)");
@@ -46,7 +44,6 @@ public class TaskCapsOverrideTests
 
         route.MaxCostUsd.ShouldBe(2m);
         route.MaxParallelism.ShouldBeNull();
-        route.MaxRounds.ShouldBeNull();
         route.MaxTotalSpawns.ShouldBeNull();
     }
 

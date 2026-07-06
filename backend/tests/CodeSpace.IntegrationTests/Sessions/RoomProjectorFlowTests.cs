@@ -198,22 +198,22 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
-    public async Task A_server_forced_budget_stop_renders_a_degraded_result_and_surfaces_the_reason()
+    public async Task A_server_forced_bound_stop_renders_a_degraded_result_and_surfaces_the_reason()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var sessionId = await SeedSessionAsync(teamId, "Ran out of budget");
+        var sessionId = await SeedSessionAsync(teamId, "Ran out of runway");
         var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the flaky tests", resultSummary: null);
 
-        // A budget/governance/bound trip forces a terminal stop that stamps {reason} on the PAYLOAD (no model outcome).
+        // A no-progress/governance/bound trip forces a terminal stop that stamps {reason} on the PAYLOAD (no model outcome).
         // The old degraded check read only the OUTCOME, so this rendered a green success with a BLANK result. It must
         // now render degraded AND surface the bound that stopped it — the SAME classifier the give-up stop uses.
-        await SeedForcedStopDecisionAsync(teamId, run, reason: SupervisorStopReasons.BudgetExhausted);
+        await SeedForcedStopDecisionAsync(teamId, run, reason: SupervisorStopReasons.NoProgress);
 
         var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
 
         var result = turn.Blocks.OfType<FinalAnswerBlock>().Single();
         result.Degraded.ShouldBeTrue("a run the server force-stopped on a bound did NOT finish the work — it is not a green success");
-        result.Text.ShouldBe("budget exhausted", "the RESULT never renders blank — it names the bound that stopped the run");
+        result.Text.ShouldBe("no progress", "the RESULT never renders blank — it names the bound that stopped the run");
 
         turn.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("stopped", "the map must not show a green 'passed' for a force-stopped run");
     }

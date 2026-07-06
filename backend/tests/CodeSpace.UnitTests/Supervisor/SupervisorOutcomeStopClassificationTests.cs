@@ -50,12 +50,12 @@ public class SupervisorOutcomeStopClassificationTests
     {
         // The reported gap: a budget/governance/bound-forced stop stamps {reason} on the PAYLOAD; ExecuteStop then
         // writes an outcome with a null outcome label — so there is no success outcome, only a reason.
-        var c = SupervisorOutcome.ClassifyStop(payloadJson: $$"""{"reason":"{{SupervisorStopReasons.BudgetExhausted}}"}""", outcomeJson: """{"stopped":true,"outcome":null,"summary":null}""");
+        var c = SupervisorOutcome.ClassifyStop(payloadJson: $$"""{"reason":"{{SupervisorStopReasons.NoProgress}}"}""", outcomeJson: """{"stopped":true,"outcome":null,"summary":null}""");
 
         c.Kind.ShouldBe(SupervisorStopKind.Forced);
         c.Degraded.ShouldBeTrue();
-        c.Reason.ShouldBe("budget exhausted");
-        c.DisplayText.ShouldBe("budget exhausted", "a forced stop never renders a blank display line");
+        c.Reason.ShouldBe("no progress");
+        c.DisplayText.ShouldBe("no progress", "a forced stop never renders a blank display line");
     }
 
     [Theory]
@@ -72,7 +72,7 @@ public class SupervisorOutcomeStopClassificationTests
     }
 
     [Theory]
-    [InlineData("""{"reason":"budget exhausted"}""", "budget exhausted")]
+    [InlineData("""{"reason":"no progress"}""", "no progress")]
     [InlineData("{}", null)]
     [InlineData(null, null)]
     [InlineData("not json", null)]

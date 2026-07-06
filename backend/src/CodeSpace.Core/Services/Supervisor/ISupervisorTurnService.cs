@@ -10,8 +10,8 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// <list type="number">
 ///   <item>REHYDRATES the run's decision tape from the durable ledger (<see cref="RehydrateFromDecisionLogAsync"/>)
 ///         — terminal decisions replayed (outcome only), the one in-flight decision identified;</item>
-///   <item>BUDGET-gates fail-closed: if the decided-decision count meets <c>SupervisorLane.DecisionBudget</c>,
-///         forces a terminal <c>stop</c> ("budget exhausted") rather than asking the decider;</item>
+///   <item>PRE-DECISION bound-gates fail-closed (depth cap, best-effort no-progress) — a tripped bound forces a
+///         terminal <c>stop</c> with a distinct reason rather than asking the decider;</item>
 ///   <item>otherwise asks the injected <see cref="ISupervisorDecider"/> for the next decision;</item>
 ///   <item>CLAIMS it exactly-once (server-derived per-turn idempotency key → <c>TryClaimAsync</c> →
 ///         <c>TryBeginExecutionAsync</c>), runs the <see cref="ISupervisorActionExecutor"/> side effect ONCE,

@@ -24,22 +24,6 @@ public class SupervisorBoundsServiceTests
     private readonly Guid _runId = Guid.NewGuid();
     private readonly Guid _teamId = Guid.NewGuid();
 
-    // ── Round budget from the config force-stops (config tighter than the default) ────
-
-    [Fact]
-    public async Task The_config_max_rounds_force_stops_before_the_decider_is_asked()
-    {
-        var ledger = new FakeSupervisorDecisionLog();
-
-        // Seed 3 decided decisions so TurnNumber == 3 == the configured MaxRounds.
-        for (var i = 0; i < 3; i++) ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"t":{{i}}}""", "{}");
-
-        var result = await Service(ledger, new AlwaysSpawnDecider()).RunTurnAsync(_runId, _teamId, "sup", "g", null, Config(maxRounds: 3), CancellationToken.None);
-
-        result.IsFinished.ShouldBeTrue("the config round budget — not the never-stopping decider — terminates");
-        result.TerminalReason.ShouldBe(SupervisorStopReasons.BudgetExhausted);
-    }
-
     // ── Total-spawn cap force-stops at the limit, counted from the ledger ────────────
 
     [Fact]
@@ -98,6 +82,45 @@ public class SupervisorBoundsServiceTests
         result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
     }
 
+    [Fact]
+    public async Task The_no_progress_guard_force_stops_a_plan_merge_loop_that_re_merges_the_same_work()
+    {
+        // The runaway a supervised run MUST self-terminate now that there is no round budget: the decider alternates
+        // plan → merge forever WITHOUT spawning (so the total-spawn / cost caps never trip). The FIRST merge of an
+        // agent-run id is progress; a merge that re-consolidates only ALREADY-merged ids makes no fresh progress — so
+        // the streak still climbs to the cap. A regression (treating every merge as progress) reopens an infinite loop.
+        var ledger = new FakeSupervisorDecisionLog();
+        var agentId = Guid.NewGuid();
+        var reMerge = $$"""{"merged":[{"agentRunId":"{{agentId}}"}],"count":1}""";
+
+        // merge #1 of the id resets the streak; the following plan + re-merges of the SAME id make no fresh progress → streak 4 == the cap.
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", reMerge);
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, "{}", "{}");
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", reMerge);
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, "{}", "{}");
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", reMerge);
+
+        var result = await Service(ledger, new AlwaysPlanDecider()).RunTurnAsync(_runId, _teamId, "sup", "g", null, Config(maxNoProgress: 4), CancellationToken.None);
+
+        result.IsFinished.ShouldBeTrue("a plan/merge loop that re-merges the same work self-terminates on the no-progress guard");
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
+    }
+
+    [Fact]
+    public async Task A_merge_that_integrates_new_work_each_turn_never_trips_the_no_progress_guard()
+    {
+        // The legitimate counterpart: a merge that consolidates a DISTINCT (newly-produced) agent-run id is real
+        // progress and resets the streak — so a healthy spawn→merge run is never falsely stopped. More new-id merges
+        // than the cap must NOT fire the guard (the fix gates on NEW ids, not merge-verb alone).
+        var ledger = new FakeSupervisorDecisionLog();
+        for (var i = 0; i < 5; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", $$"""{"merged":[{"agentRunId":"{{Guid.NewGuid()}}"}],"count":1}""");
+
+        var result = await Service(ledger, new AlwaysPlanDecider()).RunTurnAsync(_runId, _teamId, "sup", "g", null, Config(maxNoProgress: 2), CancellationToken.None);
+
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan, "a merge that integrates NEW work each turn is progress — the guard must not false-fire, so the decider is still asked");
+    }
+
     // ── Governance: a Spawns policy rewrites the spawn into an ask_human approval park ──
 
     [Fact]
@@ -140,8 +163,8 @@ public class SupervisorBoundsServiceTests
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger, ISupervisorDecider decider) =>
         new(ledger, decider, new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
-    private static SupervisorGoalConfig Config(int? maxRounds = null, int? maxTotalSpawns = null, int? maxNoProgress = null, string? approvalPolicy = null) =>
-        new() { MaxRounds = maxRounds, MaxTotalSpawns = maxTotalSpawns, MaxNoProgressDecisions = maxNoProgress, ApprovalPolicy = approvalPolicy };
+    private static SupervisorGoalConfig Config(int? maxTotalSpawns = null, int? maxNoProgress = null, string? approvalPolicy = null) =>
+        new() { MaxTotalSpawns = maxTotalSpawns, MaxNoProgressDecisions = maxNoProgress, ApprovalPolicy = approvalPolicy };
 
     /// <summary>A decider that always spawns 2 subtasks — proves a BOUND (not the decider) stops a runaway spawn loop.</summary>
     private sealed class AlwaysSpawnDecider : ISupervisorDecider

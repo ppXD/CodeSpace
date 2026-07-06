@@ -376,7 +376,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // instruct a retry-on-failure, so the live model must take an active recovery (`retry`, or an `ask_human` escalate),
         // or the blessed wire REDs after a bounded capability-floor (a FRESH run per attempt). A CodeFault reds at once; a
         // gateway outage is non-gating LOUD infra; a no-secret config skips NOT-EVALUATED. The perpetual-failure scenario
-        // force-STOPs cleanly at the decision budget ("budget exhausted"), never a run Failure, so a model that recovered
+        // force-STOPs cleanly on a bound (no-progress / total-spawn cap), never a run Failure, so a model that recovered
         // reads Drove from the ledger and is never mis-gated as a CodeFault.
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
@@ -410,7 +410,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         // GATING best-of-N (N from the job env, uniform with the other strict arms): a FRESH run per attempt; reds only if
         // EVERY non-infra attempt fails to take an ACTIVE recovery (retry — the instructed action — or escalate) on the
-        // real failure. A perpetual-failure run force-stops cleanly at the decision budget, never a run Failure.
+        // real failure. A perpetual-failure run force-stops cleanly on a bound (no-progress / total-spawn cap), never a run Failure.
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
             jobClient.Clear();
@@ -935,12 +935,11 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             ? $$""", "harness": "claude-code", "modelCredentialId": "{{ac}}", "model": "{{agentModel}}", "autonomyLevel": "Trusted" """
             : "";
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
-        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The SCRIPTED skeleton
-        // converges in ~4 rounds (plan→spawn→merge→stop), but a REAL model is less efficient — plan → spawn → inspect →
-        // (retry) → merge → stop is already ~5-6 turns with zero slack — so maxRounds:12 gives a real model a FAIR budget
-        // to drive to the accept head (a tight 6 starved it: the strict gate is real-model-drove-to-completion, so a budget
-        // tuned for the scripted skeleton would red a capable-but-deliberate model). 12 rounds still BOUNDS the wall-clock
-        // well under this lane's job timeout; a per-call timeout still self-skips as non-gating infra.
+        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. There is NO round cap —
+        // the run loops until the acceptance floor drives the terminal stop (a real model is deliberate: plan → spawn →
+        // inspect → (retry) → merge → stop, ~5-6 turns), bounded only by the best-effort no-progress guard (each settling
+        // spawn resets its streak, so a working run never trips it) and this lane's job timeout; a per-call timeout still
+        // self-skips as non-gating infra.
         // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
         var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
@@ -952,7 +951,6 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             {
               "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
-              "maxRounds": 12,
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{realAgentFields}}{{relatedLine}} },
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }

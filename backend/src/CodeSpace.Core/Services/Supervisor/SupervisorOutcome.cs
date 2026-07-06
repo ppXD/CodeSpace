@@ -103,7 +103,7 @@ public static class SupervisorOutcome
     /// <summary>The <c>stop</c> OUTCOME label — the <c>outcome</c> field of <c>{ stopped, outcome, summary }</c> (a genuine-success <c>completed</c>/<c>done</c> vs a graceful-failure <c>no-decision</c>/<c>no-model</c>/<c>unknown-decision</c>). Null when absent / malformed. The room decides whether the RESULT card renders degraded via <see cref="SupervisorStopPayload.IsSuccessOutcome"/> over this — so a fail-closed stop reads as degraded, not a green success.</summary>
     public static string? ReadStopOutcome(string? outcomeJson) => ReadStringField(outcomeJson, "outcome");
 
-    /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "budget exhausted"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
+    /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "no progress"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
     public static string? ReadStopReason(string? payloadJson) => ReadStringField(payloadJson, "reason");
 
     /// <summary>
@@ -219,6 +219,30 @@ public static class SupervisorOutcome
 
             return arr.EnumerateArray()
                 .Select(e => e.ValueKind == JsonValueKind.String && Guid.TryParse(e.GetString(), out var id) ? id : (Guid?)null)
+                .Where(id => id.HasValue)
+                .Select(id => id!.Value)
+                .ToList();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<Guid>();
+        }
+    }
+
+    /// <summary>Read the agent-run ids a recorded <c>merge</c> outcome consolidated — the <c>agentRunId</c> of each entry in its <c>merged</c> array (empty when absent/malformed). Distinct from <see cref="ReadStagedAgentRunIds"/> (the flat <c>agentRunIds</c> a spawn/retry staged): a merge NESTS them under <c>merged[].agentRunId</c>. Lets the no-progress fold tell a merge that integrated NEW work from one that re-consolidated only already-merged results (the runaway backstop, now that there is no round budget).</summary>
+    public static IReadOnlyList<Guid> ReadMergedAgentRunIds(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<Guid>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("merged", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return Array.Empty<Guid>();
+
+            return arr.EnumerateArray()
+                .Select(e => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("agentRunId", out var idEl) && idEl.ValueKind == JsonValueKind.String && Guid.TryParse(idEl.GetString(), out var id) ? id : (Guid?)null)
                 .Where(id => id.HasValue)
                 .Select(id => id!.Value)
                 .ToList();

@@ -74,7 +74,6 @@ public class SupervisorGovernanceTests
         var reasons = new[]
         {
             SupervisorStopReasons.GovernanceDenied,
-            SupervisorStopReasons.BudgetExhausted,
             SupervisorStopReasons.TotalSpawnCapReached,
             SupervisorStopReasons.SpawnFanOutExceedsCap,
             SupervisorStopReasons.DepthCapExceeded,

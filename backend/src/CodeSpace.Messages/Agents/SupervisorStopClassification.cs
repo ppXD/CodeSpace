@@ -27,7 +27,7 @@ public sealed record SupervisorStopClassification
     /// <summary>The model-authored closing line — a success / give-up stop's <c>summary</c>. Null for a server-forced stop (which carries a reason, not a summary).</summary>
     public string? Summary { get; init; }
 
-    /// <summary>Why the run stopped short — a forced stop's bound reason (e.g. "budget exhausted"), or a give-up's non-success outcome label. Null for a genuine success.</summary>
+    /// <summary>Why the run stopped short — a forced stop's bound reason (e.g. "no progress"), or a give-up's non-success outcome label. Null for a genuine success.</summary>
     public string? Reason { get; init; }
 
     /// <summary>True when the run did NOT finish well — anything but <see cref="SupervisorStopKind.Succeeded"/>. The RESULT card renders neutral/degraded (never a green success) on this.</summary>

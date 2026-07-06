@@ -21,7 +21,6 @@ export interface LaunchRelatedRepository {
 export interface LaunchCaps {
   maxCostUsd?: number;
   maxParallelism?: number;
-  maxRounds?: number;
   maxTotalSpawns?: number;
 }
 

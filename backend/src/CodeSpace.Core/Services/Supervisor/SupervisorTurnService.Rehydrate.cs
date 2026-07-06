@@ -152,27 +152,55 @@ public sealed partial class SupervisorTurnService
     /// Count the MOST RECENT consecutive decisions that produced no new SETTLED EVIDENCE of progress (the no-progress
     /// stall counter, folded from the durable ledger). EVIDENCE-based (W3), not staged-count: a spawn/retry advances the
     /// work only if its folded agents carry real evidence (a Succeeded agent or a concrete artifact — see
-    /// <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advances it (it consumed prior results). A run of
-    /// decisions that produced nothing — a wave of all-FAILED/empty agents, the decider looping on plan, or a degraded
-    /// ask_human — accumulates and eventually trips the stall bound. A LEDGER FACT (reads the same folded OutcomeJson the
-    /// decider sees), so it survives replay + re-entry deterministically. A long-running spawn whose agents haven't
-    /// settled is a PARK (not yet a terminal decision in <paramref name="priorDecisions"/>), so it never trips early.
+    /// <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advances it only if it integrated NEW work (see
+    /// <see cref="MergedNewWork"/> — a re-consolidating or content-free merge does not). A run of decisions that produced
+    /// nothing — a wave of all-FAILED/empty agents, the decider looping on plan or plan→merge — accumulates and eventually
+    /// trips the stall bound (with no round budget, THIS is the autonomous runaway backstop). A LEDGER FACT (reads the same
+    /// folded OutcomeJson the decider sees), so it survives replay + re-entry deterministically. A long-running spawn whose
+    /// agents haven't settled is a PARK (not yet a terminal decision in <paramref name="priorDecisions"/>), so it never trips early.
     /// </summary>
     private static int FoldNoProgressDecisions(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var streak = 0;
+        var everMerged = new HashSet<Guid>();
 
         foreach (var decision in priorDecisions)
-            streak = MadeProgress(decision) ? 0 : streak + 1;
+            streak = MadeProgress(decision, everMerged) ? 0 : streak + 1;
 
         return streak;
     }
 
-    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it (it consumed prior results); an ANSWERED plan-confirmation card advanced it too (an operator actively steering the plan is engagement, not a stall — without this, a couple of revise loops would trip the no-progress guard mid-conversation). A wave of all-failed/empty agents, a plan, or a content ask_human makes no fresh progress.</summary>
-    private static bool MadeProgress(SupervisorPriorDecision decision) =>
-        SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
-            ? SupervisorOutcome.HasSettledEvidence(SupervisorOutcome.ReadAgentResults(decision.OutcomeJson))
-            : decision.DecisionKind == SupervisorDecisionKinds.Merge || SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision);
+    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it only if it integrated NEW work (see <see cref="MergedNewWork"/>); an ANSWERED plan-confirmation card advanced it too (an operator actively steering the plan is engagement, not a stall — without this, a couple of revise loops would trip the no-progress guard mid-conversation). A wave of all-failed/empty agents, a plan, a content-free / re-consolidating merge, or a content ask_human makes no fresh progress.</summary>
+    private static bool MadeProgress(SupervisorPriorDecision decision, HashSet<Guid> everMerged)
+    {
+        if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind))
+            return SupervisorOutcome.HasSettledEvidence(SupervisorOutcome.ReadAgentResults(decision.OutcomeJson));
+
+        if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
+            return MergedNewWork(decision, everMerged);
+
+        return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision);
+    }
+
+    /// <summary>
+    /// A merge advanced the work only if it consolidated at least one agent-run id NO PRIOR merge already merged.
+    /// The merge executor re-collects EVERY prior spawn/retry id each turn (<c>ResolveAgentRunIdsToMerge</c>), so a
+    /// merge that follows no new spawn re-reports the SAME ids — it integrated nothing fresh. Counting that as
+    /// progress would let a <c>plan → merge → plan → merge …</c> loop reset the no-progress streak forever (no round
+    /// budget bounds it now, and plan/merge stage no agents so the spawn/cost caps never trip). Gating on NEW ids
+    /// closes that: a re-consolidating (or content-free) merge no longer resets the streak, so the run trips the
+    /// no-progress guard — the autonomous runaway backstop. Mutates <paramref name="everMerged"/> with the ids seen so
+    /// a later re-merge doesn't count again; replay-deterministic (the fold walks the ledger in the same order).
+    /// </summary>
+    private static bool MergedNewWork(SupervisorPriorDecision decision, HashSet<Guid> everMerged)
+    {
+        var isNew = false;
+
+        foreach (var id in SupervisorOutcome.ReadMergedAgentRunIds(decision.OutcomeJson))
+            isNew |= everMerged.Add(id);
+
+        return isNew;
+    }
 
     /// <summary>
     /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded
@@ -696,9 +724,6 @@ public sealed partial class SupervisorTurnService
         Kind = SupervisorDecisionKinds.Stop,
         PayloadJson = JsonSerializer.Serialize(new { reason }, AgentJson.Options),
     };
-
-    /// <summary>The terminal reason stamped on a budget-forced stop (back-compat alias for the E2 reason; points at the E5 vocabulary). Surfaced as the node's terminal reason.</summary>
-    public const string BudgetExhaustedReason = SupervisorStopReasons.BudgetExhausted;
 
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>
     private static string? ReadStopReason(SupervisorDecision decision) => SupervisorOutcome.ReadStopReason(decision.PayloadJson);

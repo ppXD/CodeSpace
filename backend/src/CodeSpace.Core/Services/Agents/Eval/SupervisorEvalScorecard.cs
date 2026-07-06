@@ -92,10 +92,9 @@ public static class SupervisorEvalScorecard
         _ => SupervisorOutcomes.Completed,
     };
 
-    /// <summary>True when the reason is one of the fail-closed bound stops (round/decision budget, total-spawn cap, per-decision fan-out cap, depth cap, no-progress) — all roll up to budget-exhausted.</summary>
+    /// <summary>True when the reason is one of the fail-closed bound stops (total-spawn cap, per-decision fan-out cap, depth cap, no-progress) — all roll up to budget-exhausted.</summary>
     private static bool IsBoundReason(string reason) =>
-        reason is SupervisorStopReasons.BudgetExhausted
-            or SupervisorStopReasons.TotalSpawnCapReached
+        reason is SupervisorStopReasons.TotalSpawnCapReached
             or SupervisorStopReasons.SpawnFanOutExceedsCap
             or SupervisorStopReasons.DepthCapExceeded
             or SupervisorStopReasons.NoProgress;

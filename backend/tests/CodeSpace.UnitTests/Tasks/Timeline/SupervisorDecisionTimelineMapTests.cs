@@ -186,10 +186,10 @@ public class SupervisorDecisionTimelineMapTests
     {
         // The reported gap: a budget/governance/bound-forced stop stamps {reason} on the PAYLOAD (no outcome), so it
         // otherwise rendered "Supervisor stopped" + green + no reason. Now it names the bound + degrades.
-        var ev = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, payload: ForcedPayload(SupervisorStopReasons.BudgetExhausted), outcome: StopOutcome(null, null)));
+        var ev = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, payload: ForcedPayload(SupervisorStopReasons.NoProgress), outcome: StopOutcome(null, null)));
 
-        ev.Title.ShouldBe("Supervisor stopped — budget exhausted");
-        ev.Summary.ShouldBe("budget exhausted", "the forced stop never renders a blank summary");
+        ev.Title.ShouldBe("Supervisor stopped — no progress");
+        ev.Summary.ShouldBe("no progress", "the forced stop never renders a blank summary");
         ev.Severity.ShouldBe(TimelineSeverity.Warning, "a forced stop did not finish the work — it is not a green success");
     }
 

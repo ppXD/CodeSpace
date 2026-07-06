@@ -26,14 +26,11 @@ public sealed record TaskCapsOverride
     /// <summary>Max branches a fan-out (map / supervisor) projection may run at once; inert on a single-agent run. Null = the preset default. Must be >= 1 when set.</summary>
     public int? MaxParallelism { get; init; }
 
-    /// <summary>Max rounds / turns a looping projection may take. Null = the preset default. Must be >= 1 when set.</summary>
-    public int? MaxRounds { get; init; }
-
     /// <summary>Max agents the run may spawn in total. Null = the preset default. Must be >= 1 when set.</summary>
     public int? MaxTotalSpawns { get; init; }
 
     /// <summary>True when no cap is set — the launch service then leaves the router's CapsOverride null (byte-identical to the preset-only path).</summary>
-    public bool IsEmpty => MaxCostUsd is null && MaxParallelism is null && MaxRounds is null && MaxTotalSpawns is null;
+    public bool IsEmpty => MaxCostUsd is null && MaxParallelism is null && MaxTotalSpawns is null;
 
     /// <summary>
     /// Fail-LOUD boundary validation: a set cap must be in a meaningful range. Without this a fat-fingered
@@ -45,7 +42,6 @@ public sealed record TaskCapsOverride
     {
         if (MaxCostUsd is { } cost && cost <= 0) throw new ArgumentException($"MaxCostUsd must be positive when set (was {cost}).");
         if (MaxParallelism is { } p && p < 1) throw new ArgumentException($"MaxParallelism must be >= 1 when set (was {p}).");
-        if (MaxRounds is { } r && r < 1) throw new ArgumentException($"MaxRounds must be >= 1 when set (was {r}).");
         if (MaxTotalSpawns is { } s && s < 1) throw new ArgumentException($"MaxTotalSpawns must be >= 1 when set (was {s}).");
     }
 
@@ -54,7 +50,6 @@ public sealed record TaskCapsOverride
     {
         MaxCostUsd = MaxCostUsd,
         MaxParallelism = MaxParallelism,
-        MaxRounds = MaxRounds,
         MaxTotalSpawns = MaxTotalSpawns,
     };
 }

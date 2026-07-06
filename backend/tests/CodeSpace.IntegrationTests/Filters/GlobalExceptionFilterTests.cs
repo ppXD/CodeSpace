@@ -108,7 +108,7 @@ public class GlobalExceptionFilterTests
     {
         // ArgumentNullException / ArgumentOutOfRangeException derive from ArgumentException — the single arm covers them.
         Run(new ArgumentNullException("repositoryId")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
-        Run(new ArgumentOutOfRangeException("maxRounds", "must be >= 1")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+        Run(new ArgumentOutOfRangeException("maxParallelism", "must be >= 1")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
     }
 
     [Fact]

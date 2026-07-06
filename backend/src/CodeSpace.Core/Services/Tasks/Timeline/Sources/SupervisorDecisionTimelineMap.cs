@@ -116,7 +116,7 @@ public static class SupervisorDecisionTimelineMap
         _ => "Supervisor resolved a conflict",
     };
 
-    /// <summary>The stop headline reflects the SAME terminal classification the RESULT card reads: a server-FORCED stop names the bound that stopped it ("— budget exhausted"), a model GIVE-UP reads "stopped early", a genuine success (or bare/unclassifiable stop) reads the neutral verb — the green tone + the summary carry the success signal.</summary>
+    /// <summary>The stop headline reflects the SAME terminal classification the RESULT card reads: a server-FORCED stop names the bound that stopped it ("— no progress"), a model GIVE-UP reads "stopped early", a genuine success (or bare/unclassifiable stop) reads the neutral verb — the green tone + the summary carry the success signal.</summary>
     private static string StopTitle(SupervisorDecisionRecord d) => SupervisorOutcome.ClassifyStop(d.PayloadJson, d.OutcomeJson) switch
     {
         { Kind: SupervisorStopKind.Forced, Reason: { } reason } => $"Supervisor stopped — {reason}",
