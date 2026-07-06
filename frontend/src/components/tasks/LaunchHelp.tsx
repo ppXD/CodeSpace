@@ -59,19 +59,57 @@ const TONES = {
 
 const LINE = { plain: "#b3aa9c", good: "#7BA254", warn: "#D9A253" } as const;
 
-function Node({ x, y, w, h = 32, title, sub, tone = "plain", dashed }: { x: number; y: number; w: number; h?: number; title: string; sub?: string; tone?: keyof typeof TONES; dashed?: boolean }) {
-  const t = TONES[tone];
+function Flow({ d, tone = "plain", still }: { d: string; tone?: keyof typeof LINE; still?: boolean }) {
+  return <path d={d} fill="none" stroke={LINE[tone]} strokeWidth={1.4} className={still ? undefined : "lt3-hd-flow"} markerEnd="url(#lt3hd-arr)" />;
+}
+
+// ── Option-lane layout: ONE strictly-horizontal lane per dropdown option, widths COMPUTED from Geist Mono
+//    character counts (10.5px title ≈ 6.3px/ch, 9.5px sub ≈ 5.7px/ch) so nothing can overflow, everything aligns.
+const CH_T = 6.3;
+const CH_S = 5.7;
+const LANE_X0 = 76;   // pill column (62) + gap (10) + left margin (4)
+const LANE_AR = 12;   // arrow length between boxes
+const LANE_STEP = 44; // vertical rhythm per lane
+
+interface LaneBox { t: string; sub?: string; tone: keyof typeof TONES }
+
+function laneBoxW(b: LaneBox) {
+  return Math.max(Math.round(b.t.length * CH_T), b.sub ? Math.round(b.sub.length * CH_S) : 0) + 12;
+}
+
+/** One option's lane: [option pill] box ──▸ box ──▸ box, left-to-right only — no branches, no crossings. The lane
+ *  matching the CURRENT dropdown value stays vivid; the others dim, so "what will MY choice do" reads at a glance. */
+function Lane({ index, pill, pillTone, boxes, active }: { index: number; pill: string; pillTone: keyof typeof TONES; boxes: LaneBox[]; active: boolean }) {
+  const y = 8 + index * LANE_STEP;
+  const pt = TONES[pillTone];
+  const placed = boxes.reduce<{ list: (LaneBox & { x: number; w: number })[]; x: number }>(
+    (acc, b) => { const w = laneBoxW(b); return { list: [...acc.list, { ...b, x: acc.x, w }], x: acc.x + w + LANE_AR }; },
+    { list: [], x: LANE_X0 },
+  ).list;
   return (
-    <g>
-      <rect x={x} y={y} width={w} height={h} rx={6} fill={dashed ? "transparent" : t.fill} stroke={dashed ? "#cfc6b8" : t.stroke} strokeWidth={1} strokeDasharray={dashed ? "4 3" : undefined} />
-      <text x={x + w / 2} y={sub ? y + h / 2 - 2.5 : y + h / 2 + 3.5} textAnchor="middle" fontSize={11} fontWeight={600} fill={t.text}>{title}</text>
-      {sub && <text x={x + w / 2} y={y + h / 2 + 11.5} textAnchor="middle" fontSize={10} fill={t.sub}>{sub}</text>}
+    <g opacity={active ? 1 : 0.35}>
+      <rect x={4} y={y + 2} width={62} height={20} rx={10} fill={pt.fill} stroke={active ? pt.text : pt.stroke} strokeWidth={active ? 1.2 : 1} />
+      <text x={35} y={y + 15.5} textAnchor="middle" fontSize={10.5} fontWeight={600} fill={pt.text}>{pill}</text>
+      {placed.map((b, i) => {
+        const t = TONES[b.tone];
+        const h = b.sub ? 32 : 24;
+        const top = b.sub ? y - 4 : y;
+        return (
+          <g key={i}>
+            {i > 0 && <Flow d={`M${b.x - LANE_AR} ${y + 12} L${b.x - 2} ${y + 12}`} tone={b.tone === "good" ? "good" : b.tone === "warn" ? "warn" : "plain"} still={!active} />}
+            <rect x={b.x} y={top} width={b.w} height={h} rx={6} fill={t.fill} stroke={t.stroke} strokeWidth={1} />
+            <text x={b.x + b.w / 2} y={b.sub ? top + 13 : y + 16} textAnchor="middle" fontSize={10.5} fontWeight={600} fill={t.text}>{b.t}</text>
+            {b.sub && <text x={b.x + b.w / 2} y={top + 25} textAnchor="middle" fontSize={9.5} fill={t.sub}>{b.sub}</text>}
+          </g>
+        );
+      })}
     </g>
   );
 }
 
-function Flow({ d, tone = "plain", still }: { d: string; tone?: keyof typeof LINE; still?: boolean }) {
-  return <path d={d} fill="none" stroke={LINE[tone]} strokeWidth={1.4} className={still ? undefined : "lt3-hd-flow"} markerEnd="url(#lt3hd-arr)" />;
+/** Map a critic dropdown value onto its lane, so the hovered card highlights the CURRENTLY selected path. */
+function laneActive(current: string | undefined, lane: "None" | "Gate" | "Improve") {
+  return !current || current === lane;
 }
 
 function Arr() {
@@ -84,78 +122,47 @@ function Arr() {
   );
 }
 
-function Tag({ x, y, text, tone = "plain" }: { x: number; y: number; text: string; tone?: keyof typeof LINE }) {
-  return <text x={x} y={y} fontSize={10} fill={tone === "good" ? TONES.good.text : tone === "warn" ? TONES.warn.text : "#8a8378"}>{text}</text>;
-}
-
-/** Plan critic — the plan is reviewed BEFORE agents run; Gate hands the verdict to you, Improve feeds it back. */
-export function PlanCriticDiagram() {
+/** Plan critic — one lane per option: what happens to the plan under Off / Gate / Improve. */
+export function PlanCriticDiagram({ current }: { current?: string }) {
   return (
-    <svg viewBox="0 0 380 212" role="img" aria-label="Plan critic flow: the plan is reviewed; pass proceeds; Gate routes concerns to your call; Improve replans once; both converge and the plan proceeds.">
+    <svg viewBox="0 0 380 128" role="img" aria-label="Plan critic options, one lane each: Off — the plan just runs; Gate — a flagged plan carries the reviewer's notes to your call, then runs; Improve — a flagged plan is replanned once automatically, then runs.">
       <Arr />
-      <Node x={10} y={10} w={70} title="Plan v1" />
-      <Flow d="M80 26 L104 26" />
-      <Node x={106} y={10} w={142} title="Independent review" tone="purple" />
-      <Tag x={300} y={20} text="pass" tone="good" />
-      <Flow d="M248 26 L348 26 L348 176 L247 176" tone="good" />
-      <Tag x={222} y={62} text="flagged" tone="warn" />
-      <Flow d="M140 42 L140 66 L78 66 L78 86" tone="warn" />
-      <Flow d="M214 42 L214 66 L272 66 L272 86" tone="warn" />
-      <Node x={10} y={86} w={136} h={40} title="Gate — you decide" sub="evidence → your call" tone="warn" />
-      <Node x={192} y={86} w={160} h={40} title="Improve — auto revise" sub="critique feeds a replan" tone="purple" />
-      <Flow d="M78 126 L78 148 L160 148 L160 160" />
-      <Flow d="M272 126 L272 148 L220 148 L220 160" />
-      <Node x={135} y={160} w={110} title="Plan proceeds" />
+      <Lane index={0} pill="Off" pillTone="plain" active={laneActive(current, "None")} boxes={[
+        { t: "plan", tone: "plain" }, { t: "agents run", tone: "good" }]} />
+      <Lane index={1} pill="Gate" pillTone="warn" active={laneActive(current, "Gate")} boxes={[
+        { t: "plan", tone: "plain" }, { t: "review ⚠", tone: "purple" }, { t: "notes → you", tone: "warn" }, { t: "runs", tone: "good" }]} />
+      <Lane index={2} pill="Improve" pillTone="purple" active={laneActive(current, "Improve")} boxes={[
+        { t: "plan", tone: "plain" }, { t: "review ⚠", tone: "purple" }, { t: "replan ×1", tone: "warn" }, { t: "runs", tone: "good" }]} />
     </svg>
   );
 }
 
-/** Evaluation — the result pipeline: objective checks, then the subjective critic, with the revise loop closing it. */
-export function EvaluationPipelineDiagram() {
+/** Agent output critic — one lane per option: what happens to an agent's finished work under Off / Gate / Improve. */
+export function EvaluationPipelineDiagram({ current }: { current?: string }) {
   return (
-    <svg viewBox="0 0 380 248" role="img" aria-label="Evaluation pipeline: agent work passes objective checks, then the critic judges it; failures feed a bounded self-revise loop back to the agent; exhausted rounds are flagged for you; acceptance criteria are the shared yardstick.">
+    <svg viewBox="0 0 380 128" role="img" aria-label="Agent output critic options, one lane each: Off — the work is done as produced; Gate — flagged work waits for your review; Improve — flagged work is revised by the same agent up to N rounds, then passes.">
       <Arr />
-      <Node x={10} y={10} w={88} h={40} title="Agent work" />
-      <Flow d="M98 30 L112 30" />
-      <Node x={114} y={10} w={90} h={40} title="① checks" sub="commands run" />
-      <Flow d="M204 30 L218 30" />
-      <Node x={220} y={10} w={110} h={40} title="③ critic" sub="② model / agent" tone="purple" />
-      <Tag x={306} y={76} text="pass" tone="good" />
-      <Flow d="M300 50 L300 96" tone="good" />
-      <Node x={220} y={96} w={110} h={30} title="Succeeded" tone="good" />
-      <Tag x={176} y={66} text="fail" tone="warn" />
-      <Flow d="M250 50 L250 72 L120 72 L120 96" tone="warn" />
-      <Flow d="M159 50 L159 72" tone="warn" still />
-      <Node x={48} y={96} w={144} h={40} title="⑤ self-revise" sub="0–3 rounds" tone="warn" />
-      <Flow d="M48 110 L30 110 L30 64 L54 64 L54 50" tone="warn" />
-      <Flow d="M120 136 L120 158" tone="warn" still />
-      <Node x={48} y={158} w={170} h={30} title="rounds spent → flagged" tone="warn" />
-      <Node x={10} y={204} w={360} h={30} title="④ criteria — the shared yardstick" dashed />
+      <Lane index={0} pill="Off" pillTone="plain" active={laneActive(current, "None")} boxes={[
+        { t: "works", tone: "plain" }, { t: "done", tone: "good" }]} />
+      <Lane index={1} pill="Gate" pillTone="warn" active={laneActive(current, "Gate")} boxes={[
+        { t: "works", tone: "plain" }, { t: "critic ⚠", tone: "purple" }, { t: "flagged — you look", tone: "warn" }]} />
+      <Lane index={2} pill="Improve" pillTone="purple" active={laneActive(current, "Improve")} boxes={[
+        { t: "works", tone: "plain" }, { t: "critic ⚠", tone: "purple" }, { t: "revise ×N", tone: "warn" }, { t: "done ✓", tone: "good" }]} />
     </svg>
   );
 }
 
-/** Decision critic — the hard gate on every supervisor move: revise, re-review, then escalate to the human. */
-export function DecisionLadderDiagram() {
+/** Decision critic — one lane per option: what happens to each supervisor move under Off / Improve / Gate. */
+export function DecisionLadderDiagram({ current }: { current?: string }) {
   return (
-    <svg viewBox="0 0 380 220" role="img" aria-label="Decision critic ladder: a flagged decision does not execute — it self-revises, is re-reviewed, and only then escalates to your call; approve is a one-shot pass, anything else is guidance.">
+    <svg viewBox="0 0 380 132" role="img" aria-label="Decision critic options, one lane each: Off — every decision executes unreviewed; Improve — a flagged decision is revised once, then executes; Gate — a flagged decision gets one fix and a re-review, and only a still-flagged one becomes your call.">
       <Arr />
-      <Node x={10} y={10} w={104} h={40} title="Decision" sub="spawn · stop …" />
-      <Flow d="M114 30 L128 30" />
-      <Node x={130} y={10} w={80} h={40} title="Review" tone="purple" />
-      <Tag x={226} y={22} text="pass" tone="good" />
-      <Flow d="M210 30 L266 30" tone="good" />
-      <Node x={268} y={10} w={76} h={40} title="Execute" tone="good" />
-      <Tag x={158} y={80} text="flagged (Gate)" tone="warn" />
-      <Flow d="M150 50 L150 86 L56 86 L56 104" tone="warn" />
-      <Node x={10} y={104} w={108} h={36} title="① self-revise" />
-      <Flow d="M118 122 L132 122" />
-      <Node x={134} y={104} w={108} h={36} title="② re-review" tone="purple" />
-      <Flow d="M188 104 L188 94 L306 94 L306 50" tone="good" />
-      <Flow d="M242 122 L262 122" tone="warn" />
-      <Node x={264} y={104} w={106} h={36} title="③ your call" tone="warn" />
-      <Flow d="M317 140 L317 178" tone="warn" still />
-      <Node x={70} y={178} w={300} h={28} title="approve = one-shot pass · else guidance" dashed />
+      <Lane index={0} pill="Off" pillTone="plain" active={laneActive(current, "None")} boxes={[
+        { t: "decision", tone: "plain" }, { t: "executes", tone: "good" }]} />
+      <Lane index={1} pill="Improve" pillTone="purple" active={laneActive(current, "Improve")} boxes={[
+        { t: "decision", tone: "plain" }, { t: "review ⚠", tone: "purple" }, { t: "revise ×1", tone: "warn" }, { t: "executes", tone: "good" }]} />
+      <Lane index={2} pill="Gate" pillTone="warn" active={laneActive(current, "Gate")} boxes={[
+        { t: "decide", tone: "plain" }, { t: "review ⚠", tone: "purple" }, { t: "fix ×1", tone: "warn" }, { t: "your call ✋", sub: "fixed → runs", tone: "warn" }]} />
     </svg>
   );
 }
