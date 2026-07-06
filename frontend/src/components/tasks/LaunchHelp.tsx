@@ -30,7 +30,7 @@ export function HelpTip({ title, note, children }: { title: string; note?: strin
 
   return (
     <>
-      <button ref={btnRef} type="button" className="lt3-help" aria-label={`How ${title} works`}
+      <button ref={btnRef} type="button" className="lt3-qhelp" aria-label={`How ${title} works`}
         onMouseEnter={open} onMouseLeave={closeSoon} onFocus={open} onBlur={closeSoon} onClick={open}>
         <Ic.Help size={14} />
       </button>
