@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
@@ -63,6 +64,17 @@ public class AgentCardFactsSourceTests
         card.FilesChanged.ShouldBe(3);
         card.Files.Select(f => (f.Path, f.Additions, f.Deletions)).ShouldBe(new[] { ("auth/session.ts", (int?)42, (int?)3) }, "the per-file diffstat rides onto the card");
         card.Resumed.ShouldBeTrue("the resume provenance rides onto the card");
+        card.Review.ShouldBeNull("an un-reviewed agent carries no verdict chip");
+    }
+
+    [Fact]
+    public void The_latest_reviewer_verdict_rides_onto_the_card()
+    {
+        var verdict = new JournalReviewVerdict { Approved = false, Rationale = "placeholder hack", Issues = new[] { "hack committed (evidence: feature.txt line 1)" }, ReviewerRunId = Guid.NewGuid(), ReviewerHarness = "claude-code", Scope = JournalReviewVerdict.OutputScope };
+
+        var card = AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: null, review: verdict);
+
+        card.Review.ShouldBe(verdict, "the adversarial exchange is legible ON the producer's card — verdict, evidence, and the reviewer run to deep-link");
     }
 
     [Fact]

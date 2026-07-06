@@ -942,12 +942,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         : string.IsNullOrEmpty(current) ? prior
         : $"{prior}\n--- revise round ---\n{current}";
 
+    /// <summary>The revise-round announcement's pinned prefix — the journal describer matches it to classify the Warning as a REVISE beat, so the copy and the classification can't drift apart.</summary>
+    internal const string ReviseAnnouncementPrefix = "Verification failed — revising";
+
     /// <summary>Announce a revise round on the timeline — the operator sees WHY the run is taking another pass and which round of the budget this is. Best-effort like the other completion-tail events.</summary>
     private async Task AppendReviseEventAsync(Guid runId, string reason, int round, int budget, CancellationToken cancellationToken)
     {
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Verification failed — revising (round {round} of {budget}). {reason}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseAnnouncementPrefix} (round {round} of {budget}). {reason}" }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

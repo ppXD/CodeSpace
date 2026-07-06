@@ -12,6 +12,10 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// into the question prose) lets the frontend render the operator's decision as a distinct line, unambiguously — a string
 /// split of the joined "{question} — {answer}" summary can't recover it when the question itself contains an em-dash.
 /// A still-pending ask (not yet answered) contributes nothing; a run with no supervisor tape contributes nothing.
+///
+/// <para>Also flags a REVIEW-GATE ESCALATION ask (the hard-Gate ladder exhausted and parked the run on the human) via
+/// the pinned payload marker (<see cref="SupervisorGateEscalation.QuestionCarriesMarker"/>) — set even while the ask is
+/// still PENDING, so the "review-blocked" framing shows the moment the run parks, not only after the answer lands.</para>
 /// </summary>
 public sealed class AskAnswerFactsSource : IJournalFactsSource
 {
@@ -31,9 +35,10 @@ public sealed class AskAnswerFactsSource : IJournalFactsSource
         foreach (var decision in tape.Where(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman))
         {
             var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
+            var escalation = SupervisorGateEscalation.QuestionCarriesMarker(decision.PayloadJson);
 
-            if (!string.IsNullOrWhiteSpace(answer))
-                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = answer.Trim() };
+            if (!string.IsNullOrWhiteSpace(answer) || escalation)
+                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = string.IsNullOrWhiteSpace(answer) ? null : answer.Trim(), ReviewEscalation = escalation };
         }
 
         return facts;

@@ -54,4 +54,7 @@ public sealed record JournalAgentCard
 
     /// <summary>Whether this agent CONTINUED a prior conversation (a retry re-ran it resuming the earlier session) rather than starting fresh — the "⟳ resumed" chip the card shows. False for a first-run agent.</summary>
     public bool Resumed { get; init; }
+
+    /// <summary>The LATEST independent reviewer's verdict on this agent's produced work (the S8 agent-based output review) — the "✓ reviewed" / "⚠ flagged" chip + the reviewer-run deep-link the card shows. Null when the agent's output was never agent-reviewed (or the review hasn't landed yet).</summary>
+    public JournalReviewVerdict? Review { get; init; }
 }

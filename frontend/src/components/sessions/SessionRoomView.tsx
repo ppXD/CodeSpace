@@ -12,6 +12,7 @@ import type {
   FinalAnswerBlock,
   JournalAgentCard,
   JournalModelCall,
+  JournalReviewVerdict,
   JournalStep,
   JournalSubtask,
   JournalTurn,
@@ -550,9 +551,13 @@ function isBackgroundStep(s: JournalStep): boolean {
   return !s.beat;
 }
 
-/** The supervisor "stopped" decision is internal lifecycle — its outcome is the result card ⑥, so it never takes a step in ③. There's no verb field on the DTO yet, so match the backend's title (see SupervisorDecisionTimelineMap.TitleFor). */
+/** The supervisor "stopped" decision is internal lifecycle — its outcome is the result card ⑥, so it never takes a step
+ *  in ③. The VERB is the authority when present (a REVISE beat's free-text reason may legitimately contain "stopped" —
+ *  it must never be swallowed); the title regex remains only as the fallback for a verbless beat. */
 function isStopDecision(s: JournalStep): boolean {
-  return s.beat && /\bstopped\b/i.test(s.title);
+  if (!s.beat) return false;
+  if (s.verb) return jVerbKey(s.verb) === "stop";
+  return /\bstopped\b/i.test(s.title);
 }
 
 /** Strip the internal-actor "Supervisor " voice so a decision reads as a plain past-tense beat ("Planned the work", "Dispatched 4 agents", "Asked you", "Merged the results"). */
@@ -581,6 +586,8 @@ function journalToRoomCard(c: JournalAgentCard): RoomAgentCard {
     changedFiles: c.files.map((f) => f.path),
     toolCount: c.toolCount ?? null,
     durationMs: c.durationMs ?? null,
+    resumed: c.resumed,
+    review: c.review ?? null,
   };
 }
 
@@ -726,12 +733,13 @@ function formatLatencyMs(ms: number): string {
 /** The display category of a folded background step — so the fold reads "3 model calls · 25.6k tokens" not a flat "N
  *  background steps" that hides cost + intelligence. Model calls / tool calls / reasoning each get their own class; the
  *  rest (lifecycle housekeeping, and any other non-beat kind) stays generic. */
-function stepCategory(kind: string): "model" | "tool" | "reasoning" | "lifecycle" | "background" {
+function stepCategory(kind: string): "model" | "tool" | "reasoning" | "lifecycle" | "review" | "background" {
   switch (kind) {
     case "model_call": return "model";
     case "tool": return "tool";
     case "thinking": return "reasoning";
     case "lifecycle": return "lifecycle";
+    case "review": return "review";
     default: return "background";
   }
 }
@@ -770,6 +778,7 @@ function foldLabel(category: string, steps: JournalStep[]): string {
     case "tool": return `${n} tool call${plural}`;
     case "reasoning": return `${n} reasoning step${plural}`;
     case "lifecycle": return `${n} lifecycle step${plural}`;
+    case "review": return `${n} reviewer step${plural}`;
     default: return `${n} background step${plural}`;
   }
 }
@@ -791,9 +800,11 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
         {step.beat
           ? <span className={`room-jpill room-jpill-${jVerbKey(step.verb)}`}>{jVerbKey(step.verb)}</span>
           : <span className={`room-jkind room-jkind-${step.kind}`}>{jKindLabel(step.kind)}</span>}
+        {step.reviewEscalation && <span className="room-jpill room-jpill-blocked">review-blocked</span>}
         <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
+      {step.review && <ReviewVerdictCard review={step.review} />}
       {showDetail && (ask
         ? <>
             {ask.question && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{ask.question}</div>}
@@ -821,6 +832,39 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
   );
 }
 
+/** The independent reviewer's verdict card under a REVIEW beat — approve/flag badge, rationale, evidence-attached
+ *  issues, and the independence line ("└ via · claude-code — an independent output review") with a deep-link into the
+ *  reviewer's OWN run, so the adversarial exchange is inspectable, not just narrated. */
+function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
+  const openDrawer = useRoomDrawer();
+  const run = useContext(RunActionsContext);
+  const n = review.issues.length;
+  return (
+    <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`}>
+      <div className="room-jverdict-head">
+        <span className="room-jverdict-badge">{review.approved ? "✓ approved" : `⚠ flagged${n > 0 ? ` · ${n} issue${n === 1 ? "" : "s"}` : ""}`}</span>
+        <span className="room-jverdict-rationale">{review.rationale}</span>
+      </div>
+      {review.issues.map((issue, i) => <div key={i} className="room-jverdict-issue">└ {issue}</div>)}
+      <div className="room-jverdict-via">
+        <span className="room-jmodel-l">└ via · </span>
+        <span className="room-jmodel-model">{review.reviewerHarness ?? "agent"}</span>
+        <span className="room-jmodel-x"> — an independent {review.scope === "plan" ? "grounded plan" : "output"} review</span>
+        {run && (
+          <button className="room-jverdict-open" onClick={() => openDrawer({ kind: "agent", agent: reviewerCard(review), runId: run.runId })}>
+            view reviewer run <Sym n="chevron-right" s={11} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A minimal drawer card for the reviewer's OWN run — enough identity for the terminal / trace drawer to load by id. */
+function reviewerCard(review: JournalReviewVerdict): RoomAgentCard {
+  return { agentRunId: review.reviewerRunId, label: review.scope === "plan" ? "plan reviewer" : "reviewer", status: "Succeeded", harness: review.reviewerHarness ?? null };
+}
+
 function jTone(t: string): string { return t === "Success" ? "ok" : t === "Warning" ? "warn" : t === "Error" ? "err" : "info"; }
 function jKindLabel(k: string): string { return k === "model_call" ? "model" : k; }
 /** The semantic pill for a supervisor decision verb — PLAN / DISPATCH / ASK / MERGE / RETRY / RESOLVE (rendered uppercase by CSS), so a beat says WHAT was decided, not a generic "decision". The backend emits the lowercase/snake_case DecisionKind (plan / spawn / ask_human / …); lowercased here for robustness. Unknown/missing verb falls back to "decision". */
@@ -842,6 +886,8 @@ function jVerbKey(verb: string | null | undefined): string {
     case "merge": return "merge";
     case "resolve": return "resolve";
     case "stop": return "stop";
+    case "review": return "review";     // an independent reviewer's verdict beat — the adversarial exchange
+    case "revise": return "revise";     // the producer's revise round against the reviewer's / oracle's feedback
     default: return "decision";
   }
 }
@@ -1289,12 +1335,14 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
       <button className="room-arow" data-queued={queued || undefined} disabled={!run} onClick={() => run && openDrawer({ kind: "agent", agent: a, runId: run.runId })}>
         <span className={`room-adot room-adot-${cls}`} />
         <span className="room-arow-name" title={a.summary ?? a.label}>{a.label}</span>
-        {(tokens > 0 || fileCount > 0 || a.model || a.harness) && (
+        {(tokens > 0 || fileCount > 0 || a.model || a.harness || a.resumed || a.review) && (
           <span className="room-arow-meta">
             {a.harness && <span className={`room-arow-metaitem room-arow-harness room-arow-hn-${harnessTint(a.harness)}`} title={`Harness · ${a.harness}`}><Sym n="terminal" s={11} cls="room-arow-metaic room-arow-hic" /></span>}
             {tokens > 0 && <span className="room-arow-metaitem" title={`${tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-arow-metaic" /> {formatTokens(tokens)} tokens</span>}
             {a.model && <span className="room-arow-metaitem room-arow-model" title={`Model · ${a.model}`}><Sym n="sparkle" s={10} cls="room-arow-metaic" /> {a.model}</span>}
             {fileCount > 0 && <span className="room-arow-metaitem" title={`${fileCount} file${fileCount === 1 ? "" : "s"} changed`}><Sym n="file" s={10} cls="room-arow-metaic" /> {fileCount} {fileCount === 1 ? "file" : "files"}</span>}
+            {a.resumed && <span className="room-arow-metaitem room-arow-resumed" title="Continued its earlier conversation (the retry resumed the session)"><Sym n="rerun" s={10} cls="room-arow-metaic" /> resumed</span>}
+            {a.review && <span className={`room-arow-metaitem room-arow-review-${a.review.approved ? "ok" : "warn"}`} title={`Independent review — ${a.review.approved ? "approved" : "flagged"}: ${a.review.rationale}`}>{a.review.approved ? "✓ reviewed" : `⚠ flagged${a.review.issues.length > 0 ? ` · ${a.review.issues.length}` : ""}`}</span>}
           </span>
         )}
         <span className="room-arow-time">{a.durationMs != null ? formatDurationMs(a.durationMs) : "—"}</span>

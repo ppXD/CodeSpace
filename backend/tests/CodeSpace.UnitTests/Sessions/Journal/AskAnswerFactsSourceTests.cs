@@ -45,5 +45,58 @@ public class AskAnswerFactsSourceTests
             .ShouldBeEmpty("only an ANSWERED ask_human contributes — a non-ask verb or a still-pending ask adds nothing");
     }
 
+    [Fact]
+    public async Task A_pending_gate_escalation_ask_is_flagged_the_moment_the_run_parks()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, EscalationPayload(), "{}");   // parked, unanswered
+
+        var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
+
+        var key = SupervisorDecisionTimelineMap.EventId(log.Rows.Single());
+        facts[key].ReviewEscalation.ShouldBeTrue("the review-blocked framing shows while the ask is still pending, not only after the answer lands");
+        facts[key].Answer.ShouldBeNull("no answer yet");
+    }
+
+    [Fact]
+    public async Task An_answered_escalation_carries_both_the_answer_and_the_flag()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, EscalationPayload(), AnswerOutcome("approve"));
+
+        var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
+
+        var key = SupervisorDecisionTimelineMap.EventId(log.Rows.Single());
+        facts[key].Answer.ShouldBe("approve");
+        facts[key].ReviewEscalation.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task An_ordinary_answered_ask_is_not_flagged()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, "{}", AnswerOutcome("go ahead"));
+
+        var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
+
+        facts[SupervisorDecisionTimelineMap.EventId(log.Rows.Single())].ReviewEscalation
+            .ShouldBeFalse("a content ask / a confirmation card never reads as a review escalation — the marker is payload-pinned");
+    }
+
+    /// <summary>A REAL escalation card's payload — built by the production gate so the marker can't drift from the recognizer.</summary>
+    private static string EscalationPayload() =>
+        Core.Services.Supervisor.SupervisorGateEscalation.IntoAskHuman(
+            new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" },
+            new Messages.Review.CriticVerdict { Mode = Messages.Enums.ReviewMode.Gate, Approved = false, Rationale = "blocked" }).PayloadJson;
+
     private static string AnswerOutcome(string answer) => System.Text.Json.JsonSerializer.Serialize(new { answer });
 }

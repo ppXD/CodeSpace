@@ -50,5 +50,7 @@ public sealed class JournalWalk : IJournalWalk, IScopedDependency
             Plan = facts.Plan ?? step.Plan,
             Answer = facts.Answer ?? step.Answer,
             ModelCall = facts.ModelCall ?? step.ModelCall,
+            Review = facts.Review ?? step.Review,
+            ReviewEscalation = facts.ReviewEscalation || step.ReviewEscalation,
         };
 }

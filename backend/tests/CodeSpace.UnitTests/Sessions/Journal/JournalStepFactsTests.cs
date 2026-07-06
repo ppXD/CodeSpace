@@ -55,4 +55,18 @@ public class JournalStepFactsTests
         merged.Rationale.ShouldBe("why it spawned", "the rationale source's field survives");
         merged.Agents.ShouldBe(cards, "the agent-cards source's field survives — the two independent fields compose, neither clobbers");
     }
+
+    [Fact]
+    public void The_review_verdict_coalesces_and_the_escalation_flag_ORs()
+    {
+        var verdict = new JournalReviewVerdict { Approved = false, Rationale = "flagged", ReviewerRunId = Guid.NewGuid(), Scope = JournalReviewVerdict.OutputScope };
+
+        var merged = new JournalStepFacts { Review = verdict }.Merge(new JournalStepFacts { ReviewEscalation = true });
+
+        merged.Review.ShouldBe(verdict, "an unset right Review leaves the left intact");
+        merged.ReviewEscalation.ShouldBeTrue("a bool fact ORs — once a source flags the escalation, no later source can un-flag it");
+
+        new JournalStepFacts { ReviewEscalation = true }.Merge(new JournalStepFacts())
+            .ReviewEscalation.ShouldBeTrue("the OR holds in both orientations");
+    }
 }
