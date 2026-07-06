@@ -5736,12 +5736,18 @@ body.chat-resizing .acs-root .app { transition: none; }
 .lt3-preset-custom { font-size: 11px; color: #a89f93; font-style: italic; margin-left: 2px; }
 
 /* A settings row with a hover "?" — the row's own bottom border moves to the wrapper so the separator spans the ?,
-   and the LAST row drops it exactly like a bare .lt3-srow:last-child (no doubled hairline, no 1px-taller last row). */
+   and the LAST row drops it exactly like a bare .lt3-srow:last-child (no doubled hairline, no 1px-taller last row).
+   The HOVER lives on the WRAPPER so the row + its ? highlight as ONE unit (the ? belongs to the row, never a
+   separate island); the inner row's own hover is suppressed to avoid a two-tone seam. NOTE the ? class is lt3-qhelp —
+   `.lt3-help` is a pre-existing data-tip bubble whose empty attr() renders a floating dark box. */
 .lt3-hrow { display: flex; align-items: stretch; border-bottom: 1px solid #eee8df; }
+.lt3-hrow:hover { background: #f4efe8; }
 .lt3-hrow .lt3-srow { flex: 1; min-width: 0; border-bottom: 0; }
+.lt3-hrow .lt3-srow:hover { background: transparent; }
 .lt3-hrow:last-child { border-bottom: 0; }
-.lt3-help { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-right: 10px; border: 0; border-radius: 50%; background: transparent; color: #b7ada0; cursor: help; }
-.lt3-help:hover { background: #f4efe8; color: var(--accent); }
+.lt3-qhelp { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-right: 10px; border: 0; border-radius: 50%; background: transparent; color: #b7ada0; cursor: help; }
+.lt3-qhelp:hover, .lt3-hrow:hover .lt3-qhelp { color: var(--accent); }
+.lt3-qhelp:hover { background: #eae3d8; }
 .lt3-helpcard { z-index: 240; background: #fffdf9; border: 1px solid #e5ddd1; border-radius: 10px; box-shadow: 0 10px 32px rgba(60, 50, 40, .16); padding: 12px 14px 12px; }
 .lt3-helpcard-t { font-size: 12px; font-weight: 600; color: #57524b; margin-bottom: 8px; }
 .lt3-helpcard svg { display: block; width: 100%; height: auto; }
