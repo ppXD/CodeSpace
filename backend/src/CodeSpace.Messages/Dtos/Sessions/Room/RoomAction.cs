@@ -32,6 +32,10 @@ public enum RoomActionKind
     RetryFailedAgent,
     AnswerDecision,
     Stop,
+
+    /// <summary>Resume a stopped/failed run IN PLACE (same run id) from where it halted — re-runs the interrupted frontier, reusing the succeeded upstream. Distinct from <see cref="RerunTurn"/>, which forks a fresh attempt.</summary>
+    Continue,
+
     OpenTrace,
 
     /// <summary>A typed remediation that deep-links to fix a rejected model credential — surfaced on an auth-failure diagnostic.</summary>

@@ -89,7 +89,7 @@ export interface SessionDetail {
 
 export type ExecutionStepStatus = "Pending" | "Queued" | "Running" | "Done" | "Failed" | "Blocked" | "Skipped";
 export type NarrativeTone = "Info" | "Success" | "Error";
-export type RoomActionKind = "RerunTurn" | "RerunFromNode" | "RerunFailedMapItems" | "RetryFailedAgent" | "AnswerDecision" | "Stop" | "OpenTrace" | "FixCredentials";
+export type RoomActionKind = "RerunTurn" | "RerunFromNode" | "RerunFailedMapItems" | "RetryFailedAgent" | "AnswerDecision" | "Stop" | "Continue" | "OpenTrace" | "FixCredentials";
 
 /// A capability-aware action on a turn. `enabled` + `disabledReason` come from the backend, so a click never 422s.
 export interface RoomAction {

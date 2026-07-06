@@ -169,6 +169,64 @@ public class OperatorCancelInProgressWalkFlowTests
             .ShouldNotBe(WorkflowRunStatus.Suspended, "the parent is not stranded Suspended forever — the cancelled child woke it");
     }
 
+    [Fact]
+    public async Task Continuing_a_stopped_run_resumes_the_interrupted_frontier_to_completion()
+    {
+        // The counterpart to the cancel tests above: after an operator STOP lands the run Cancelled with the gate node
+        // left mid-flight (Running), ContinueRunAsync re-runs that interrupted frontier IN PLACE (same run id) and drives
+        // it to Success — reusing the succeeded upstream, never re-running it. Proves ContinueCancelledRunAsync.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var gateKey = Guid.NewGuid().ToString("N");
+        var gate = CancelGateNode.Arm(gateKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, GatedChainDefinition(gateKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Start the walk; it parks inside the gate mid-wave (the run is Running, the gate node Running).
+        var walk = Task.Run(async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+        });
+        await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // Operator STOP while mid-flight → Cancelled, the gate node left Running (interrupted — its work never finished).
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None))!.Cancelled.ShouldBeTrue();
+
+        gate.Release.TrySetResult();   // unblock the first walk's gate await so it unwinds through the cancel
+        try { await walk.WaitAsync(TimeSpan.FromSeconds(30)); }
+        catch (OperationCanceledException) { /* the engine re-throws the cancel after handling — expected */ }
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Cancelled);
+            (await NodeStartedCountAsync(db, runId, "after")).ShouldBe(0, "the stop halted the walk before the downstream node ever ran");
+        }
+
+        // CONTINUE the stopped run — flips Cancelled → Pending and resets the interrupted gate node so the re-walk
+        // re-runs it (the gate's Release is already set, so it no longer parks) and drives on to `after` → `end`.
+        bool continued;
+        using (var scope = _fixture.BeginScope())
+            continued = await scope.Resolve<IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
+
+        continued.ShouldBeTrue("a stopped run with an interrupted frontier continues in place (same run id, never a fork)");
+
+        // Dispatch fired inline post-commit (leaving the run Enqueued); drive the re-walk exactly as the rerun tests do.
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+
+        using var final = _fixture.BeginScope();
+        var fdb = final.Resolve<CodeSpaceDbContext>();
+
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the continued run drove the interrupted frontier + downstream to completion — the reset frontier re-ran and finished");
+        (await NodeStartedCountAsync(fdb, runId, "start")).ShouldBe(1, "the succeeded trigger upstream was REUSED, never re-run (no duplicate of completed work)");
+        (await NodeStartedCountAsync(fdb, runId, "after")).ShouldBe(1, "the downstream node ran exactly once after the frontier resumed (it never ran before the stop)");
+        (await NodeStartedCountAsync(fdb, runId, "gate")).ShouldBeGreaterThanOrEqualTo(2, "the interrupted gate node was reset and re-ran on continue (it was Running when stopped)");
+    }
+
     // start → sub (flow.subworkflow → the gated child) → end. No result ref since a cancelled child produces none.
     private static WorkflowDefinition SubworkflowParentDefinition(Guid childWorkflowId) => new()
     {

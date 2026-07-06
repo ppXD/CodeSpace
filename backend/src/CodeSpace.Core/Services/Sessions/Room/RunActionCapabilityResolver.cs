@@ -17,9 +17,23 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
         var terminal = WorkflowRunState.IsTerminal(status);
         var target = runId.ToString();
 
+        // Continue resumes IN PLACE from where the run halted — the same-run-id revival ContinueRunAsync performs for a
+        // stopped (Cancelled) or failed run. Offered ONLY there: Success has nothing to resume, an active run stops
+        // first, and a Suspended run resumes via its wait / the stranded-continue control, not the turn footer.
+        var continuable = status is WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure;
+
         return new[]
         {
             new RoomAction { Kind = RoomActionKind.OpenTrace, Label = "View trace", Enabled = true, Target = target },
+
+            new RoomAction
+            {
+                Kind = RoomActionKind.Continue,
+                Label = "Continue",
+                Enabled = continuable,
+                DisabledReason = continuable ? null : "Only a stopped or failed turn can be resumed in place.",
+                Target = target,
+            },
 
             new RoomAction
             {

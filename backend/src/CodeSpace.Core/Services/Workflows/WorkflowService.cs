@@ -823,13 +823,15 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (status is null) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
 
-        // Two IN-PLACE continues, both same-run-id revivals (never a fork, unlike replay / rerun-from-node): a STRANDED
-        // Suspended run (the reconciler twin) and a terminal FAILURE run (re-run the node[s] that halted it, where they
-        // died). Success / Cancelled / Running can't continue in place.
+        // Three IN-PLACE continues, all same-run-id revivals (never a fork, unlike replay / rerun-from-node): a STRANDED
+        // Suspended run (the reconciler twin), a terminal FAILURE run (re-run the node[s] that halted it, where they
+        // died), and a terminal CANCELLED run the operator stopped mid-flight (re-run the frontier the stop interrupted).
+        // Success / Running can't continue in place.
         return status.Value switch
         {
             WorkflowRunStatus.Suspended => await ContinueStrandedSuspendedRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             WorkflowRunStatus.Failure => await ContinueFailedRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            WorkflowRunStatus.Cancelled => await ContinueCancelledRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             _ => false,
         };
     }
@@ -910,6 +912,56 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Failed workflow run continued in place by operator. RunId={RunId} TeamId={TeamId} ResetNodes={ResetNodes}", runId, teamId, string.Join(",", toReset));
+
+        return true;
+    }
+
+    /// <summary>
+    /// Revive a terminal CANCELLED run IN PLACE (same run id) — the Cancelled analogue of <see cref="ContinueFailedRunAsync"/>,
+    /// for a run the operator STOPPED mid-flight. A stop trips the walk at its next safe checkpoint and
+    /// <c>EnsureRunCancelledAsync</c> flips ONLY the run row, so the node(s) the walk was driving are left FIRED-but-not-
+    /// terminal — the one mid-execution stays <c>Running</c> (its agent was torn down), a node parked on a wait stays
+    /// <c>Suspended</c> (its wait was cancelled). The walk's own dedup ("a node that already fired in any state is
+    /// skipped") means a plain re-dispatch would SKIP them, so we RESET each interrupted node with a fresh
+    /// <c>node.started</c> (the latest-record-wins view projects it to <c>Running</c> — exactly the crash-recovery
+    /// "Running → re-run" state the engine's rehydrate re-executes), CAS Cancelled → Pending, and re-dispatch. The run
+    /// resumes exactly where the stop hit: every succeeded upstream cell stays settled + reused (never re-run), the
+    /// interrupted node re-runs (a manual retry — it never completed, so its side effect never fully committed; where the
+    /// harness captured a resumable session the re-run CONTINUES that agent's conversation, P3), and never-run downstream
+    /// runs after. Returns false (→ the caller falls back to replay / rerun-from-node) when nothing fired-but-incomplete
+    /// remains — e.g. a stop that landed exactly on a wave boundary with no node in flight.
+    /// </summary>
+    private async Task<bool> ContinueCancelledRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        // The frontier the stop interrupted: TOP-LEVEL nodes that FIRED but did not reach a terminal — Running (mid-
+        // execution) or Suspended (parked on a now-cancelled wait). Succeeded/Skipped upstream is reused; a Failure here
+        // was already handled (an unhandled one lands the run in Failure, not Cancelled) so it is not the stop's frontier.
+        var frontier = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.IterationKey == WorkflowIterationKeys.TopLevel
+                        && (n.Status == NodeStatus.Running || n.Status == NodeStatus.Suspended))
+            .Select(n => n.NodeId)
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (frontier.Count == 0) return false;   // nothing fired-but-incomplete to resume → the caller falls back to replay / rerun
+
+        // CAS Cancelled → Pending: atomically claim the revive. 0 rows = a concurrent continue / replay already moved it.
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == WorkflowRunStatus.Cancelled)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0) return false;
+
+        // Reset each interrupted node so the re-walk RE-RUNS it (view → Running → rehydrate re-executes) instead of the
+        // dedup skipping it as "already fired". In the command's transaction with the CAS above, committed together
+        // before the post-commit dispatch — the exact discipline ContinueFailedRunAsync uses.
+        foreach (var nodeId in frontier)
+            await _recordLogger.NodeStartedAsync(runId, nodeId, WorkflowIterationKeys.TopLevel, EmptyNodeBag, EmptyNodeBag, cancellationToken).ConfigureAwait(false);
+
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Cancelled workflow run continued in place by operator. RunId={RunId} TeamId={TeamId} ResumedNodes={ResumedNodes}", runId, teamId, string.Join(",", frontier));
 
         return true;
     }
