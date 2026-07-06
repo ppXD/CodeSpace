@@ -5726,6 +5726,28 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-spin { animation: rm-spin 1.4s linear infinite; }
 
 .lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
+
+/* Quality presets — the intent dial above the customize body: one click sets the whole review/verification group. */
+.lt3-presets { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-bottom: 1px solid #eee8df; }
+.lt3-presets-l { font-size: 10.5px; color: #a89f93; text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
+.lt3-preset { font: inherit; font-size: 12px; padding: 3px 12px; border-radius: 999px; border: 1px solid #e5ddd1; background: #faf6f0; color: #57524b; cursor: pointer; transition: background .1s; }
+.lt3-preset:hover { background: #f4efe8; }
+.lt3-preset[data-on="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
+.lt3-preset-custom { font-size: 11px; color: #a89f93; font-style: italic; margin-left: 2px; }
+
+/* A settings row with a hover "?" — the row's own bottom border moves to the wrapper so the separator spans the ?. */
+.lt3-hrow { display: flex; align-items: stretch; border-bottom: 1px solid #eee8df; }
+.lt3-hrow .lt3-srow { flex: 1; min-width: 0; border-bottom: 0; }
+.lt3-help { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-right: 10px; border: 0; border-radius: 50%; background: transparent; color: #b7ada0; cursor: help; }
+.lt3-help:hover { background: #f4efe8; color: var(--accent); }
+.lt3-helpcard { z-index: 240; background: #fffdf9; border: 1px solid #e5ddd1; border-radius: 10px; box-shadow: 0 10px 32px rgba(60, 50, 40, .16); padding: 12px 14px 12px; }
+.lt3-helpcard-t { font-size: 12px; font-weight: 600; color: #57524b; margin-bottom: 8px; }
+.lt3-helpcard svg { display: block; width: 100%; height: auto; }
+.lt3-helpcard .lt3-hd-flow { stroke-dasharray: 5 4; animation: lt3hdflow .9s linear infinite; }
+@keyframes lt3hdflow { to { stroke-dashoffset: -9; } }
+@media (prefers-reduced-motion: reduce) { .lt3-helpcard .lt3-hd-flow { animation: none; } }
+.lt3-hd-note { margin-top: 8px; font-size: 11.5px; color: #7a746c; line-height: 1.45; }
+
 .lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
 .lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }
 .lt3-ctab[data-on="true"] { color: #8A4326; border-bottom-color: #E0A07F; }
