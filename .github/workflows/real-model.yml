@@ -342,3 +342,136 @@ jobs:
             echo "::error::Expected the RealModel benchmark gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
             exit 1
           fi
+
+  real-model-injection:
+    name: real model (agent/skill injection — claude gates, codex reports)
+    runs-on: ubuntu-latest
+    # THE live behavioral proof for B1 agent injection: a real claude AND a real codex agent each run a trivial task
+    # carrying an injected persona / bound skill whose instruction forces a unique marker into the MODEL'S OWN reply —
+    # proving the injection actually REACHES and CHANGES a live coding agent's output, not merely that the file/flag is
+    # constructed. Claude is the BLESSED wire (persona via --append-system-prompt, skill via CLAUDE_CONFIG_DIR/skills
+    # auto-discovery) → GATES on a persistent non-apply, best-of-N-floored. Codex rides the OpenAI `responses` wire the
+    # shared gateway may not serve, so it is INFORMATIONAL (one reported attempt; a run that can't complete is non-gating
+    # infra, never a false red) — plus the DETERMINISTIC real-codex-binary proofs (RealCodexResume: thread resume +
+    # persona rollout, dummy key, no gateway). Two behavioral gates (~30-90s each) × best-of-N + the fast deterministic
+    # proofs, so the 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets / a CLI are absent
+    # (skip ≠ pass; a fork stays green at zero cost).
+    timeout-minutes: 30
+
+    # Same UNCONFINED rationale as the whole-loop lane: this gate's signal is the live model's OUTPUT, not sandbox
+    # confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner is flaky. So force the
+    # unconfined path deterministically + disable the prlimit caps (the RLIMIT_NPROC per-UID trap that signal-kills forks
+    # on a shared host). The agents here author a trivial marker reply in a throwaway git workspace; real confinement
+    # stays gated, fail-closed, in the sandbox-isolation lane.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # The custom-endpoint config the RealModel tests read; absent on a fork → the tests self-skip → green at zero cost.
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # best-of-3 capability-floor for the blessed Claude PERSONA gate (near-deterministic — the system prompt is always
+      # in context; the spare attempts just absorb a rare gateway hiccup). The SKILL gate is REPORT-ONLY — a loaded
+      # skill is applied only via the model's auto-invocation (progressive disclosure, a model decision), which we
+      # surface but do NOT gate main on — so it takes one reported attempt; Codex is informational likewise.
+      CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      # Run the deterministic real-codex-binary proofs (RealCodexResume) — dummy key, no gateway needed. Its opt-in gate
+      # var; the codex binary is installed below.
+      CODESPACE_CODEX_RESUME_E2E: '1'
+      # Force the agent UNCONFINED: a non-existent bwrap binary degrades BubblewrapSandbox's probe to "unavailable" →
+      # unconfined (deterministic); caps=0 → ProcessRlimits.Wrap returns the command unchanged → no RLIMIT_NPROC
+      # signal-kill on a shared host. Safe: REQUIRE_SANDBOX is unset (no fail-closed throw).
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-injection-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLIs)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLIs (Claude Code + Codex)
+        # BOTH harness binaries: claude (ClaudeCodeHarness) drives the blessed behavioral gate; codex (CodexHarness)
+        # drives the informational behavioral proof + the deterministic real-binary proofs. FATAL install (a missing
+        # binary must RED the lane, never let a gating arm self-skip green — "skip ≠ pass"). Pins match the worker image
+        # ARGs + the harness DefaultVersion consts the CLI surface is verified against (claude 2.1.193 / codex 0.142.2),
+        # so a future CLI flag change is a visible lane break to fix, not a silent harness regression.
+        run: |
+          # One retry each to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the lane; a
+          # genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
+          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
+          claude --version
+          codex --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the live behavioral injection gates — real claude + real codex apply a persona / obey a skill)
+        # Scoped to the injection classes in E2ETests:
+        #   ~RealModelAgentInjection → the CLAUDE behavioral proof. PERSONA (--append-system-prompt, always in context)
+        #     GATES the blessed wire on a persistent non-apply (best-of-N floored). SKILL obedience (CLAUDE_CONFIG_DIR/
+        #     skills auto-discovery + the model's auto-invocation) is REPORTED, not gated — its LOADING is gated
+        #     deterministically by RealHarnessSkillProjectionTests (no live model needed).
+        #   ~RealModelCodexInjection → the CODEX behavioral proof (persona via $CODEX_HOME/AGENTS.md; skill via
+        #     $CODEX_HOME/skills). INFORMATIONAL wire (OpenAI `responses`) → one reported attempt; a run that can't
+        #     complete on the shared gateway is non-gating LOUD infra, never a false red.
+        #   ~RealCodexResume → the DETERMINISTIC real-codex-binary proofs (thread resume + persona rollout), dummy key,
+        #     no gateway — the gateway-free floor. Gated on CODESPACE_CODEX_RESUME_E2E (set above) + codex on PATH.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelAgentInjection|FullyQualifiedName~RealModelCodexInjection|FullyQualifiedName~RealCodexResume"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-injection.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the injection gates actually ran (no silent skip)
+        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects the injection gates must
+        # RED this lane, not pass green at zero cost. (A secrets-absent run still SELECTS + reports these classes, so the
+        # count is >=1 whether or not the gateway is set.)
+        run: |
+          trx=backend/TestResults/real-model-injection.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the RealModel injection gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
+          # The aggregate executed>=1 is NOT enough: this lane's REASON TO EXIST is the persona KILL-GATE. An FQN/trait
+          # drift that de-selects ONLY the gating arm while the informational Codex + deterministic RealCodexResume arms
+          # still match would keep executed>=1 and pass GREEN with the kill-gate running on NOTHING. Require the gating
+          # test BY NAME so a de-selected gate reds this lane instead of silently passing.
+          if ! grep -q "A_real_claude_agent_applies_its_injected_persona" "$trx"; then
+            echo "::error::The persona KILL-GATE (A_real_claude_agent_applies_its_injected_persona) did not run — it was de-selected while other arms matched. Other arms passing green is NOT the gate running."
+            exit 1
+          fi
