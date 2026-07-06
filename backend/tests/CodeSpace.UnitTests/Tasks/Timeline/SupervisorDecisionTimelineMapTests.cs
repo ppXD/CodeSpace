@@ -193,19 +193,6 @@ public class SupervisorDecisionTimelineMapTests
         ev.Severity.ShouldBe(TimelineSeverity.Warning, "a forced stop did not finish the work — it is not a green success");
     }
 
-    [Fact]
-    public void A_budget_stop_that_carries_its_round_cap_names_the_N_round_budget()
-    {
-        // The enriched budget stop stamps {reason, maxRounds} so the terminal reads the cap the run hit, not a bare
-        // "budget exhausted" — the round count the reader also sees per step (the round tag).
-        var payload = JsonSerializer.Serialize(new { reason = SupervisorStopReasons.BudgetExhausted, maxRounds = 12 });
-
-        var ev = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, payload: payload, outcome: StopOutcome(null, null)));
-
-        ev.Title.ShouldBe("Supervisor stopped — reached the 12-round budget");
-        ev.Severity.ShouldBe(TimelineSeverity.Warning);
-    }
-
     // ── Severity: rides status, downgrades a succeeded-but-degraded decision to amber ───────────────────────────
 
     [Theory]

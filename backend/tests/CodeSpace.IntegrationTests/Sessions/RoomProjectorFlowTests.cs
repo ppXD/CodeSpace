@@ -219,22 +219,6 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
-    public async Task A_budget_stop_that_carries_its_round_cap_names_the_N_round_budget_on_the_result()
-    {
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var sessionId = await SeedSessionAsync(teamId, "Out of rounds");
-        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the flaky tests", resultSummary: null);
-
-        // The enriched budget stop carries its round cap, so the RESULT names it instead of the bare "budget exhausted".
-        await SeedForcedStopDecisionAsync(teamId, run, reason: SupervisorStopReasons.BudgetExhausted, maxRounds: 12);
-
-        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
-
-        result.Degraded.ShouldBeTrue();
-        result.Text.ShouldBe("Reached the 12-round budget before the plan finished.", "the RESULT names the round cap the run hit");
-    }
-
-    [Fact]
     public async Task A_supervisor_turn_aggregates_distinct_changed_files_across_its_agents()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -708,18 +692,16 @@ public class RoomProjectorFlowTests
     }
 
     /// <summary>Stamp a SERVER-FORCED stop — a budget/governance/bound trip that puts {reason} on the PAYLOAD, then records an outcome with a NULL outcome label (exactly what ExecuteStop writes for a forced stop). No success outcome, only a reason.</summary>
-    private async Task SeedForcedStopDecisionAsync(Guid teamId, Guid runId, string reason, int? maxRounds = null)
+    private async Task SeedForcedStopDecisionAsync(Guid teamId, Guid runId, string reason)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-
-        var payload = maxRounds is { } m ? JsonSerializer.Serialize(new { reason, maxRounds = m }) : JsonSerializer.Serialize(new { reason });
 
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
         {
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop:{Guid.NewGuid():N}", InputHash = new string('0', 64),
-            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload,
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = JsonSerializer.Serialize(new { reason }),
             OutcomeJson = JsonSerializer.Serialize(new { stopped = true, outcome = (string?)null, summary = (string?)null }),
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });

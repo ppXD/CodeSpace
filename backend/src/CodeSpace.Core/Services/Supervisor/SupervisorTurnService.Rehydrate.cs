@@ -687,17 +687,13 @@ public sealed partial class SupervisorTurnService
     /// <summary>
     /// The forced terminal decision when a fail-closed bound or governance refusal trips (PR-E E2/E5) — a
     /// <c>stop</c> stamping the DISTINCT <paramref name="reason"/> (a <see cref="SupervisorStopReasons"/> value).
-    /// DETERMINISTIC given (reason, maxRounds): a re-entry after the same bound tripped re-derives the identical stop, so
-    /// the per-turn idempotency key is stable and the run terminates cleanly with the operator-legible reason.
-    /// <paramref name="maxRounds"/> rides ONLY on the budget-exhausted stop (naming the round cap the run reached); every
-    /// other forced stop keeps the byte-identical <c>{reason}</c> payload, so their idempotency keys are unperturbed.
+    /// DETERMINISTIC given (reason): a re-entry after the same bound tripped re-derives the identical stop, so the
+    /// per-turn idempotency key is stable and the run terminates cleanly with the operator-legible reason.
     /// </summary>
-    private static SupervisorDecision ForcedStop(string reason, int? maxRounds = null) => new()
+    private static SupervisorDecision ForcedStop(string reason) => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = maxRounds is { } max
-            ? JsonSerializer.Serialize(new { reason, maxRounds = max }, AgentJson.Options)
-            : JsonSerializer.Serialize(new { reason }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new { reason }, AgentJson.Options),
     };
 
     /// <summary>The terminal reason stamped on a budget-forced stop (back-compat alias for the E2 reason; points at the E5 vocabulary). Surfaced as the node's terminal reason.</summary>

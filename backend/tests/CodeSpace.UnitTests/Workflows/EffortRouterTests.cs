@@ -58,10 +58,11 @@ public class EffortRouterTests
         plan.ClassifierConfidence.ShouldBe(1.0, "an operator decision is full-confidence");
         plan.Decision!.ClassifierKind.ShouldBe("operator");
 
-        // The standard preset's caps flowed onto the plan.
+        // The standard preset's caps flowed onto the plan — the tier tunes ONLY concurrency now; round / total-spawn are
+        // no longer tier knobs (a supervised run loops until done, bounded by cost / no-progress / the model's stop).
         plan.Caps.MaxParallelism.ShouldBe(3);
-        plan.Caps.MaxRounds.ShouldBe(3);
-        plan.Caps.MaxTotalSpawns.ShouldBe(8);
+        plan.Caps.MaxRounds.ShouldBeNull("the tier no longer caps rounds — the run loops until done");
+        plan.Caps.MaxTotalSpawns.ShouldBeNull("the tier no longer caps total spawns — concurrency is the only agent knob");
     }
 
     [Fact]
@@ -90,7 +91,7 @@ public class EffortRouterTests
         plan.EffortMode.ShouldBe(TaskEffortModes.Deep);
         plan.WasAutoClassified.ShouldBeFalse();
         plan.NeedsConfirmCard.ShouldBeFalse();
-        plan.Caps.MaxTotalSpawns.ShouldBe(20, "the deep preset's caps");
+        plan.Caps.MaxParallelism.ShouldBe(5, "the deep preset's caps — wide concurrency");
     }
 
     [Fact]
@@ -110,8 +111,8 @@ public class EffortRouterTests
         var plan = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: overrideCaps), CancellationToken.None);
 
         plan.Caps.MaxParallelism.ShouldBe(2, "the set override field wins over the preset's 3");
-        plan.Caps.MaxRounds.ShouldBe(3, "an unset override field keeps the preset's value");
-        plan.Caps.MaxTotalSpawns.ShouldBe(8, "an unset override field keeps the preset's value");
+        plan.Caps.MaxRounds.ShouldBeNull("an unset override field keeps the preset's value — the preset no longer sets rounds");
+        plan.Caps.MaxTotalSpawns.ShouldBeNull("an unset override field keeps the preset's value — the preset no longer sets total spawns");
         plan.Caps.RequiresApproval.ShouldBeTrue("the override tightened approval on");
     }
 
