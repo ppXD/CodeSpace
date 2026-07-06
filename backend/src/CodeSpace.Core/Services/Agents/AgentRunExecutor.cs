@@ -149,13 +149,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } claimedEpoch) return;
 
-        // Re-check the parent workflow run's status the instant after the Queued→Running claim wins, closing the TOCTOU
-        // the reconciler's guard leaves open: the reconciler reads the parent then re-dispatches, but the parent can flip
-        // terminal in the window before this claim, so without this re-check the executor would launch a sandbox under an
-        // already-dead workflow. A standalone run (no WorkflowRunId) or a live parent (Suspended/Pending/Running) proceeds
-        // EXACTLY as before — only a terminal parent aborts the launch (the run, now Running, is cancelled instead).
-        if (await AbortIfParentTerminalAsync(agentRunId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
-
         // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
         // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
         // reconciler's liveness window and falsely abandon a run that was actually finishing (which then races
@@ -185,6 +178,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
+            // Re-check the parent workflow run's status the instant after the Queued→Running claim wins, closing the TOCTOU
+            // the reconciler's guard leaves open: the reconciler reads the parent then re-dispatches, but the parent can flip
+            // terminal in the window before this claim, so without this re-check the executor would launch a sandbox under an
+            // already-dead workflow. A standalone run (no WorkflowRunId) or a live parent (Suspended/Pending/Running) proceeds
+            // EXACTLY as before — only a terminal parent aborts the launch (the run, now Running, is cancelled instead). INSIDE
+            // the try so a fault READING the parent status lands a clean terminal Failed with the real (redacted) error, instead
+            // of escaping uncaught to leave the run Running for the reconciler to later abandon with a generic reason.
+            if (await AbortIfParentTerminalAsync(agentRunId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
+
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
