@@ -49,6 +49,13 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
 
         if (mode == ReviewMode.None || !CriticToggle.Enabled) return decision;
 
+        // P1d checks-before-critics: a structurally-invalid PLAN (a dangling DependsOn or a cycle) is force-stopped by
+        // the free Tier-0 SupervisorPlanValidator in the post-decision gate no matter what a critic rules, so paying up
+        // to three model calls to critique it first is pure waste. Skip the critic and let the gate reject it. The check
+        // is pure + returns null for every non-plan decision and every well-formed plan, so a valid decision is reviewed
+        // exactly as before — only a doomed plan short-circuits.
+        if (SupervisorPlanValidator.Validate(decision) != null) return decision;
+
         // S8 one-shot absolution: the LATEST prior decision is an ANSWERED gate-escalation card. Approve ⇒ the
         // human saw the critique and ruled — this turn's decision proceeds unreviewed (positional latest-only, so
         // absolution never leaks past the very next decision). Any other answer is guidance the inner decider

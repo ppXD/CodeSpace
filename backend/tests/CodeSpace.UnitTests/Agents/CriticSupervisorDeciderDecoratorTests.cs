@@ -283,6 +283,7 @@ public class CriticSupervisorDeciderDecoratorTests
     private sealed class FakeDecider : ISupervisorDecider
     {
         public string Kind { get; set; } = SupervisorDecisionKinds.Spawn;
+        public string PayloadJson { get; set; } = "{\"agents\":[]}";
         public List<SupervisorTurnContext> Contexts { get; } = new();
         public List<string?> ScopeKinds { get; } = new();
 
@@ -290,7 +291,7 @@ public class CriticSupervisorDeciderDecoratorTests
         {
             Contexts.Add(context);
             ScopeKinds.Add(CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current?.Kind);
-            return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = "{\"agents\":[]}" });
+            return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = PayloadJson });
         }
     }
 
@@ -347,6 +348,49 @@ public class CriticSupervisorDeciderDecoratorTests
 
         CriticSupervisorDeciderDecorator.ReviewModeFor(context, decision).ShouldBe(expected);
     }
+
+    // ── P1d: checks before critics — a structurally-doomed plan never bills the model critic ──
+
+    [Fact]
+    public async Task A_structurally_invalid_plan_skips_the_critic_and_returns_unreviewed()
+    {
+        // The plan depends on a subtask it never declares (a dangling edge). The free Tier-0 SupervisorPlanValidator
+        // in the post-decision gate force-stops it regardless of any critique, so the decorator must NOT spend a model
+        // call reviewing it — it returns the decision untouched for the gate to reject.
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan, PayloadJson = DanglingPlan };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "would-have-approved" } };
+        var agent = new RecordingAgentPlanReviewer { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "grounded-ok" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, agent);
+
+        var decision = await decorator.DecideAsync(GroundedContext(ReviewMode.Gate, Guid.NewGuid()), CancellationToken.None);
+
+        critic.Requests.ShouldBeEmpty("a plan the free validator will reject anyway never bills the model critic");
+        agent.Requests.ShouldBeEmpty("nor the grounded agent reviewer — the deterministic check short-circuits before either");
+        inner.Contexts.Count.ShouldBe(1, "no re-decide — the decision is handed straight back");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "returned untouched; the POST-decision gate is what force-stops it");
+        decision.Reviews.ShouldBeEmpty("no review happened, so nothing rides the tape");
+    }
+
+    [Fact]
+    public async Task A_well_formed_plan_is_still_reviewed_by_the_critic()
+    {
+        // Regression guard: the pre-filter must only skip DOOMED plans. A well-formed DAG passes the validator (null)
+        // and earns its normal review — the checks-before-critics ordering must not silence the critic on valid work.
+        var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan, PayloadJson = WellFormedPlan };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var decision = await decorator.DecideAsync(Context(ReviewMode.Gate), CancellationToken.None);
+
+        critic.Requests.Count.ShouldBe(1, "a well-formed plan is reviewed exactly as before — the pre-filter never fires");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+    }
+
+    // A plan whose subtask depends on an id the plan never declares — a dangling edge the dependency gate could never satisfy.
+    private const string DanglingPlan = """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"do a","dependsOn":["ghost"]}]}""";
+
+    // A valid DAG: b depends on a, a is declared, no cycle.
+    private const string WellFormedPlan = """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["a"]}]}""";
 
     // ── D①: the grounded plan-review ladder on the supervisor tier — real agent first → model critic → fail-open ──
 
