@@ -71,6 +71,14 @@ public static class WorkflowWaitKinds
     public const string Decision = "Decision";
 
     /// <summary>
+    /// The supervisor's MODEL-PLANE OUTAGE park (P1.1): the brain call exhausted its in-call retry on a
+    /// transient/rate-limit fault, so instead of terminalizing an hours-long run the node parks on this wait with a
+    /// <c>DeadlineAt</c> along an exponential schedule — the deadline IS the wake (nothing else resolves it), and its
+    /// <c>TimeoutPayload</c> carries the park count + window start so the re-entry continues the ladder durably.
+    /// </summary>
+    public const string SupervisorInfraPark = "SupervisorInfraPark";
+
+    /// <summary>
     /// The wait kinds an operator may FORCE-REISSUE via the reissue verb — the SIGNAL-driven waits that can strand with
     /// no backstop: a <see cref="Timer"/> whose scheduled wake was dropped (a lost Hangfire job — there is no reconciler
     /// sweep for it, unlike <see cref="SupervisorDecision"/>), and a <see cref="Callback"/> whose external system never

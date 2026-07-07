@@ -49,6 +49,15 @@ public interface ISupervisorTurnService
     Task<string?> PendingHumanWaitTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Force a terminal <c>stop</c> with <paramref name="reason"/> through the SAME exactly-once claim/execute/record
+    /// path a bound trip takes — the P1.1 infra-park's honest ending: the model plane stayed unavailable past the
+    /// whole park window, so the run ends as a DEGRADED stop (the reason rides the payload → the node reports
+    /// <c>Stopped</c>, never a fake success) with every ledger invariant intact. Deterministic given (run, reason):
+    /// a crashed re-entry re-derives the identical stop.
+    /// </summary>
+    Task<SupervisorTurnResult> ForceStopAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, string reason, CancellationToken cancellationToken);
+
+    /// <summary>
     /// How many WorkflowRun ancestors this supervisor run has — the PR-E E5 depth-cap input (a recursive
     /// supervisor-spawns-supervisor fan-out nested beyond <c>SupervisorLane.MaxSupervisorDepth</c> ancestors
     /// force-STOPs at turn 0). Walks the durable <c>parent_run_id</c> chain, team-scoped, bounded so a corrupt

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -143,7 +144,20 @@ public sealed class AgentSupervisorNode : INodeRuntime
         // re-post the question.
         if (pendingHumanToken != null) return ReparkOnPendingHuman(context, pendingHumanToken);
 
-        var result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
+        SupervisorTurnResult result;
+
+        try
+        {
+            result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException fault) when (SupervisorInfraPark.IsParkable(fault.Category))
+        {
+            // P1.1 — park, don't die: the model plane is transiently down (the in-call retry already rode out the
+            // short blips), so the run WAITS OUT the outage on a durable deadline ladder and re-enters the SAME
+            // turn on wake, instead of terminalizing hours of work. Only past the whole 24h window does it stop —
+            // honestly, as a degraded Stopped.
+            return await ParkForInfraOrStopAsync(context, supervisorRunId, teamId, goal, goalConfig, fault, cancellationToken).ConfigureAwait(false);
+        }
 
         // The node re-runs on EITHER pass identically — the durable ledger (not ResumePayload) is the source
         // of truth, so a resumed pass (a self-advance marker, an agent-completion barrier resume, OR a human
@@ -162,6 +176,49 @@ public sealed class AgentSupervisorNode : INodeRuntime
         return result.ParkedOnHuman
             ? ParkOnHuman(context.Logger, result)
             : ParkSelfAdvance(context.Logger, context.NodeId, result);
+    }
+
+    /// <summary>
+    /// The model-plane outage path (P1.1): compute the next park on the exponential ladder from the resume payload's
+    /// durable marker; park the run on a <c>SupervisorInfraPark</c> wait whose DEADLINE is the wake (nothing else
+    /// resolves it) and whose TimeoutPayload carries the ladder position — or, once the whole window is exhausted,
+    /// force an HONEST degraded stop through the ledger (the node then reports <c>Stopped</c> + the reason).
+    /// </summary>
+    private async Task<NodeResult> ParkForInfraOrStopAsync(NodeRunContext context, Guid supervisorRunId, Guid teamId, string goal, SupervisorGoalConfig? goalConfig, LlmApiException fault, CancellationToken cancellationToken)
+    {
+        var state = SupervisorInfraPark.Next(context.ResumePayload, DateTimeOffset.UtcNow);
+
+        if (state.WindowExhausted)
+        {
+            context.Logger.LogWarning("agent.supervisor run {RunId}: the model plane stayed unavailable past the whole {Window} park window — stopping honestly", supervisorRunId, SupervisorInfraPark.MaxParkWindow);
+
+            var stopped = await ForceStopAsync(supervisorRunId, teamId, context.NodeId, goal, goalConfig, SupervisorStopReasons.ModelPlaneUnavailable, cancellationToken).ConfigureAwait(false);
+
+            return Finish(context.Logger, stopped);
+        }
+
+        var delay = SupervisorInfraPark.DelayFor(state.Parks);
+        var marker = SupervisorInfraPark.Marker(state, fault.Message);
+
+        context.Logger.LogWarning("agent.supervisor run {RunId}: brain call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run", supervisorRunId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc);
+
+        return NodeResult.Suspend(new SuspensionToken
+        {
+            Kind = WorkflowWaitKinds.SupervisorInfraPark,
+            IterationKey = $"{context.NodeId}#infra{state.Parks}",
+            Payload = marker,
+            DeadlineAt = DateTimeOffset.UtcNow + delay,
+            TimeoutPayload = marker,
+        });
+    }
+
+    /// <summary>Resolve the scoped turn service in its own DI scope (the node is a singleton) and force the honest degraded stop (the P1.1 window-exhausted ending).</summary>
+    private async Task<SupervisorTurnResult> ForceStopAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, string reason, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var turns = scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>();
+
+        return await turns.ForceStopAsync(supervisorRunId, teamId, nodeId, goal, goalConfig, reason, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Resolve the scoped turn service in its own DI scope (the node is a singleton) and run one turn.</summary>

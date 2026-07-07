@@ -66,6 +66,21 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         return BuildResult(context, decision, execution);
     }
 
+    public async Task<SupervisorTurnResult> ForceStopAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, string reason, CancellationToken cancellationToken)
+    {
+        var context = await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, goalConfig, cancellationToken).ConfigureAwait(false);
+
+        // A crashed prior walk may have left an in-flight decision — finish IT frozen (exactly as RunTurnAsync would);
+        // the caller's forced stop re-derives on the next entry. Never strand a claimed row behind a forced stop.
+        if (context.InFlight != null) return await ReplayInFlightTurnAsync(teamId, context, cancellationToken).ConfigureAwait(false);
+
+        var decision = ForcedStop(reason);
+
+        var execution = await ClaimAndExecuteAsync(supervisorRunId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
+
+        return BuildResult(context, decision, execution);
+    }
+
     /// <summary>
     /// Replay a crashed-mid-execution decision (<see cref="SupervisorTurnContext.InFlight"/>) FROZEN — the decider +
     /// bounds are NOT re-run. The in-flight row exists ONLY because the decision was already chosen, passed pre-bounds
