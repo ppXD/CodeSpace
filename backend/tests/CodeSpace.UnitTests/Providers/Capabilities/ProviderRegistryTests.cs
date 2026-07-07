@@ -2,7 +2,6 @@ using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
-using CodeSpace.Messages.Events;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Capabilities;

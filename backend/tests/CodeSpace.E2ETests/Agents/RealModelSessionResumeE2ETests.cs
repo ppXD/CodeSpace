@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
-using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Agents;

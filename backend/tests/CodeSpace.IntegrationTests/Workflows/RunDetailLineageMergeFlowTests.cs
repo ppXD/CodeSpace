@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Autofac;
-using Microsoft.EntityFrameworkCore;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;

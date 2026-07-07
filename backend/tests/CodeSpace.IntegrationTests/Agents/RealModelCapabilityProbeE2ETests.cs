@@ -8,7 +8,6 @@ using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
-using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
 

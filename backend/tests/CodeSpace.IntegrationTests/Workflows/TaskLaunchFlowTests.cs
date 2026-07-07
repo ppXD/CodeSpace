@@ -3,7 +3,6 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.IntegrationTests.Infrastructure;

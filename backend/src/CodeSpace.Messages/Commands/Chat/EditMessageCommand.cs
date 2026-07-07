@@ -1,7 +1,6 @@
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Mediation;
-using MediatR;
 
 namespace CodeSpace.Messages.Commands.Chat;
 

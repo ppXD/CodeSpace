@@ -8,7 +8,6 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;

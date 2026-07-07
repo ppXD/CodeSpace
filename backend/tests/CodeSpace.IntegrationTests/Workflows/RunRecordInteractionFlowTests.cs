@@ -7,7 +7,6 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
-using CodeSpace.Messages.Dtos.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 

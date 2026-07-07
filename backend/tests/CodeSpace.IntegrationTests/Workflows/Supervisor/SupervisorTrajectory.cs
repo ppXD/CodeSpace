@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
-using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;

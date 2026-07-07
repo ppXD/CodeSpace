@@ -1,4 +1,3 @@
-using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;

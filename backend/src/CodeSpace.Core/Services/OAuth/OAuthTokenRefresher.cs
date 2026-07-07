@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Providers;
-using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Messages.Credentials;
 
 namespace CodeSpace.Core.Services.OAuth;

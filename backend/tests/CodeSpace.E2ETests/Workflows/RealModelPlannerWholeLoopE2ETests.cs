@@ -2,7 +2,6 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Workflows.Engine;

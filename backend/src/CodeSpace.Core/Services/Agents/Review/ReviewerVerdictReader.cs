@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;

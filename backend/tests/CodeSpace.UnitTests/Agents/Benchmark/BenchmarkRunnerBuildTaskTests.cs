@@ -1,7 +1,6 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
-using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents.Benchmark;

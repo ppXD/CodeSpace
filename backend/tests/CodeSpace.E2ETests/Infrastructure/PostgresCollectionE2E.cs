@@ -1,5 +1,4 @@
 using CodeSpace.IntegrationTests.Infrastructure;
-using Xunit;
 
 namespace CodeSpace.E2ETests.Infrastructure;
 

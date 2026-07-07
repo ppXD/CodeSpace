@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
-using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.UnitTests.Infrastructure;

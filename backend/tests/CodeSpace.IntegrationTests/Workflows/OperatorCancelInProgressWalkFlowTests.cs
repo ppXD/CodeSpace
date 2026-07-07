@@ -1,6 +1,5 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;

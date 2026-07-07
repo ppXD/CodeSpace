@@ -3,7 +3,6 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.IntegrationTests.Infrastructure;
-using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;

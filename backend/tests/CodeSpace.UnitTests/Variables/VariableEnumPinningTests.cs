@@ -1,6 +1,5 @@
 using CodeSpace.Messages.Enums;
 using Shouldly;
-using Xunit;
 
 namespace CodeSpace.UnitTests.Variables;
 

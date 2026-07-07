@@ -5,8 +5,6 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Enums;
-using CodeSpace.Messages.Review;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;

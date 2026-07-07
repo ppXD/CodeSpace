@@ -1,9 +1,7 @@
 using System.Diagnostics;
-using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.E2ETests.Agents;

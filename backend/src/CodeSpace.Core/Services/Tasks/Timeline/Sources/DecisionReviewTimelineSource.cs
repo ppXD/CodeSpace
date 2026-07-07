@@ -2,7 +2,6 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Tasks.Timeline;
 
 namespace CodeSpace.Core.Services.Tasks.Timeline.Sources;

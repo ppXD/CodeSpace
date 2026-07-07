@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents;

@@ -5,13 +5,11 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Settings;
 using MediatR;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Serilog;
-using Serilog.Extensions.Logging;
 
 namespace CodeSpace.IntegrationTests.Infrastructure;
 

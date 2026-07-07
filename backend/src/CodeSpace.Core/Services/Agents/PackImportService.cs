@@ -1,7 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Messages.Agents;
-using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents;
 

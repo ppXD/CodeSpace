@@ -1,14 +1,11 @@
 using CodeSpace.Core.Services.Tasks.Bounds;
-using CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
 using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
-using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
-using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;

@@ -1,4 +1,3 @@
-using System.Net.Http;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Providers;

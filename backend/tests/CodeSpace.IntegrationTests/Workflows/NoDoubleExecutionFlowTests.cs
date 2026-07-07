@@ -6,7 +6,6 @@ using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
-using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;

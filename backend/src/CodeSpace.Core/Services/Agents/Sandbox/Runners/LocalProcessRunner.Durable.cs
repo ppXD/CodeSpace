@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text;
-using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 

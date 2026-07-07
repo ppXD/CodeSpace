@@ -14,7 +14,6 @@ using CodeSpace.Messages.Queries.Credentials;
 using CodeSpace.Messages.Queries.ProviderInstances;
 using CodeSpace.Messages.Queries.Repositories;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Authorization;

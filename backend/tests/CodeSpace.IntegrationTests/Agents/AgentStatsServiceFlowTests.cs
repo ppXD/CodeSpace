@@ -7,7 +7,6 @@ using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;

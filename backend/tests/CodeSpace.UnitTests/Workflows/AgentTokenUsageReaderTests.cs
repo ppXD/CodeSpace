@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
