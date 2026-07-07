@@ -518,9 +518,52 @@ public sealed partial class SupervisorTurnService
 
         if (targets.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
 
-        var grade = await GradeStopTargetsAsync(teamId, targets, gates, cancellationToken).ConfigureAwait(false);
+        var grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
+    }
+
+    /// <summary>
+    /// P1.3 — wraps the (potentially multi-minute, sequential multi-target × multi-gate) grade with a background
+    /// ledger HEARTBEAT: a run mid-grade emits no other ledger activity, and the operator's/model's gates can
+    /// together run well past <see cref="StuckRunReconcilerService.LedgerLivenessWindow"/> (5 min) — without this,
+    /// the reconciler's staleness check would read a genuinely-alive grading run as abandoned and could yank it
+    /// out from under the live worker. The heartbeat is a plain <c>log</c> ledger record (no new record type, no
+    /// migration) at <see cref="SupervisorLane.AcceptanceGradeHeartbeatInterval"/>; it stops the instant grading
+    /// finishes (success, failure, or exception) via the linked token — never outlives the grade it protects.
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, CancellationToken cancellationToken)
+    {
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token);
+
+        try
+        {
+            return await GradeStopTargetsAsync(teamId, targets, gates, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+
+            try { await heartbeat.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    /// <summary>The heartbeat loop itself: sleeps, logs, repeats — until <paramref name="cancellationToken"/> fires (grading finished). A cancellation mid-sleep is the expected exit, never propagated as a fault. Internal + interval-parameterized so a unit test can pin the cancellation contract with a millisecond-scale interval instead of waiting out the real 90s production value.</summary>
+    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+
+                await _recordLogger.LogAsync(supervisorRunId, nodeId, Workflows.Lifecycle.LogLevel.Info,
+                    "Supervisor stop acceptance grading is still in progress.", cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     /// <summary>

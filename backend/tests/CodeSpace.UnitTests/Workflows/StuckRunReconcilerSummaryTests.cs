@@ -26,6 +26,15 @@ public class StuckRunReconcilerSummaryTests
     }
 
     [Fact]
+    public void The_supervisor_node_type_key_is_pinned()
+    {
+        // The P1.3 pre-claim-crash recovery identifies "is this run's unsettled node an agent.supervisor node"
+        // by comparing against THIS literal (no shared constant exists elsewhere) — a node rename that drifts
+        // from AgentSupervisorNode.TypeKey would silently reopen the pre-claim recovery gap. Pin it (Rule 8).
+        StuckRunReconcilerService.SupervisorNodeTypeKey.ShouldBe("agent.supervisor");
+    }
+
+    [Fact]
     public void Total_includes_every_sweep_count()
     {
         // Every sweep's count MUST roll into Total — otherwise the recurring-job log line +
