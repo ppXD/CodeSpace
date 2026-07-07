@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Harnesses;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 
@@ -21,6 +22,15 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders;
 /// </summary>
 internal static class AgentNodeMapping
 {
+    /// <summary>
+    /// The transient-failure retry every TASK-LAUNCHED agent node carries (both launch lanes — single-agent and the
+    /// plan-map fan-out body): one crashed / rate-limited / timed-out agent must not kill the whole task when a fresh
+    /// respawn would succeed. The engine's durable attempt ledger makes the budget honest across suspend cycles, and
+    /// the node marks deterministic outcomes (NeedsReview, Cancelled) non-retryable so no attempt is wasted on a
+    /// verdict a re-run cannot change. Hand-AUTHORED workflows are untouched (a null policy stays one attempt).
+    /// </summary>
+    public static RetryPolicy DefaultRetry => new() { MaxAttempts = 3, BackoffSeconds = 30 };
+
     /// <summary>
     /// The <c>agent.code</c> Config — maps the resolved profile onto the EXACT keys <c>AgentCodeNode</c> reads,
     /// with the supplied <paramref name="goal"/> (a literal for single-agent, a <c>{{item}}</c> binding for a map

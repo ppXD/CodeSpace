@@ -266,6 +266,19 @@ public class SingleAgentDefinitionBuilderTests
         inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("no base-refs ⇒ no per-repo ref key");
     }
 
+    [Fact]
+    public void The_agent_node_carries_the_default_transient_retry()
+    {
+        // One crashed / rate-limited agent must not kill the whole task — the launch lane authors the respawn
+        // budget the engine's durable attempt ledger enforces. Pinned so a projection refactor can't silently
+        // strip the resilience back to one attempt.
+        var retry = Builder.Build(Context(Seed(), profile: null)).Nodes.Single(n => n.Id == "agent").Retry;
+
+        retry.ShouldNotBeNull();
+        retry.MaxAttempts.ShouldBe(3);
+        retry.BackoffSeconds.ShouldBe(30);
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────────
 
     private static JsonElement AgentConfigOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "agent").Config;

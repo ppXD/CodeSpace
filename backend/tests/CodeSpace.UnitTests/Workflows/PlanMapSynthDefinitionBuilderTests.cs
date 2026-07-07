@@ -75,6 +75,18 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
+    public void The_map_body_agent_node_carries_the_default_transient_retry()
+    {
+        // The fan-out body inherits the same respawn budget as the single-agent lane: one transient branch death
+        // re-stages a fresh agent for THAT branch instead of sinking the whole map.
+        var retry = Builder.Build(Context()).Nodes.Single(n => n.Id == "agent").Retry;
+
+        retry.ShouldNotBeNull();
+        retry.MaxAttempts.ShouldBe(3);
+        retry.BackoffSeconds.ShouldBe(30);
+    }
+
+    [Fact]
     public void Output_passes_the_real_validator_for_a_bare_profile()
     {
         var result = RealValidator().Validate(Builder.Build(Context()));

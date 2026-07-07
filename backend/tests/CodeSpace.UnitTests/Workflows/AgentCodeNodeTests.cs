@@ -488,6 +488,21 @@ public class AgentCodeNodeTests
         result.Error.ShouldContain("patch did not apply");
     }
 
+    [Theory]
+    [InlineData("Failed", true)]        // a crashed / non-zero-exit agent — a fresh respawn may survive
+    [InlineData("TimedOut", true)]      // a wall-clock kill — transient by nature
+    [InlineData("NeedsReview", false)]  // human-owed verdict — a respawn cannot change it
+    [InlineData("Cancelled", false)]    // the user's own stop — never override it with a respawn
+    public async Task A_resumed_failure_carries_the_retry_verdict_for_the_engine(string status, bool expectedRetryable)
+    {
+        var resume = JsonDocument.Parse($$"""{"status":"{{status}}","error":"x"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBe(expectedRetryable, "the node's verdict tells the retry policy whether a fresh agent could change the outcome");
+    }
+
     [Fact]
     public async Task Resumed_needs_review_run_does_not_proceed_as_a_success()
     {

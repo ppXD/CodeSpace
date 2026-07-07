@@ -20,6 +20,9 @@ public sealed record NodeResult
     public IReadOnlyDictionary<string, JsonElement> Outputs { get; init; } = new Dictionary<string, JsonElement>();
     public string? Error { get; init; }
 
+    /// <summary>Whether a <c>Failure</c> may be retried under the node's retry policy. Default true (the historical status-blind behaviour). A node marks a DETERMINISTIC failure false — a human-owed verdict, the user's own cancel — so the engine never burns attempts re-running work whose outcome cannot change.</summary>
+    public bool Retryable { get; init; } = true;
+
     /// <summary>Set when Status == Suspended. Opaque token the resume mechanism feeds back.</summary>
     public SuspensionToken? SuspendUntil { get; init; }
 
@@ -40,6 +43,9 @@ public sealed record NodeResult
         new() { Status = NodeStatus.Success, Outputs = outputs ?? new Dictionary<string, JsonElement>(), RoutingHints = handles };
 
     public static NodeResult Fail(string error) => new() { Status = NodeStatus.Failure, Error = error };
+
+    /// <summary>A failure with an explicit retry verdict — <paramref name="retryable"/> false marks a deterministic outcome the retry policy must not re-run.</summary>
+    public static NodeResult Fail(string error, bool retryable) => new() { Status = NodeStatus.Failure, Error = error, Retryable = retryable };
 
     public static NodeResult Skip() => new() { Status = NodeStatus.Skipped };
 

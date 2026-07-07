@@ -257,13 +257,22 @@ public sealed class AgentCodeNode : INodeRuntime
         }
     }
 
-    /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure.</summary>
+    /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure, marked retryable only when a fresh respawn could change the outcome.</summary>
     private static NodeResult MapResult(JsonElement payload)
     {
-        if (ReadString(payload, "status") != nameof(AgentRunStatus.Succeeded))
+        var status = ReadString(payload, "status");
+
+        if (status != nameof(AgentRunStatus.Succeeded))
         {
             var error = ReadString(payload, "error");
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? ReadString(payload, "status") : error)}");
+
+            // NeedsReview parked human-owed work and Cancelled recorded the user's own stop — respawning the agent
+            // cannot change either verdict, so both fail non-retryable. Everything else (Failed / TimedOut / an
+            // abandoned run) is a candidate transient death a fresh agent may survive; the node's retry policy
+            // decides whether one is bought.
+            var deterministic = status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled);
+
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };

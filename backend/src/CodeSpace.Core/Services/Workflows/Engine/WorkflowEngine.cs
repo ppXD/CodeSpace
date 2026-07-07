@@ -2813,7 +2813,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var plan = RetryPlan.From(node.Retry);
         var lastError = "Node failed.";
 
-        for (var attempt = 1; attempt <= plan.MaxAttempts; attempt++)
+        // A SUSPEND-capable node's retry budget must survive suspend cycles: a resumed failure (the staged agent
+        // run / child workflow came back failed) re-enters this method fresh, so the in-process counter alone would
+        // restart at 1 every cycle — an unbounded respawn loop. The durable attempt.failed records LogRetryAndWait
+        // writes are the cross-cycle ledger: count them so this entry CONTINUES the budget instead of resetting it.
+        // Only a resumed entry pays the read — a plain in-process node keeps the historical zero-IO path.
+        var priorAttempts = exec.ResumePayload is not null && plan.RetriesOnFailure
+            ? await CountAttemptFailuresAsync(run.Id, node.Id, iterationKey, cancellationToken).ConfigureAwait(false)
+            : 0;
+
+        for (var attempt = 1 + priorAttempts; attempt <= plan.MaxAttempts; attempt++)
         {
             var attemptStartedAt = DateTimeOffset.UtcNow;
             var (result, thrown) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
@@ -2852,10 +2861,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var (retryable, retryAfter) = ClassifyFailure(thrown);
             lastError = result?.Error ?? thrown?.Message ?? lastError;
 
-            if (!retryable || attempt == plan.MaxAttempts)
+            // The node's own verdict composes with the exception classification: a returned Fail marked
+            // non-retryable (a human-owed NeedsReview, the user's own cancel) is deterministic — never re-run.
+            retryable = retryable && (result?.Retryable ?? true);
+
+            if (!retryable || attempt >= plan.MaxAttempts)
                 return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
 
             await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, retryAfter, cancellationToken).ConfigureAwait(false);
+
+            // A failure DELIVERED BY A RESUME cannot be retried by re-reading the same settled payload — the retry
+            // must re-run the node FRESH so it re-stages its work (a new agent run, a new wait) and suspends again.
+            // The durable attempt count above keeps the budget honest across those cycles, so the respawn can never
+            // run away. In-process (non-suspending) retries keep the payload untouched (it is null for them anyway).
+            if (exec.ResumePayload is not null) exec = exec with { ResumePayload = null };
         }
 
         // Defensive: the loop always returns on its final attempt.
@@ -2927,6 +2946,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             return (null, ex);   // the EXCEPTION (not just its message) so the retry loop can classify a typed retryable-vs-terminal fault
         }
     }
+
+    /// <summary>The durable attempt ledger: how many <c>attempt.failed</c> records this (run, node, iteration) has already written — the cross-suspend-cycle base for the retry budget, so a respawned suspend-node CONTINUES its budget on re-entry instead of resetting it (see <see cref="ExecuteNodeAsync"/>).</summary>
+    private async Task<int> CountAttemptFailuresAsync(Guid runId, string nodeId, string iterationKey, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunRecord.CountAsync(r => r.RunId == runId && r.NodeId == nodeId && r.IterationKey == iterationKey && r.RecordType == WorkflowRunRecordTypes.AttemptFailed, cancellationToken).ConfigureAwait(false);
 
     /// <summary>Decide whether a node failure should be RETRIED and any provider backoff. A thrown <see cref="IRetryClassifiedException"/> anywhere in the chain (e.g. an LLM auth/rate-limit fault that propagated from the llm.complete node, the supervisor decider, or a flow.map branch) is authoritative; everything else retries per the node plan (the prior status-blind default). Internal (not private) so the classification is unit-pinned directly via InternalsVisibleTo.</summary>
     internal static (bool Retryable, TimeSpan? RetryAfter) ClassifyFailure(Exception? thrown)
