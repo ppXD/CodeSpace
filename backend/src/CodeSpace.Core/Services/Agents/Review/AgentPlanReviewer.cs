@@ -34,13 +34,16 @@ public sealed class AgentPlanReviewer : IAgentPlanReviewer, IScopedDependency
             ReviewerModelId = request.ReviewerModelId,
         }, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>The grounded plan-review body: verify the plan against the REAL tree — assumptions, feasibility, completeness, already-done work. The capability-context clause is load-bearing: the reviewer's OWN clone is deliberately read-only, and a real run was once derailed by a reviewer that probed <c>touch</c>/<c>dotnet build</c>, hit its own sandbox wall, and concluded the plan itself was unachievable — the executing agents' environment must never be inferred from the reviewer's. Internal for direct unit pinning.</summary>
+    /// <summary>The grounded plan-review body: verify the plan against the REAL tree — assumptions, feasibility, completeness, already-done work, and (⑧) whether each subtask's ACCEPTANCE is satisfiable. The capability-context clause is load-bearing: the reviewer's OWN clone is deliberately read-only, and a real run was once derailed by a reviewer that probed <c>touch</c>/<c>dotnet build</c>, hit its own sandbox wall, and concluded the plan itself was unachievable — the executing agents' environment must never be inferred from the reviewer's. Internal for direct unit pinning.</summary>
     internal static string BuildReviewInstructions(string planArtifact, string goal)
     {
         return
             "You are an INDEPENDENT reviewer. This workspace is the repository the plan below targets, checked out at its base state. " +
             "VERIFY the plan against the ACTUAL code — read the files it presumes, run greps: (1) do its assumptions hold (files, frameworks, test infrastructure it names or implies)? " +
             "(2) is each step feasible and necessary in THIS codebase? (3) is anything the plan schedules already done? (4) does anything essential for the goal go unplanned? " +
+            "(5) is each subtask's ACCEPTANCE actually SATISFIABLE — can the way the plan declares that subtask 'done' be VERIFIED against this tree + what the executing agents will produce? " +
+            "Flag as a BLOCKING flaw any acceptance that can never pass AS WRITTEN: a tests/command check naming a framework, script, or path this repo lacks; a rubric / citation / schema check with no rubric or schema supplied; " +
+            "or an acceptance that needs an artifact (a repository binding, a built binary, a produced branch) this run will not create. An unsatisfiable acceptance dooms its subtask to endless retry — judge it from the CODE + the plan's declared checks, never from your own inability to run them. " +
             "You did not write the plan; judge it strictly against what you can see in the tree. Do NOT modify anything.\n\n" +
             "IMPORTANT — your sandbox is NOT the executing environment: your clone is deliberately READ-ONLY and command-restricted (write probes and builds WILL fail here by design). " +
             "The agents that will execute this plan run with WRITABLE workspaces and can run builds and tests. " +
