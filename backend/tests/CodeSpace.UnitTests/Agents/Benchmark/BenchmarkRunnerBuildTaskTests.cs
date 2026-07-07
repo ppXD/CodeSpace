@@ -94,4 +94,45 @@ public class BenchmarkRunnerBuildTaskTests
 
         agentTask.EnableMcpEndpoint.ShouldBe(expected, "the mcp opt-in is driven by the mode, not the agent selection");
     }
+
+    // ── Corpus A/B: the output-critic config is the run-level variable a critic-on/critic-off benchmark toggles ──
+
+    [Fact]
+    public void The_critic_on_arm_threads_the_output_review_config_onto_the_task()
+    {
+        var reviewerId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerId, MaxReviseRounds = 2 };
+
+        var agentTask = BenchmarkRunner.BuildAgentTask(Task(), BenchmarkMode.HarnessCli, Workspace, selection);
+
+        agentTask.OutputReviewMode.ShouldBe(ReviewMode.Improve, "the critic-ON arm runs the adversarial output critic — the A/B variable under test");
+        agentTask.ReviewerModelId.ShouldBe(reviewerId, "the independent reviewer's model row carries onto the task");
+        agentTask.MaxReviseRounds.ShouldBe(2, "the critic's revise budget carries onto the task");
+    }
+
+    [Fact]
+    public void The_critic_off_arm_leaves_the_output_critic_unset_byte_identical()
+    {
+        // Arm B (and the whole pre-A/B corpus): no critic. A null selection OR a live selection that sets only
+        // non-review fields both leave the output critic OFF — the deterministic CI lane is unchanged either way.
+        var live = new BenchmarkAgentSelection { Harness = "claude-code", Model = "gw-model", Autonomy = AgentAutonomyLevel.Trusted };
+
+        foreach (var sel in new BenchmarkAgentSelection?[] { null, live })
+        {
+            var agentTask = BenchmarkRunner.BuildAgentTask(Task(), BenchmarkMode.HarnessCli, Workspace, sel);
+
+            agentTask.OutputReviewMode.ShouldBe(ReviewMode.None, "no OutputReviewMode set ⇒ no critic (byte-identical to the pre-A/B corpus)");
+            agentTask.ReviewerModelId.ShouldBeNull("no reviewer model when the critic is off");
+            agentTask.MaxReviseRounds.ShouldBeNull("no revise budget when the critic is off");
+
+            // LITERAL byte-identity: the three A/B fields carry [JsonIgnore(WhenWritingDefault/Null)], so a critic-off
+            // task serializes WITHOUT them — the persisted task_json is unchanged vs the pre-A/B corpus (the deterministic
+            // CI lane can't drift). Serialize with the SAME options the run persistence uses.
+            var json = System.Text.Json.JsonSerializer.Serialize(agentTask, CodeSpace.Core.Services.Agents.AgentJson.Options);
+
+            json.ShouldNotContain("outputReviewMode", Case.Insensitive, "critic-off ⇒ the field is omitted from persisted task_json");
+            json.ShouldNotContain("reviewerModelId", Case.Insensitive, "critic-off ⇒ the field is omitted from persisted task_json");
+            json.ShouldNotContain("maxReviseRounds", Case.Insensitive, "critic-off ⇒ the field is omitted from persisted task_json");
+        }
+    }
 }

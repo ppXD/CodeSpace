@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Messages.Agents.Benchmark;
 
 /// <summary>
@@ -28,4 +30,13 @@ public sealed record BenchmarkAgentSelection
 
     /// <summary>How trusted the agent runs. Null ⇒ <see cref="AgentAutonomyLevel.Standard"/> (workspace-write, the corpus default). A real coding agent that must reach the gateway + edit to solve uses <see cref="AgentAutonomyLevel.Trusted"/>.</summary>
     public AgentAutonomyLevel? Autonomy { get; init; }
+
+    /// <summary>The adversarial OUTPUT critic each attempt runs at completion — the variable an A/B benchmark toggles (critic-on vs critic-off). Null / <see cref="ReviewMode.None"/> ⇒ no critic (byte-identical to the pre-A/B corpus). Folds into <see cref="AgentTask.OutputReviewMode"/>.</summary>
+    public ReviewMode? OutputReviewMode { get; init; }
+
+    /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model (or, when only one credential is seeded, that one). Only consulted when <see cref="OutputReviewMode"/> is not None. Folds into <see cref="AgentTask.ReviewerModelId"/>.</summary>
+    public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>How many bounded revise rounds a flagged attempt may take before it settles — the critic's teeth (critique → re-verify). Null ⇒ the executor default for the resolved review mode. Folds into <see cref="AgentTask.MaxReviseRounds"/>; inert when <see cref="OutputReviewMode"/> is None.</summary>
+    public int? MaxReviseRounds { get; init; }
 }

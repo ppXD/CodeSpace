@@ -1,7 +1,9 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
@@ -94,6 +96,9 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             TimeoutSeconds = task.TimeoutSeconds,
             EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp ? true : null,
+            OutputReviewMode = selection?.OutputReviewMode ?? ReviewMode.None,
+            ReviewerModelId = selection?.ReviewerModelId,
+            MaxReviseRounds = selection?.MaxReviseRounds,
         };
     }
 
@@ -112,16 +117,24 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. <paramref name="mcpEnabled"/> is the executor's resolved MCP gate for this run — the observable cli vs cli-mcp distinction.</summary>
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpEnabled) => new()
+    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpEnabled"/> is the executor's resolved MCP gate for this run — the observable cli vs cli-mcp distinction.</summary>
+    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpEnabled)
     {
-        TaskId = task.Id,
-        Mode = mode,
-        AgentRunId = run.Id,
-        RunStatus = run.Status,
-        DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
-        Grade = grade,
-        McpEndpointEnabled = mcpEnabled,
-        PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
-    };
+        var result = run.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
+
+        return new BenchmarkResult
+        {
+            TaskId = task.Id,
+            Mode = mode,
+            AgentRunId = run.Id,
+            RunStatus = run.Status,
+            DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
+            Grade = grade,
+            McpEndpointEnabled = mcpEnabled,
+            TokenUsage = result?.TokenUsage,
+            ReviseRounds = result?.ReviseRounds ?? 0,
+            ExitReason = result?.ExitReason,
+            PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
+        };
+    }
 }

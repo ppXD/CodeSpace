@@ -34,6 +34,20 @@ public sealed record BenchmarkResult
     public required BenchmarkGrade Grade { get; init; }
 
     /// <summary>
+    /// Total tokens the run BILLED (input+output, summed across every revise round the executor ran). Null when the run
+    /// reported no usage (the deterministic fake CLI emits none). COST NOTE for a critic A/B: this EXCLUDES the critic's
+    /// OWN review model tokens — on a standalone benchmark run (<c>workflowRunId=null</c>) the critic's usage lands
+    /// nowhere, so an arm's true cost is strictly ≥ the sum of this field. Projected from the run's <c>AgentRunResult.TokenUsage</c>.
+    /// </summary>
+    public AgentTokenUsage? TokenUsage { get; init; }
+
+    /// <summary>How many bounded revise rounds the executor ran inside this run (<c>AgentRunResult.ReviseRounds</c>). In a critic-on arm this is the retry a critic flag bought; 0 in a critic-off arm. The retry-share disclosure that keeps an A/B honest — a solve-rate lift riding on extra attempts is visible here, not hidden.</summary>
+    public int ReviseRounds { get; init; }
+
+    /// <summary>The run's terminal <c>AgentRunResult.ExitReason</c>. Scopes an intervention proxy to the CRITIC-flag path (<c>"output-flagged"</c>) so it is never conflated with the arm-symmetric <c>"stalled"</c> harness-noise path. Null when the run recorded no result (a setup/infra failure before completion).</summary>
+    public string? ExitReason { get; init; }
+
+    /// <summary>
     /// Whether the run-scoped MCP tool-fabric endpoint was actually OPENED for this run — the resolved state of the
     /// executor's per-run gate, recorded by the runner from the SAME gate the executor used so a row can never be
     /// mislabeled. This is the load-bearing distinction between <see cref="BenchmarkMode.HarnessCli"/> (false) and
