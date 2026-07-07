@@ -274,6 +274,9 @@ public class TaskLaunchFlowTests
             // The baked id is a REAL enabled credentialed-model row the TEAM owns — not a guess, not a foreign row.
             (await IsTeamPoolRowAsync(Guid.Parse(bakedBrain!), teamId)).ShouldBeTrue(
                 "the baked brain is a team-owned, enabled credentialed-model row the decider can resolve by id");
+
+            ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeFalse(
+                "no pin was authored at all — this is an ordinary auto-select, not a fallback from a bad pin");
         }
         finally
         {
@@ -314,6 +317,9 @@ public class TaskLaunchFlowTests
 
             ReadSupervisorBrainModelId(run.DefinitionSnapshotJson!).ShouldBe(pinnedRow.ToString(),
                 customMessage: "the operator's pinned brain row binds verbatim into the supervisor's brain model — not the auto pick");
+
+            ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeFalse(
+                "the pin resolved cleanly — never mark an honored pin as an ineligible fallback");
         }
         finally
         {
@@ -351,6 +357,9 @@ public class TaskLaunchFlowTests
             bakedBrain.ShouldNotBeNull("a non-structured pin still yields a brain — the auto fallback, never NoBrainModelStop");
             bakedBrain.ShouldNotBe(ollamaRow.ToString(), "the unusable (non-structured) pin is NOT baked — auto picks a structured-eligible row instead");
             (await IsTeamPoolRowAsync(Guid.Parse(bakedBrain!), teamId)).ShouldBeTrue("the fallback brain is a real team pool row");
+
+            ReadSupervisorBrainModelPinIneligible(run.DefinitionSnapshotJson!).ShouldBeTrue(
+                "the operator's pin silently steered the run onto a DIFFERENT brain than requested — that must be discoverable on the run's own definition, not just a swapped id with no trace");
         }
         finally
         {
@@ -1536,6 +1545,15 @@ public class TaskLaunchFlowTests
         var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
 
         return sup.GetProperty("config").TryGetProperty("supervisorModelId", out var brain) ? brain.GetString() : null;
+    }
+
+    /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>brainModelPinIneligible</c> flag — true only when the operator's pin was authored but did NOT resolve, so <see cref="ReadSupervisorBrainModelId"/> is the auto-selected fallback. False when the key is absent (no pin, or the pin was honored).</summary>
+    private static bool ReadSupervisorBrainModelPinIneligible(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("brainModelPinIneligible", out var flag) && flag.GetBoolean();
     }
 
     /// <summary>Whether the row id is an enabled credentialed-model row under an active credential the team owns — proves the baked brain is a real, team-scoped, decider-resolvable row.</summary>

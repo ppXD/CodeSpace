@@ -92,6 +92,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // structured-capable brain, so the build stays pure + a bare supervisor still validates (it just fails closed
         // at decide time — the honest floor).
         AddIfPresent(config, "supervisorModelId", context.SupervisorBrainModelId?.ToString());
+        // The operator's pin was authored but ineligible, so supervisorModelId above is the auto-selected FALLBACK,
+        // not the requested row — record that fact instead of silently baking the swap with no trace. False (the
+        // common case: no pin, or the pin was honored) ⇒ omitted, byte-identical.
+        AddIfPresent(config, "brainModelPinIneligible", context.SupervisorBrainModelPinIneligible ? (object?)true : null);
         // The decision-critic mode + its reviewer model — baked so every turn + replay reads the same critic config.
         // None (the default) ⇒ omitted ⇒ the critic decorator is a pure passthrough ⇒ byte-identical. Baked as the enum's
         // INT (the supervisor config deserializer has no string-enum converter), round-tripping to ReviewMode by default.

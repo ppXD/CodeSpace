@@ -30,12 +30,13 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, bool brainModelPinIneligible = false, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
         SupervisorBrainModelId = brainModelId,
+        SupervisorBrainModelPinIneligible = brainModelPinIneligible,
         AllowedModelIds = allowedModelIds,
         AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
         AcceptanceChecks = acceptanceChecks,
@@ -259,6 +260,28 @@ public class SupervisorDefinitionBuilderTests
 
         sup.Config.GetProperty("supervisorModelId").GetString().ShouldBe(brain.ToString(),
             "the launch-resolved brain row id is baked into the node config — the decider runs on it (no NoBrainModelStop turn-1)");
+    }
+
+    [Fact]
+    public void A_bare_context_omits_the_brain_pin_ineligible_flag()
+    {
+        // The common case (no pin, or an honored pin): no fallback happened, so the flag must not be baked at all —
+        // byte-identical to every pre-existing supervisor definition.
+        Builder.Build(Context(brainModelId: Guid.NewGuid())).Nodes.Single(n => n.Id == "sup").Config
+            .TryGetProperty("brainModelPinIneligible", out _).ShouldBeFalse("no fallback ⇒ no key ⇒ byte-identical");
+    }
+
+    [Fact]
+    public void Supervisor_config_bakes_the_brain_pin_ineligible_flag_when_the_launch_fell_back()
+    {
+        // TaskLaunchService sets this when the operator's pin was ineligible and it auto-selected a DIFFERENT brain —
+        // the flag must survive into the frozen definition so the swap is discoverable, not a silent id substitution.
+        var fallbackBrain = Guid.NewGuid();
+
+        var sup = Builder.Build(Context(brainModelId: fallbackBrain, brainModelPinIneligible: true)).Nodes.Single(n => n.Id == "sup");
+
+        sup.Config.GetProperty("brainModelPinIneligible").GetBoolean().ShouldBeTrue(
+            "the pin didn't resolve — the baked supervisorModelId is a fallback, and that fact must ride along with it");
     }
 
     [Fact]
