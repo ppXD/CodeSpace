@@ -62,6 +62,13 @@ public sealed class CorpusBenchmarkFlowTests
         // The corpus reduces to the per-mode rows the scorecard lays side by side, every one an honest 0.0 solve rate.
         run.Scorecard.Harnesses.Select(h => h.Harness).ShouldBe(new[] { "bench:cli", "bench:cli-mcp" }, ignoreOrder: true);
         run.Scorecard.Harnesses.ShouldAllBe(h => h.Total == corpus.Count && h.SuccessRate == 0.0);
+
+        // Corpus A/B projection: BuildResult deserializes each run's ResultJson to carry the token / revise / exit-reason
+        // fields a critic A/B reports. On this critic-OFF baseline every pair has zero revise rounds and no critic exit —
+        // the byte-identical control arm, and the proof the projection actually populates (a fold regression would blank these).
+        run.Results.ShouldAllBe(r => r.ReviseRounds == 0, "critic-off baseline ⇒ zero revise rounds on every pair (the control arm)");
+        run.Results.ShouldAllBe(r => !string.IsNullOrEmpty(r.ExitReason), "the terminal ExitReason is projected from the run's ResultJson, never blank");
+        run.Results.ShouldAllBe(r => r.ExitReason != "output-flagged", "no critic ran ⇒ no pair is critic-flagged");
     }
 
     private async Task<Guid> SeedTeamAsync()
