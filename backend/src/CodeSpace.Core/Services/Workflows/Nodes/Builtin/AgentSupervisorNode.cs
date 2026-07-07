@@ -95,6 +95,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
                     "agentDefinitionId": { "type": "string", "format": "uuid", "x-selector": "agent", "description": "Agent persona each spawned agent embodies — its system prompt + model + tools become the defaults. Leave empty to configure inline." },
                     "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential each spawned agent authenticates with. Leave empty for the persona's or the team/operator default." },
                     "runnerKind": { "type": "string", "description": "Sandbox runner each spawned agent executes on (e.g. \"local\"). Defaults to the deployment default." },
+                    "timeoutSeconds": { "type": "integer", "description": "Wall-clock cap for each spawned agent, in seconds. Positive caps the run; 0 = no wall-clock (bounded only by the stall watchdog + cost cap); leave empty for the bounded 1h default." },
                     "enableMcp": { "type": "boolean", "description": "Open the MCP tool-fabric endpoint for each spawned agent. Leave unset to defer to the deployment default." },
                     "autonomyLevel": { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much each spawned agent may do — write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest." }
                   }

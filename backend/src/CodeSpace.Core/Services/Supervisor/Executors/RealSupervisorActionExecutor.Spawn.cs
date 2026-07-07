@@ -409,6 +409,10 @@ public sealed partial class RealSupervisorActionExecutor
             Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
+            // The profile's wall-clock cap, in the agent.code node's vocabulary: positive caps the run, an explicit ≤0
+            // means NO wall-clock (the operator's "no timeout" choice), absent → the bounded 1h default — so the Launch
+            // timeout override finally reaches the agents that do the hours of work.
+            TimeoutSeconds = profile?.TimeoutSeconds is { } timeout ? (timeout > 0 ? timeout : (int?)null) : 3600,
             ApprovalConversationId = context.ConversationId,
             EnableMcpEndpoint = profile?.EnableMcp,
             PushProducedBranch = forcePushBranch ? true : profile?.PushBranch,

@@ -150,6 +150,9 @@ public sealed record SupervisorAgentProfile
     /// <summary>The sandbox runner each spawned agent executes on (e.g. <c>"local"</c>). Null → the executor's default.</summary>
     public string? RunnerKind { get; init; }
 
+    /// <summary>Each spawned agent's wall-clock cap, in seconds — the same vocabulary as the <c>agent.code</c> node's <c>timeoutSeconds</c>: a positive value caps the run, an explicit ≤0 means NO wall-clock (bounded only by the stall watchdog + cost cap), null/absent → the bounded 1h default. Wired from the Launch override so a long deep task is no longer pinned at the default.</summary>
+    public int? TimeoutSeconds { get; init; }
+
     /// <summary>Per-run opt-in to the MCP tool-fabric endpoint for each spawned agent. Null → defer to the ambient deployment flag (an ordinary spawn is unchanged).</summary>
     public bool? EnableMcp { get; init; }
 

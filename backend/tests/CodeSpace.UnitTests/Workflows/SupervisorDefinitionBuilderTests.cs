@@ -181,7 +181,7 @@ public class SupervisorDefinitionBuilderTests
     {
         var repoId = Guid.NewGuid();
         var credId = Guid.NewGuid();
-        var profile = new ResolvedAgentProfile { RepositoryId = repoId, Harness = "claude-code", Model = "claude-sonnet", ModelCredentialId = credId, RunnerKind = "local", EnableMcp = true, AutonomyLevel = "Trusted" };
+        var profile = new ResolvedAgentProfile { RepositoryId = repoId, Harness = "claude-code", Model = "claude-sonnet", ModelCredentialId = credId, RunnerKind = "local", TimeoutSeconds = 7200, EnableMcp = true, AutonomyLevel = "Trusted" };
 
         var agentProfile = Builder.Build(Context(profile)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
 
@@ -190,6 +190,7 @@ public class SupervisorDefinitionBuilderTests
         agentProfile.GetProperty("model").GetString().ShouldBe("claude-sonnet");
         agentProfile.GetProperty("modelCredentialId").GetString().ShouldBe(credId.ToString());
         agentProfile.GetProperty("runnerKind").GetString().ShouldBe("local");
+        agentProfile.GetProperty("timeoutSeconds").GetInt32().ShouldBe(7200, "the Launch timeout override must reach the spawned agents, not die at the projection");
         agentProfile.GetProperty("enableMcp").GetBoolean().ShouldBeTrue();
         agentProfile.GetProperty("autonomyLevel").GetString().ShouldBe("Trusted");
     }
