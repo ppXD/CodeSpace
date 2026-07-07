@@ -125,9 +125,23 @@ public class SupervisorTurnServiceTests
 
         SupervisorTurnService.FoldNoProgressDecisions(new[] { PlanPrior(1), AskPrior(2, card.PayloadJson, """{"question":"q"}""") })
             .ShouldBe(2, "an UNANSWERED escalation is still a stall — only the human's ruling counts");
+    }
 
-        SupervisorTurnService.FoldNoProgressDecisions(new[] { AskPrior(1, """{"question":"which db?"}""", """{"question":"which db?","answer":"postgres"}""") })
-            .ShouldBe(1, "an answered CONTENT ask (model-authored question, no gate marker) never counts — a model looping its own asks still marches toward the stall bound");
+    [Fact]
+    public void An_answered_content_ask_resets_the_no_progress_streak()
+    {
+        // P1.5-A: a human answering the model's plain clarifying question (no gate marker) is engagement, not a
+        // stall — exactly like an answered confirmation/escalation card. Before this fix a run mid interactive
+        // clarification still marched toward the no-progress kill purely for talking to its operator.
+        SupervisorTurnService.FoldNoProgressDecisions(new[]
+        {
+            PlanPrior(1), PlanPrior(2), PlanPrior(3),
+            AskPrior(4, """{"question":"which db?"}""", """{"question":"which db?","answer":"postgres"}"""),
+            PlanPrior(5), PlanPrior(6),
+        }).ShouldBe(2, "the answered content ask resets the streak; only the two later plans count");
+
+        SupervisorTurnService.FoldNoProgressDecisions(new[] { PlanPrior(1), AskPrior(2, """{"question":"which db?"}""", """{"question":"which db?"}""") })
+            .ShouldBe(2, "an UNANSWERED content ask is still a stall — a model looping its own questions to itself gains nothing");
     }
 
     private static SupervisorPriorDecision PlanPrior(int seq) =>
