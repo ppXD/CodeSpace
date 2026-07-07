@@ -69,6 +69,12 @@ public sealed record JournalStep
     /// <summary>Whether an ASK step is a REVIEW-GATE ESCALATION — the hard-Gate ladder exhausted (critic disapproved, the revision was re-reviewed and still disapproved) and the run parked on the human. The frontend frames the ask with a "review-blocked" chip. False on every other step. Enriched off the ask payload's escalation marker.</summary>
     public bool ReviewEscalation { get; init; }
 
+    /// <summary>The DISCARDED DRAFT this decision replaced (pre-rendered "plan draft · via metis-coder-max · 8.2k tokens") — the "└ replaced a draft" line under a decision beat that went through a critic revision, attributing the once-anonymous authoring call. Null on every other step. Enriched by <c>DecisionReviewFactsSource</c>.</summary>
+    public string? Draft { get; init; }
+
+    /// <summary>Whether an ASK step is the PLAN-CONFIRMATION card (the S3 gate's park). The plan checklist card right above it is that park's structured answer surface (approve / request changes), so the frontend suppresses the generic inline answer bar here — one park, one surface. False on every other step. Enriched off the ask payload's confirmation marker.</summary>
+    public bool PlanConfirmation { get; init; }
+
     /// <summary>The render tone — the timeline's closed severity axis (Info / Success / Warning / Error).</summary>
     public TimelineSeverity Tone { get; init; } = TimelineSeverity.Info;
 

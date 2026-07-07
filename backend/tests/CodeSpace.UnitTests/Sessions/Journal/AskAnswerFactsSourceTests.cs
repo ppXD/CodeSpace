@@ -92,6 +92,23 @@ public class AskAnswerFactsSourceTests
             .ShouldBeFalse("a content ask / a confirmation card never reads as a review escalation — the marker is payload-pinned");
     }
 
+    [Fact]
+    public async Task A_pending_plan_confirmation_ask_is_flagged_so_the_generic_answer_bar_stays_off()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var log = new FakeSupervisorDecisionLog();
+
+        // A REAL confirmation card's payload — built by the production gate so the marker can't drift.
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, Core.Services.Supervisor.SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2).PayloadJson, "{}");
+
+        var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
+
+        var key = SupervisorDecisionTimelineMap.EventId(log.Rows.Single());
+        facts[key].PlanConfirmation.ShouldBeTrue("the plan checklist card is that park's answer surface — the frontend suppresses the generic bar");
+        facts[key].ReviewEscalation.ShouldBeFalse("the two gates never claim each other's cards");
+    }
+
     /// <summary>A REAL escalation card's payload — built by the production gate so the marker can't drift from the recognizer.</summary>
     private static string EscalationPayload() =>
         Core.Services.Supervisor.SupervisorGateEscalation.IntoAskHuman(

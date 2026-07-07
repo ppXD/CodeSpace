@@ -159,6 +159,11 @@ public class JournalStepDescriberRegistryTests
             .ShouldBe("Model critic approved the decision");
         Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = false, Rationale = "r", Scope = "decision" })
             .ShouldBe("Model critic flagged the decision", "no draft ⇒ the decision itself was flagged (the escalation's second rung)");
+
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = true, Rationale = "r", Scope = "plan" }, index: 1)
+            .ShouldBe("Model critic approved the revised plan", "a later rung reviews the REVISION — say so, or two same-titled beats read as a stutter");
+        Core.Services.Tasks.Timeline.Sources.DecisionReviewTimelineMap.TitleFor(new Messages.Agents.SupervisorDecisionReview { Approved = false, Rationale = "r", Scope = "decision" }, index: 1)
+            .ShouldBe("Model critic flagged the revised decision");
     }
 
     [Fact]

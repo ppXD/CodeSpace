@@ -421,13 +421,15 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 const topPlan = hasInlinePlan ? undefined : (planCard ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
                 const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
-                // A plain run with NO orchestration beat (a single agent, or a linear agent chain — no supervisor, no map
-                // fan-out) has no beat to hang its agent cards on, so the ③ skeleton would show only folded lifecycle and
-                // the agent's work would vanish. Render the room's own agent_group block(s) in that case — the SAME cards
-                // the room shows. When there IS a beat, the cards ride the beat (supervisor spawn / map dispatch) and this
-                // stays empty, so they're never doubled.
-                const hasBeat = journalTurn.steps.some((s) => s.beat);
-                const agentGroupBlocks = hasBeat ? [] : turn.blocks.filter((b) => b.type === "agent_group");
+                // A plain run with NO agent-carrying beat (a single agent, or a linear agent chain — no supervisor
+                // spawn, no map dispatch) has no beat to hang its agent cards on, so the ③ skeleton would show only
+                // folded lifecycle and the agent's work would vanish. Render the room's own agent_group block(s) in
+                // that case — the SAME cards the room shows. The predicate is "some beat CARRIES agents", not "some
+                // beat exists": a REVIEW beat (in-flight or landed) carries no cards, so it must not suppress them —
+                // otherwise a plain run's cards vanish for the whole review window. Card-carrying beats keep this
+                // empty, so cards are never doubled.
+                const beatsCarryAgents = journalTurn.steps.some((s) => s.beat && s.agents.length > 0);
+                const agentGroupBlocks = beatsCarryAgents ? [] : turn.blocks.filter((b) => b.type === "agent_group");
                 // Supporting rows AFTER the result — Files changed / Tools / Reasoning. Drop the "Plan · N subtasks" stat
                 // when the plan is shown inline (redundant); never re-render the one block pinned at the top.
                 const statBlocks = turn.blocks.filter((b) => b.type === "stat" && b.id !== topPlan?.id && !(hasInlinePlan && b.kind === "subtasks"));
@@ -632,6 +634,12 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
   const currentPlanStepId = planStepIds[planStepIds.length - 1];
   const planVersionById = new Map(planStepIds.map((id, i) => [id, i + 1]));
 
+  // Only the NEWEST pending ask gets the inline answer bar — the answer endpoint targets the newest unanswered ask,
+  // so a bar under an older (degraded/superseded) question would silently answer the wrong one. Plan-confirmation
+  // parks are excluded: the plan checklist card is that park's structured answer surface.
+  const pendingAskIds = turn.steps.filter((s) => s.beat && jVerbKey(s.verb) === "ask" && !s.answer && !s.planConfirmation).map((s) => s.id);
+  const answerableAskId = pendingAskIds[pendingAskIds.length - 1];
+
   return (
     <>
       {hasDecision && (
@@ -643,7 +651,7 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
       )}
       <div className="room-jrnl">
         {rows.map((r, i) => (r.kind === "step"
-          ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === currentPlanStepId ? planCard : undefined} planVersion={planVersionById.get(r.step.id)} planSuperseded={r.step.id !== currentPlanStepId} />
+          ? <JournalStepRow key={r.step.id} step={r.step} planCard={r.step.id === currentPlanStepId ? planCard : undefined} planVersion={planVersionById.get(r.step.id)} planSuperseded={r.step.id !== currentPlanStepId} askAnswerable={r.step.id === answerableAskId} />
           : partitionBackground(r.steps).map((g, j) => <JournalFold key={`fold-${i}-${g.category}-${j}`} steps={g.steps} category={g.category} />)))}
         {turn.steps.length === 0 && <p className="room-para room-muted">No steps recorded yet.</p>}
       </div>
@@ -783,7 +791,7 @@ function foldLabel(category: string, steps: JournalStep[]): string {
   }
 }
 
-function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock; planVersion?: number; planSuperseded?: boolean }) {
+function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, askAnswerable }: { step: JournalStep; muted?: boolean; planCard?: PlanChecklistBlock; planVersion?: number; planSuperseded?: boolean; askAnswerable?: boolean }) {
   // Raw thinking never renders flat on the main transcript — it lives in the trace drawer. A folded thinking step,
   // even when its disclosure is opened, shows only its one-line title; the full chain-of-thought stays in the trace.
   const showDetail = step.detail && step.kind !== "thinking";
@@ -791,7 +799,8 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
   // the question as "{question} — {answer}", so use the known answer to locate + strip that suffix — precise, unlike an
   // em-dash split which mis-fires when the question itself contains a dash. The answer then reads as its OWN "└ answer ·"
   // line (like the "└ why" rationale line). Scoped to ASK beats with an answer; a still-pending ask shows just the question.
-  const ask = step.beat && jVerbKey(step.verb) === "ask" && step.answer ? askParts(step.detail, step.answer) : null;
+  const isAsk = step.beat && jVerbKey(step.verb) === "ask";
+  const ask = isAsk && step.answer ? askParts(step.detail, step.answer) : null;
   return (
     <div className={`room-jstep room-jtone-${jTone(step.tone)}${step.milestone ? " room-jkey" : ""}${muted ? " room-jmuted" : ""}`}>
       <span className="room-jnode" />
@@ -804,13 +813,17 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
         <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
+      {step.draft && <div className="room-jwhy room-jdraftline"><span className="room-jwhy-l">└ replaced a draft · </span>{step.draft}</div>}
       {step.review && <ReviewVerdictCard review={step.review} />}
       {showDetail && (ask
         ? <>
-            {ask.question && <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{ask.question}</div>}
+            {ask.question && <JournalAskQuestion text={ask.question} tone={jTone(step.tone)} />}
             <div className="room-janswer"><span className="room-janswer-l">└ answer · </span>{ask.answer}</div>
           </>
-        : <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>)}
+        : isAsk
+          ? <JournalAskQuestion text={step.detail!} tone={jTone(step.tone)} />
+          : <div className={`room-jdetail room-jdetail-${jTone(step.tone)}`}>{step.detail}</div>)}
+      {isAsk && askAnswerable && !step.answer && !muted && !step.planConfirmation && <AskAnswerBar escalation={step.reviewEscalation === true} />}
       {step.modelCall && (
         <div className="room-jmodel">
           <span className="room-jmodel-l">└ via · </span>
@@ -833,9 +846,10 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded }: 
 }
 
 /** The reviewer's verdict card under a REVIEW beat — COLLAPSED by default to one line (badge + rationale + chevron)
- *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues, the discarded
- *  draft's attribution, and the independence line — "independent agent · claude-code" with a deep-link into the
- *  reviewer's OWN run, or "model critic — independently prompted" when the verdict came from the in-process critic. */
+ *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues and the independence
+ *  line — "independent agent · claude-code" with a deep-link into the reviewer's OWN run, or "model critic —
+ *  independently prompted" when the verdict came from the in-process critic. The WHOLE card toggles (open or closed) —
+ *  clicking the expanded body collapses it again; only the deep-link button opts out. */
 function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
   const openDrawer = useRoomDrawer();
   const run = useContext(RunActionsContext);
@@ -843,15 +857,14 @@ function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
   const n = review.issues.length;
   const reviewerRunId = review.reviewerRunId ?? null;
   return (
-    <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`} data-open={open}>
-      <button type="button" className="room-jverdict-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+    <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`} data-open={open} onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="room-jverdict-head" aria-expanded={open}>
         <span className="room-jverdict-badge">{review.approved ? "✓ approved" : `⚠ flagged${n > 0 ? ` · ${n} issue${n === 1 ? "" : "s"}` : ""}`}</span>
         <span className="room-jverdict-rationale" data-clamp={!open || undefined}>{review.rationale}</span>
         <Sym n={open ? "chevron-down" : "chevron-right"} s={12} cls="room-jverdict-chev" />
       </button>
       {open && <>
         {review.issues.map((issue, i) => <div key={i} className="room-jverdict-issue">└ {issue}</div>)}
-        {review.draftAttribution && <div className="room-jverdict-issue room-jverdict-draft">└ discarded: {review.draftAttribution}</div>}
         <div className="room-jverdict-via">
           <span className="room-jmodel-l">└ via · </span>
           {reviewerRunId
@@ -870,6 +883,89 @@ function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
           )}
         </div>
       </>}
+    </div>
+  );
+}
+
+/** An ASK beat's question text — long questions CLAMP to a few lines with a "show more" toggle, so a parked card
+ *  (especially an older run's unbounded escalation prose) never walls the timeline. Short questions render plain. */
+function JournalAskQuestion({ text, tone }: { text: string; tone: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const long = text.length > 280;
+  return (
+    <div className={`room-jdetail room-jdetail-${tone}`}>
+      <span data-clamp={(long && !expanded) || undefined} className="room-jask-q">{text}</span>
+      {long && <button type="button" className="room-jask-more" onClick={() => setExpanded((v) => !v)}>{expanded ? "show less" : "show more"}</button>}
+    </div>
+  );
+}
+
+/** The INLINE answer bar under a PENDING ask beat — the run page's own answer surface, so a parked run is operable
+ *  right where the question appears (previously the sole surface was the conversation card, invisible from here).
+ *  Posts to the run-scoped ask/answer endpoint, which resolves the SAME durable wait the card's Answer button does
+ *  (first answer wins). A review-gate ESCALATION adds the one-shot "Approve anyway" quick action — the 'approve'
+ *  reply the gate reads as absolution; any typed text is guidance the supervisor's next decide reads. */
+function AskAnswerBar({ escalation }: { escalation: boolean }) {
+  const run = useContext(RunActionsContext);
+  const queryClient = useQueryClient();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  // The answer folds onto the ask's durable outcome only at the NEXT supervisor turn, so the refetch right after a
+  // successful POST still shows the ask "unanswered". Latch locally once the wait resolves — the bar reads "answer
+  // sent — resuming…" instead of silently staying live (which invited a confusing second submit).
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!run || run.isTerminal) return null;
+
+  const send = async (answer: string) => {
+    if (!answer.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await sessionsApi.answerRunAsk(run.runId, answer.trim());
+      if (result == null) {
+        setError("Nothing left to answer — this question was already settled.");
+      } else {
+        setSent(true);
+        setText("");
+        if (!result.resumed) setError("Already answered on another surface — the run is resuming.");
+      }
+      await queryClient.invalidateQueries({ queryKey: ["run-journal"] });
+      await queryClient.invalidateQueries({ queryKey: ["run-room"] });
+    } catch {
+      setError("Could not send your answer — try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (sent) {
+    return (
+      <div className="room-jask-bar">
+        <span className="room-jask-sent"><Sym n="check" s={11} /> {error ?? "Answer sent — the run is resuming…"}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="room-jask-bar">
+      <input
+        className="room-jask-input"
+        placeholder={escalation ? "Describe what to do instead…" : "Type your answer…"}
+        value={text}
+        disabled={busy}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send(text); }}
+      />
+      <button type="button" className="room-jask-btn room-jask-send" disabled={busy || text.trim().length === 0} onClick={() => void send(text)}>
+        Answer
+      </button>
+      {escalation && (
+        <button type="button" className="room-jask-btn room-jask-approve" disabled={busy} title="Proceed with the blocked decision despite the review (one-shot)" onClick={() => void send("approve")}>
+          <Sym n="check" s={11} /> Approve anyway
+        </button>
+      )}
+      {error && <span className="room-jask-err">{error}</span>}
     </div>
   );
 }
@@ -1157,6 +1253,7 @@ function PlanChecklistCard({ plan }: { plan: PlanChecklistBlock }) {
     try {
       const result = await sessionsApi.confirmRunPlan(run.runId, { approve, feedback: feedback() || undefined });
       if (result == null) setError("Nothing left to confirm — the plan was already answered.");
+      await queryClient.invalidateQueries({ queryKey: ["run-journal"] });
       await queryClient.invalidateQueries({ queryKey: ["run-room"] });
     } catch {
       setError("Could not send your answer — try again.");

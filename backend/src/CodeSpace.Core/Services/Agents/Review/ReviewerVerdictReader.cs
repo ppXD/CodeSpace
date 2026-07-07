@@ -15,8 +15,10 @@ namespace CodeSpace.Core.Services.Agents.Review;
 /// source, and the producer-card join. Re-uses the production <see cref="AgentReviewRunner.ParseVerdict"/> so a
 /// projection can never disagree with the executor about what a reviewer concluded. DELIBERATELY event-log-free:
 /// the verdict is read off the reviewer's durable RESULT, so it surfaces identically whether or not the harness
-/// emitted a final-summary event (codex-cli does not — the miss that hid a real run's verdict). A reviewer run
-/// still in flight, non-succeeded, or off-contract yields NO verdict. READ-ONLY, one narrow batch query.
+/// emitted a final-summary event (codex-cli does not — the miss that hid a real run's verdict). An IN-FLIGHT
+/// reviewer (Queued/Running) yields a verdict-LESS row — the "reviewer inspecting…" beat, upgraded in place when
+/// the verdict lands (same event id); a terminal non-succeeded / off-contract run yields nothing (fail-open — the
+/// model-critic fallback's own beat takes over). READ-ONLY, one narrow batch query.
 /// </summary>
 public sealed class ReviewerVerdictReader : IScopedDependency
 {
@@ -56,23 +58,28 @@ public sealed class ReviewerVerdictReader : IScopedDependency
 
     private static readonly IReadOnlyDictionary<Guid, string> EmptyKeys = new Dictionary<Guid, string>();
 
-    /// <summary>One reviewer row → its parsed verdict, or null when it carries none yet (in flight / failed / off-contract) — fail-open, mirroring the executor's ladder.</summary>
+    /// <summary>One reviewer row → its parsed verdict; an IN-FLIGHT row (Queued/Running) keeps its beat with a NULL verdict ("reviewer inspecting…", upgraded in place when it lands); a terminal non-succeeded / off-contract run yields null — fail-open, mirroring the executor's ladder.</summary>
     private static ReviewerVerdictRow? ToRow(ReviewerSlice r)
     {
+        var scope = r.IterationKey.EndsWith(AgentPlanReviewer.IterationKey, StringComparison.Ordinal) ? JournalReviewVerdict.PlanScope : JournalReviewVerdict.OutputScope;
+
+        if (r.Status is AgentRunStatus.Queued or AgentRunStatus.Running)
+            return new ReviewerVerdictRow(r.Id, r.IterationKey, r.NodeId, r.CreatedDate, r.CreatedDate, scope, Verdict: null);
+
         if (r.Status != AgentRunStatus.Succeeded || string.IsNullOrEmpty(r.ResultJson)) return null;
 
         var verdict = AgentReviewRunner.ParseVerdict(TryReadSummary(r.ResultJson));
 
         if (verdict.Failed) return null;
 
-        return new ReviewerVerdictRow(r.IterationKey, r.NodeId, r.CreatedDate, r.CompletedAt ?? r.CreatedDate, new JournalReviewVerdict
+        return new ReviewerVerdictRow(r.Id, r.IterationKey, r.NodeId, r.CreatedDate, r.CompletedAt ?? r.CreatedDate, scope, new JournalReviewVerdict
         {
             Approved = verdict.Approved,
             Rationale = verdict.Rationale,
             Issues = verdict.Issues.Select(i => i.ToString()).ToList(),
             ReviewerRunId = r.Id,
             ReviewerHarness = TryReadHarness(r.TaskJson),
-            Scope = r.IterationKey.EndsWith(AgentPlanReviewer.IterationKey, StringComparison.Ordinal) ? JournalReviewVerdict.PlanScope : JournalReviewVerdict.OutputScope,
+            Scope = scope,
         });
     }
 
@@ -99,5 +106,5 @@ public sealed class ReviewerVerdictReader : IScopedDependency
     private sealed record HarnessSlice(string? Harness);
 }
 
-/// <summary>One landed reviewer verdict: the reviewer run's cell key (its producer join key) + node, its staging time (latest-wins per producer) and completion time (the verdict beat's timestamp), and the render-ready verdict.</summary>
-public sealed record ReviewerVerdictRow(string IterationKey, string? NodeId, DateTimeOffset CreatedAt, DateTimeOffset CompletedAt, JournalReviewVerdict Verdict);
+/// <summary>One reviewer run's beat: the reviewer run id (the beat's identity — the same event id in flight and landed), its cell key (the producer join key) + node, its staging time (latest-wins per producer) and completion time (the verdict beat's timestamp; = staging while in flight), the scope (<c>plan</c>/<c>output</c>, known from the key before any verdict), and the render-ready verdict — NULL while the reviewer is still inspecting.</summary>
+public sealed record ReviewerVerdictRow(Guid ReviewerRunId, string IterationKey, string? NodeId, DateTimeOffset CreatedAt, DateTimeOffset CompletedAt, string Scope, JournalReviewVerdict? Verdict);

@@ -54,6 +54,9 @@ public sealed record SupervisorDecisionReview
 
     /// <summary>The DISCARDED draft this review flagged, when a revision followed — its verb + the model call that authored it, pre-rendered ("plan draft · via metis-coder-max · 8.2k tokens") so the once-anonymous call is attributed. Null when the review approved (nothing was discarded).</summary>
     public string? DraftAttribution { get; init; }
+
+    /// <summary>True when a REAL AGENT produced this verdict (its reviewer run is already a first-class journal beat — the projection must not beat it twice; the entry rides for its <see cref="DraftAttribution"/>). False for the in-process model critic.</summary>
+    public bool ViaAgent { get; init; }
 }
 
 /// <summary>The model call that authored a supervisor decision — the model id + its token usage, captured off the decider's LLM response. A data noun (Rule 18.1) folded into the decision's outcome so a read can attribute the decision.</summary>

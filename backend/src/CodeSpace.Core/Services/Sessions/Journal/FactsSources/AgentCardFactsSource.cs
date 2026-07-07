@@ -75,7 +75,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
     {
         var verdictRows = await _verdicts.ReadForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var outputVerdicts = verdictRows.Where(v => v.Verdict.Scope == JournalReviewVerdict.OutputScope).ToList();
+        var outputVerdicts = verdictRows.Where(v => v.Verdict is not null && v.Scope == JournalReviewVerdict.OutputScope).ToList();
 
         if (outputVerdicts.Count == 0) return EmptyReviews;
 
@@ -83,7 +83,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
 
         var latestByKey = outputVerdicts
             .GroupBy(v => v.IterationKey)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(v => v.CreatedAt).First().Verdict);
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(v => v.CreatedAt).First().Verdict!);
 
         return producerKeys
             .Where(p => latestByKey.ContainsKey(AgentOutputReviewer.ReviewIterationKey(p.Value)))

@@ -81,23 +81,29 @@ public static class SupervisorGateEscalation
         }
     }
 
-    /// <summary>The escalation question: the blocked verb, the reviewer's rationale, and up to <see cref="MaxQuotedIssues"/> evidence-attached issues.</summary>
+    /// <summary>Per-fragment cap on the quoted rationale / issue text — the card is a HEADLINE, not the review dossier (the full evidence-attached verdicts are their own journal beats since H1), so a verbose critic can't turn the ask into a wall of text.</summary>
+    internal const int MaxQuotedChars = 200;
+
+    /// <summary>The escalation question — COMPACT by design: the blocked verb, the reviewer's clipped rationale, and up to <see cref="MaxQuotedIssues"/> clipped issue headlines (no evidence dumps — the full verdicts live on the run's REVIEW beats). Bounded so the parked card reads in seconds.</summary>
     private static string QuestionFor(SupervisorDecision blocked, CriticVerdict verdict)
     {
         var builder = new StringBuilder();
 
-        builder.Append($"An independent reviewer blocked the supervisor's '{blocked.Kind}' decision (twice — the revised decision did not satisfy it either). Reviewer: {verdict.Rationale}");
+        builder.Append($"An independent reviewer blocked the supervisor's '{blocked.Kind}' decision (twice — the revised decision did not satisfy it either). Reviewer: {Clip(verdict.Rationale)}");
 
         if (verdict.Issues.Count > 0)
         {
             builder.Append(" Issues: ");
-            builder.Append(string.Join("; ", verdict.Issues.Take(MaxQuotedIssues)));
+            builder.Append(string.Join("; ", verdict.Issues.Take(MaxQuotedIssues).Select(i => Clip(i.Text))));
             if (verdict.Issues.Count > MaxQuotedIssues) builder.Append($" (+{verdict.Issues.Count - MaxQuotedIssues} more)");
             builder.Append('.');
         }
 
+        builder.Append(" The full verdicts are on this run's review steps.");
         builder.Append(' ').Append(EscalationMarker);
 
         return builder.ToString();
     }
+
+    private static string Clip(string text) => text.Length <= MaxQuotedChars ? text : string.Concat(text.AsSpan(0, MaxQuotedChars).TrimEnd(), "…");
 }

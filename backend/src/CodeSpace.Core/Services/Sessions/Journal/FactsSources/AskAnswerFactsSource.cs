@@ -15,7 +15,10 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 ///
 /// <para>Also flags a REVIEW-GATE ESCALATION ask (the hard-Gate ladder exhausted and parked the run on the human) via
 /// the pinned payload marker (<see cref="SupervisorGateEscalation.QuestionCarriesMarker"/>) — set even while the ask is
-/// still PENDING, so the "review-blocked" framing shows the moment the run parks, not only after the answer lands.</para>
+/// still PENDING, so the "review-blocked" framing shows the moment the run parks, not only after the answer lands.
+/// A PLAN-CONFIRMATION card (<see cref="SupervisorPlanConfirmation.QuestionCarriesMarker"/>) is flagged the same way,
+/// so the frontend suppresses the generic answer bar on it — the plan checklist card is that park's richer answer
+/// surface (structured approve / request-changes), and two bars answering one wait would just be noise.</para>
 /// </summary>
 public sealed class AskAnswerFactsSource : IJournalFactsSource
 {
@@ -36,9 +39,10 @@ public sealed class AskAnswerFactsSource : IJournalFactsSource
         {
             var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
             var escalation = SupervisorGateEscalation.QuestionCarriesMarker(decision.PayloadJson);
+            var planGate = SupervisorPlanConfirmation.QuestionCarriesMarker(decision.PayloadJson);
 
-            if (!string.IsNullOrWhiteSpace(answer) || escalation)
-                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = string.IsNullOrWhiteSpace(answer) ? null : answer.Trim(), ReviewEscalation = escalation };
+            if (!string.IsNullOrWhiteSpace(answer) || escalation || planGate)
+                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Answer = string.IsNullOrWhiteSpace(answer) ? null : answer.Trim(), ReviewEscalation = escalation, PlanConfirmation = planGate };
         }
 
         return facts;

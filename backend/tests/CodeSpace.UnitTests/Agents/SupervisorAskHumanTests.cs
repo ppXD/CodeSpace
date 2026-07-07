@@ -92,6 +92,36 @@ public class SupervisorAskHumanTests
     // ── SupervisorOutcome helpers (the canonical ask_human shape) ────────────────────
 
     [Fact]
+    public void Folding_the_answer_preserves_the_review_chain_and_usage_on_the_parked_row()
+    {
+        // The escalation ask's row carries the WHOLE Gate ladder (its verdicts + the draft attribution) + the
+        // authoring usage. The answer fold must set ONLY the answer — the old bare re-emit erased the exchange
+        // off the durable tape the moment the human answered (the reviewer-proven J defect).
+        var reviews = new[]
+        {
+            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none)" }, Scope = "decision", DraftAttribution = "spawn draft · authored via m9 · 8,000 tokens", ViaAgent = true },
+            new SupervisorDecisionReview { Approved = false, Rationale = "still thin", Scope = "decision" },
+        };
+        var parked = SupervisorOutcome.WriteReviews(
+            SupervisorOutcome.WriteModelUsage(SupervisorOutcome.FoldAnswer("Proceed?", "tok-1", answer: null), new SupervisorModelUsage { Model = "m9", InputTokens = 7000, OutputTokens = 1000 }),
+            reviews);
+
+        var folded = SupervisorOutcome.FoldAnswerOnto(parked, "approve");
+
+        SupervisorOutcome.ReadAskHumanAnswer(folded).ShouldBe("approve");
+        SupervisorOutcome.ReadAskHumanQuestion(folded).ShouldBe("Proceed?", "the question survives the fold");
+        SupervisorOutcome.ReadHumanWaitToken(folded).ShouldBe("tok-1", "the token survives — a replay still re-derives the same park");
+        SupervisorOutcome.ReadModelUsage(folded).ShouldNotBeNull("the authoring usage survives");
+
+        var read = SupervisorOutcome.ReadReviews(folded);
+        read.Count.ShouldBe(2, "the escalation's whole ladder survives the answer");
+        read[0].DraftAttribution.ShouldBe("spawn draft · authored via m9 · 8,000 tokens", "the draft attribution — the journal's replaced-a-draft line — survives");
+        read[0].ViaAgent.ShouldBeTrue();
+
+        SupervisorOutcome.FoldAnswerOnto(folded, "approve").ShouldBe(folded, "re-folding the same answer is byte-identical — the rehydrate fold stays idempotent");
+    }
+
+    [Fact]
     public void The_human_wait_key_is_per_turn_and_ask_suffixed()
     {
         SupervisorOutcome.HumanWaitKey("sup", 0).ShouldBe("sup#turn0#ask");
