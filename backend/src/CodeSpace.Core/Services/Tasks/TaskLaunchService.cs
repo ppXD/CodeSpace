@@ -14,6 +14,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Tasks;
 
@@ -37,8 +38,9 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly IModelPoolSelector _modelSelector;
     private readonly ILLMClientRegistry _llm;
     private readonly CodeSpaceDbContext _db;
+    private readonly ILogger<TaskLaunchService> _logger;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
     {
         _seedProviders = seedProviders;
         _router = router;
@@ -50,6 +52,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         _modelSelector = modelSelector;
         _llm = llm;
         _db = db;
+        _logger = logger;
     }
 
     public async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
@@ -83,8 +86,9 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         // Deep/Auto: the supervisor's brain model — the operator's pinned "Brain model" chip when set + usable, else
         // self-resolved so the decider has one instead of stopping turn-1. Inert (null) for every non-supervisor
-        // projection — single-agent / map launches are byte-identical.
-        var brainModelId = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
+        // projection — single-agent / map launches are byte-identical. PinIneligible flags the ONE case worth
+        // recording: a pin was authored but didn't resolve, so the run silently ran on a DIFFERENT brain than requested.
+        var (brainModelId, brainPinIneligible) = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
         var plannerModelRowId = await ResolvePlannerModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
@@ -96,7 +100,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             ? await _sessions.EnsureConversationAsync(session.SessionId, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false)
             : (Guid?)null;
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -121,10 +125,12 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// Null for every other projection (single-agent / map are byte-identical) and for an empty / structured-incapable
     /// pool (the builder then emits no brain — the honest fail-closed floor). Resolved ONCE here + baked into the
     /// immutable snapshot, so every turn + replay reads the same brain (a decide-time pick would drift if the pool changed).
+    /// <c>PinIneligible</c> is true only when a pin was authored and did NOT resolve — the fallback still happened,
+    /// but it's now discoverable instead of a silently swapped id with no trace.
     /// </summary>
-    private async Task<Guid?> ResolveSupervisorBrainModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
+    private async Task<(Guid? RowId, bool PinIneligible)> ResolveSupervisorBrainModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
     {
-        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return null;
+        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return (null, false);
 
         return await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false);
     }
@@ -139,21 +145,32 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     {
         if (route.ProjectionKind is not (TaskProjectionKinds.PlanMapSynth or TaskProjectionKinds.PlanMapDynamic)) return null;
 
-        return await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false);
+        return (await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false)).RowId;
     }
 
-    /// <summary>Pinned-or-auto structured "brain" row shared by the deep supervisor + the plan-map planner: the operator's pinned (model, credential) row wins when it resolves to a real enabled team row a structured client serves; otherwise self-resolve from the pool bounded to structured-capable providers. Null on an empty / structured-incapable pool (the consumer omits — the honest fail-closed floor).</summary>
-    private async Task<Guid?> ResolveStructuredBrainRowAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Pinned-or-auto structured "brain" row shared by the deep supervisor + the plan-map planner: the operator's pinned
+    /// (model, credential) row wins when it resolves to a real enabled team row a structured client serves; otherwise
+    /// self-resolve from the pool bounded to structured-capable providers. Null on an empty / structured-incapable pool
+    /// (the consumer omits — the honest fail-closed floor). A LOGGED warning + <c>PinIneligible = true</c> mark the one
+    /// case worth surfacing: an authored pin that didn't resolve, so the run is quietly steered onto a different brain
+    /// than the operator asked for — a routine credential-rotation/revocation event, not a rare authoring mistake.
+    /// </summary>
+    private async Task<(Guid? RowId, bool PinIneligible)> ResolveStructuredBrainRowAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
     {
         var structuredProviders = _llm.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
-        if (structuredProviders.Count == 0) return null;
+        if (structuredProviders.Count == 0) return (null, false);
 
-        if (request.Overrides.ModelCredentialModelId is { } pin
-            && await _modelSelector.ResolvePinnedBrainRowIdAsync(request.TeamId, pin, structuredProviders, cancellationToken).ConfigureAwait(false) is { } pinnedBrain)
-            return pinnedBrain;
+        if (request.Overrides.ModelCredentialModelId is not { } pin)
+            return (await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false), false);
 
-        return await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false);
+        if (await _modelSelector.ResolvePinnedBrainRowIdAsync(request.TeamId, pin, structuredProviders, cancellationToken).ConfigureAwait(false) is { } pinnedBrain)
+            return (pinnedBrain, false);
+
+        _logger.LogWarning("TaskLaunchService: the operator's pinned brain model {PinnedModelCredentialModelId} for team {TeamId} was ineligible (missing/disabled/cross-team/non-structured) — auto-selecting an eligible model instead", pin, request.TeamId);
+
+        return (await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false), true);
     }
 
     /// <summary>The grounding the run is primed with: on a CONTINUE, the session's prior-turn digest composed over any seed grounding; on a fresh launch, only the seed's own grounding (null for chat). The projection folds this into the agent prompt.</summary>

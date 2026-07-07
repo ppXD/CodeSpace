@@ -79,6 +79,9 @@ public sealed record SupervisorGoalConfig
     /// </summary>
     public Guid? SupervisorModelId { get; init; }
 
+    /// <summary>True when the operator authored a brain-model pin but it was ineligible (missing / disabled / cross-team / non-structured) and <see cref="SupervisorModelId"/> is the auto-selected FALLBACK, not the requested row — RESERVED (stored + parsed at launch; a future Run Room note surfaces it to the operator). False (no pin, or the pin was honored) ⇒ omitted (byte-identical).</summary>
+    public bool BrainModelPinIneligible { get; init; }
+
     /// <summary>How an INDEPENDENT critic reviews each turn's decision before its side effect. <c>None</c> (the default) ⇒ no critic (byte-identical); <c>Improve</c> ⇒ one bounded re-decide against the critique. Baked so every turn + replay of this frozen run reads the same mode.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 
