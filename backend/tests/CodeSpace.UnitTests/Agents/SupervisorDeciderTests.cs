@@ -67,6 +67,47 @@ public class SupervisorDeciderTests
         prompt.ShouldContain(SupervisorDecisionKinds.Plan, Case.Insensitive, "the prior plan is folded into the prompt so the decider can spawn over it");
     }
 
+    // ── P1e compaction ladder: a re-planned run renders only the LATEST plan full; superseded plans collapse to a digest ──
+
+    [Fact]
+    public void A_superseded_plan_collapses_to_a_digest_while_the_latest_renders_full()
+    {
+        var v1 = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"AAAA_OLD_INSTRUCTION"},{"id":"b","title":"B","instruction":"bee"}]}""",
+            OutcomeJson = """{"outcome":"planned"}""",
+        };
+        var v2 = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"CCCC_NEW_INSTRUCTION"},{"id":"c","title":"C","instruction":"see"}]}""",
+            OutcomeJson = """{"outcome":"planned"}""",
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, v1, v2));
+
+        prompt.ShouldNotContain("AAAA_OLD_INSTRUCTION", customMessage: "the superseded plan's full subtask payload is dropped — the single biggest source of the run's monotone prompt growth");
+        prompt.ShouldContain("plan (superseded by a later re-plan): 2 subtask(s) [a, b]", customMessage: "the superseded plan collapses to a one-line digest that keeps its subtask ids (the re-plan history stays legible)");
+        prompt.ShouldContain("CCCC_NEW_INSTRUCTION", customMessage: "the LATEST plan still renders full — only superseded plans compact");
+    }
+
+    [Fact]
+    public void A_single_plan_renders_full_and_is_never_flagged_superseded()
+    {
+        var only = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"SOLO_INSTRUCTION_MARKER"}]}""",
+            OutcomeJson = """{"outcome":"planned"}""",
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1, only));
+
+        prompt.ShouldContain("SOLO_INSTRUCTION_MARKER", customMessage: "a lone plan IS the latest — it renders full (byte-identical to the pre-compaction prompt)");
+        prompt.ShouldNotContain("superseded", customMessage: "nothing is superseded when there is a single plan");
+    }
+
     [Fact]
     public void The_user_prompt_surfaces_each_spawned_agents_status_summary_and_error()
     {

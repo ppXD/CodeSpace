@@ -238,6 +238,29 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         context.NoProgressDecisions.ShouldBe(0, "a spawn that produced a real artifact reset the streak — no false stall");
     }
 
+    // ── P1e compaction ladder over the REAL durable tape ────────────────────────────────
+
+    [Fact]
+    public async Task Rehydrate_then_render_compacts_a_superseded_plans_full_payload()
+    {
+        // P1e end-to-end over real Postgres: two plan versions on the durable tape. After the REAL rehydrate, the real
+        // decider prompt renders ONLY the latest plan full; the superseded v1's full subtask payload is dropped for a
+        // one-line digest — the monotone-prompt-growth fix proven through the actual DB → rehydrate → BuildUserPrompt
+        // path (not a hand-built context), including that a genuinely persisted, re-loaded plan compacts correctly.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanDecisionAsync(runId, teamId, sequence: 1, """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"OLD_PLAN_INSTRUCTION_V1"},{"id":"b","title":"B","instruction":"bee"}]}""");
+        await SeedPlanDecisionAsync(runId, teamId, sequence: 2, """{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"NEW_PLAN_INSTRUCTION_V2"},{"id":"c","title":"C","instruction":"see"}]}""");
+
+        var context = await RehydrateAsync(runId, teamId);
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldNotContain("OLD_PLAN_INSTRUCTION_V1", Case.Insensitive, "the superseded plan's full subtask payload is dropped from the rehydrated prompt");
+        prompt.ShouldContain("plan (superseded by a later re-plan): 2 subtask(s) [a, b]", Case.Insensitive, "the superseded plan collapses to a one-line digest keeping its subtask ids");
+        prompt.ShouldContain("NEW_PLAN_INSTRUCTION_V2", Case.Insensitive, "the latest plan still renders full — only superseded plans compact");
+    }
+
     // ─── Seeding + helpers ─────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId)
@@ -317,6 +340,32 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
             Status = status,
             PayloadJson = """{"subtaskIds":["s1","s2"]}""",
             OutcomeJson = outcomeJson,
+            FenceEpoch = 1,
+            CreatedDate = now,
+            CreatedBy = Guid.Empty,
+            LastModifiedDate = now,
+            LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedPlanDecisionAsync(Guid runId, Guid teamId, long sequence, string payloadJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            SupervisorRunId = runId,
+            Sequence = sequence,
+            DecisionKind = SupervisorDecisionKinds.Plan,
+            IdempotencyKey = $"plan-{sequence}-{Guid.NewGuid():N}",
+            InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = payloadJson,
+            OutcomeJson = """{"outcome":"planned"}""",
             FenceEpoch = 1,
             CreatedDate = now,
             CreatedBy = Guid.Empty,
