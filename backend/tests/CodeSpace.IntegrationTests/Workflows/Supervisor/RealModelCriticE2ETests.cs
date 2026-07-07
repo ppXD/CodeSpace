@@ -194,6 +194,63 @@ public sealed class RealModelCriticE2ETests
         });
     }
 
+    /// <summary>
+    /// The P1b-2 CONVERGENCE prerequisite under a LIVE model: an oscillation-stop rests on the critic RE-FLAGGING an
+    /// unremoved flaw (if it didn't, there'd be nothing to converge on). A real reviewer must flag a flaw, then flag a
+    /// SUPERFICIALLY-revised change (the flaw untouched, only a comment reworded) AGAIN — the gate. The convergence
+    /// module's assessment over the two live verdicts (did the fingerprint catch the persistence?) is REPORTED, not
+    /// gated: text-fingerprinting catches re-wording, not arbitrary semantic paraphrase, so a live match is a bonus
+    /// signal, never a flaky gate. Infra failures (no verdict) stay non-gating.
+    /// </summary>
+    [Fact]
+    public async Task A_live_reviewer_consistently_re_flags_an_unremoved_flaw()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+
+        const string goal = "Reject empty or missing passwords in the login endpoint.";
+
+        // The flaw: validation that accepts every password. Both versions carry it UNCHANGED — only the comment differs.
+        const string firstChange =
+            "Agent summary: added password validation\n\nDiff:\n" +
+            "+            // validate the password\n" +
+            "+            if (password == null || password.Length >= 0) return Ok(IssueToken(user));\n";
+
+        const string superficiallyRevised =
+            "Agent summary: revised the password validation\n\nDiff:\n" +
+            "+            // now with a clearer comment about checking the password value\n" +
+            "+            if (password == null || password.Length >= 0) return Ok(IssueToken(user));\n";
+
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
+
+        await RealModelGate.AssessLiveAsync(Custom, async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+
+            var first = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = firstChange, Goal = goal }, teamId, reviewerRowId, CancellationToken.None);
+            var second = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = superficiallyRevised, Goal = goal }, teamId, reviewerRowId, CancellationToken.None);
+
+            if (first.Failed || second.Failed)
+                return (true, "the reviewer produced no verdict on one side (gateway infra) — not gating");
+
+            // GATE: the unremoved flaw is re-flagged both times — the consistency convergence relies on.
+            var consistentlyFlagged = !first.Approved && !second.Approved;
+
+            // REPORT (non-gating): whether the convergence fingerprint recognised the persisting flaw across the two
+            // independent live reviews — a bonus over the deterministic integration proof, never a flaky gate.
+            var report = CriticConvergence.Assess(first.Issues, second.Issues);
+
+            return (consistentlyFlagged,
+                $"first: approved={first.Approved} (issues={first.Issues.Count}) · second: approved={second.Approved} (issues={second.Issues.Count}) · " +
+                $"convergence persisting={report.Persisting.Count} resolved={report.Resolved.Count} introduced={report.Introduced.Count}");
+        });
+    }
+
     /// <summary>The S7 RUBRIC-JUDGE effectiveness gate: the live judge must answer per-criterion BINARY verdicts that
     /// DISCRIMINATE — an artifact that plainly satisfies both criteria gets both met, one that satisfies neither gets
     /// neither. This is what the non-coding oracle rests on; the verdicts ARE gated (infra failures stay non-gating).</summary>

@@ -196,6 +196,32 @@ public class CriticSupervisorDeciderDecoratorTests
         question.ShouldEndWith(SupervisorGateEscalation.EscalationMarker);
     }
 
+    [Fact]
+    public void The_escalation_names_the_issues_the_revision_could_not_resolve()
+    {
+        // P1b-2: with both reviews in hand, the card tells the human WHAT the revision failed to move — the issues
+        // present in BOTH the first and the second review — a sharper prompt than "still disapproved".
+        var first = new CriticVerdict
+        {
+            Mode = ReviewMode.Gate, Approved = false, Rationale = "flawed",
+            Issues = new[] { new CriticIssue { Text = "no rollback plan", Evidence = "e1" }, new CriticIssue { Text = "no tests", Evidence = "e2" } },
+        };
+        var second = new CriticVerdict
+        {
+            Mode = ReviewMode.Gate, Approved = false, Rationale = "still flawed",
+            Issues = new[] { new CriticIssue { Text = "No rollback plan.", Evidence = "e1b" }, new CriticIssue { Text = "hardcoded secret", Evidence = "e3" } },
+        };
+
+        var card = SupervisorGateEscalation.IntoAskHuman(new SupervisorDecision { Kind = SupervisorDecisionKinds.Retry, PayloadJson = "{}" }, second, priorVerdict: first);
+        var question = System.Text.Json.JsonDocument.Parse(card.PayloadJson).RootElement.GetProperty("question").GetString()!;
+
+        question.ShouldContain("The revision did NOT resolve:", customMessage: "the card names the unmoved problems");
+        question.ShouldContain("No rollback plan.", customMessage: "the rollback issue persisted across both reviews (fingerprint-matched despite re-casing)");
+        question.ShouldContain("The revision INTRODUCED:", customMessage: "a fresh regression is surfaced too — a new blocker must not be hidden behind the persisting ones");
+        question.ShouldContain("hardcoded secret", customMessage: "the newly-introduced issue is named in the INTRODUCED line");
+        question.ShouldEndWith(SupervisorGateEscalation.EscalationMarker);
+    }
+
     private static CriticVerdict Disapproved(string rationale) => new()
     {
         Mode = ReviewMode.Gate,

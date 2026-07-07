@@ -277,9 +277,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // surfaces and the completion choke point keeps precedence. A worker tear-down mid-round leaves the run for
             // re-attach, whose own terminal path honours the acceptance contract fail-closed — never a phantom pass.
             var reviseBudget = EffectiveReviseRounds(effectiveTask);
+            string? priorReason = null;
 
-            for (var round = 1; round <= reviseBudget && ReviseReasonFor(effectiveTask, result) is { } reason; round++)
+            for (var round = 1; round <= reviseBudget; round++)
             {
+                if (ReviseReasonFor(effectiveTask, result) is not { } reason) break;   // nothing left to revise — approved / passed
+
+                // Convergence (P1b-2): a CRITIC that re-raises the identical feedback means the prior revision moved
+                // nothing it cares about, and another pass will only re-produce it — stop EARLY rather than re-billing
+                // the same stall, and record it so the flagged result stands for a human with an honest "stalled" note.
+                // SCOPED TO THE CRITIC PATH: an ORACLE's failing-check detail is identical every round REGARDLESS of
+                // what the agent tried (the check output doesn't change until it passes), so an identical oracle reason
+                // is NOT a stall signal — a later round may still land the fix, so the budget runs for oracle failures.
+                if (priorReason is not null && result.ExitReason == "output-flagged" && CriticConvergence.SameSignal(priorReason, reason))
+                {
+                    await AppendReviseStalledEventAsync(agentRunId, reason, round - 1, cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
                 await AppendReviseEventAsync(agentRunId, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
                 var reviseTask = BuildReviseTask(effectiveTask, result, reason);
@@ -294,6 +309,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
                 // wrapper (which quotes the failure and could bias or blind the reviewer).
                 result = await VerifyProducedWorkAsync(agentRunId, run, harness, reviseTask with { Goal = effectiveTask.Goal }, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+                priorReason = reason;
             }
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
@@ -978,6 +995,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-round event", runId);
+        }
+    }
+
+    /// <summary>The stalled-revision announcement's pinned prefix — the convergence early-stop's operator-visible marker (a stable hook for tests + the journal).</summary>
+    internal const string ReviseStalledPrefix = "Revision stalled — the same issue persisted";
+
+    /// <summary>Announce that the revise loop stopped EARLY because the same problem re-surfaced unchanged — the operator sees the loop gave up on an unmovable issue rather than silently exhausting the budget. Best-effort.</summary>
+    private async Task AppendReviseStalledEventAsync(Guid runId, string reason, int roundsRun, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseStalledPrefix} after {roundsRun} round(s); stopping early. {reason}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-stalled event", runId);
         }
     }
 

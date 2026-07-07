@@ -29,11 +29,11 @@ public static class SupervisorGateEscalation
     /// <summary>Cap on the issues quoted into the card — the card is a summary; the full verdict lives on the tape.</summary>
     private const int MaxQuotedIssues = 3;
 
-    /// <summary>Build the escalation ask for a still-disapproved decision — the card carries the blocked verb + the reviewer's rationale + the evidence-attached issues, so the human rules on the CRITIQUE, not a mystery.</summary>
-    public static SupervisorDecision IntoAskHuman(SupervisorDecision blocked, CriticVerdict verdict) => new()
+    /// <summary>Build the escalation ask for a still-disapproved decision — the card carries the blocked verb + the reviewer's rationale + the evidence-attached issues, so the human rules on the CRITIQUE, not a mystery. When the FIRST review is supplied, the card also names which issues PERSISTED unchanged through the revision (P1b-2 convergence), so the operator sees what the revision could not move, not just that it failed twice.</summary>
+    public static SupervisorDecision IntoAskHuman(SupervisorDecision blocked, CriticVerdict verdict, CriticVerdict? priorVerdict = null) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(blocked, verdict) }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(blocked, verdict, priorVerdict) }, AgentJson.Options),
     };
 
     /// <summary>
@@ -88,25 +88,41 @@ public static class SupervisorGateEscalation
     /// <summary>Per-fragment cap on the quoted rationale / issue text — the card is a HEADLINE, not the review dossier (the full evidence-attached verdicts are their own journal beats since H1), so a verbose critic can't turn the ask into a wall of text.</summary>
     internal const int MaxQuotedChars = 200;
 
-    /// <summary>The escalation question — COMPACT by design: the blocked verb, the reviewer's clipped rationale, and up to <see cref="MaxQuotedIssues"/> clipped issue headlines (no evidence dumps — the full verdicts live on the run's REVIEW beats). Bounded so the parked card reads in seconds.</summary>
-    private static string QuestionFor(SupervisorDecision blocked, CriticVerdict verdict)
+    /// <summary>The escalation question — COMPACT by design: the blocked verb, the reviewer's clipped rationale, and up to <see cref="MaxQuotedIssues"/> clipped issue headlines (no evidence dumps — the full verdicts live on the run's REVIEW beats). When the first review is supplied, it names the issues that PERSISTED through the revision (convergence), so the human sees what the revision could not resolve. Bounded so the parked card reads in seconds.</summary>
+    private static string QuestionFor(SupervisorDecision blocked, CriticVerdict verdict, CriticVerdict? priorVerdict)
     {
         var builder = new StringBuilder();
 
         builder.Append($"An independent reviewer blocked the supervisor's '{blocked.Kind}' decision (twice — the revised decision did not satisfy it either). Reviewer: {Clip(verdict.Rationale)}");
 
-        if (verdict.Issues.Count > 0)
+        // Convergence: name what the revision could NOT move (present in BOTH reviews) AND what it newly INTRODUCED —
+        // a sharper prompt than "still disapproved": the operator sees the unmovable problem AND any fresh regression
+        // the revision caused, not just a flat issue list. Falls back to the second verdict's issues with no prior.
+        var report = priorVerdict is null ? null : Review.CriticConvergence.Assess(priorVerdict.Issues, verdict.Issues);
+
+        if (report is { Persisting.Count: > 0 } or { Introduced.Count: > 0 })
         {
-            builder.Append(" Issues: ");
-            builder.Append(string.Join("; ", verdict.Issues.Take(MaxQuotedIssues).Select(i => Clip(i.Text))));
-            if (verdict.Issues.Count > MaxQuotedIssues) builder.Append($" (+{verdict.Issues.Count - MaxQuotedIssues} more)");
-            builder.Append('.');
+            if (report.Persisting.Count > 0) AppendIssueList(builder, " The revision did NOT resolve: ", report.Persisting);
+            if (report.Introduced.Count > 0) AppendIssueList(builder, " The revision INTRODUCED: ", report.Introduced);
+        }
+        else if (verdict.Issues.Count > 0)
+        {
+            AppendIssueList(builder, " Issues: ", verdict.Issues);
         }
 
         builder.Append(" The full verdicts are on this run's review steps.");
         builder.Append(' ').Append(EscalationMarker);
 
         return builder.ToString();
+    }
+
+    /// <summary>Append a labelled, bounded issue-headline list to the card — up to <see cref="MaxQuotedIssues"/> clipped headlines with a "+N more" count (no evidence dumps — the card is a headline, the full verdicts are their own review beats).</summary>
+    private static void AppendIssueList(StringBuilder builder, string label, IReadOnlyList<CriticIssue> issues)
+    {
+        builder.Append(label);
+        builder.Append(string.Join("; ", issues.Take(MaxQuotedIssues).Select(i => Clip(i.Text))));
+        if (issues.Count > MaxQuotedIssues) builder.Append($" (+{issues.Count - MaxQuotedIssues} more)");
+        builder.Append('.');
     }
 
     private static string Clip(string text) => text.Length <= MaxQuotedChars ? text : string.Concat(text.AsSpan(0, MaxQuotedChars).TrimEnd(), "…");

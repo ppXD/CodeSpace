@@ -101,7 +101,8 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
 
             // The escalation ask INHERITS the ladder's whole chain (first flagged verdict + draft attribution + the
             // still-disapproving second verdict) — the parked card is the ladder's product, so its tape row tells it.
-            return SupervisorGateEscalation.IntoAskHuman(revised, second) with { Reviews = revised.Reviews.Concat(ToReviews(second, secondByAgent, scope, null)).ToList() };
+            // The FIRST verdict rides too, so the card names which issues the revision could NOT resolve (convergence).
+            return SupervisorGateEscalation.IntoAskHuman(revised, second, priorVerdict: verdict) with { Reviews = revised.Reviews.Concat(ToReviews(second, secondByAgent, scope, null)).ToList() };
         }
 
         return CarryReview(decision, verdict, agentReviewed, scope, draft: null);
