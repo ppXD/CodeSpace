@@ -721,6 +721,92 @@ public class SupervisorDeciderTests
         client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
     }
 
+    // ── P1.4: a TRUNCATED completion buys ONE retry with a RAISED output budget before the bind-check flow ──
+
+    [Fact]
+    public void TruncatedRetryMaxOutputTokens_is_pinned_double_the_default()
+    {
+        // Shrinking this re-narrows the exact window the retry exists to widen — the whole point is genuine
+        // extra room for a large plan that hit the SAME ceiling once already (Rule 8).
+        LlmSupervisorDecider.TruncatedRetryMaxOutputTokens.ShouldBe(8192);
+    }
+
+    [Theory]
+    [InlineData("length")]      // OpenAI's truncation marker
+    [InlineData("max_tokens")]  // Anthropic's truncation marker
+    public async Task A_truncated_completion_is_retried_with_a_raised_budget_and_the_retry_lands(string finishReason)
+    {
+        // The primary call BINDS (many providers' constrained decoding keeps JSON syntactically valid even when
+        // content was cut short) but is FLAGGED truncated by its own finish reason — a single-subtask spawn that
+        // could just as easily be the FIRST 1-of-many a bigger fan-out ran out of room to finish. The retry (a
+        // raised budget) returns a bigger, complete spawn; the decider must use THAT, not the truncated one.
+        var truncated = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["only-one"]}}""").RootElement;
+        var complete = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["one","two","three"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(new[] { truncated, complete }, new[] { finishReason, null });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(2, "exactly one bounded retry — the primary truncated call + the raised-budget retry");
+        client.Requests[1].MaxOutputTokens.ShouldBe(LlmSupervisorDecider.TruncatedRetryMaxOutputTokens, "the retry asks for the RAISED budget, not the same ceiling that just truncated");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn);
+        decision.PayloadJson.ShouldContain("three", customMessage: "the decision reflects the RETRIED (complete) spawn, not the truncated one");
+        decision.PayloadJson.ShouldNotContain("only-one", customMessage: "the truncated reply is discarded once the retry succeeds");
+    }
+
+    [Fact]
+    public async Task A_clean_completion_never_pays_the_truncation_retry()
+    {
+        // Byte-identical to before this fix on the dominant (non-truncated) path — no wasted extra call.
+        var clean = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["a"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(clean);   // default finish reason: null → Clean
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(1, "a clean (non-truncated) completion never triggers the retry");
+    }
+
+    [Fact]
+    public async Task A_truncated_retry_that_itself_capability_misses_falls_back_to_the_original_completion()
+    {
+        // The retry call itself hits a model-side miss (the SAME class TryRepairAsync already tolerates) — fail
+        // TOWARD the original truncated completion rather than crashing the run; the normal bind-check flow then
+        // decides its fate exactly as if the retry had never been attempted.
+        var truncated = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["only-one"]}}""").RootElement;
+        var client = new TruncatedThenCapabilityMissClient(truncated, "length");
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Calls.ShouldBe(2, "the retry was attempted once, then the decider fell back");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the ORIGINAL truncated completion still bound fine, so it lands as the decision — never a crash");
+        decision.PayloadJson.ShouldContain("only-one");
+    }
+
+    /// <summary>First call returns a truncated-but-bindable completion; every call after THROWS a model-capability-miss (simulating the raised-budget retry itself failing) — proves the decider falls back to the original completion rather than propagating.</summary>
+    private sealed class TruncatedThenCapabilityMissClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly JsonElement _first;
+        private readonly string _finishReason;
+        public int Calls { get; private set; }
+
+        public TruncatedThenCapabilityMissClient(JsonElement first, string finishReason) { _first = first; _finishReason = finishReason; }
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            if (Calls == 1) return Task.FromResult(new StructuredLLMCompletion { Json = _first, Model = request.Model, Usage = new LlmUsage { FinishReason = _finishReason } });
+
+            throw new LlmApiException("TestSupervisor", null, LlmErrorCategory.Malformed, "the retry itself produced no usable reply");
+        }
+    }
+
     [Fact]
     public async Task A_repair_that_still_cannot_bind_stops_with_the_precise_path()
     {
@@ -834,13 +920,20 @@ public class SupervisorDeciderTests
             Task.FromResult(new StructuredLLMCompletion { Json = _raw, Model = request.Model });
     }
 
-    /// <summary>Returns a SEQUENCE of raw replies (the last one repeats) and records every request — the repair arc's seam: first the unbindable reply, then the repaired one, with the repair prompt pinned off the recorded request.</summary>
+    /// <summary>Returns a SEQUENCE of raw replies (the last one repeats) and records every request — the repair arc's seam: first the unbindable reply, then the repaired one, with the repair prompt pinned off the recorded request. An optional PARALLEL finish-reason queue (default null ⇒ Clean, byte-identical to every pre-existing caller) drives the P1.4 truncated-completion retry.</summary>
     private sealed class SequencedRawJsonStructuredClient : ILLMClient, IStructuredLLMClient
     {
         private readonly Queue<JsonElement> _replies;
+        private readonly Queue<string?> _finishReasons;
         public readonly List<StructuredLLMCompletionRequest> Requests = new();
 
-        public SequencedRawJsonStructuredClient(params JsonElement[] replies) => _replies = new Queue<JsonElement>(replies);
+        public SequencedRawJsonStructuredClient(params JsonElement[] replies) : this(replies, finishReasons: null) { }
+
+        public SequencedRawJsonStructuredClient(JsonElement[] replies, string?[]? finishReasons)
+        {
+            _replies = new Queue<JsonElement>(replies);
+            _finishReasons = new Queue<string?>(finishReasons ?? new string?[replies.Length]);
+        }
 
         public string Provider => "TestSupervisor";
 
@@ -851,7 +944,8 @@ public class SupervisorDeciderTests
         {
             Requests.Add(request);
             var json = _replies.Count > 1 ? _replies.Dequeue() : _replies.Peek();
-            return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model });
+            var finishReason = _finishReasons.Count > 1 ? _finishReasons.Dequeue() : (_finishReasons.Count == 1 ? _finishReasons.Peek() : null);
+            return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new LlmUsage { FinishReason = finishReason } });
         }
     }
 
