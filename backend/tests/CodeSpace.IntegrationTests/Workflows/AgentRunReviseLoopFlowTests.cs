@@ -53,6 +53,9 @@ public sealed class AgentRunReviseLoopFlowTests
     /// <summary>Fixes the CHECK but keeps the planted flaw — the combined-ordering arc's "half-fix".</summary>
     private const string HalfFixScript = "printf 'revised " + DeterministicCriticLlmClient.RejectMarker + "\\n' > feature.txt; echo half-fixed";
 
+    /// <summary>Sound work (passes <see cref="CheckScript"/>) that draws only a MINOR critic nitpick — the calibration path.</summary>
+    private const string NitpickScript = "printf 'revised " + DeterministicCriticLlmClient.NitpickMarker + "\\n' > feature.txt; echo drafted";
+
     private readonly PostgresFixture _fixture;
 
     public AgentRunReviseLoopFlowTests(PostgresFixture fixture) { _fixture = fixture; }
@@ -111,6 +114,43 @@ public sealed class AgentRunReviseLoopFlowTests
         var events = await LoadEventsAsync(runId);
         events.Count(e => e.Contains("revising (round 1 of 2)")).ShouldBe(1);
         events.Count(e => e.Contains("revising (round 2 of 2)")).ShouldBe(1, "each round announces itself — the timeline is the audit trail");
+    }
+
+    [Fact]
+    public async Task A_minor_only_critic_flag_does_not_halt_a_gate_the_calibration_fix()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
+        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var reviewerRowId = await SeedCriticModelAsync(teamId);
+            ResetCriticScript();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            // GATE mode: a flag would hard-halt to NeedsReview. The sound work draws only a MINOR nitpick, and the
+            // severity-authoritative projection APPROVES it (no blocker) — so the run stays Succeeded, unflagged.
+            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId });
+
+            await ExecuteAsync(runId, new ReviseAwareHarness(first: NitpickScript, revised: RevisedScript));
+
+            var (run, result) = await LoadAsync(runId);
+
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "a Minor-only flag no longer halts the gate — the produced work is not blocked over a nitpick");
+            result.ReviseRounds.ShouldBe(0, "a Gate mode never revises; and a Minor flag never triggered one either");
+            result.ReviewFeedback.ShouldBeNull("an approved run carries no feedback");
+            CriticCalls().ShouldBe(1, "the critic was consulted exactly once and its minor-only verdict approved");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
+        }
     }
 
     [Fact]

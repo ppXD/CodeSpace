@@ -26,11 +26,12 @@ public static class CriticSchema
                 "additionalProperties": false,
                 "properties": {
                   "issue": { "type": "string", "description": "One concrete, specific problem." },
-                  "evidence": { "type": "string", "description": "The grounding — QUOTE the offending part of the artifact or name its precise location. REQUIRED: an unevidenced issue is an opinion, not a finding." }
+                  "evidence": { "type": "string", "description": "The grounding — QUOTE the offending part of the artifact or name its precise location. REQUIRED: an unevidenced issue is an opinion, not a finding." },
+                  "severity": { "type": "string", "enum": ["blocker", "major", "minor"], "description": "How badly this undermines the goal. blocker = makes the artifact UNFIT (wrong/broken/unsafe/incomplete, or fails a hard requirement) — the ONLY severity that halts. major = a real problem worth fixing that does NOT make it unfit. minor = a nitpick/style preference. REQUIRED." }
                 },
-                "required": ["issue", "evidence"]
+                "required": ["issue", "evidence", "severity"]
               },
-              "description": "Concrete, specific problems found, each with evidence from the artifact — empty if none."
+              "description": "Concrete, specific problems found, each with evidence AND a severity — empty if none."
             },
             "rationale": { "type": "string", "description": "Why you approved or flagged it — REQUIRED." }
           },
@@ -51,11 +52,12 @@ public static class CriticSchema
                 "additionalProperties": false,
                 "properties": {
                   "issue": { "type": "string", "description": "One concrete, specific problem." },
-                  "evidence": { "type": "string", "description": "The grounding — QUOTE the offending part of the artifact or name its precise location. REQUIRED." }
+                  "evidence": { "type": "string", "description": "The grounding — QUOTE the offending part of the artifact or name its precise location. REQUIRED." },
+                  "severity": { "type": "string", "enum": ["blocker", "major", "minor"], "description": "How badly this undermines the goal. blocker = makes the artifact UNFIT. major = a real problem worth fixing that does NOT make it unfit. minor = a nitpick/style preference (revising against minor-only issues is not worth a round). REQUIRED." }
                 },
-                "required": ["issue", "evidence"]
+                "required": ["issue", "evidence", "severity"]
               },
-              "description": "The concrete problems, itemised with evidence — empty if none."
+              "description": "The concrete problems, itemised with evidence AND a severity — empty if none."
             },
             "rationale": { "type": "string", "description": "A short summary of your overall assessment — REQUIRED." }
           },
@@ -84,20 +86,25 @@ internal sealed record ImproveModelReview
     public string? Rationale { get; init; }
 }
 
-/// <summary>One raw issue as the model returns it ({issue, evidence}), before projection onto <see cref="CriticIssue"/>.</summary>
+/// <summary>One raw issue as the model returns it ({issue, evidence, severity}), before projection onto <see cref="CriticIssue"/>.</summary>
 internal sealed record ModelIssue
 {
     public string? Issue { get; init; }
     public string? Evidence { get; init; }
+    public string? Severity { get; init; }
 }
 
-/// <summary>The shared projection: raw model issues → canonical evidence-attached <see cref="CriticIssue"/>s (blank-text entries dropped; missing evidence degrades to empty, never null).</summary>
+/// <summary>The shared projection: raw model issues → canonical evidence-attached, SEVERITY-graded <see cref="CriticIssue"/>s (blank-text entries dropped; missing evidence degrades to empty, an absent/unknown severity degrades to <see cref="CriticSeverity.Major"/> — never a silent blocker, never a silent nitpick).</summary>
 internal static class ModelIssueProjection
 {
     public static IReadOnlyList<CriticIssue> Project(IReadOnlyList<ModelIssue>? issues) =>
         issues is not { Count: > 0 }
             ? Array.Empty<CriticIssue>()
             : issues.Where(i => !string.IsNullOrWhiteSpace(i.Issue))
-                .Select(i => new CriticIssue { Text = i.Issue!.Trim(), Evidence = i.Evidence?.Trim() ?? "" })
+                .Select(i => new CriticIssue { Text = i.Issue!.Trim(), Evidence = i.Evidence?.Trim() ?? "", Severity = ParseSeverity(i.Severity) })
                 .ToList();
+
+    /// <summary>Parse the model's severity token case-insensitively; an absent / unknown value degrades to <see cref="CriticSeverity.Major"/> (a real-but-non-fatal concern — the safe middle, never a silent blocker or a silent nitpick).</summary>
+    internal static CriticSeverity ParseSeverity(string? raw) =>
+        Enum.TryParse<CriticSeverity>(raw?.Trim(), ignoreCase: true, out var severity) ? severity : CriticSeverity.Major;
 }

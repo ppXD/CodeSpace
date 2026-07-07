@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -16,31 +17,78 @@ namespace CodeSpace.UnitTests.Workflows;
 public class LlmStructuredCriticTests
 {
     [Fact]
-    public void Project_gate_carries_approved_score_and_issues()
+    public void Project_gate_carries_score_issues_evidence_and_derives_approval_from_severity()
     {
-        var json = Parse("""{ "approved": false, "score": 55, "issues": [{ "issue": "no rollback plan", "evidence": "the plan has no rollback subtask" }], "rationale": "thin" }""");
+        var json = Parse("""{ "approved": false, "score": 55, "issues": [{ "issue": "no rollback plan", "evidence": "the plan has no rollback subtask", "severity": "blocker" }], "rationale": "thin" }""");
 
         var verdict = LlmStructuredCritic.Project(ReviewMode.Gate, json);
 
         verdict.Failed.ShouldBeFalse();
         verdict.Mode.ShouldBe(ReviewMode.Gate);
-        verdict.Approved.ShouldBeFalse();
+        verdict.Approved.ShouldBeFalse("a Blocker halts the gate");
         verdict.Score.ShouldBe(55);
-        verdict.Issues.ShouldContain(i => i.Text == "no rollback plan" && i.Evidence == "the plan has no rollback subtask", "issues carry their evidence (S8)");
+        verdict.Issues.ShouldContain(i => i.Text == "no rollback plan" && i.Evidence == "the plan has no rollback subtask" && i.Severity == CriticSeverity.Blocker, "issues carry their evidence (S8) AND severity (P1)");
         verdict.Rationale.ShouldBe("thin");
     }
 
-    [Fact]
-    public void Project_improve_carries_the_critique()
+    [Theory]
+    // The model's raw `approved` bit is ADVISORY; SEVERITY is authoritative. A Blocker halts even if the model
+    // said approved:true (under-call safety); a Major/Minor-only flag no longer halts even if the model said
+    // approved:false (the calibration fix — "correctly addresses the goal but has a material flaw" proceeds).
+    [InlineData("blocker", true, false)]    // a Blocker halts regardless of the raw approved bit
+    [InlineData("blocker", false, false)]
+    [InlineData("major", false, true)]      // a Major-only disapproval no longer halts — the calibration fix
+    [InlineData("minor", false, true)]      // a nitpick never halts
+    [InlineData("bogus", false, true)]      // an unknown severity degrades to Major → does not halt
+    public void Gate_approval_is_severity_authoritative(string severity, bool rawApproved, bool expectedApproved)
     {
-        var json = Parse("""{ "critique": "add an integration test subtask", "issues": [{ "issue": "untested path", "evidence": "subtask s2 names no test" }], "rationale": "missing coverage" }""");
+        var json = Parse($$"""{ "approved": {{(rawApproved ? "true" : "false")}}, "issues": [{ "issue": "x", "evidence": "y", "severity": "{{severity}}" }], "rationale": "r" }""");
+
+        LlmStructuredCritic.Project(ReviewMode.Gate, json).Approved.ShouldBe(expectedApproved);
+    }
+
+    [Fact]
+    public void Project_gate_with_no_issues_approves()
+    {
+        var json = Parse("""{ "approved": true, "issues": [], "rationale": "clean" }""");
+
+        LlmStructuredCritic.Project(ReviewMode.Gate, json).Approved.ShouldBeTrue("no issue ⇒ no blocker ⇒ approved");
+    }
+
+    [Fact]
+    public void Project_improve_carries_the_critique_when_a_material_issue_warrants_it()
+    {
+        var json = Parse("""{ "critique": "add an integration test subtask", "issues": [{ "issue": "untested path", "evidence": "subtask s2 names no test", "severity": "major" }], "rationale": "missing coverage" }""");
 
         var verdict = LlmStructuredCritic.Project(ReviewMode.Improve, json);
 
         verdict.Failed.ShouldBeFalse();
         verdict.Mode.ShouldBe(ReviewMode.Improve);
-        verdict.Critique.ShouldBe("add an integration test subtask");
-        verdict.Issues.ShouldContain(i => i.Text == "untested path", "improve issues project the same evidence-attached shape");
+        verdict.Critique.ShouldBe("add an integration test subtask", "a Major issue warrants the revision");
+        verdict.Issues.ShouldContain(i => i.Text == "untested path" && i.Severity == CriticSeverity.Major);
+    }
+
+    [Fact]
+    public void Project_improve_suppresses_a_minor_only_critique()
+    {
+        // A revision round is not worth spending on nitpicks — the critique is suppressed so the producer keeps its
+        // output, while the verdict (and its minor issues) still surfaces for the journal.
+        var json = Parse("""{ "critique": "rename the variable for clarity", "issues": [{ "issue": "terse name", "evidence": "`x` at line 3", "severity": "minor" }], "rationale": "cosmetic only" }""");
+
+        var verdict = LlmStructuredCritic.Project(ReviewMode.Improve, json);
+
+        verdict.Failed.ShouldBeFalse("the review ran — it is not a failed review");
+        verdict.Critique.ShouldBeNull("a minor-only critique does not warrant a revision round → suppressed");
+        verdict.Issues.ShouldHaveSingleItem().Severity.ShouldBe(CriticSeverity.Minor);
+    }
+
+    [Fact]
+    public void Project_improve_keeps_a_free_text_critique_with_no_structured_issues()
+    {
+        var json = Parse("""{ "critique": "the whole approach is off", "issues": [], "rationale": "reconsider" }""");
+
+        LlmStructuredCritic.Project(ReviewMode.Improve, json).Critique
+            .ShouldBe("the whole approach is off", "a critique with no structured issues keeps its revision — unknown severity must not be silently dropped");
     }
 
     [Fact]

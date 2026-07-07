@@ -42,14 +42,14 @@ public sealed class JournalReviewFactsFlowTests
 
         // Round 1's reviewer flagged; round 2's approved — the card join must show the LATEST (the approval).
         var reviewer1 = SeedAgentRun(db, teamId, runId, "map#0#review", AgentRunStatus.Succeeded,
-            resultSummary: """Reviewed. VERDICT: {"approved": false, "rationale": "placeholder hack", "issues": [{"issue": "hack committed", "evidence": "feature.txt line 1"}]}""",
+            resultSummary: """Reviewed. VERDICT: {"approved": false, "rationale": "placeholder hack", "issues": [{"issue": "hack committed", "evidence": "feature.txt line 1", "severity": "blocker"}]}""",
             harness: "claude-code", createdAt: DateTimeOffset.UtcNow.AddMinutes(-10));
         var reviewer2 = SeedAgentRun(db, teamId, runId, "map#0#review", AgentRunStatus.Succeeded,
             resultSummary: """Reviewed again. VERDICT: {"approved": true, "rationale": "clean now", "issues": []}""",
             harness: "claude-code", createdAt: DateTimeOffset.UtcNow.AddMinutes(-2));
 
         var planReviewer = SeedAgentRun(db, teamId, runId, "#plan-review", AgentRunStatus.Succeeded,
-            resultSummary: """VERDICT: {"approved": false, "rationale": "the plan schedules finished work", "issues": [{"issue": "step 2 already done", "evidence": "src/auth.cs already validates"}]}""",
+            resultSummary: """VERDICT: {"approved": false, "rationale": "the plan schedules finished work", "issues": [{"issue": "step 2 already done", "evidence": "src/auth.cs already validates", "severity": "blocker"}]}""",
             harness: "codex-cli");
 
         await db.SaveChangesAsync();

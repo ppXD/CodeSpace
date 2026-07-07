@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Review;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -93,15 +94,26 @@ public sealed class AgentOutputReviewerTests
     // ─── The VERDICT parse (fail-closed → the model-critic ladder) ───────────
 
     [Fact]
-    public void A_contract_final_message_parses_into_an_evidence_attached_verdict()
+    public void A_contract_final_message_parses_into_an_evidence_and_severity_attached_verdict()
     {
         var verdict = AgentReviewRunner.ParseVerdict(
-            """Reviewed. VERDICT: {"approved": false, "rationale": "placeholder hack", "issues": [{"issue": "hack committed", "evidence": "feature.txt line 1"}]}""");
+            """Reviewed. VERDICT: {"approved": false, "rationale": "placeholder hack", "issues": [{"issue": "hack committed", "evidence": "feature.txt line 1", "severity": "blocker"}]}""");
 
         verdict.Failed.ShouldBeFalse();
-        verdict.Approved.ShouldBeFalse();
+        verdict.Approved.ShouldBeFalse("the agent named a Blocker — the Gate halts (severity-authoritative, uniform with the in-process critic)");
         verdict.Rationale.ShouldBe("placeholder hack");
-        verdict.Issues.ShouldContain(i => i.Text == "hack committed" && i.Evidence == "feature.txt line 1");
+        verdict.Issues.ShouldContain(i => i.Text == "hack committed" && i.Evidence == "feature.txt line 1" && i.Severity == CriticSeverity.Blocker);
+    }
+
+    [Fact]
+    public void The_agent_gate_is_severity_authoritative_so_a_major_only_disapproval_no_longer_halts()
+    {
+        // P1: the agent reviewer's Gate uses the SAME rule as the in-process critic — halt iff a Blocker. A
+        // Major/Minor-only flag (even with the model's raw approved:false) does not halt, so a sound produced change
+        // with a non-fatal concern is not blocked into a NeedsReview.
+        AgentReviewRunner.ParseVerdict(
+            """VERDICT: {"approved": false, "rationale": "a naming nit", "issues": [{"issue": "terse name", "evidence": "x at line 3", "severity": "minor"}]}""")
+            .Approved.ShouldBeTrue("a Minor-only disapproval no longer halts the agent gate — the calibration fix");
     }
 
     [Fact]
@@ -111,7 +123,7 @@ public sealed class AgentOutputReviewerTests
             """The goal said to end with VERDICT: {...} — here it is. VERDICT: {"approved": true, "rationale": "clean"}""");
 
         verdict.Failed.ShouldBeFalse();
-        verdict.Approved.ShouldBeTrue();
+        verdict.Approved.ShouldBeTrue("no issue ⇒ no blocker ⇒ approved");
     }
 
     [Theory]
