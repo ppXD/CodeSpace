@@ -23,8 +23,7 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// on top of this in-call retry). A run that is genuinely cancelled (the outer
 /// token) is never retried. The happy path (a decision returned within the per-attempt budget) returns the inner
 /// decision UNCHANGED — only a transient fault or a wedged call engages the timeout/retry; an operator can fully
-/// disable the bound via the env overrides (MaxAttempts = 1 with the timeout set to the inherited 600s budget). A
-/// plain class, wired via Autofac <c>RegisterDecorator</c>.</para>
+/// disable the retry via the env overrides (MaxAttempts = 1). A plain class, wired via Autofac <c>RegisterDecorator</c>.</para>
 /// </summary>
 public sealed class RetryingSupervisorDeciderDecorator : ISupervisorDecider
 {
@@ -72,8 +71,26 @@ public sealed class RetryingSupervisorDeciderDecorator : ISupervisorDecider
 
     private async Task BackoffAsync(int attempt, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
-        var delay = retryAfter ?? TimeSpan.FromTicks(_options.BaseBackoff.Ticks * attempt);
+        var delay = ComputeDelay(_options, attempt, retryAfter);
 
         if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The wait before the next attempt. A provider Retry-After wins verbatim — the provider KNOWS when it recovers —
+    /// but is clamped to <see cref="SupervisorDecisionRetryOptions.RetryAfterCeiling"/> so a hostile / misconfigured
+    /// header can't pin a worker for hours. Otherwise exponential: BaseBackoff × 2^(attempt−1), capped at
+    /// <see cref="SupervisorDecisionRetryOptions.BackoffCeiling"/>, with ±20% jitter so many concurrent runs retrying
+    /// a recovering gateway never re-storm it in lockstep. Internal + pure for direct unit pinning (no sleeps).
+    /// </summary>
+    internal static TimeSpan ComputeDelay(SupervisorDecisionRetryOptions options, int attempt, TimeSpan? retryAfter)
+    {
+        if (retryAfter is { } hinted)
+            return hinted <= SupervisorDecisionRetryOptions.RetryAfterCeiling ? hinted : SupervisorDecisionRetryOptions.RetryAfterCeiling;
+
+        var exponential = TimeSpan.FromTicks(options.BaseBackoff.Ticks * (1L << Math.Min(attempt - 1, 10)));
+        var capped = exponential <= SupervisorDecisionRetryOptions.BackoffCeiling ? exponential : SupervisorDecisionRetryOptions.BackoffCeiling;
+
+        return capped * (0.8 + Random.Shared.NextDouble() * 0.4);
     }
 }
