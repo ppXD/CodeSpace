@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Tasks;
@@ -78,6 +79,35 @@ public class TaskLaunchServiceClampTests
         var profile = TaskLaunchService.BuildAgentProfile(Request(null), Seed, Route(ceiling: "", recommended: ""));
 
         profile.AutonomyLevel.ShouldBe("Standard");
+    }
+
+    // ── The tier-aware agent wall-clock default: deep runs get 2h; an operator override always wins ──
+
+    [Fact]
+    public void BuildAgentProfile_defaults_the_deep_tier_agent_timeout_to_two_hours()
+    {
+        // Deep exists for hours-long work — the 1h record default killed exactly the long builds that tier dispatches.
+        var profile = TaskLaunchService.BuildAgentProfile(Request(null), Seed, Route("Standard") with { EffortMode = TaskEffortModes.Deep });
+
+        profile.TimeoutSeconds.ShouldBe(7200);
+    }
+
+    [Fact]
+    public void BuildAgentProfile_keeps_the_operator_timeout_override_over_the_deep_default()
+    {
+        var request = Request(null) with { Overrides = new TaskExecutionOverrides { TimeoutSeconds = 900 } };
+
+        var profile = TaskLaunchService.BuildAgentProfile(request, Seed, Route("Standard") with { EffortMode = TaskEffortModes.Deep });
+
+        profile.TimeoutSeconds.ShouldBe(900, "an explicit operator override always wins over the tier default");
+    }
+
+    [Fact]
+    public void BuildAgentProfile_leaves_non_deep_tiers_on_the_bounded_record_default()
+    {
+        var profile = TaskLaunchService.BuildAgentProfile(Request(null), Seed, Route("Standard") with { EffortMode = TaskEffortModes.Quick });
+
+        profile.TimeoutSeconds.ShouldBeNull("no tier default outside deep — downstream keeps the bounded 1h record default");
     }
 
     // ── Multi-repo launch: the related-repos → profile projection (the OTHER pure choke point on BuildAgentProfile) ──

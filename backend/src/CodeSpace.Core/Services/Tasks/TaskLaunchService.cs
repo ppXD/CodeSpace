@@ -297,7 +297,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             ModelCredentialModelId = request.Overrides.ModelCredentialModelId,
             RunnerKind = request.Overrides.RunnerKind,
             AutonomyLevel = ClampAutonomy(request, route),
-            TimeoutSeconds = request.Overrides.TimeoutSeconds,
+            TimeoutSeconds = request.Overrides.TimeoutSeconds ?? DefaultTimeoutSeconds(route),
             IntegrateBranches = request.Overrides.IntegrateBranches,
             CwdMode = WorkspaceCwdModeWire.FromWire(request.Overrides.CwdMode),
             EnableMcp = request.Overrides.EnableMcp,
@@ -309,6 +309,13 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             ReviewerAgent = request.Overrides.ReviewerAgent,
         };
     }
+
+    /// <summary>The deep tier's default agent wall-clock, in seconds — deep exists for hours-long work, and the record's 1h default killed exactly the long builds/test suites that tier dispatches. An operator override always wins; other tiers keep the bounded 1h record default (null).</summary>
+    private const int DeepAgentTimeoutSeconds = 7200;
+
+    /// <summary>The tier-aware agent wall-clock default when the operator set none: deep → <see cref="DeepAgentTimeoutSeconds"/>; every other tier → null (the record's bounded 1h default downstream).</summary>
+    private static int? DefaultTimeoutSeconds(RoutePlan route) =>
+        string.Equals(route.EffortMode, TaskEffortModes.Deep, StringComparison.OrdinalIgnoreCase) ? DeepAgentTimeoutSeconds : null;
 
     /// <summary>Project the operator's typed related repos onto <see cref="WorkspaceRepositorySpec"/>s through the SHARED authoring path (Rule 7 — the same defaults the agent.code node + supervisor get). Null / empty ⇒ null, so a single-repo launch leaves <c>RelatedRepositories</c> unset (the projection omits the key — byte-identical).</summary>
     private static IReadOnlyList<WorkspaceRepositorySpec>? BuildRelatedRepositories(IReadOnlyList<TaskRelatedRepository>? related) =>

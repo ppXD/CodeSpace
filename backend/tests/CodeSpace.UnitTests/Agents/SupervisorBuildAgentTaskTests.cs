@@ -106,6 +106,17 @@ public class SupervisorBuildAgentTaskTests
         task.PushProducedBranch.ShouldBe(true, "the profile's push opt-in threads to the spawned task so each branch agent publishes its own branch");
     }
 
+    [Theory]
+    [InlineData(7200, 7200)]  // positive → caps the run
+    [InlineData(0, null)]     // explicit 0 → NO wall-clock (the operator's "no timeout" choice)
+    [InlineData(-5, null)]    // any non-positive → unbounded, mirroring the agent.code node's vocabulary
+    public void A_profile_timeout_maps_onto_the_spawned_task_in_the_agent_code_vocabulary(int authored, int? expected)
+    {
+        var task = Build(new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { TimeoutSeconds = authored } });
+
+        task.TimeoutSeconds.ShouldBe(expected);
+    }
+
     // ── S7-A: multi-repo — the authored related repos project onto a Workspace via the SHARED authoring底層 ──
 
     [Fact]
