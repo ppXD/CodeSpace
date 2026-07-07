@@ -111,10 +111,61 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
         // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).
-        return SupervisorDecisionProjector.Project(model) with
+        var decision = SupervisorDecisionProjector.Project(model) with
         {
             Usage = new SupervisorModelUsage { Model = pick.ModelId, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
         };
+
+        // A STRUCTURALLY invalid plan (SupervisorPlanValidator: a dangling DependsOn reference or a cycle) would
+        // otherwise force-stop the whole run at SupervisorTurnService's post-decision gate with no chance to
+        // recover — buy ONE bounded re-plan with the specific error folded back before that terminal path ever
+        // runs. A retry that fails too (or misses) keeps the ORIGINAL decision, so the existing gate still force-
+        // stops exactly as before this existed.
+        if (SupervisorPlanValidator.Validate(decision) is { } planError)
+            decision = await TryRepairInvalidPlanAsync(structured, pick, context, catalog, decision, planError, cancellationToken).ConfigureAwait(false) ?? decision;
+
+        return decision;
+    }
+
+    /// <summary>
+    /// One bounded RE-PLAN round-trip after a STRUCTURALLY invalid plan: the model receives its own invalid plan
+    /// payload plus the validator's reason (a dangling <c>DependsOn</c> reference or a cycle) and must re-author a
+    /// valid decision — a revised plan, or a different action entirely if planning no longer fits. Returns null on
+    /// a model-side miss OR a retry that is STILL invalid (fail toward the ORIGINAL decision, which the caller then
+    /// keeps — <see cref="SupervisorTurnService.ApplyPostDecisionGate"/> force-stops it exactly as before this
+    /// existed) — a genuine INFRA fault propagates unchanged, same as every other repair call in this file.
+    /// </summary>
+    private static async Task<SupervisorDecision?> TryRepairInvalidPlanAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, SupervisorDecision invalid, string planError, CancellationToken cancellationToken)
+    {
+        StructuredLLMCompletion completion;
+        try
+        {
+            completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = SystemPrompt,
+                UserPrompt = $"{BuildUserPrompt(context, catalog)}\n\nYour previous 'plan' decision was structurally INVALID ({planError}): {invalid.PayloadJson}\n\nEvery subtask id a 'dependsOn' entry cites must be declared elsewhere in the SAME plan, and the dependency graph must contain no cycle (including a subtask depending on itself). Re-author a valid plan, or choose a different action if planning no longer fits.",
+                JsonSchema = SupervisorDecisionSchema.ResponseSchema,
+                MaxOutputTokens = 4096,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+
+        var model = TryDeserialize(completion.Json, out _);
+
+        if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return null;
+
+        var retried = SupervisorDecisionProjector.Project(model) with
+        {
+            Usage = new SupervisorModelUsage { Model = pick.ModelId, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+        };
+
+        return SupervisorPlanValidator.Validate(retried) is null ? retried : null;
     }
 
     /// <summary>
