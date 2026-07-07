@@ -85,12 +85,18 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
         if (model is null) return CriticVerdict.ReviewFailed(ReviewMode.Gate, "The reviewer returned no verdict.");
 
+        var issues = ModelIssueProjection.Project(model.Issues);
+
         return new CriticVerdict
         {
             Mode = ReviewMode.Gate,
-            Approved = model.Approved,
+            // SEVERITY-AUTHORITATIVE approval (P1): a gate halts iff at least one issue is a Blocker — the model's raw
+            // approved bit is advisory. A Minor/Major-only disapproval no longer halts (the calibration fix), and a
+            // Blocker the model under-called with approved:true still halts (the safety catch). The oracle/rubric layer
+            // is the deterministic gate for correctness; the critic is advisory calibration over what a human weighs.
+            Approved = CriticGatePolicy.Approves(issues),
             Score = model.Score,
-            Issues = ModelIssueProjection.Project(model.Issues),
+            Issues = issues,
             Rationale = Rationale(model.Rationale),
         };
     }
@@ -103,11 +109,17 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         if (model is null || string.IsNullOrWhiteSpace(model.Critique))
             return CriticVerdict.ReviewFailed(ReviewMode.Improve, "The reviewer returned no critique.");
 
+        var issues = ModelIssueProjection.Project(model.Issues);
+
         return new CriticVerdict
         {
             Mode = ReviewMode.Improve,
-            Critique = model.Critique,
-            Issues = ModelIssueProjection.Project(model.Issues),
+            // A MINOR-ONLY critique (all issues are nitpicks) does not warrant a revision round — suppress the critique
+            // so the producer keeps its output, while still surfacing the verdict (the review ran, the minors are
+            // noted). A critique with no structured issues keeps its revision — an unknown-severity free-text critique
+            // must not be silently dropped (fail toward doing the review, the safe direction).
+            Critique = CriticGatePolicy.WarrantsRevision(issues) ? model.Critique : null,
+            Issues = issues,
             Rationale = Rationale(model.Rationale),
         };
     }
@@ -151,14 +163,20 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
     private const string GateSystemPrompt =
         "You are an INDEPENDENT reviewer. You did not write the artifact under review; judge it strictly and fairly on " +
-        "its own merits against the stated goal. Approve ONLY when it soundly achieves the goal with no material flaw; " +
-        "otherwise flag it with concrete, specific issues a human should weigh — and ground EVERY issue in evidence: " +
-        "quote the offending part of the artifact or name its precise location (an unevidenced issue is an opinion, " +
-        "not a finding). Always give a rationale. Return ONLY the schema-constrained JSON.";
+        "its own merits against the stated goal. Ground EVERY issue in evidence (quote the offending part or name its " +
+        "precise location — an unevidenced issue is an opinion, not a finding) AND classify its SEVERITY: 'blocker' = " +
+        "the artifact is UNFIT for its goal (it would produce wrong, broken, unsafe, or incomplete results, or fails a " +
+        "hard requirement); 'major' = a real problem worth fixing that does NOT make it unfit; 'minor' = a nitpick or " +
+        "style preference. Set approved=false if and ONLY if you list at least one BLOCKER — a major or minor issue is " +
+        "worth surfacing but is not, on its own, grounds to halt. Do NOT inflate severity: reserve 'blocker' for genuine " +
+        "unfitness, so a sound artifact with a cosmetic flaw is not blocked. Always give a rationale. Return ONLY the " +
+        "schema-constrained JSON.";
 
     private const string ImproveSystemPrompt =
         "You are an INDEPENDENT reviewer helping improve an artifact you did not write. Critique it against the stated " +
         "goal: identify what is weak, missing, or wrong, and give SPECIFIC, ACTIONABLE guidance the author can apply to " +
         "produce a better revision. Ground every itemised issue in evidence — quote the artifact or name the precise " +
-        "location. Be concrete, not vague. Return ONLY the schema-constrained JSON.";
+        "location — AND classify its severity ('blocker' = makes it unfit; 'major' = a real problem to fix; 'minor' = a " +
+        "nitpick). If the only problems are minor nitpicks, say so plainly — do not manufacture a substantive revision " +
+        "for style preferences. Be concrete, not vague. Return ONLY the schema-constrained JSON.";
 }

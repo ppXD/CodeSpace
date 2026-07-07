@@ -107,11 +107,11 @@ public sealed class AgentReviewRunner : IScopedDependency
         Acceptance = null,
     };
 
-    /// <summary>The shared final-message contract footer every review goal ends with — evidence REQUIRED per issue.</summary>
+    /// <summary>The shared final-message contract footer every review goal ends with — evidence AND severity REQUIRED per issue (P1: the agent reviewer's Gate is severity-authoritative, uniform with the in-process critic).</summary>
     internal const string VerdictContract =
         "Your FINAL message must be exactly one line starting with the marker, no prose after it:\n" +
-        VerdictMarker + " {\"approved\": true|false, \"rationale\": \"why\", \"issues\": [{\"issue\": \"one concrete problem\", \"evidence\": \"quote or precise location in the repository\"}]}\n\n" +
-        "Approve ONLY when the artifact soundly achieves its goal with no material flaw; otherwise approved=false with every issue grounded in evidence you actually saw in this workspace.";
+        VerdictMarker + " {\"approved\": true|false, \"rationale\": \"why\", \"issues\": [{\"issue\": \"one concrete problem\", \"evidence\": \"quote or precise location in the repository\", \"severity\": \"blocker|major|minor\"}]}\n\n" +
+        "Classify each issue's SEVERITY: blocker = the artifact is UNFIT for its goal (wrong/broken/unsafe/incomplete, or fails a hard requirement); major = a real problem worth fixing that does NOT make it unfit; minor = a nitpick. Set approved=false if and ONLY if you list at least one BLOCKER — reserve blocker for genuine unfitness so a sound result with a cosmetic flaw is not blocked. Ground every issue in evidence you actually saw in this workspace.";
 
     /// <summary>
     /// Parse the reviewer's final message into a verdict, FAIL-CLOSED to a failed review (→ the model-critic ladder)
@@ -134,12 +134,18 @@ public sealed class AgentReviewRunner : IScopedDependency
             if (model is null || string.IsNullOrWhiteSpace(model.Rationale))
                 return CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: the verdict JSON carries no rationale");
 
+            var issues = ModelIssueProjection.Project(model.Issues);
+
             return new CriticVerdict
             {
                 Mode = ReviewMode.Gate,
-                Approved = model.Approved,
+                // SEVERITY-AUTHORITATIVE, uniform with LlmStructuredCritic.ProjectGate (P1): the agent's Gate halts iff
+                // it named a Blocker — the raw approved bit is advisory. So the two independent Gate channels (agent
+                // reviewer + in-process critic) can never disagree on the halt rule, and the D② co-sign compares like
+                // with like.
+                Approved = CriticGatePolicy.Approves(issues),
                 Score = model.Score,
-                Issues = ModelIssueProjection.Project(model.Issues),
+                Issues = issues,
                 Rationale = model.Rationale,
             };
         }

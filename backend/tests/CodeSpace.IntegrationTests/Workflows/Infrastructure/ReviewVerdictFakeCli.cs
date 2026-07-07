@@ -49,7 +49,7 @@ public sealed class ReviewVerdictFakeCli : IDisposable
         "#!/bin/sh\n" +
         "printf '{\"type\":\"agent_reasoning\",\"message\":\"Inspecting the produced tree\"}\\n'\n" +
         "if grep -rq --exclude-dir=.git '" + FlawMarker + "' .; then\n" +
-        "  printf '{\"type\":\"agent_message\",\"message\":\"VERDICT: {\\\\\"approved\\\\\": false, \\\\\"rationale\\\\\": \\\\\"" + DisapproveRationale + "\\\\\", \\\\\"issues\\\\\": [{\\\\\"issue\\\\\": \\\\\"placeholder hack committed\\\\\", \\\\\"evidence\\\\\": \\\\\"grep found " + FlawMarker + " in the produced tree\\\\\"}]}\"}\\n'\n" +
+        "  printf '{\"type\":\"agent_message\",\"message\":\"VERDICT: {\\\\\"approved\\\\\": false, \\\\\"rationale\\\\\": \\\\\"" + DisapproveRationale + "\\\\\", \\\\\"issues\\\\\": [{\\\\\"issue\\\\\": \\\\\"placeholder hack committed\\\\\", \\\\\"evidence\\\\\": \\\\\"grep found " + FlawMarker + " in the produced tree\\\\\", \\\\\"severity\\\\\": \\\\\"blocker\\\\\"}]}\"}\\n'\n" +
         "else\n" +
         "  printf '{\"type\":\"agent_message\",\"message\":\"VERDICT: {\\\\\"approved\\\\\": true, \\\\\"rationale\\\\\": \\\\\"clean and goal-aligned\\\\\", \\\\\"issues\\\\\": []}\"}\\n'\n" +
         "fi\n" +

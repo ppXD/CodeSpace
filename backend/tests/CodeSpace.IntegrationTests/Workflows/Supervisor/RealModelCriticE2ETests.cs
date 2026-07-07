@@ -126,6 +126,74 @@ public sealed class RealModelCriticE2ETests
         });
     }
 
+    /// <summary>
+    /// The P1 SEVERITY-CALIBRATION gate: the same live reviewer must grade PROPORTIONATELY — mark a functionally FATAL
+    /// flaw a BLOCKER (so the gate still halts it), and a purely COSMETIC issue on otherwise-correct code NOT a blocker
+    /// (so the artifact is NOT halted). This is the claim the calibration fix rests on — that adversarial review stops
+    /// blocking on nitpicks WITHOUT going blind to real defects. The verdicts ARE gated; infra failures stay non-gating.
+    /// </summary>
+    [Fact]
+    public async Task A_live_reviewer_blocks_a_fatal_flaw_but_not_a_cosmetic_one()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+
+        const string goal = "Reject empty or missing passwords in the login endpoint.";
+
+        // FATAL: functionally accepts every password — it does NOT achieve the goal (a Blocker).
+        const string fatalChange =
+            "Agent summary: added password validation\n\n" +
+            "Changed files (1): src/Api/LoginController.cs\n\n" +
+            "Diff:\n" +
+            "diff --git a/src/Api/LoginController.cs b/src/Api/LoginController.cs\n" +
+            "+            // accepts every password — validation is not actually implemented\n" +
+            "+            if (password == null || password.Length >= 0) return Ok(IssueToken(user));\n";
+
+        // COSMETIC: correctly rejects empty/missing passwords (ACHIEVES the goal) with a covering test — the only
+        // quibble is a terse local variable name. A well-calibrated reviewer marks this minor and does NOT block it.
+        const string cosmeticChange =
+            "Agent summary: reject empty or missing passwords with 400, with a covering test\n\n" +
+            "Changed files (2): src/Api/LoginController.cs, tests/LoginControllerTests.cs\n\n" +
+            "Diff:\n" +
+            "diff --git a/src/Api/LoginController.cs b/src/Api/LoginController.cs\n" +
+            "+            if (string.IsNullOrEmpty(pwd)) return BadRequest(\"password is required\");\n" +
+            "diff --git a/tests/LoginControllerTests.cs b/tests/LoginControllerTests.cs\n" +
+            "+        [Theory] [InlineData(null)] [InlineData(\"\")] public async Task Rejects_missing_password(string? pwd) => (await Post(pwd)).StatusCode.ShouldBe(400);\n";
+
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
+
+        await RealModelGate.AssessLiveAsync(Custom, async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+
+            var fatal = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = fatalChange, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+            var cosmetic = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = cosmeticChange, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+
+            if (fatal.Failed || cosmetic.Failed)
+                return (true, "the reviewer produced no verdict on one side (gateway infra) — not gating");
+
+            // Severity-authoritative: the fatal flaw must be BLOCKED (a Blocker issue → Approved=false), and the
+            // cosmetic-only change must NOT be blocked (Approved=true — the calibration fix, a real model no longer
+            // halting sound code over a naming nit).
+            var calibrated = !fatal.Approved
+                && fatal.Issues.Any(i => i.Severity == CriticSeverity.Blocker)
+                && cosmetic.Approved;
+
+            return (calibrated,
+                $"fatal: approved={fatal.Approved} (want false), severities=[{string.Join(",", fatal.Issues.Select(i => i.Severity))}] · " +
+                $"cosmetic: approved={cosmetic.Approved} (want true), severities=[{string.Join(",", cosmetic.Issues.Select(i => i.Severity))}] — {fatal.Rationale}");
+        });
+    }
+
     /// <summary>The S7 RUBRIC-JUDGE effectiveness gate: the live judge must answer per-criterion BINARY verdicts that
     /// DISCRIMINATE — an artifact that plainly satisfies both criteria gets both met, one that satisfies neither gets
     /// neither. This is what the non-coding oracle rests on; the verdicts ARE gated (infra failures stay non-gating).</summary>
