@@ -10,10 +10,11 @@ namespace CodeSpace.UnitTests.Agents;
 /// 🟢 Unit: the PURE pieces of loopability slice 3 (per-unit objective acceptance). The rehydrate WIRING (grade-once,
 /// positional join, fail-closed, repo resolution) is proven over real Postgres in
 /// <c>SupervisorUnitAcceptanceFoldFlowTests</c>; this pins the decision logic in isolation: (1) the no-progress
-/// EVIDENCE DISCOUNT — an objectively-rejected unit (<c>AcceptancePassed == false</c>) is NOT settled evidence even
-/// though it pushed a branch (the must-fix: without it an acceptance-failing retry loop never trips the stall bound);
-/// (2) <c>ReadPlanSubtasks</c> reads each subtask's authored acceptance off a plan payload; (3) the new verdict fields
-/// are null-omitted so an ungraded unit serializes byte-identical.
+/// EVIDENCE DISCOUNT — a WORK-classed rejection (<c>AcceptancePassed == false</c>, the check ran and the work failed
+/// it) is NOT settled evidence even though it pushed a branch (the must-fix: without it an acceptance-failing retry
+/// loop never trips the stall bound), while an INFRA-classed rejection (the check could not RUN — P0) KEEPS its
+/// evidence; (2) <c>ReadPlanSubtasks</c> reads each subtask's authored acceptance off a plan payload; (3) the new
+/// verdict fields are null-omitted so an ungraded unit serializes byte-identical.
 /// </summary>
 [Trait("Category", "Unit")]
 public class SupervisorUnitAcceptanceTests
@@ -50,6 +51,38 @@ public class SupervisorUnitAcceptanceTests
         var results = new[] { BranchPushed(false), BranchPushed(false), BranchPushed(true) };
 
         SupervisorOutcome.HasSettledEvidence(results).ShouldBeTrue("at least one objectively-accepted unit is real forward progress");
+    }
+
+    // ── P0: an INFRA-classed rejection keeps its evidence (the check could not RUN — that is not failed work) ──
+
+    [Theory]
+    [InlineData("no-branch-or-repo")]          // publish failed with work present — the c5c6bba6 kill: correct work erased from progress
+    [InlineData("grade-error: clone timeout")] // the grader's own failure
+    [InlineData("no-rubric")]                  // half-authored spec — the check can never run as authored
+    public void An_infra_classed_rejection_keeps_its_evidence(string detail)
+    {
+        var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ChangedFiles = new[] { "report.md" }, AcceptancePassed = false, AcceptanceDetail = detail };
+
+        SupervisorOutcome.HasSettledEvidence(new[] { result })
+            .ShouldBeTrue("the discount exists to catch never-PASSING work, not never-RUNNING checks — discounting these marched a run with correct work into its no-progress kill");
+    }
+
+    [Fact]
+    public void A_work_classed_rejection_stays_discounted()
+    {
+        // The original slice-3 purpose is untouched: a real check verdict (the work IS wrong) resets nothing.
+        var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "b", AcceptancePassed = false, AcceptanceDetail = "tests-failed-exit-1" };
+
+        SupervisorOutcome.HasSettledEvidence(new[] { result }).ShouldBeFalse("a failing check on real work is still not progress");
+    }
+
+    [Fact]
+    public void A_no_work_no_branch_rejection_has_no_evidence_to_keep()
+    {
+        // no-branch-or-repo with NO work is agent-fixable (do the work) — and there is nothing to count as evidence.
+        var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Failed", AcceptancePassed = false, AcceptanceDetail = "no-branch-or-repo" };
+
+        SupervisorOutcome.HasSettledEvidence(new[] { result }).ShouldBeFalse();
     }
 
     // ── ReadPlanSubtasks: the per-unit acceptance source ───────────────────────────────

@@ -159,7 +159,7 @@ public sealed partial class SupervisorTurnService
     /// folded OutcomeJson the decider sees), so it survives replay + re-entry deterministically. A long-running spawn whose
     /// agents haven't settled is a PARK (not yet a terminal decision in <paramref name="priorDecisions"/>), so it never trips early.
     /// </summary>
-    private static int FoldNoProgressDecisions(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    internal static int FoldNoProgressDecisions(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var streak = 0;
         var everMerged = new HashSet<Guid>();
@@ -170,7 +170,7 @@ public sealed partial class SupervisorTurnService
         return streak;
     }
 
-    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it only if it integrated NEW work (see <see cref="MergedNewWork"/>); an ANSWERED plan-confirmation card advanced it too (an operator actively steering the plan is engagement, not a stall — without this, a couple of revise loops would trip the no-progress guard mid-conversation). A wave of all-failed/empty agents, a plan, a content-free / re-consolidating merge, or a content ask_human makes no fresh progress.</summary>
+    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>; an INFRA-classed rejection keeps its evidence — the check could not run, that is not failed work); a merge advanced it only if it integrated NEW work (see <see cref="MergedNewWork"/>); an ANSWERED plan-confirmation OR gate-escalation card advanced it too (a human actively steering the plan or RULING on a blocked decision is engagement, not a stall — both cards are server-authored, and the counted state additionally requires a server-written answer off a resolved wait, so every streak reset costs a real human interaction). A wave of all-failed/empty agents, a plan, a content-free / re-consolidating merge, or a content ask_human makes no fresh progress.</summary>
     private static bool MadeProgress(SupervisorPriorDecision decision, HashSet<Guid> everMerged)
     {
         if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind))
@@ -179,7 +179,13 @@ public sealed partial class SupervisorTurnService
         if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
             return MergedNewWork(decision, everMerged);
 
-        return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision);
+        // BOTH gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer RULES
+        // on a blocked decision. The marker is text-matchable (a model could mint a marker-carrying ask), but the
+        // counted state requires a server-written ANSWER off a resolved wait — every streak reset costs a real
+        // human interaction, so a walk-away run gains nothing; a model looping its own content asks still marches
+        // toward the stall bound. Without the escalation clause, a human actively unblocking a run accelerated its
+        // no-progress kill — a real run died 24ms after its third 'approve'.
+        return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision) || SupervisorGateEscalation.IsAnsweredEscalationCard(decision);
     }
 
     /// <summary>
@@ -341,8 +347,9 @@ public sealed partial class SupervisorTurnService
     /// Fold the per-UNIT OBJECTIVE acceptance grade onto a TERMINAL spawn/retry decision (loopability slice 3) — each
     /// spawned unit whose PLANNED subtask authored an <see cref="SupervisorAcceptanceSpec"/> is graded on ITS OWN
     /// produced branch, so a unit's "done" is a server-verified fact, not the agent's self-report. The verdict stamps
-    /// onto that unit's <see cref="SupervisorAgentResult"/> (so a FAILED unit is the precise retry target the decider
-    /// sees AND is discounted from the no-progress evidence — a branch pushed but REJECTED is not progress). Runs
+    /// onto that unit's <see cref="SupervisorAgentResult"/> (so a WORK-classed failure is the precise retry target the
+    /// decider sees AND is discounted from the no-progress evidence — a branch pushed but REJECTED is not progress;
+    /// an INFRA-classed failure instead reads "the check could not run" and keeps its evidence). Runs
     /// EXACTLY ONCE: a re-fold is skipped the moment any unit already carries a verdict (durable on the tape), so the
     /// clone+grade never re-fires (the replay-safety contract, same as the resolve/stop folds). Returns UNCHANGED —
     /// byte-identical — for: a non-spawn/retry verb (resolve has its own grade); a plan whose subtasks carry NO

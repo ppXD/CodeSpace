@@ -103,6 +103,39 @@ public class SupervisorTurnServiceTests
         result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
     }
 
+    [Fact]
+    public void An_answered_escalation_card_resets_the_no_progress_streak()
+    {
+        // P0: a human RULING on a gate-escalation card is engagement, not a stall — exactly like an answered
+        // plan-confirmation card (#988). Without this clause the same tape marched to a forced stop (a real run
+        // died 24ms after its third 'approve'). Pure fold pin: reset at the answered card, counting resumes after.
+        var card = SupervisorGateEscalation.IntoAskHuman(
+            new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" },
+            new CodeSpace.Messages.Review.CriticVerdict { Mode = CodeSpace.Messages.Enums.ReviewMode.Gate, Approved = false, Rationale = "blocked" });
+
+        var priors = new[]
+        {
+            PlanPrior(1), PlanPrior(2), PlanPrior(3),
+            AskPrior(4, card.PayloadJson, """{"question":"q","answer":"approve"}"""),
+            PlanPrior(5), PlanPrior(6),
+        };
+
+        SupervisorTurnService.FoldNoProgressDecisions(priors)
+            .ShouldBe(2, "the answered escalation resets the streak; only the two later plans count");
+
+        SupervisorTurnService.FoldNoProgressDecisions(new[] { PlanPrior(1), AskPrior(2, card.PayloadJson, """{"question":"q"}""") })
+            .ShouldBe(2, "an UNANSWERED escalation is still a stall — only the human's ruling counts");
+
+        SupervisorTurnService.FoldNoProgressDecisions(new[] { AskPrior(1, """{"question":"which db?"}""", """{"question":"which db?","answer":"postgres"}""") })
+            .ShouldBe(1, "an answered CONTENT ask (model-authored question, no gate marker) never counts — a model looping its own asks still marches toward the stall bound");
+    }
+
+    private static SupervisorPriorDecision PlanPrior(int seq) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan, PayloadJson = "{}", OutcomeJson = "{}" };
+
+    private static SupervisorPriorDecision AskPrior(int seq, string payloadJson, string outcomeJson) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.AskHuman, PayloadJson = payloadJson, OutcomeJson = outcomeJson };
+
     // ── Governance DENY → force-STOP=GovernanceDenied, no agent staged (the fail-closed branch) ──
 
     [Theory]

@@ -437,11 +437,17 @@ public static class SupervisorOutcome
         // the no-progress streak (ProducedBranch counts below), so an acceptance-failing retry loop never trips the
         // stall bound (only the total-spawn cap), burning the budget on never-passing work. An ungraded unit
         // (AcceptancePassed null — no per-unit contract, the pre-slice case) is byte-identically unaffected.
-        result.AcceptancePassed != false
-        && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
-            || result.ChangedFiles.Count > 0
-            || !string.IsNullOrEmpty(result.ProducedBranch)
-            || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0));
+        // An INFRA-classed rejection (the CHECK could not run: grader error, half-authored spec, publish failure with
+        // work present) keeps its evidence — the discount exists to catch never-PASSING work, not never-RUNNING checks;
+        // discounting those erased a real run's ONLY correct work product and marched it into the no-progress kill.
+        (result.AcceptancePassed != false || Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, ResultShowsWork(result)))
+        && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) || ResultShowsWork(result));
+
+    /// <summary>Whether the compact shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — the ONE work-present read the evidence fold, the decider's verdict line, and the recitation all share for the infra classification, so the three can never drift on what "work exists" means.</summary>
+    public static bool ResultShowsWork(SupervisorAgentResult result) =>
+        result.ChangedFiles.Count > 0
+        || !string.IsNullOrEmpty(result.ProducedBranch)
+        || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
 
     /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo

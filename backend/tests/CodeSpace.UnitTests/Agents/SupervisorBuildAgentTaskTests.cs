@@ -360,6 +360,24 @@ public class SupervisorBuildAgentTaskTests
             "spec=null builds the EXACT same task as the no-spec path — a no-dispatch spawn is byte-identical");
     }
 
+    [Fact]
+    public void A_contract_bearing_subtask_forces_the_push_opt_in()
+    {
+        // F4 on the SUPERVISOR lane (P0): the fold grades a contracted unit's oracle on its produced branch — a
+        // stock profile (push off) would fail every contracted unit "no-branch-or-repo" even with perfect work.
+        var subtasks = new Dictionary<string, SupervisorPlannedSubtask>
+        {
+            ["s1"] = new() { Id = "s1", Title = "contracted", Instruction = "do it", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "report.md" } } },
+            ["s2"] = new() { Id = "s2", Title = "plain", Instruction = "do it too" },
+        };
+        var ctx = new SupervisorTurnContext { Goal = "g" };
+
+        RealSupervisorActionExecutor.BuildAgentTask(subtasks, "s1", revisedInstruction: null, ctx).PushProducedBranch
+            .ShouldBe(true, "a per-unit contract implies a GRADABLE branch — the publish opt-in is forced ON");
+        RealSupervisorActionExecutor.BuildAgentTask(subtasks, "s2", revisedInstruction: null, ctx).PushProducedBranch
+            .ShouldBeNull("a contract-less subtask keeps the profile/ambient behavior — byte-identical");
+    }
+
     private static AgentTask Build(SupervisorTurnContext context) =>
         RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, context);
 
