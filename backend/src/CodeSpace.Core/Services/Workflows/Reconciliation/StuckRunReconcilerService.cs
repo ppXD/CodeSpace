@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Dispatch;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Agents;
@@ -509,14 +510,23 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// query EXCLUDES any run that already has <see cref="MaxSupervisorRunRecoveries"/> durable
     /// <c>supervisor.run_recovered</c> records — that run is left Running for <see cref="MarkAbandonedRunningAsync"/>
     /// to fail cleanly. So a transient crash recovers; a deterministic crash recovers K times then TERMINATES.</para>
-    /// <para>The reaper always runs; a run with no non-terminal <c>SupervisorDecisionRecord</c> simply matches nothing here (the candidate query returns 0 for it) and falls through to <see cref="MarkAbandonedRunningAsync"/> unchanged.</para>
+    /// <para>P1.3 widened this to the PRE-CLAIM crash too: a worker that died INSIDE <c>ChooseDecisionAsync</c>
+    /// before the decider even replied leaves NO <c>SupervisorDecisionRecord</c> row at all (nothing was claimed
+    /// yet) — <see cref="FindPreClaimSupervisorCrashCandidatesAsync"/> catches that case by confirming the run's
+    /// own unsettled node IS an <c>agent.supervisor</c> node (via the definition, not a ledger proxy), so re-entry
+    /// is provably pure (rehydrate finds nothing in-flight, re-asks the decider — at most one wasted brain call,
+    /// the same cost class as any transient-fault retry already accepted elsewhere in this arc).</para>
+    /// <para>The reaper always runs; a run matching NEITHER candidate set falls through to
+    /// <see cref="MarkAbandonedRunningAsync"/> unchanged — the conservative default for every node type this
+    /// service cannot positively prove is safe to blindly re-run.</para>
     /// </summary>
     private async Task<int> RecoverAbandonedSupervisorRunsAsync(CancellationToken cancellationToken)
     {
-        var candidates = await FindRecoverableSupervisorRunsAsync(cancellationToken).ConfigureAwait(false);
+        var postClaim = await FindRecoverableSupervisorRunsAsync(cancellationToken).ConfigureAwait(false);
+        var preClaim = await FindPreClaimSupervisorCrashCandidatesAsync(cancellationToken).ConfigureAwait(false);
 
         var recovered = 0;
-        foreach (var runId in candidates)
+        foreach (var runId in postClaim.Concat(preClaim).Distinct())
             if (await TryRecoverSupervisorRunAsync(runId, cancellationToken).ConfigureAwait(false)) recovered++;
 
         return recovered;
@@ -581,6 +591,75 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         await _db.WorkflowRunRecord.AsNoTracking()
             .CountAsync(rec => rec.RunId == runId && rec.RecordType == WorkflowRunRecordTypes.SupervisorRunRecovered, cancellationToken)
             .ConfigureAwait(false);
+
+    /// <summary>The <c>agent.supervisor</c> node's TypeKey — no shared constant exists (the codebase uses the literal ad hoc), pinned here + by a unit test (Rule 8) so a node rename can't silently reopen this recovery gap.</summary>
+    internal const string SupervisorNodeTypeKey = "agent.supervisor";
+
+    /// <summary>
+    /// The PRE-CLAIM crash candidate set (P1.3): a Running, stale, under-cap run — SAME liveness signature as
+    /// <see cref="FindRecoverableSupervisorRunsAsync"/> — but with ZERO <c>SupervisorDecisionRecord</c> rows at
+    /// all (proving no decision was ever claimed, so <see cref="FindRecoverableSupervisorRunsAsync"/>'s ledger
+    /// proxy can't see it). The SQL-only candidate set can't express "is the stuck node an agent.supervisor" (that
+    /// needs the definition's JSON, not a column), so this is a two-phase read: cheap SQL narrows to a small
+    /// batch, then each candidate's definition + unsettled top-level <c>WorkflowRunNode</c> row are checked
+    /// client-side — this positive proof (not a heuristic) is what keeps the blind-redispatch scoped to exactly
+    /// the node type whose re-entry is provably safe, leaving every other node type on the conservative
+    /// <see cref="MarkAbandonedRunningAsync"/> default.
+    /// </summary>
+    private async Task<List<Guid>> FindPreClaimSupervisorCrashCandidatesAsync(CancellationToken cancellationToken)
+    {
+        var runningThreshold = DateTimeOffset.UtcNow - RunningStuckAfter;
+        var livenessThreshold = DateTimeOffset.UtcNow - LedgerLivenessWindow;
+
+        var candidates = await (
+            from run in _db.WorkflowRun.AsNoTracking()
+            where run.Status == WorkflowRunStatus.Running && run.StartedAt < runningThreshold
+            let mostRecentLedger = _db.WorkflowRunRecord.AsNoTracking().Where(rec => rec.RunId == run.Id).Max(rec => (DateTimeOffset?)rec.OccurredAt)
+            where mostRecentLedger == null || mostRecentLedger < livenessThreshold
+            where !_db.SupervisorDecisionRecord.Any(d => d.SupervisorRunId == run.Id)
+            where _db.WorkflowRunRecord.Count(rec => rec.RunId == run.Id && rec.RecordType == WorkflowRunRecordTypes.SupervisorRunRecovered) < MaxSupervisorRunRecoveries
+            orderby run.StartedAt
+            select new { run.Id, run.WorkflowId, run.WorkflowVersion, run.DefinitionSnapshotJson }
+        ).Take(BatchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var recoverable = new List<Guid>();
+
+        foreach (var candidate in candidates)
+            if (await IsStuckOnAnUnsettledSupervisorNodeAsync(candidate.Id, candidate.WorkflowId, candidate.WorkflowVersion, candidate.DefinitionSnapshotJson, cancellationToken).ConfigureAwait(false))
+                recoverable.Add(candidate.Id);
+
+        return recoverable;
+    }
+
+    /// <summary>
+    /// True when this run's active (unsettled — <c>Pending</c>/<c>Running</c>/<c>Suspended</c>, never
+    /// <c>Success</c>/<c>Skipped</c>) TOP-LEVEL <c>WorkflowRunNode</c> is typed <c>agent.supervisor</c> in the run's
+    /// OWN definition. Mirrors <see cref="ActorIdentityRequirementGate"/>'s snapshot-or-version definition load
+    /// (a SNAPSHOT run carries its definition inline; an AUTHORED run reads its pinned version) — no tamper/hash
+    /// check here, this is a read-only classification for a recovery decision, not an execution path.
+    /// </summary>
+    private async Task<bool> IsStuckOnAnUnsettledSupervisorNodeAsync(Guid runId, Guid? workflowId, int? workflowVersion, string? definitionSnapshotJson, CancellationToken cancellationToken)
+    {
+        var definitionJson = definitionSnapshotJson ?? (workflowId is { } wid && workflowVersion is { } wver
+            ? await _db.WorkflowVersion.AsNoTracking()
+                .Where(v => v.WorkflowId == wid && v.Version == wver)
+                .Select(v => v.DefinitionJson)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            : null);
+
+        var definition = definitionJson == null ? null : System.Text.Json.JsonSerializer.Deserialize<Messages.Dtos.Workflows.WorkflowDefinition>(definitionJson, WorkflowJson.Options);
+        if (definition == null) return false;
+
+        var supervisorNodeIds = definition.Nodes.Where(n => n.TypeKey == SupervisorNodeTypeKey).Select(n => n.Id).ToHashSet();
+        if (supervisorNodeIds.Count == 0) return false;
+
+        var unsettled = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.IterationKey == "" && n.Status != NodeStatus.Success && n.Status != NodeStatus.Skipped)
+            .Select(n => n.NodeId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return unsettled.Any(supervisorNodeIds.Contains);
+    }
 
     /// <summary>The non-terminal <c>SupervisorDecisionStatus</c> set, derived ONCE from the state machine so the recoverable predicate can't drift from <see cref="SupervisorDecisionStateMachine.IsTerminal"/>.
     /// Includes <c>AwaitingApproval</c> (reserved/unused today). When the HITL-approval slice lands, such a decision parks the run <c>Suspended</c>, not <c>Running</c>, so this Running-only sweep still won't yank a legitimately-awaiting-approval run — revisit this predicate if that ever changes.</summary>

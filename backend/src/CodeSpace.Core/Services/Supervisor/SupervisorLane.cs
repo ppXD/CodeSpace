@@ -56,4 +56,13 @@ public static class SupervisorLane
 
     /// <summary>Wall-clock cap (seconds) for the OBJECTIVE acceptance grade — re-cloning a resolver's branch and running the operator's acceptance command (L4 A3). A hung check is a non-accept, not a hang. An operator-tunable field is a follow-up. Pinned (Rule 8).</summary>
     public const int AcceptanceGradeTimeoutSeconds = 120;
+
+    /// <summary>
+    /// P1.3 — the heartbeat interval a long SEQUENTIAL multi-target/multi-gate grade emits a ledger record at, so
+    /// the reconciler's staleness check (<see cref="StuckRunReconcilerService.LedgerLivenessWindow"/>, 5 min) never
+    /// mistakes an actively-grading run for an abandoned one. Comfortably under the liveness window (30% of it) so
+    /// a heartbeat always lands well before staleness would trip, even accounting for scheduling jitter. Pinned
+    /// (Rule 8) — widening it risks the exact false-abandon this exists to prevent.
+    /// </summary>
+    public static readonly TimeSpan AcceptanceGradeHeartbeatInterval = TimeSpan.FromSeconds(90);
 }
