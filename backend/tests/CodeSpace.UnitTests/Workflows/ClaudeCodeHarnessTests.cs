@@ -494,6 +494,30 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Build_result_reports_failure_on_exit_zero_when_the_result_line_is_an_error()
+    {
+        // Claude Code's own process can exit 0 (it didn't crash) while its result line carries is_error:true
+        // (e.g. a gateway 429 mid-turn) — that must NOT read as a silent Succeeded.
+        var errorResult = Harness.ParseEvents("""{"type":"result","subtype":"error_during_execution","result":"API Error (429)","is_error":true}""").Single();
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, errorResult };
+
+        var result = Harness.BuildResult(events, exitCode: 0);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe("harness-reported-failure");
+        result.Error.ShouldBe("API Error (429)");
+    }
+
+    [Fact]
+    public void Build_result_still_succeeds_on_exit_zero_when_the_result_line_is_clean()
+    {
+        var okResult = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false}""").Single();
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, okResult };
+
+        Harness.BuildResult(events, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded, "a clean is_error:false result line on exit 0 is unaffected");
+    }
+
+    [Fact]
     public void Build_result_populates_token_usage_from_the_result_lines_usage_object()
     {
         // D3b-i: Claude's final result line carries a usage object; parsed via the harness (so Data is the
