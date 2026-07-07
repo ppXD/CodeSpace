@@ -84,6 +84,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return NonConformantStop();
         }
 
+        // A completion CUT OFF mid-generation (Anthropic max_tokens / OpenAI length — see ModelCallFinish, the SAME
+        // classifier the journal legibility axis uses) is not a shape the model chose: it ran out of room, most
+        // often authoring a large multi-subtask plan. Buy ONE bounded retry with a RAISED output budget before this
+        // falls into the bind-check flow — the repair round-trip below reuses the SAME (smaller) request budget, so
+        // without this it would only reproduce the identical truncation on a genuinely big decision.
+        if (ModelCallFinish.Classify(completion.Usage.FinishReason) == ModelCallFinishKind.Truncated)
+            completion = await TryRetryWithRaisedBudgetAsync(structured, pick, context, catalog, cancellationToken).ConfigureAwait(false) ?? completion;
+
         var model = TryDeserialize(completion.Json, out var bindError);
 
         // A reply that passed the JSON schema but did not BIND to the decision record is a schema↔type DRIFT signal
@@ -130,6 +138,27 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 Temperature = 0,
                 Credential = pick.Credential,
             }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The raised output budget ONE truncated-completion retry gets — double the normal <see cref="MaxOutputTokens"/> (4096) so a large multi-subtask plan gets genuine room to finish. Pinned (Rule 8): shrinking it re-narrows the exact window this exists to widen.</summary>
+    internal const int TruncatedRetryMaxOutputTokens = 8192;
+
+    /// <summary>
+    /// One bounded retry after a TRUNCATED completion: re-run the SAME request with <see cref="TruncatedRetryMaxOutputTokens"/>
+    /// instead of the default budget. Returns null on a model-side miss (fail toward the ORIGINAL truncated completion,
+    /// which the caller's normal bind-check/repair/stop flow then handles exactly as before this existed) — a genuine
+    /// INFRA fault propagates unchanged, same as every other repair call in this file.
+    /// </summary>
+    private static async Task<StructuredLLMCompletion?> TryRetryWithRaisedBudgetAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await structured.CompleteStructuredAsync(BuildRequest(context, pick, catalog) with { MaxOutputTokens = TruncatedRetryMaxOutputTokens }, cancellationToken).ConfigureAwait(false);
         }
         catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
         {
