@@ -33,7 +33,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         // A test injects a TRANSIENT (retryable) infra fault on a specific turn — thrown BEFORE any decision is produced,
         // so the production RetryingSupervisorDeciderDecorator that wraps this scripted decider must retry + recover it.
         if (_script.TryConsumeTransientFault(context.TurnNumber))
-            throw new LlmApiException("test-gateway", 503, LlmErrorCategory.Transient, $"injected transient brain fault on turn {context.TurnNumber}");
+            throw new LlmApiException("test-gateway", 503, LlmErrorCategory.Transient, $"injected transient brain fault on turn {context.TurnNumber}", _script.TransientFaultRetryAfter);
 
         var decision = _script.Mode switch
         {
@@ -303,14 +303,21 @@ public sealed class SupervisorDecisionScript
 
     private readonly Dictionary<int, int> _transientFaults = new();
 
-    /// <summary>Inject a transient (retryable) brain-call fault on a specific TURN: the next <paramref name="times"/> decide invocations for that turn throw a Transient <c>LlmApiException</c> before any decision is produced, then it proceeds — driving the production retry decorator that wraps the scripted decider. <paramref name="times"/> must stay under the retry budget for the run to recover.</summary>
+    /// <summary>Inject a transient (retryable) brain-call fault on a specific TURN: the next <paramref name="times"/> decide invocations for that turn throw a Transient <c>LlmApiException</c> before any decision is produced, then it proceeds — driving the production retry decorator that wraps the scripted decider. <paramref name="times"/> UNDER the in-call retry budget → the decorator recovers in place; AT/OVER it → the exhausted fault escapes and the node's infra park (P1.1) engages.</summary>
     public void FailTransientlyOnTurn(int turn, int times) => _transientFaults[turn] = times;
+
+    /// <summary>The Retry-After each injected fault carries. Tests exercising EXHAUSTION set a tiny value so the decorator's in-call backoff honors it and a whole 5-attempt cycle runs in milliseconds instead of the exponential schedule's ~30s. Null (default) keeps the exponential-backoff path the recovery tests exercise.</summary>
+    public TimeSpan? TransientFaultRetryAfter { get; set; }
 
     /// <summary>How many injected transient faults REMAIN for a turn (0 once they've all been thrown) — a test asserts this reached 0 to prove the decider actually faulted that many times.</summary>
     public int RemainingTransientFaults(int turn) => _transientFaults.TryGetValue(turn, out var n) ? n : 0;
 
-    /// <summary>Drop all injected transient faults — a test calls this in cleanup so the shared fixture singleton never leaks a fault into a sibling test.</summary>
-    public void ClearTransientFaults() => _transientFaults.Clear();
+    /// <summary>Drop all injected transient faults (and any Retry-After override) — a test calls this in cleanup so the shared fixture singleton never leaks a fault into a sibling test.</summary>
+    public void ClearTransientFaults()
+    {
+        _transientFaults.Clear();
+        TransientFaultRetryAfter = null;
+    }
 
     /// <summary>Consume one injected transient fault for the turn if any remain (called by the scripted decider on each decide).</summary>
     public bool TryConsumeTransientFault(int turn)
