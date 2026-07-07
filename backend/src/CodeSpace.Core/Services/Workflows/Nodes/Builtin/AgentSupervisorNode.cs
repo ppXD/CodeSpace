@@ -212,12 +212,11 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
         var outputs = new Dictionary<string, JsonElement>
         {
-            // L4 P1: a terminal stop whose MODEL-authored acceptance check FAILED reports AcceptanceFailed (objective
-            // definition-of-done not met) instead of the self-reported Completed; null (no check authored) / true →
-            // Completed, byte-identical to before. The failed verdict also withholds the reviewable branch upstream.
-            ["status"] = JsonSerializer.SerializeToElement(result.AcceptancePassed == false ? "AcceptanceFailed" : "Completed"),
+            ["status"] = JsonSerializer.SerializeToElement(TerminalStatus(result)),
             ["decision"] = JsonSerializer.SerializeToElement(result.DecisionKind),
-            ["reason"] = JsonSerializer.SerializeToElement(result.TerminalReason ?? ""),
+            // A GaveUp stop carries no payload reason — fall back to the classification's (the non-success outcome
+            // label, e.g. "no-decision"), so a Stopped status always names why.
+            ["reason"] = JsonSerializer.SerializeToElement(result.TerminalReason ?? result.StopClassification?.Reason ?? ""),
             ["turns"] = JsonSerializer.SerializeToElement((result.NextTurn?.TurnNumber ?? 0)),
             // The run's final reviewable integrated branch (S5) — "" when none, so a downstream git.open_pr binds it directly.
             ["integratedBranch"] = JsonSerializer.SerializeToElement(result.IntegratedBranch ?? ""),
@@ -230,6 +229,18 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
         return NodeResult.Ok(outputs);
     }
+
+    /// <summary>
+    /// The terminal <c>status</c> output, in verdict-strength order: a FAILED model-authored acceptance grade is an
+    /// OBJECTIVE miss → <c>AcceptanceFailed</c> (L4 P1; the reviewable branch is withheld upstream); a degraded stop
+    /// (server-FORCED by a bound/budget/governance trip, or a model GIVE-UP — classified by the shared
+    /// <c>SupervisorOutcome.ClassifyStop</c>) → <c>Stopped</c>, because a run that ended mid-way must never claim
+    /// <c>Completed</c>; only a genuine model-authored success stop reports <c>Completed</c>.
+    /// </summary>
+    private static string TerminalStatus(SupervisorTurnResult result) =>
+        result.AcceptancePassed == false ? "AcceptanceFailed"
+        : result.StopClassification?.Degraded == true ? "Stopped"
+        : "Completed";
 
     /// <summary>
     /// SYNCHRONOUS non-terminal turn (plan / merge) → park on a SupervisorDecision wait that self-advances to

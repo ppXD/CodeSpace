@@ -479,7 +479,8 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
                 ReadStopReason(decision),
                 withhold ? null : SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions),
                 withhold ? Array.Empty<SupervisorRepositoryBranch>() : SupervisorOutcome.ReadFinalRepositoryBranches(context.PriorDecisions),
-                acceptancePassed);
+                acceptancePassed,
+                SupervisorOutcome.ClassifyStop(decision.PayloadJson, execution.OutcomeJson));
         }
 
         var nextTurn = context with { TurnNumber = context.TurnNumber + 1, InFlight = null };
