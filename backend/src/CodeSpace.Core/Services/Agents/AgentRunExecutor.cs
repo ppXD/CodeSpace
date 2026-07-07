@@ -781,7 +781,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             if (multiRepo) return await PushRepositoryResultsAsync(runId, result, workspace, pushHandle, cancellationToken).ConfigureAwait(false);
 
-            var branch = await pushHandle.PushChangesAsync(BuildBranchName(runId), cancellationToken).ConfigureAwait(false);
+            var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId), ct), cancellationToken).ConfigureAwait(false);
 
             return branch is null ? result : result with { ProducedBranch = branch };
         }
@@ -789,9 +789,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             // Best-effort: a push failure must never flip a Succeeded run to Failed. The exception message has the
             // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch; the run stays Succeeded with no branch output", runId);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch after {Attempts} attempt(s); the run stays Succeeded with no branch output", runId, PushMaxAttempts);
             await AppendPushFailureWarningAsync(runId, ex.Message, cancellationToken).ConfigureAwait(false);
             return result;
+        }
+    }
+
+    /// <summary>Bounded attempts for one branch push before giving up — a contract-bearing task forces the push opt-in (F4), so a single transient git failure (network blip, remote hiccup) would otherwise convert a fully correct run into <c>AcceptanceFailed("no-branch-or-repo")</c> with zero chance to recover. <see cref="WorkspaceException"/> carries no transient/deterministic classification (a flat clone/push wrapper), so this retries EVERY push failure a fixed number of times rather than sniffing error text — the same "retry blind, bounded" posture the P0.3 agent-respawn fix already took for a transient-vs-deterministic distinction git itself doesn't expose. Pinned (Rule 8).</summary>
+    internal const int PushMaxAttempts = 3;
+
+    /// <summary>Fixed backoff between push attempts — short because this runs inside the agent's own bounded wall clock; a network blip clears in well under a second, and a deterministic failure (auth, permission) just burns 3 short waits (~1s total) before falling through to the existing best-effort no-branch-output path unchanged. Pinned (Rule 8).</summary>
+    internal static readonly TimeSpan PushRetryBackoff = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>Retry a single push call up to <see cref="PushMaxAttempts"/> times on <see cref="WorkspaceException"/>, with <see cref="PushRetryBackoff"/> between attempts. The FINAL attempt's exception propagates unchanged — callers keep their existing single-catch best-effort fallback (per-repo isolation for multi-repo, run-stays-Succeeded for single-repo). Internal so both push paths share one retry posture and a test can pin the attempt count directly.</summary>
+    internal async Task<string?> PushWithRetryAsync(Func<CancellationToken, Task<string?>> push, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await push(cancellationToken).ConfigureAwait(false);
+            }
+            catch (WorkspaceException) when (attempt < PushMaxAttempts)
+            {
+                await Task.Delay(PushRetryBackoff, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -827,16 +849,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return result with { RepositoryResults = updated, ProducedBranch = primaryBranch };
     }
 
-    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returns null, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
+    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returns null, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
     private async Task<string?> PushOneRepoOrNullAsync(Guid runId, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
         try
         {
-            return await pushHandle.PushChangesAsync(alias, branchName, cancellationToken).ConfigureAwait(false);
+            return await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(alias, branchName, ct), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}'; keeping the other repos' branches in the change set", runId, alias);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}' after {Attempts} attempt(s); keeping the other repos' branches in the change set", runId, alias, PushMaxAttempts);
             await AppendPushFailureWarningAsync(runId, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
             return null;
         }
