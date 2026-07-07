@@ -132,7 +132,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         {
             var credential = new ResolvedModelCredential { Provider = Provider, BaseUrl = baseUrl!.TrimEnd('/'), ApiKey = apiKey! };
             var registry = new LLMClientRegistry(new ILLMClient[] { new Core.Services.Workflows.Llm.Anthropic.AnthropicClient(SharedHttp), new Core.Services.Workflows.Llm.OpenAi.OpenAiClient(SharedHttp) });
-            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary());
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary(), new E2ETapeStore());
 
             var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
             var score = SupervisorDecisionEval.Score(scenario, decision);
@@ -243,3 +243,17 @@ public sealed class RealModelSessionWholeLoopE2ETests
         public Task DeleteAsync(Guid teamId, Guid agentDefinitionId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }
+/// <summary>In-memory tape-summary store for the live-wire decider — the digest concern is pinned by its own tests.</summary>
+internal sealed class E2ETapeStore : CodeSpace.Core.Services.Supervisor.ISupervisorTapeSummaryStore
+{
+    private CodeSpace.Messages.Agents.SupervisorTapeSummary? _summary;
+
+    public Task<CodeSpace.Messages.Agents.SupervisorTapeSummary?> GetAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_summary);
+
+    public Task UpsertAsync(Guid supervisorRunId, Guid teamId, long upToSequence, string summary, CancellationToken cancellationToken)
+    {
+        _summary = new CodeSpace.Messages.Agents.SupervisorTapeSummary { UpToSequence = upToSequence, Text = summary };
+        return Task.CompletedTask;
+    }
+}
+

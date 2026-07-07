@@ -37,7 +37,7 @@ public sealed class RealModelSupervisorDecisionFlowTests
         await RealModelGate.AssessLiveAsync(provider, async () =>
         {
             var credential = RealModelLiveWire.Credential(provider, baseUrl, apiKey);
-            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas());
+            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore());
 
             var scores = new List<SupervisorDecisionScore>();
             foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
