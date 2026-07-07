@@ -475,3 +475,91 @@ jobs:
             echo "::error::The persona KILL-GATE (A_real_claude_agent_applies_its_injected_persona) did not run — it was de-selected while other arms matched. Other arms passing green is NOT the gate running."
             exit 1
           fi
+
+  real-model-publish-manifest:
+    name: real model (publish-manifest capture + push)
+    runs-on: ubuntu-latest
+    # THE live behavioral proof of the publish-or-park arc's I1/I2/I3 invariants: a REAL claude agent edits a REAL git
+    # clone, force-pushes the branch over REAL git to a REAL local bare repo (file://, no network), and a
+    # PublishManifest row lands recording it — independently re-verified against the bare remote's own refs, not just
+    # our own DB bookkeeping. One behavioral gate (~30-90s) + best-of-N, so the 30-min ceiling holds with headroom.
+    # Self-skips LOUDLY when the secrets / claude / git are absent (skip ≠ pass; a fork stays green at zero cost).
+    timeout-minutes: 30
+
+    # Same UNCONFINED rationale as the injection lane: this gate's signal is capture/push/manifest correctness, not
+    # sandbox confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner is flaky.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # best-of-N capability-floor (Rule 8 escape hatch): file-creation-then-push is near-deterministic, so the spare
+      # attempts just absorb a rare gateway hiccup, not model judgement variance.
+      CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-publish-manifest-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        # FATAL install (a missing binary must RED the lane, never let the gating arm self-skip green — "skip ≠ pass").
+        run: |
+          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          claude --version
+          git --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (a real agent's diff is captured, pushed to a real bare remote, and recorded in the publish manifest)
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelPublishManifest"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-publish-manifest.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the publish-manifest gate actually ran (no silent skip)
+        run: |
+          trx=backend/TestResults/real-model-publish-manifest.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the RealModel publish-manifest gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi

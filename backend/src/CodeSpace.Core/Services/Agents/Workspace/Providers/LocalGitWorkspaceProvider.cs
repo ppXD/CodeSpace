@@ -19,7 +19,7 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
 /// exposure is acceptable on a single-tenant local worker; the K8s runner injects via an in-pod
 /// credential helper instead.)</para>
 /// </summary>
-public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJanitor, ISingletonDependency
+public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJanitor, IWorkspacePathCapture, ISingletonDependency
 {
     private const int CloneTimeoutSeconds = 300;
     private const int CaptureTimeoutSeconds = 120;
@@ -192,6 +192,44 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             throw new WorkspaceException($"Could not read the workspace base revision (exit {result.ExitCode}): {Summarize(result.Stderr)}");
 
         return result.Stdout.Trim();
+    }
+
+    // ── IWorkspacePathCapture: capture with no live handle (the re-attach path) ──────────────────────
+
+    /// <summary>
+    /// The re-attach path's capture: same git-diff shape as <see cref="LocalWorkspaceHandle.CaptureRepoChangesAsync"/>,
+    /// against a bare <paramref name="directory"/> + <paramref name="baseSha"/> instead of a <c>MaterializedRepo</c> —
+    /// there is no clone credential to redact here (re-attach never re-resolves a push token), so errors surface the
+    /// raw stderr. Throws <see cref="WorkspaceException"/> when the directory was already reclaimed by the janitor or
+    /// a git command fails — the caller (best-effort, like every other capture) logs and keeps the result unchanged.
+    /// </summary>
+    public async Task<WorkspaceChanges> CaptureChangesFromPathAsync(string directory, string baseSha, CancellationToken cancellationToken)
+    {
+        var runner = _runners.Resolve(Kind);
+
+        async Task<string> RunOrThrowAsync(IReadOnlyList<string> args)
+        {
+            var result = await runner.RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+
+            if (result.Status != SandboxStatus.Success)
+                throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {Summarize(result.Stderr)}");
+
+            return result.Stdout;
+        }
+
+        await RunOrThrowAsync(new[] { "add", "-A" }).ConfigureAwait(false);
+
+        var patch = await RunOrThrowAsync(new[] { "diff", "--cached", "--no-color", baseSha }).ConfigureAwait(false);
+        var names = await RunOrThrowAsync(new[] { "diff", "--cached", "--name-only", baseSha }).ConfigureAwait(false);
+        var numstat = await RunOrThrowAsync(new[] { "diff", "--cached", "--numstat", baseSha }).ConfigureAwait(false);
+
+        return new WorkspaceChanges
+        {
+            Patch = patch,
+            BaseSha = baseSha,
+            ChangedFiles = names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            FileStats = NumstatParser.Parse(numstat),
+        };
     }
 
     // ── IWorkspaceJanitor: reclaim clones orphaned by a crashed worker ───────────────────────────────
@@ -383,7 +421,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         public string PrimaryAlias => _primary.Alias;
 
         public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
-            _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access, BaseBranch = r.BaseBranch }).ToList();
+            _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access, BaseBranch = r.BaseBranch, BaseSha = r.BaseSha }).ToList();
 
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) =>
             // The PRIMARY repo's changes. For a single-repo workspace the primary IS the only repo, so this is

@@ -94,6 +94,7 @@ public class AgentRunExecutorRecordingFlowTests
         scope.Resolve<CodeSpaceDbContext>(),
         scope.Resolve<IStructuredCritic>(),
         scope.Resolve<IArtifactOffloader>(),
+        scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
         NullLogger<AgentRunExecutor>.Instance);
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)

@@ -71,6 +71,9 @@ public sealed record WorkspaceRepositoryHandle
 
     /// <summary>The ref this repo was cloned at — the PR base for the branch the agent produces, carried through so a downstream change-set PR-open needs no separately-authored target. Usually the repo's default branch; a tag when an author pinned one (a non-branch ref then makes that repo's open a per-repo Failed). Null when the clone carried no ref.</summary>
     public string? BaseBranch { get; init; }
+
+    /// <summary>The cloned HEAD revision <see cref="IWorkspaceHandle.CaptureChangesAsync(CancellationToken)"/> diffs against — surfaced here (not just internal provider state) so a caller can persist it durably (the launch-time <c>SandboxHandle</c>) for a later path-only capture via <see cref="IWorkspacePathCapture"/>, when the live handle that prepared this clone no longer exists.</summary>
+    public string? BaseSha { get; init; }
 }
 
 /// <summary>
@@ -96,4 +99,20 @@ public interface IWorkspacePushHandle
     /// Throws <see cref="WorkspaceException"/> for an unknown / read-only alias or a git failure.
     /// </summary>
     Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// A SIBLING capability (Rule 7 / ISP — NOT widening <see cref="IWorkspaceProvider"/>): capture a diff from a bare
+/// directory + recorded base SHA, with NO live <see cref="IWorkspaceHandle"/> in hand. This is the RE-ATTACH path's
+/// only tool — the handle object that prepared the clone died with the original worker (a backend restart), but the
+/// clone directory is deliberately left on disk for re-attach, and its base SHA survives on the run's durable
+/// <c>SandboxHandle</c> (stamped at launch). Read-only + credential-free by design: re-attach never re-resolves a
+/// push token, so this can only ever capture, never push (a re-attached run that needs a branch on the remote still
+/// produces it on the original live path, same as before this capability existed). A feature-detect
+/// (<c>provider is IWorkspacePathCapture</c>) keeps the base contract handle-scoped.
+/// </summary>
+public interface IWorkspacePathCapture
+{
+    /// <summary>Same git-diff semantics as <see cref="IWorkspaceHandle.CaptureChangesAsync(CancellationToken)"/>, scoped to a bare <paramref name="directory"/> against <paramref name="baseSha"/> instead of a live handle. Throws <see cref="WorkspaceException"/> when the directory is gone or the git command fails — the caller treats this exactly like any other best-effort capture (log + keep the result unchanged).</summary>
+    Task<WorkspaceChanges> CaptureChangesFromPathAsync(string directory, string baseSha, CancellationToken cancellationToken);
 }
