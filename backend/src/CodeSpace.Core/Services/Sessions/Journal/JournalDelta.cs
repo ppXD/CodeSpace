@@ -15,6 +15,13 @@ namespace CodeSpace.Core.Services.Sessions.Journal;
 /// accumulated step count is less than <see cref="JournalTurn.StepCount"/> (which the delta preserves), a below-cursor
 /// step exists → it re-fetches the FULL journal (omit <c>?since</c>). So the delta is the cheap common-case path; the
 /// full fetch is the correctness backstop. Unit-pinned; the query handler composes it after the projector.</para>
+///
+/// <para>KNOWN BOUNDS the count-based self-heal does NOT cover: a step that MOVES (an in-place upgrade re-stamps its
+/// cursor — the in-flight reviewer beat's OccurredAt advances when its verdict lands, so a delta re-delivers it under
+/// the same id) and a step that VANISHES (a terminally-failed reviewer's beat yields nothing, over-counting the
+/// client's accumulation). A delta consumer must upsert BY STEP ID and tolerate a stale extra row until its next full
+/// fetch. The current frontend polls the FULL view (no <c>?since=</c> consumer exists), so these are documentation
+/// bounds, not live defects.</para>
 /// </summary>
 public static class JournalDelta
 {

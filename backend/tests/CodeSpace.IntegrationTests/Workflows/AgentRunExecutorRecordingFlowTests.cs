@@ -76,7 +76,8 @@ public class AgentRunExecutorRecordingFlowTests
             interactions[0].CorrelationId.ShouldBe(interactions[1].CorrelationId, "the started+completed pair share one correlation id");
 
             var started = JsonDocument.Parse(interactions[0].PayloadJson).RootElement;
-            started.GetProperty("kind").GetString().ShouldBe("agent.critic", "the interaction is attributed as the agent's output-review critic, not the node's own call");
+            started.GetProperty("kind").GetString().ShouldBe(LlmStructuredCritic.ReviewCallKind,
+                customMessage: "every critic call records under the critic's OWN kind (K/L2 — the journal's intent label); the executor's agent.critic push still provides the identity cell, its kind shadowed by the critic's re-label");
         }
         finally
         {

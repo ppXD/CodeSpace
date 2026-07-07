@@ -83,6 +83,66 @@ public class LlmStructuredCriticTests
         CriticSchema.ImproveSchema.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task Review_relabels_the_ambient_recording_scope_as_critic_review()
+    {
+        // K/L2: the critic's model call must record under "critic.review" — not its CALLER's kind ("supervisor.decision",
+        // a planner node's type key) — so the journal says what the call was doing. One nesting inside the critic covers
+        // every caller; the ambient kind is restored after the review (scoped, not a leak).
+        var captured = new List<string?>();
+        var critic = new LlmStructuredCritic(new SingleClientRegistry(new KindCapturingClient(captured)), new PickByRowSelector());
+
+        var scope = new Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "sup", "sup#turn0", "supervisor.decision", Logger: null!, Offloader: null!);
+
+        using (Core.Services.Workflows.Llm.LlmCallContext.Push(scope))
+        {
+            var verdict = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "plan", Artifact = "a", Goal = "g" }, Guid.NewGuid(), reviewerModelId: Guid.NewGuid(), CancellationToken.None);
+
+            verdict.Failed.ShouldBeFalse("the happy path reached the model");
+            Core.Services.Workflows.Llm.LlmCallContext.Current!.Kind.ShouldBe("supervisor.decision", "the re-label is scoped to the review call");
+        }
+
+        string.Join("|", captured).ShouldBe(LlmStructuredCritic.ReviewCallKind, "the model call saw the critic's own kind");
+        LlmStructuredCritic.ReviewCallKind.ShouldBe("critic.review");
+    }
+
+    private sealed class KindCapturingClient : Core.Services.Workflows.Llm.ILLMClient, Core.Services.Workflows.Llm.IStructuredLLMClient
+    {
+        private readonly List<string?> _captured;
+
+        public KindCapturingClient(List<string?> captured) { _captured = captured; }
+
+        public string Provider => "TestCritic";
+
+        public Task<Core.Services.Workflows.Llm.LLMCompletion> CompleteAsync(Core.Services.Workflows.Llm.LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Core.Services.Workflows.Llm.StructuredLLMCompletion> CompleteStructuredAsync(Core.Services.Workflows.Llm.StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            _captured.Add(Core.Services.Workflows.Llm.LlmCallContext.Current?.Kind);
+            return Task.FromResult(new Core.Services.Workflows.Llm.StructuredLLMCompletion { Json = Parse("""{ "approved": true, "rationale": "ok" }"""), Model = "m" });
+        }
+    }
+
+    private sealed class SingleClientRegistry : Core.Services.Workflows.Llm.ILLMClientRegistry
+    {
+        public SingleClientRegistry(Core.Services.Workflows.Llm.ILLMClient client) => All = new[] { client };
+        public IReadOnlyList<Core.Services.Workflows.Llm.ILLMClient> All { get; }
+        public Core.Services.Workflows.Llm.ILLMClient Resolve(string provider) => All[0];
+    }
+
+    private sealed class PickByRowSelector : IModelPoolSelector
+    {
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) =>
+            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = "m", Credential = new Messages.Agents.ResolvedModelCredential { Provider = "TestCritic", ApiKey = "sk" } });
+
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
     // ── SelectReviewerRowIdAsync default member (S4d): fakes without an override inherit today's pick ──

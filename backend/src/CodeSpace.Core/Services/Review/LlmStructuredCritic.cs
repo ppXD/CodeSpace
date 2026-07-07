@@ -27,8 +27,17 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         _modelSelector = modelSelector;
     }
 
+    /// <summary>The interaction kind every critic review call records under (the journal's intent label) — pinned by a unit test.</summary>
+    public const string ReviewCallKind = "critic.review";
+
     public async Task<CriticVerdict> ReviewAsync(CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
     {
+        // Re-label the ambient recording scope for the duration of the review — the critic's model call records as
+        // "critic.review" instead of inheriting its caller's kind ("supervisor.decision", a planner node's type key),
+        // so the run journal can say WHAT the call was doing. One nesting here covers EVERY critic caller. No ambient
+        // scope (a call outside any run) ⇒ nothing to re-label.
+        using var relabel = LlmCallContext.Current is { } ambient ? LlmCallContext.Push(ambient with { Kind = ReviewCallKind }) : null;
+
         // NEVER throws (cancellation aside) — the caller relies on always getting a verdict (a failed review = fall back
         // to the original output). Any failure of resolution / the brain call / the parse returns a Failed verdict.
         try

@@ -128,8 +128,10 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         // The critic is the executor's one IN-PROCESS model call, and it runs OUTSIDE the engine's per-node scope. This
         // pins the fix: when the agent run belongs to a workflow run, the critic call is made UNDER an LlmCallScope keyed
-        // to the run's (WorkflowRunId, NodeId, IterationKey) cell with kind "agent.critic" — so the recording decorator
-        // lands its interaction.* on the SAME workflow_run_record ledger as the rest of the run.
+        // to the run's (WorkflowRunId, NodeId, IterationKey) cell — so the recording decorator lands its interaction.*
+        // on the SAME workflow_run_record ledger as the rest of the run. The executor's base kind is "agent.critic"
+        // (asserted here at the executor seam — the fake critic sees it verbatim); the REAL critic re-labels the
+        // RECORDED kind to critic.review (K/L2, pinned at the integration tier) while keeping this identity cell.
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
         var workflowRunId = Guid.NewGuid();
@@ -142,7 +144,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope!.RunId.ShouldBe(workflowRunId, "the interaction is bound to the OWNING workflow run, not the agent run id");
         critic.ObservedScope.NodeId.ShouldBe("agent-node");
         critic.ObservedScope.IterationKey.ShouldBe("agent-node#2", "the full cell key rides so a map-branch agent's critic is distinguishable");
-        critic.ObservedScope.Kind.ShouldBe("agent.critic", "the step is attributed as the agent's critic, not the node's own call");
+        critic.ObservedScope.Kind.ShouldBe("agent.critic", "the executor's base kind — the real critic re-labels the recorded kind to critic.review on top of this cell");
     }
 
     [Fact]
