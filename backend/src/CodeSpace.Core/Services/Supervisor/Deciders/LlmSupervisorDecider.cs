@@ -29,12 +29,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly IAgentDefinitionService _agentDefinitions;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions)
+    private readonly ISupervisorTapeSummaryStore _tapeSummaries;
+
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions, ISupervisorTapeSummaryStore tapeSummaries)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
         _agentDefinitions = agentDefinitions;
+        _tapeSummaries = tapeSummaries;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -60,10 +63,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // per agent ON PURPOSE rather than blind. The server still clamps an incompatible pair, so this guides not gates.
         var catalog = await BuildCapabilityCatalogAsync(context, cancellationToken).ConfigureAwait(false);
 
+        // P1.2 — load the run's rolling tape digest (if any prior turn compacted): the prompt then renders
+        // [digest + recent tail] instead of the whole tape, so a once-compacted run STAYS under the window.
+        if (context.TapeSummary is null && await _tapeSummaries.GetAsync(context.SupervisorRunId, context.TeamId, cancellationToken).ConfigureAwait(false) is { } persisted)
+            context = context with { TapeSummary = persisted };
+
         StructuredLLMCompletion completion;
         try
         {
-            completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick, catalog), cancellationToken).ConfigureAwait(false);
+            completion = await CompleteWithCompactionAsync(structured, pick, context, catalog, cancellationToken).ConfigureAwait(false);
         }
         catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
         {
@@ -122,6 +130,108 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 Temperature = 0,
                 Credential = pick.Credential,
             }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>How many of the NEWEST decisions stay rendered raw after a compaction — the model still sees its recent moves verbatim; only the older head folds into the digest. Pinned by a unit test (Rule 8).</summary>
+    internal const int CompactTailKeep = 8;
+
+    /// <summary>The fewest decisions worth folding — below this a compaction would not shrink the prompt meaningfully (the overflow has another cause), so the original fault propagates to the clean-stop path.</summary>
+    internal const int MinCompactFold = 4;
+
+    private static readonly JsonElement TapeSummarySchema = JsonDocument.Parse("""
+        { "type": "object", "additionalProperties": false, "required": ["summary"], "properties": { "summary": { "type": "string", "description": "The compact progress digest." } } }
+        """).RootElement;
+
+    /// <summary>
+    /// The primary brain call with the P1.2 AUTO-COMPACT safety net: on the FIRST ContextLengthExceeded the decider
+    /// folds the tape's oldest decisions into a persisted rolling digest (one bounded summarizer call on the same
+    /// pinned brain row), rebuilds the prompt as [digest + recent tail] and retries the SAME decision ONCE — a long
+    /// run's growing tape compacts instead of dying. A second overflow (or a tape too small to fold) propagates to
+    /// the existing clean-stop path; an infra fault during the summarizer propagates too (the node's infra park owns
+    /// it). Later turns load the digest at rehydrate, so the prompt STAYS compacted without re-hitting the window.
+    /// </summary>
+    private async Task<StructuredLLMCompletion> CompleteWithCompactionAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await structured.CompleteStructuredAsync(BuildRequest(context, pick, catalog), cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.ContextLengthExceeded)
+        {
+            var compacted = await TryCompactTapeAsync(structured, pick, context, cancellationToken).ConfigureAwait(false);
+
+            if (compacted == null) throw;
+
+            return await structured.CompleteStructuredAsync(BuildRequest(compacted, pick, catalog), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Fold every prior decision except the newest <see cref="CompactTailKeep"/> into a model-written digest
+    /// (folding INTO any existing digest — the roll-forward), persist it (the rolling per-run row), and return the
+    /// context re-stamped with it. Null when the foldable head is smaller than <see cref="MinCompactFold"/> —
+    /// compaction could not meaningfully shrink the prompt, so the caller lets the original overflow propagate.
+    /// </summary>
+    private async Task<SupervisorTurnContext?> TryCompactTapeAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var alreadyFolded = context.TapeSummary?.UpToSequence ?? long.MinValue;
+        var rendered = context.PriorDecisions.Where(d => d.Sequence > alreadyFolded).ToList();
+        var foldable = rendered.Take(Math.Max(0, rendered.Count - CompactTailKeep)).ToList();
+
+        if (foldable.Count < MinCompactFold) return null;
+
+        var digest = await SummarizeAsync(structured, pick, context, foldable, cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(digest)) return null;
+
+        var summary = new SupervisorTapeSummary { UpToSequence = foldable[^1].Sequence, Text = digest };
+
+        await _tapeSummaries.UpsertAsync(context.SupervisorRunId, context.TeamId, summary.UpToSequence, summary.Text, cancellationToken).ConfigureAwait(false);
+
+        return context with { TapeSummary = summary };
+    }
+
+    /// <summary>One bounded summarizer round-trip on the SAME pinned brain row: the prior digest (roll-forward) + the foldable head, out comes the new digest. A model-side miss reads as "no digest" (null → the overflow propagates); an INFRA fault propagates (the node's park owns it).</summary>
+    private static async Task<string?> SummarizeAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable, CancellationToken cancellationToken)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine($"Goal: {context.Goal}");
+        builder.AppendLine();
+
+        if (context.TapeSummary is { } prior)
+        {
+            builder.AppendLine("Existing progress digest (fold the new decisions below INTO it):");
+            builder.AppendLine(prior.Text.Trim());
+            builder.AppendLine();
+        }
+
+        builder.AppendLine("Decisions to fold (in order, with their recorded outcomes):");
+        var latestSpawnIndex = LastIndexOf(foldable, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+        for (var i = 0; i < foldable.Count; i++)
+            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex);
+
+        try
+        {
+            var completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = "You compact a supervisor run's oldest decisions into one rolling progress digest. Keep every fact a future decision needs: what was planned, each subtask's final state (succeeded/failed/why), branches produced, merges/conflicts, human answers, key learnings. Be dense; max ~400 words. Reply with ONLY the schema JSON.",
+                UserPrompt = builder.ToString(),
+                JsonSchema = TapeSummarySchema,
+                MaxOutputTokens = 1024,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+
+            return completion.Json.ValueKind == JsonValueKind.Object && completion.Json.TryGetProperty("summary", out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString()
+                : null;
         }
         catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
         {
@@ -274,13 +384,25 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
         else
         {
+            // P1.2 auto-compact: with a rolling digest, the folded head renders as the digest block and only the
+            // decisions AFTER it render raw — the prompt stops growing with the run. Bounds/recitation still read
+            // the COMPLETE tape (the filter is prompt-grain only).
+            var rendered = context.TapeSummary is { } tape ? context.PriorDecisions.Where(d => d.Sequence > tape.UpToSequence).ToList() : context.PriorDecisions;
+
+            if (context.TapeSummary is { } digest)
+            {
+                builder.AppendLine($"Earlier progress (auto-compacted digest of the run's older decisions, up to ledger sequence {digest.UpToSequence}):");
+                builder.AppendLine(digest.Text.Trim());
+                builder.AppendLine();
+            }
+
             // The index of the MOST RECENT spawn/retry — the one whose agent results the decider should act on
             // (a later retry's results supersede the original spawn's). Marked so the model targets the freshest.
-            var latestSpawnIndex = LastIndexOf(context.PriorDecisions, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+            var latestSpawnIndex = LastIndexOf(rendered, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
-            for (var i = 0; i < context.PriorDecisions.Count; i++)
-                AppendPriorDecision(builder, context.PriorDecisions[i], isLatestSpawn: i == latestSpawnIndex);
+            for (var i = 0; i < rendered.Count; i++)
+                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex);
 
             AppendDependencyFrontier(builder, context);
         }

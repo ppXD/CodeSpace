@@ -460,7 +460,7 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
-        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -472,7 +472,7 @@ public class SupervisorDeciderTests
     public async Task A_run_with_no_selected_brain_model_fails_closed_to_a_terminal_stop()
     {
         // supervisorModelId is REQUIRED — the operator must pick the brain model; the supervisor never guesses its own.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context() with { SupervisorModelId = null }, CancellationToken.None);
 
@@ -486,7 +486,7 @@ public class SupervisorDeciderTests
     {
         // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
         // configured, or none within the allowed pool) → the brain stops cleanly rather than guess a model or key.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -520,7 +520,7 @@ public class SupervisorDeciderTests
         // The gateway returned a structurally WRONG reply (a bare JSON string, not a decision object) — deserialization
         // would throw. The decider must still fail closed to a clean stop, never crash the durable run on a degraded reply.
         var raw = JsonSerializer.SerializeToElement("not a decision object");
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -540,7 +540,7 @@ public class SupervisorDeciderTests
         // decision) — the decider fails closed to a clean stop, NEVER crashing the durable run. This is THE canonical
         // capability miss ("no conformant decision"): it must end as a clean stop so the whole-loop reads it as a
         // CapabilityMiss (non-gating), not a code fault.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -558,7 +558,7 @@ public class SupervisorDeciderTests
         // A genuine gateway/credential INFRA fault is NOT swallowed into a stop — it PROPAGATES so the engine fails the
         // run (visible + rerunnable) and the live-gate treats it as non-gating infra (consistent with the decision-eval
         // lane), never a silent "completed" no-op that masks an outage.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
     }
@@ -567,7 +567,7 @@ public class SupervisorDeciderTests
     public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
     {
         var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -626,7 +626,7 @@ public class SupervisorDeciderTests
         var decider = new LlmSupervisorDecider(
             new FakeRegistry(client),
             FakeSelector.WithModelAndPool("claude-sonnet-4-5", new PoolModelInfo("metis-coder-max", "Anthropic")),
-            new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")), FakePersonas.Empty());
+            new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")), FakePersonas.Empty(), new FakeTapeStore());
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -645,7 +645,7 @@ public class SupervisorDeciderTests
             new FakeRegistry(client),
             FakeSelector.WithModel(),
             new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")),
-            FakePersonas.With(("security-reviewer", "Security Reviewer", "Audits for vulnerabilities")));
+            FakePersonas.With(("security-reviewer", "Security Reviewer", "Audits for vulnerabilities")), new FakeTapeStore());
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -662,7 +662,7 @@ public class SupervisorDeciderTests
         // belongs) — the lenient converter drops the FIELD (the run-level repo applies), never the whole decision.
         var reply = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["scan"],"agents":[{"subtaskId":"scan","role":"scanner","repositoryId":"backend"}]},"rationale":{"why":"fan out the ready subtask"}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(reply);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -678,7 +678,7 @@ public class SupervisorDeciderTests
         var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;   // a string where an array belongs — validator-shaped drift
         var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["oops"]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(broken, repaired);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -694,7 +694,7 @@ public class SupervisorDeciderTests
     {
         var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(broken);   // the repair replays the same broken reply
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -752,7 +752,7 @@ public class SupervisorDeciderTests
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
     private static LlmSupervisorDecider Decider(SupervisorModelDecision model) =>
-        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty());
+        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
 
     // ── Fakes at the honest IStructuredLLMClient seam ────────────────────────────────
 
@@ -904,4 +904,132 @@ public class SupervisorDeciderTests
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) => throw new NotSupportedException();
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => throw new NotSupportedException();
     }
+    // ── P1.2 auto-compact: a context overflow folds the tape's head and retries, never a clean stop ──
+
+    [Fact]
+    public void The_compaction_constants_are_pinned()
+    {
+        // Shrinking the tail starves the model of its recent moves; raising the fold floor blocks compaction on
+        // runs that genuinely need it. Hard-pin both (Rule 8).
+        LlmSupervisorDecider.CompactTailKeep.ShouldBe(8);
+        LlmSupervisorDecider.MinCompactFold.ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task A_context_overflow_compacts_the_tape_persists_the_digest_and_the_retry_succeeds()
+    {
+        // 12 prior decisions; the first decide overflows the window → the decider folds seq 1..4 (12 − tail 8)
+        // into a digest, persists it, and retries the SAME decision with [digest + tail] — the run continues as if
+        // the window never bound.
+        var store = new FakeTapeStore();
+        var client = new CompactionScriptClient("DIGEST: planned a/b, a succeeded on branch-a", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "t", Title = "t", Instruction = "do t" } } } });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store);
+
+        var decision = await decider.DecideAsync(Context(turnNumber: 12, Tape(12)), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "the retried decide succeeded — the overflow never surfaced");
+
+        store.Stored.ShouldNotBeNull("the digest is persisted so every LATER turn renders compacted without re-hitting the window");
+        store.Stored!.UpToSequence.ShouldBe(4, "12 decisions − the 8-deep raw tail = seq 1..4 folded");
+
+        client.Requests.Count.ShouldBe(3, "decide (overflow) → summarizer → retried decide");
+        client.Requests[1].UserPrompt.ShouldContain("marker-1-seq", customMessage: "the summarizer sees the folded head");
+        client.Requests[2].UserPrompt.ShouldContain("DIGEST: planned a/b", customMessage: "the retried prompt carries the digest");
+        client.Requests[2].UserPrompt.ShouldNotContain("marker-1-seq", customMessage: "the folded head no longer renders raw");
+        client.Requests[2].UserPrompt.ShouldContain("marker-12-seq", customMessage: "the recent tail still renders verbatim");
+    }
+
+    [Fact]
+    public async Task A_tape_too_small_to_fold_degrades_to_the_existing_clean_stop()
+    {
+        // 6 priors → foldable = max(0, 6−8) = 0 < MinCompactFold: compaction can't shrink the prompt, so the
+        // overflow falls to the existing fail-closed clean stop (honest Stopped downstream) and nothing persists.
+        var store = new FakeTapeStore();
+        var client = new CompactionScriptClient("unused", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan }) { AlwaysOverflow = true };
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store);
+
+        var decision = await decider.DecideAsync(Context(turnNumber: 6, Tape(6)), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "no compaction win available — the fail-closed stop stands");
+        store.Stored.ShouldBeNull("nothing was folded");
+        client.Requests.Count.ShouldBe(1, "no summarizer call, no retry — the original fault propagated");
+    }
+
+    [Fact]
+    public async Task A_persisted_digest_renders_compacted_on_every_later_turn_without_an_overflow()
+    {
+        // A prior turn compacted; this turn loads the rolling digest at decide time — the prompt is
+        // [digest + tail] from the start, no window hit, no new summarizer call.
+        var store = new FakeTapeStore { Stored = new SupervisorTapeSummary { UpToSequence = 4, Text = "DIGEST-FROM-EARLIER" } };
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "t", Title = "t", Instruction = "do t" } } } });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store);
+
+        await decider.DecideAsync(Context(turnNumber: 12, Tape(12)), CancellationToken.None);
+
+        client.LastUserPrompt.ShouldNotBeNull();
+        client.LastUserPrompt!.ShouldContain("DIGEST-FROM-EARLIER");
+        client.LastUserPrompt.ShouldNotContain("marker-4-seq", customMessage: "folded head rows never render raw again");
+        client.LastUserPrompt.ShouldContain("marker-5-seq", customMessage: "rows after the digest boundary render verbatim");
+    }
+
+    /// <summary>A tape of <paramref name="count"/> merged decisions, Sequence 1..count, each payload carrying a distinct marker.</summary>
+    private static SupervisorPriorDecision[] Tape(int count) =>
+        Enumerable.Range(1, count).Select(i => new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(),
+            Sequence = i,
+            DecisionKind = SupervisorDecisionKinds.Merge,
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = $$"""{"note":"marker-{{i}}-seq"}""",
+            OutcomeJson = "{}",
+        }).ToArray();
+
+    /// <summary>Scripted client for the compaction arc: the FIRST decide overflows (ContextLengthExceeded), the summarizer call (recognised by its system prompt) returns the digest, the retried decide returns the final decision. <see cref="AlwaysOverflow"/> makes every decide overflow (the too-small-to-fold path).</summary>
+    private sealed class CompactionScriptClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly string _digest;
+        private readonly SupervisorModelDecision _final;
+        private int _decides;
+
+        public CompactionScriptClient(string digest, SupervisorModelDecision final) { _digest = digest; _final = final; }
+
+        public bool AlwaysOverflow { get; init; }
+
+        public readonly List<StructuredLLMCompletionRequest> Requests = new();
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+
+            if (request.SystemPrompt.StartsWith("You compact", StringComparison.Ordinal))
+                return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { summary = _digest }), Model = request.Model });
+
+            _decides++;
+
+            if (AlwaysOverflow || _decides == 1)
+                throw new LlmApiException("TestSupervisor", null, LlmErrorCategory.ContextLengthExceeded, "window exceeded");
+
+            return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_final, SupervisorDecisionSchema.Options), Model = request.Model });
+        }
+    }
+
+    /// <summary>In-memory tape-summary store — the compaction paths are pinned by their own tests; every other decide test just needs a working store.</summary>
+    private sealed class FakeTapeStore : ISupervisorTapeSummaryStore
+    {
+        public SupervisorTapeSummary? Stored;
+
+        public Task<SupervisorTapeSummary?> GetAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(Stored);
+
+        public Task UpsertAsync(Guid supervisorRunId, Guid teamId, long upToSequence, string summary, CancellationToken cancellationToken)
+        {
+            Stored = new SupervisorTapeSummary { UpToSequence = upToSequence, Text = summary };
+            return Task.CompletedTask;
+        }
+    }
+
 }

@@ -89,3 +89,19 @@ internal static class RealModelLiveWire
         public Task DeleteAsync(Guid teamId, Guid agentDefinitionId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }
+
+/// <summary>In-memory tape-summary store for live-wire decider construction — the digest concern is pinned by its own unit/flow tests; the live lanes only need a working store.</summary>
+public sealed class InMemoryTapeSummaryStore : CodeSpace.Core.Services.Supervisor.ISupervisorTapeSummaryStore
+{
+    private CodeSpace.Messages.Agents.SupervisorTapeSummary? _summary;
+
+    public Task<CodeSpace.Messages.Agents.SupervisorTapeSummary?> GetAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_summary);
+
+    public Task UpsertAsync(Guid supervisorRunId, Guid teamId, long upToSequence, string summary, CancellationToken cancellationToken)
+    {
+        if (_summary == null || upToSequence > _summary.UpToSequence)
+            _summary = new CodeSpace.Messages.Agents.SupervisorTapeSummary { UpToSequence = upToSequence, Text = summary };
+
+        return Task.CompletedTask;
+    }
+}

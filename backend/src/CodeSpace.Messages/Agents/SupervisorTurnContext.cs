@@ -149,6 +149,15 @@ public sealed record SupervisorTurnContext
     public string? ReviewerCritique { get; init; }
 
     /// <summary>
+    /// The run's rolling TAPE SUMMARY (P1.2 auto-compact) — a persisted model-written digest of the decisions with
+    /// <c>Sequence ≤ UpToSequence</c>, loaded at rehydrate. PROMPT-GRAIN ONLY: <see cref="PriorDecisions"/> stays the
+    /// COMPLETE tape (bounds, recitation, and replay all read the full list); only the decider's prompt substitutes
+    /// the summarized head for the raw rows, so a long run's prompt stops growing without ever changing a bound.
+    /// Null = nothing compacted yet (byte-identical prompt).
+    /// </summary>
+    public SupervisorTapeSummary? TapeSummary { get; init; }
+
+    /// <summary>
     /// The PENDING decisions this run's CHILD agent runs raised and are blocked on (Decision substrate D4c-2), read off
     /// the cross-grain queue on rehydrate (soonest-deadline first). The arbiter drains these BEFORE the decider each turn:
     /// it auto-answers the ones it is confident about (low/med risk, within the fail-closed floor) and LEAVES the rest in

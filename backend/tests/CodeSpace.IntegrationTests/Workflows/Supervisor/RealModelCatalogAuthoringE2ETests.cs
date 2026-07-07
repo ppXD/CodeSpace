@@ -43,7 +43,7 @@ public sealed class RealModelCatalogAuthoringE2ETests
                 new CatalogHarness("claude-code", "Anthropic", "Custom"),
             });
             var selector = new PooledSelector(model, credential, new PoolModelInfo("metis-coder-max", "Anthropic"));
-            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), selector, harnesses, RealModelLiveWire.Personas());
+            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), selector, harnesses, RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore());
 
             // The 'planned, not spawned' golden context → the one reasonable next action is spawn.
             var scenario = SupervisorDecisionGoldenScenarios.All.First(s => s.AcceptedKinds.Contains(SupervisorDecisionKinds.Spawn));
