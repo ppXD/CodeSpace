@@ -170,7 +170,7 @@ public sealed partial class SupervisorTurnService
         return streak;
     }
 
-    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>; an INFRA-classed rejection keeps its evidence — the check could not run, that is not failed work); a merge advanced it only if it integrated NEW work (see <see cref="MergedNewWork"/>); an ANSWERED plan-confirmation OR gate-escalation card advanced it too (a human actively steering the plan or RULING on a blocked decision is engagement, not a stall — both cards are server-authored, and the counted state additionally requires a server-written answer off a resolved wait, so every streak reset costs a real human interaction). A wave of all-failed/empty agents, a plan, a content-free / re-consolidating merge, or a content ask_human makes no fresh progress.</summary>
+    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>; an INFRA-classed rejection keeps its evidence — the check could not run, that is not failed work); a merge advanced it only if it integrated NEW work (see <see cref="MergedNewWork"/>); an ANSWERED plan-confirmation card, gate-escalation card, or plain CONTENT ask_human advanced it too (a human actively steering the plan, RULING on a blocked decision, or answering the model's clarifying question is engagement, not a stall — every shape requires a server-written answer off a resolved wait, so every streak reset costs a real human interaction). A wave of all-failed/empty agents, a plan, a content-free / re-consolidating merge, or an UNANSWERED ask_human makes no fresh progress.</summary>
     private static bool MadeProgress(SupervisorPriorDecision decision, HashSet<Guid> everMerged)
     {
         if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind))
@@ -179,14 +179,27 @@ public sealed partial class SupervisorTurnService
         if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
             return MergedNewWork(decision, everMerged);
 
-        // BOTH gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer RULES
-        // on a blocked decision. The marker is text-matchable (a model could mint a marker-carrying ask), but the
-        // counted state requires a server-written ANSWER off a resolved wait — every streak reset costs a real
-        // human interaction, so a walk-away run gains nothing; a model looping its own content asks still marches
-        // toward the stall bound. Without the escalation clause, a human actively unblocking a run accelerated its
-        // no-progress kill — a real run died 24ms after its third 'approve'.
-        return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision) || SupervisorGateEscalation.IsAnsweredEscalationCard(decision);
+        // ALL THREE gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer
+        // RULES on a blocked decision, and a plain CONTENT answer means the human just walked the model through a
+        // clarification it needed. The confirmation/escalation markers are text-matchable (a model could mint a
+        // marker-carrying ask), but the counted state requires a server-written ANSWER off a resolved wait — every
+        // streak reset costs a real human interaction, so a walk-away run gains nothing; a model looping UNANSWERED
+        // content asks to itself still marches toward the stall bound (only a genuine human reply resets it, exactly
+        // the same guarantee the gate cards already had). Without the escalation clause, a human actively unblocking
+        // a run accelerated its no-progress kill — a real run died 24ms after its third 'approve'; without the
+        // content-ask clause, a run mid interactive clarification (answering, not stalling) marched toward the same
+        // kill purely for talking to its operator.
+        return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision)
+            || SupervisorGateEscalation.IsAnsweredEscalationCard(decision)
+            || IsAnsweredContentAsk(decision);
     }
+
+    /// <summary>An ANSWERED plain content ask_human — the residual shape once the confirmation and escalation markers are ruled out. Its own dedicated check (rather than folding into the generic "any answered ask_human" test) keeps the three gate shapes independently readable + independently testable, mirroring <see cref="SupervisorPlanConfirmation.IsAnsweredConfirmationCard"/> / <see cref="SupervisorGateEscalation.IsAnsweredEscalationCard"/>.</summary>
+    private static bool IsAnsweredContentAsk(SupervisorPriorDecision decision) =>
+        decision.DecisionKind == SupervisorDecisionKinds.AskHuman
+        && !SupervisorPlanConfirmation.IsConfirmationCard(decision)
+        && !SupervisorGateEscalation.IsEscalationCard(decision)
+        && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) != null;
 
     /// <summary>
     /// A merge advanced the work only if it consolidated at least one agent-run id NO PRIOR merge already merged.

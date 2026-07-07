@@ -45,6 +45,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveApprovedMergeStop => PlanSpawnMergeResolveApprovedMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
+            SupervisorScriptMode.AskHumanRepeatedlyThenStop => AskHumanRepeatedlyThenStop(context, _script.AskHumanRounds),
             SupervisorScriptMode.PlanConfirmReactive => PlanConfirmReactive(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
@@ -78,6 +79,16 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
 
         return Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = $"human said: {answer}" });
     }
+
+    // P1.5-A arc: a PLAIN content ask_human at turns 0..rounds-1 (each answered before the next turn — the test
+    // drives the answer between engine passes), then stop. No plan/spawn/merge at all, so this isolates the
+    // no-progress fold to EXACTLY the answered-content-ask clause: on origin/main (before the fix) rounds ≥
+    // SupervisorLane.DefaultMaxNoProgressDecisions (8) force-stops with NoProgress before ever reaching the
+    // final stop turn; with the fix, an answered content ask resets the streak every round, so ANY round count
+    // reaches the stop cleanly.
+    private static SupervisorDecision AskHumanRepeatedlyThenStop(SupervisorTurnContext context, int rounds) => context.TurnNumber < rounds
+        ? Canonical(SupervisorDecisionKinds.AskHuman, new SupervisorAskHumanPayload { Question = $"{AskQuestion} (round {context.TurnNumber})" })
+        : Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = $"answered {rounds} rounds without stalling" });
 
     // E2 arc: turn 0 plan → every later turn stop. The plan still records 2 subtasks (legible replay tape).
     private static SupervisorDecision PlanThenStop(SupervisorTurnContext context) => context.TurnNumber == 0
@@ -350,6 +361,15 @@ public sealed class SupervisorDecisionScript
 
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
+    /// <summary>How many turns <see cref="SupervisorScriptMode.AskHumanRepeatedlyThenStop"/> asks before stopping. Default 1 (byte-identical to a single ask); a test raises it to prove the no-progress fold across many answered rounds.</summary>
+    public int AskHumanRounds { get; set; } = 1;
+
+    public void AskHumanRepeatedlyThenStop(int rounds)
+    {
+        Mode = SupervisorScriptMode.AskHumanRepeatedlyThenStop;
+        AskHumanRounds = rounds;
+    }
+
     public void PlanConfirmReactive() => Mode = SupervisorScriptMode.PlanConfirmReactive;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
@@ -395,5 +415,6 @@ public enum SupervisorScriptMode
     PlanSpawnBadPersonaStop,
     PlanConfirmReactive,
     AskHumanStop,
+    AskHumanRepeatedlyThenStop,
     PlanThenSpawnForever,
 }

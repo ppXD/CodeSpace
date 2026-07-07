@@ -59,7 +59,9 @@ public class SupervisorAskHumanFlowTests : IDisposable
     public void Dispose()
     {
         using var scope = _fixture.BeginScope();
-        scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
+        var script = scope.Resolve<SupervisorDecisionScript>();
+        script.PlanThenStop();      // restore the default for sibling tests
+        script.AskHumanRounds = 1;  // reset the round-count knob (inert once Mode != AskHumanRepeatedlyThenStop, but keep the fixture clean)
     }
 
     [Fact]
@@ -128,6 +130,57 @@ public class SupervisorAskHumanFlowTests : IDisposable
             // Exactly one question card was ever posted.
             (await db.Message.AsNoTracking().IgnoreQueryFilters().CountAsync(m => m.ConversationId == conversationId && m.InteractionJson != null && m.DeletedDate == null))
                 .ShouldBe(1, "exactly one question card — no duplicate ask");
+        }
+    }
+
+    [Fact]
+    public async Task Repeated_answered_content_asks_never_trip_the_no_progress_guard()
+    {
+        // P1.5-A CROWN JEWEL: an answered PLAIN content ask_human (no confirmation/escalation marker) used to count
+        // as NO PROGRESS — a run mid ordinary interactive clarification marched toward the same kill an unattended
+        // stall would. ROUNDS deliberately EXCEEDS SupervisorLane.DefaultMaxNoProgressDecisions (8): on origin/main
+        // before this fix, the 8th round's pre-decision bound check would force-stop with NoProgress before the
+        // decider is ever asked again — proving the fix requires driving PAST that cap, not just under it.
+        const int rounds = 9;
+
+        using (var scope = _fixture.BeginScope())
+            scope.Resolve<SupervisorDecisionScript>().AskHumanRepeatedlyThenStop(rounds);
+
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId);
+
+        ResolveJobClient().Clear();
+
+        for (var round = 0; round < rounds; round++)
+        {
+            await RunEngineAsync(runId);   // this round's ask_human posts a card + parks
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, $"round {round}: still parked on the human's answer — the no-progress guard must not have force-stopped it yet");
+
+            var token = (await db.WorkflowRunWait.AsNoTracking()
+                .SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending)).Token;
+
+            await AnswerAsync(token, $"answer {round}", userId, teamId);
+        }
+
+        await RunEngineAsync(runId);   // the (rounds)-th turn: past every ask, the script stops
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success,
+                    customMessage: $"{rounds} answered content-ask rounds (exceeding the no-progress cap of 8) must reach the final stop — if this is Failure/Stopped, the no-progress guard force-stopped an actively-answered run");
+
+            var ledger = await Ledger(db, runId, teamId);
+            ledger.Count(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman).ShouldBe(rounds, "every round's ask is its own ledger row");
+            ledger.Single(d => d.DecisionKind == SupervisorDecisionKinds.Stop).OutcomeJson
+                .ShouldContain($"answered {rounds} rounds", customMessage: "the script's OWN stop turn ran — not a forced NoProgress stop");
         }
     }
 
