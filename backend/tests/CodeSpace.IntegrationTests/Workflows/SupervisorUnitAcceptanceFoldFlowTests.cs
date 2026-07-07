@@ -24,9 +24,11 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// result. Proves: a FAILED unit folds rejected, is EXCLUDED from the no-progress evidence (the must-fix — proven through
 /// the real FoldNoProgressDecisions), and renders the retry signal; a PASSED unit folds accepted; a unit with no contract
 /// is byte-identical (never grades); the grade runs EXACTLY ONCE (replay reads the tape, never re-grades); a grader
-/// failure fails closed; a multi-repo unit is deferred; and a repo-overridden unit is graded against ITS repo, not the
-/// profile default. The grader's real clone+run fidelity is proven in <c>SupervisorAcceptanceFoldFlowTests</c> (same
-/// grader); this pins the per-unit FOLD wiring (positional join, evidence discount, repo resolution) over real Postgres.
+/// failure fails closed; a MULTI-repo unit is graded against EVERY repo it actually changed (all-or-nothing, short-
+/// circuiting on the first failing repo, skipping a repo with no changes, failing closed if none produced a branch
+/// anywhere); and a repo-overridden unit is graded against ITS repo, not the profile default. The grader's real
+/// clone+run fidelity is proven in <c>SupervisorAcceptanceFoldFlowTests</c> (same grader); this pins the per-unit FOLD
+/// wiring (positional join, evidence discount, repo resolution) over real Postgres.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -167,27 +169,122 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     }
 
     [Fact]
-    public async Task A_multi_repo_unit_is_deferred_and_falls_back_to_no_verdict()
+    public async Task A_multi_repo_unit_is_graded_against_every_repo_it_changed()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var webRepo = Guid.NewGuid();
+        var apiRepo = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        // A unit whose agent ran MULTI-repo, changing BOTH web and api — its subtask's contract binds the WHOLE
+        // change, so every repo it touched must be graded, not just its (legacy-compat) top-level ProducedBranch.
+        var multiRepoUnit = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "web/x",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "web", RepositoryId = webRepo, ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+                new RepositoryRunResult { Alias = "api", RepositoryId = apiRepo, ProducedBranch = "api/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+            },
+        };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(multiRepoUnit));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        grader.CallCount.ShouldBe(2, "every repo the unit actually changed is graded against the same contract");
+        grader.Calls.Select(c => (c.RepositoryId, c.Branch)).ShouldBe(new[] { (webRepo, "web/x"), (apiRepo, "api/x") }, "graded in authored order");
+        grader.Calls.ShouldAllBe(c => c.Command.SequenceEqual(Check), "the SAME subtask contract binds every repo");
+
+        SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson)
+            .Single().AcceptancePassed.ShouldBe(true, "all repos passed → the unit is accepted");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_unit_fails_closed_when_any_repo_fails_and_short_circuits()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var webRepo = Guid.NewGuid();
+        var apiRepo = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var multiRepoUnit = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "web/x",
+            RepositoryResults = new[]
+            {
+                // web FAILS its check — the unit's contract is not satisfied even though api would have passed.
+                new RepositoryRunResult { Alias = "web", RepositoryId = webRepo, ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+                new RepositoryRunResult { Alias = "api", RepositoryId = apiRepo, ProducedBranch = "api/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+            },
+        };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(multiRepoUnit));
+
+        var grader = new RecordingGrader(branch => new BenchmarkGrade { Passed = branch != "web/x", Detail = branch == "web/x" ? "tests-failed-exit-1" : "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        grader.CallCount.ShouldBe(1, "the FIRST repo's failure short-circuits — api is never even cloned");
+        SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson)
+            .Single().AcceptancePassed.ShouldBe(false, "ANY repo failing rejects the whole unit — a multi-repo change is all-or-nothing");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_unit_skips_a_repo_the_agent_never_changed()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var webRepo = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var multiRepoUnit = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "web/x",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "web", RepositoryId = webRepo, ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+                // api was bound to the workspace but the agent made no changes there — nothing to verify.
+                new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), ProducedBranch = null, BaseBranch = "main", Access = WorkspaceAccess.Write },
+            },
+        };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(multiRepoUnit));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        grader.CallCount.ShouldBe(1, "a repo with no produced branch is not a target — only 'web' is graded");
+        grader.LastCall!.Value.RepositoryId.ShouldBe(webRepo);
+        SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson)
+            .Single().AcceptancePassed.ShouldBe(true);
+    }
+
+    [Fact]
+    public async Task A_multi_repo_unit_with_no_produced_branches_anywhere_fails_closed()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
         await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
-        // A unit whose agent ran MULTI-repo (RepositoryResults present): its top-level branch mirrors only the primary,
-        // so the per-agent multi-repo grade is deferred (mirroring the resolve fold) rather than a primary-only false verdict.
+        // A contract-bearing multi-repo unit that pushed NOTHING anywhere — the multi-repo analogue of the
+        // single-repo "no branch to grade against" floor: fail closed, never a silent accept.
         var multiRepoUnit = new SupervisorAgentResult
         {
-            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "primary",
-            RepositoryResults = new[] { new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write } },
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = null,
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), ProducedBranch = null, BaseBranch = "main", Access = WorkspaceAccess.Write },
+                new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), ProducedBranch = null, BaseBranch = "main", Access = WorkspaceAccess.Write },
+            },
         };
         await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(multiRepoUnit));
 
-        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "should-not-run" });
         var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
 
-        grader.CallCount.ShouldBe(0, "a multi-repo unit is not graded by the per-unit fold (per-repo grade deferred)");
+        grader.CallCount.ShouldBe(0, "nothing to clone anywhere → the grader never runs");
         SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson)
-            .Single().AcceptancePassed.ShouldBeNull("no verdict is folded onto a multi-repo unit");
+            .Single().AcceptancePassed.ShouldBe(false, "a contract-bearing unit that produced no branch anywhere fails closed — never a silent accept");
     }
 
     [Fact]
@@ -344,24 +441,31 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         });
     }
 
-    /// <summary>Records each grade call (count + args) and returns a canned grade — or throws (the unexpected-failure path). The one seam the per-unit fold grades at, faked so the test asserts call count + the exact (repo, branch, command) without real git.</summary>
+    /// <summary>
+    /// Records EVERY grade call (in order, with its full args) and returns a canned grade (constant, or per-branch via
+    /// <paramref name="gradeByBranch"/>) — or throws (the unexpected-failure path). The one seam the per-unit fold
+    /// grades at, faked so a test asserts call count/order + the exact (repo, branch, command) without real git. The
+    /// per-branch mode is what a multi-repo test uses to make ONE repo fail while another passes.
+    /// </summary>
     private sealed class RecordingGrader : ISupervisorAcceptanceGrader
     {
         private readonly BenchmarkGrade _grade;
+        private readonly Func<string, BenchmarkGrade>? _gradeByBranch;
         private readonly Exception? _throw;
 
         public RecordingGrader(BenchmarkGrade grade) => _grade = grade;
         public RecordingGrader(Exception toThrow) { _throw = toThrow; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
+        public RecordingGrader(Func<string, BenchmarkGrade> gradeByBranch) { _gradeByBranch = gradeByBranch; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
-        public int CallCount { get; private set; }
-        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
+        public List<(Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)> Calls { get; } = new();
+        public int CallCount => Calls.Count;
+        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall => Calls.Count > 0 ? Calls[^1] : null;
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
-            CallCount++;
-            LastCall = (repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass);
+            Calls.Add((repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass));
             if (_throw != null) throw _throw;
-            return Task.FromResult(_grade);
+            return Task.FromResult(_gradeByBranch?.Invoke(branch) ?? _grade);
         }
     }
 }

@@ -366,10 +366,12 @@ public sealed partial class SupervisorTurnService
     /// EXACTLY ONCE: a re-fold is skipped the moment any unit already carries a verdict (durable on the tape), so the
     /// clone+grade never re-fires (the replay-safety contract, same as the resolve/stop folds). Returns UNCHANGED —
     /// byte-identical — for: a non-spawn/retry verb (resolve has its own grade); a plan whose subtasks carry NO
-    /// acceptance (the dominant case); a unit whose subtask carries none; and a MULTI-repo unit (its top-level branch
-    /// mirrors only the primary, so a per-agent multi-repo grade is deferred, mirroring the resolve fold's deferral).
-    /// FAIL-CLOSED: a missing branch/repo or a grader error folds <c>passed:false</c> — never a silent accept, never a
-    /// throw that would strand the terminal row.
+    /// acceptance (the dominant case); and a unit whose subtask carries none. A MULTI-repo unit (<see cref="SupervisorAgentResult.RepositoryResults"/>
+    /// present) is graded PER REPO (<see cref="GradeUnitAcceptanceMultiRepoAsync"/>) — EVERY repo the unit actually
+    /// changed must satisfy the SAME contract, mirroring the run-level stop floor's multi-target grade; a repo with no
+    /// changes is not a target (nothing to verify there). FAIL-CLOSED: a missing branch/repo (single- or multi-repo)
+    /// or a grader error folds <c>passed:false</c> — never a silent accept, never a throw that would strand the
+    /// terminal row.
     /// </summary>
     private async Task<SupervisorPriorDecision> FoldUnitAcceptanceGradeAsync(SupervisorPriorDecision decision, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorGoalConfig? goalConfig, Guid teamId, CancellationToken cancellationToken)
     {
@@ -397,26 +399,36 @@ public sealed partial class SupervisorTurnService
             var spec = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var found) ? found : null;
             var command = spec is not null ? NormalizeCommand(spec.Command) : null;
 
-            // Ungraded — keep the result byte-identical — when: the unit has no contract; its command is all-blank; or
-            // its agent ran MULTI-repo (RepositoryResults present → the per-agent multi-repo grade is deferred, exactly
-            // as the resolve fold defers a multi-repo resolver rather than grade its primary-only top-level branch).
-            if (command is null || results[i].RepositoryResults.Count > 0)
+            // Ungraded — keep the result byte-identical — when the unit has no contract or its command is all-blank
+            // (the dominant no-contract case). A MULTI-repo unit (RepositoryResults present) is graded PER REPO below,
+            // mirroring the run-level stop floor's multi-target grade — it is no longer silently skipped.
+            if (command is null)
             {
                 graded.Add(results[i]);
                 continue;
             }
 
-            var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
-                               ?? goalConfig?.AgentProfile?.RepositoryId;
-
             // The subtask authored its OWN oracle — the FULL spec rides (kind + rubric/schema payloads, triad S7).
-            var grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, spec! with { Command = command }, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+            var fullSpec = spec! with { Command = command };
+
+            BenchmarkGrade grade;
+            if (results[i].RepositoryResults.Count > 0)
+            {
+                grade = await GradeUnitAcceptanceMultiRepoAsync(results[i], fullSpec, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
+                                   ?? goalConfig?.AgentProfile?.RepositoryId;
+
+                grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+            }
 
             graded.Add(results[i] with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail });
             anyGraded = true;
         }
 
-        if (!anyGraded) return decision;   // every contract-bearing unit was deferred (multi-repo) → byte-identical; a replay re-attempt is a pure no-op (no grade I/O ran)
+        if (!anyGraded) return decision;   // no unit in THIS decision carries a contract (the plan's acceptance-bearing subtasks belong to a different decision) → byte-identical; a replay re-attempt is a pure no-op (no grade I/O ran)
 
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, graded) };
     }
@@ -436,6 +448,41 @@ public sealed partial class SupervisorTurnService
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
             return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
         }
+    }
+
+    /// <summary>
+    /// Grade a MULTI-repo unit's subtask acceptance SPEC against EVERY repo it actually changed — mirroring
+    /// <see cref="GradeStopTargetsAsync"/>'s run-level multi-target grade at the per-unit grain (a subtask's
+    /// contract binds its WHOLE change, not just its primary repo). A repo with no produced branch had nothing to
+    /// verify there, so it is not a target (same filter as <see cref="ResolveAcceptanceTargets"/>); a unit that
+    /// produced NO branch across every repo still fails closed — the single-repo floor's exact "no-branch-or-repo"
+    /// semantic, just evaluated over the repo set instead of one field. All targets must pass, short-circuiting on
+    /// the first failure (the detail names the failing repo); any unexpected non-cancellation grader escape
+    /// degrades to not-accepted so the terminal fold can never crash + strand the row.
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceMultiRepoAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    {
+        var targets = result.RepositoryResults.Where(r => !string.IsNullOrEmpty(r.ProducedBranch) && r.RepositoryId is not null).ToList();
+
+        if (targets.Count == 0) return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
+
+        foreach (var target in targets)
+        {
+            BenchmarkGrade grade;
+            try
+            {
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Per-unit multi-repo acceptance grade for agent {AgentRunId} repo '{Alias}' in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, target.Alias, decisionId);
+                return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}" };
+            }
+
+            if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': {grade.Detail}" };
+        }
+
+        return new BenchmarkGrade { Passed = true, Detail = "accepted" };
     }
 
     /// <summary>The OBJECTIVE acceptance each planned subtask authored (loopability slice 1), keyed by subtask id — read off the MOST RECENT <c>plan</c> decision's payload. Only subtasks WITH an acceptance contract are included; an empty map (a flat plan) means no per-unit grade runs. Duplicate ids keep the first (defensive; a plan shouldn't repeat an id).</summary>
