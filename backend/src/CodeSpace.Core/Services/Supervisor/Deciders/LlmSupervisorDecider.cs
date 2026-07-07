@@ -294,7 +294,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine("Decisions to fold (in order, with their recorded outcomes):");
         var latestSpawnIndex = LastIndexOf(foldable, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
         for (var i = 0; i < foldable.Count; i++)
-            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex);
+            // The fold path is ALREADY a compaction (the summarizer compresses to ~400 words), so it keeps FULL plan
+            // payloads — the summarizer wants "what was planned" verbatim to distil. The superseded-plan digest is a
+            // LIVE-prompt concern only; the fold rendering stays byte-identical (untouched #1004 tape-summary behavior).
+            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: false);
 
         try
         {
@@ -480,9 +483,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // (a later retry's results supersede the original spawn's). Marked so the model targets the freshest.
             var latestSpawnIndex = LastIndexOf(rendered, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
+            // P1e ladder: the index of the LATEST plan in the rendered window. Every EARLIER plan was replaced by a
+            // re-plan — its full subtask payload is dead weight (the LIVE plan is recited at the tail with per-item
+            // states, and its frontier is shown), so only the latest plan renders full; superseded plans collapse to a
+            // one-line digest. The single biggest source of the run's monotone prompt growth (each re-plan added a full payload).
+            var latestPlanIndex = LastIndexOf(rendered, d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
             for (var i = 0; i < rendered.Count; i++)
-                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex);
+                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex);
 
             AppendDependencyFrontier(builder, context);
         }
@@ -562,8 +571,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"      produced — {string.Join("; ", parts)}");
     }
 
-    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn)
+    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn, bool isSupersededPlan)
     {
+        // P1e ladder: a plan REPLACED by a later re-plan collapses to a one-line digest — its full subtask payload is
+        // dead weight (the live plan is recited at the tail; its frontier is shown). Keep the subtask ids so the model
+        // still sees the re-plan history + how the shape changed, without paying for N full payloads. Pure over the
+        // payload (replay re-derives the identical line). The LATEST plan still renders full below.
+        if (isSupersededPlan)
+        {
+            var subtaskIds = SupervisorOutcome.ReadPlanSubtasks(prior.PayloadJson).Select(s => s.Id).ToList();
+            var ids = subtaskIds.Count > 0 ? $" [{string.Join(", ", subtaskIds)}]" : "";
+
+            builder.AppendLine($"- plan (superseded by a later re-plan): {subtaskIds.Count} subtask(s){ids}");
+            return;
+        }
+
         var agentResults = SupervisorDecisionKinds.StagesAgents(prior.DecisionKind)
             ? SupervisorOutcome.ReadAgentResults(prior.OutcomeJson)
             : Array.Empty<SupervisorAgentResult>();
