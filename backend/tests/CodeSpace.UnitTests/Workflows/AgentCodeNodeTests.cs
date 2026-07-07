@@ -489,18 +489,28 @@ public class AgentCodeNodeTests
     }
 
     [Theory]
-    [InlineData("Failed", true)]        // a crashed / non-zero-exit agent — a fresh respawn may survive
-    [InlineData("TimedOut", true)]      // a wall-clock kill — transient by nature
-    [InlineData("NeedsReview", false)]  // human-owed verdict — a respawn cannot change it
-    [InlineData("Cancelled", false)]    // the user's own stop — never override it with a respawn
-    public async Task A_resumed_failure_carries_the_retry_verdict_for_the_engine(string status, bool expectedRetryable)
+    [InlineData("Failed", null, true)]                  // a crashed / non-zero-exit agent — a fresh respawn may survive
+    [InlineData("Failed", "non-zero-exit", true)]       // an ordinary harness death — transient candidate
+    [InlineData("TimedOut", null, true)]                // a wall-clock kill — transient by nature
+    [InlineData("NeedsReview", null, false)]            // human-owed verdict — a respawn cannot change it
+    [InlineData("Cancelled", null, false)]              // the user's own stop — never override it with a respawn
+    [InlineData("Failed", "acceptance-failed", false)]  // a fail-closed verdict — same code + same check would fail again
+    public async Task A_resumed_failure_carries_the_retry_verdict_for_the_engine(string status, string? exitReason, bool expectedRetryable)
     {
-        var resume = JsonDocument.Parse($$"""{"status":"{{status}}","error":"x"}""").RootElement;
+        var resume = JsonDocument.Parse($$"""{"status":"{{status}}","error":"x"{{(exitReason is null ? "" : $@",""exitReason"":""{exitReason}""")}}}""").RootElement;
 
         var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Retryable.ShouldBe(expectedRetryable, "the node's verdict tells the retry policy whether a fresh agent could change the outcome");
+    }
+
+    [Fact]
+    public void The_fail_closed_acceptance_exit_reason_is_pinned()
+    {
+        // The node's retry verdict and the acceptance re-grade key on this literal — a rename would silently turn
+        // every deterministic verdict failure back into a billed respawn loop. Hard-pin (Rule 8).
+        AgentAcceptanceContract.FailClosedExitReason.ShouldBe("acceptance-failed");
     }
 
     [Fact]

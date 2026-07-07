@@ -41,6 +41,20 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_the_exit_reason_for_the_retry_verdict()
+    {
+        // The node's retry verdict keys on exitReason (a fail-closed "acceptance-failed" must not respawn) —
+        // dropping it from the payload would silently turn every verdict failure back into a billed respawn loop.
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason, Error = "The acceptance check did not pass: tests-failed-exit-1" };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("exitReason").GetString().ShouldBe("acceptance-failed");
+        payload.GetProperty("status").GetString().ShouldBe("Failed");
+    }
+
+    [Fact]
     public void BuildResumePayload_surfaces_per_repo_branches_WITHOUT_leaking_the_diff()
     {
         // S7-C0 — a multi-repo run's resume payload (the agent.code node output source) carries each repo's branch +

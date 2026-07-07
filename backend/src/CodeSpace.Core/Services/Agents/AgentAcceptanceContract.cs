@@ -18,12 +18,15 @@ public static class AgentAcceptanceContract
     public static bool RequiresGrade(AgentTask task) =>
         task.Acceptance is { } spec && spec.Command.Any(c => !string.IsNullOrWhiteSpace(c));
 
+    /// <summary>The <see cref="AgentRunResult.ExitReason"/> a fail-closed acceptance re-grade stamps — the machine-readable marker consumers (the agent.code node's retry verdict) key on to tell a DETERMINISTIC verdict failure from a transient death. Pinned by a unit test (Rule 8) so producer + consumer can't drift.</summary>
+    public const string FailClosedExitReason = "acceptance-failed";
+
     /// <summary>The fail-closed re-grade: the work (branch, diff, transcript) is preserved — the STATUS tells the truth, the contract was not met (or could not be verified).</summary>
     public static AgentRunResult FailClosed(AgentRunResult result, string? detail) => result with
     {
         Status = AgentRunStatus.Failed,
         CompletionDisposition = CompletionDisposition.Completed,
-        ExitReason = "acceptance-failed",
+        ExitReason = FailClosedExitReason,
         Error = $"The acceptance check did not pass: {detail}",
         AcceptancePassed = false,
         AcceptanceDetail = detail,

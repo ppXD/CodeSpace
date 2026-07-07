@@ -101,6 +101,9 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             repositoryResults = result?.RepositoryResults?.Select(r => r.WithoutDiff()).ToList(),
             changeSetId = result?.ChangeSetId,
             error = result?.Error ?? run.Error,
+            // WHY the run ended (e.g. the fail-closed "acceptance-failed" re-grade) — the machine-readable half the
+            // node's retry verdict keys on: a deterministic verdict failure must not be respawned as if transient.
+            exitReason = result?.ExitReason,
         }, AgentJson.Options);
     }
 }

@@ -266,11 +266,13 @@ public sealed class AgentCodeNode : INodeRuntime
         {
             var error = ReadString(payload, "error");
 
-            // NeedsReview parked human-owed work and Cancelled recorded the user's own stop — respawning the agent
-            // cannot change either verdict, so both fail non-retryable. Everything else (Failed / TimedOut / an
-            // abandoned run) is a candidate transient death a fresh agent may survive; the node's retry policy
-            // decides whether one is bought.
-            var deterministic = status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled);
+            // NeedsReview parked human-owed work, Cancelled recorded the user's own stop, and a fail-closed
+            // acceptance re-grade is a VERDICT (same code + same check would fail again — in-run improvement is the
+            // revise loop's job, plan-level revision the supervisor's) — respawning the agent can change none of
+            // them, so all three fail non-retryable. Everything else (a crashed / timed-out / abandoned run) is a
+            // candidate transient death a fresh agent may survive; the node's retry policy decides whether one is bought.
+            var deterministic = status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled)
+                || ReadString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason;
 
             return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }
