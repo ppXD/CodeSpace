@@ -195,6 +195,49 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
+    public async Task An_oscillating_critic_stops_early_when_the_same_flaw_is_re_flagged_unchanged()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
+        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var reviewerRowId = await SeedCriticModelAsync(teamId);
+            ResetCriticScript();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            // Budget 3, but the "revision" never removes the flaw (both scripts carry the reject marker) → the critic
+            // re-flags the IDENTICAL feedback. P1b-2: convergence recognises the unchanged re-flag and stops EARLY —
+            // rounds 2 and 3 are never billed — instead of silently exhausting the whole budget on an unmovable issue.
+            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 3 });
+
+            await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: DraftScript));
+
+            var (run, result) = await LoadAsync(runId);
+
+            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the flaw persisted — the run is flagged for a human, never a silent pass");
+            result.ReviseRounds.ShouldBe(1, "convergence stopped after ONE round — the identical re-flag was not worth rounds 2 and 3");
+            result.ReviewFeedback.ShouldNotBeNull("the flag stands with the reviewer's feedback for the human");
+
+            CriticCalls().ShouldBe(2, "first review + round-1 review only — the stall stopped rounds 2 and 3 before they billed the critic");
+
+            var events = await LoadEventsAsync(runId);
+            events.ShouldContain(e => e.Contains(AgentRunExecutor.ReviseStalledPrefix), "the operator sees the loop gave up on an unmovable issue, not a silently-spent budget");
+            events.Count(e => e.Contains("revising (round")).ShouldBe(1, "exactly one revise round was announced before the stall");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
+        }
+    }
+
+    [Fact]
     public async Task The_oracle_fails_first_without_billing_the_critic_and_a_half_fix_lands_the_truthful_flag()
     {
         if (OperatingSystem.IsWindows()) return;
