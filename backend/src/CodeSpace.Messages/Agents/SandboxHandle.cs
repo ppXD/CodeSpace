@@ -97,4 +97,19 @@ public sealed record SandboxHandle
     /// pre-existing run is never mistaken for having a cgroup to reap.
     /// </summary>
     public string? CgroupRunKey { get; init; }
+
+    /// <summary>
+    /// The PRIMARY repo's on-disk clone directory, stamped at launch (null when the run had no workspace) — persisted
+    /// so a RE-ATTACH after a worker restart can still capture the agent's diff even though the live
+    /// <c>IWorkspaceHandle</c> that prepared the clone died with the original worker. The clone itself survives
+    /// (deliberately left in place for re-attach; the workspace janitor reaps it by age if no re-attach ever claims
+    /// it) — only the in-process object holding it is gone. Paired with <see cref="WorkspaceBaseSha"/>; used via
+    /// <c>IWorkspacePathCapture</c>. Scoped to the primary repo only — a multi-repo run's secondary repos are not
+    /// captured on re-attach (a documented residual gap, same asymmetry the live path already has for a SECONDARY
+    /// repo's capture failure).
+    /// </summary>
+    public string? WorkspaceDirectory { get; init; }
+
+    /// <summary>The primary repo's cloned HEAD revision (<c>WorkspaceRepositoryHandle.BaseSha</c>) at launch — the base a re-attach diffs <see cref="WorkspaceDirectory"/> against. Null exactly when <see cref="WorkspaceDirectory"/> is.</summary>
+    public string? WorkspaceBaseSha { get; init; }
 }

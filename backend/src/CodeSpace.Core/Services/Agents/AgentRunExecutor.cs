@@ -5,6 +5,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -124,9 +125,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IStructuredCritic _critic;
     // Resolves a REFERENCED (offloaded) restored transcript back to bytes just before invocation (P3 continue).
     private readonly IArtifactOffloader _offloader;
+    // The publish-or-park ledger: upserted at the end of every verification pass, regardless of the run's status.
+    private readonly IPublishManifestStore _manifests;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, IPublishManifestStore manifests, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -140,6 +143,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _db = db;
         _critic = critic;
         _offloader = offloader;
+        _manifests = manifests;
         _logger = logger;
     }
 
@@ -216,6 +220,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
+            // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
+            // re-attach can capture the diff even after the live workspace handle object dies with this worker.
+            var primaryRepo = workspace?.Repositories.FirstOrDefault(r => r.Alias == workspace.PrimaryAlias);
+            var workspaceDirectory = primaryRepo?.Directory;
+            var workspaceBaseSha = primaryRepo?.BaseSha;
+
             // Resolve + decrypt the model credential JUST-IN-TIME (team from the run row, never the envelope) and
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
             // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
@@ -265,7 +275,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // points at it. Null when no endpoint → nothing to re-open.
             var mcpToken = mcp is null ? null : token;
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
+            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round: 0), workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
 
             result = await VerifyProducedWorkAsync(agentRunId, run, harness, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
@@ -302,7 +312,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 var priorTranscript = result.Transcript;
                 var priorUsage = result.TokenUsage;
-                result = await RunHarnessAsync(agentRunId, harness, runner, reviseSpec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round), cancellationToken).ConfigureAwait(false);
+                result = await RunHarnessAsync(agentRunId, harness, runner, reviseSpec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round), workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
                 result = result with { Transcript = JoinTranscripts(priorTranscript, result.Transcript), TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
@@ -385,18 +395,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            // NOTE: deliberately NO branch push on the re-attach path — the workspace clone didn't survive the
-            // backend restart (re-attach folds the result from the spool + exit code, never a git diff), so there
-            // is nothing to commit or push. A run that needed its branch on a remote must produce it on the
-            // original ExecuteAsync path.
+            // NOTE: deliberately NO branch PUSH on the re-attach path — re-attach never re-resolves a push credential
+            // (ReattachAndFoldAsync folds the result from the spool + exit code, no git diff of its own), so a run
+            // that needs its branch on the remote must still produce it on the original live ExecuteAsync path. The
+            // clone directory itself DOES survive (deliberately left in place for this exact case) with its base SHA
+            // persisted on the handle at launch, so EnrichWithReattachWorkspaceChangesAsync below still CAPTURES the
+            // diff (I1) via IWorkspacePathCapture — read-only, credential-free — even though nothing gets pushed here.
             var result = await ReattachAndFoldAsync(agentRunId, durable, handle, task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
 
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
+
+            result = await EnrichWithReattachWorkspaceChangesAsync(agentRunId, run.TeamId, handle, result, cancellationToken).ConfigureAwait(false);
 
             // S5: the acceptance invariant holds on THIS terminal path too — a contract-bearing run that completed
             // across a worker restart has no published branch to grade (see the no-push note above), so it fails
             // CLOSED rather than landing Succeeded ungraded because a crash happened at the right moment.
             result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
+
+            // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
+            await PersistPublishManifestAsync(agentRunId, run, task, result, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -654,7 +671,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static long ParseMaxSessionTranscriptBytes(string? raw, long fallback) =>
         long.TryParse(raw, out var value) && value > 0 ? value : fallback;
 
-    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
         if (workspace is null) return result;
 
@@ -662,12 +679,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             // The PRIMARY repo's diff is git ground truth for the top-level fields — byte-identical to a single-repo run.
             var changes = await workspace.CaptureChangesAsync(cancellationToken).ConfigureAwait(false);
+
             result = result with { ChangedFiles = changes.ChangedFiles, FileStats = changes.FileStats, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
+
+            // Publish-manifest (I1): offload the FULL, untruncated patch to the artifact store — a SEPARATE
+            // best-effort step (its own try/catch below) so an artifact-store hiccup can NEVER discard the git
+            // ground truth just assigned above. The existing 1MB inline cap stays byte-identical for every other
+            // consumer; this only ADDS a durable reference a large diff wouldn't otherwise have.
+            result = result with { PatchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false) };
 
             // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
             // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
             if (workspace.Repositories.Count > 1)
-                result = await CaptureRepositoryResultsAsync(runId, task, result, workspace, changes, cancellationToken).ConfigureAwait(false);
+                result = await CaptureRepositoryResultsAsync(runId, teamId, task, result, workspace, changes, cancellationToken).ConfigureAwait(false);
 
             return result;
         }
@@ -677,6 +701,51 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // infra exception that slipped the provider) is logged and the result kept — a git hiccup must
             // never flip an otherwise-successful run to Failed. Cancellation still propagates (worker torn down).
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture workspace changes; keeping the harness-reported file list", runId);
+            return result;
+        }
+    }
+
+    /// <summary>Offload the FULL, untruncated patch to the artifact store for the publish-manifest — independently best-effort: an artifact-store failure here must never discard the git-ground-truth fields a caller already assigned. Returns null on any failure (the manifest then simply carries no PatchArtifactId; the inline, possibly-truncated <see cref="AgentRunResult.Patch"/> is unaffected either way).</summary>
+    private async Task<Guid?> TryOffloadPatchAsync(Guid runId, Guid teamId, string patch, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await _offloader.OffloadIfLargeAsync(teamId, patch, "text/x-diff", cancellationToken).ConfigureAwait(false)).ArtifactId;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to offload the full patch to the artifact store; the manifest will carry no PatchArtifactId", runId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The RE-ATTACH counterpart of <see cref="EnrichWithWorkspaceChangesAsync"/>: no live <see cref="IWorkspaceHandle"/>
+    /// survives a worker restart, but the primary repo's clone directory + base SHA were stamped onto
+    /// <paramref name="handle"/> at launch — this resolves the SAME provider by <see cref="SandboxHandle.Kind"/> and
+    /// captures via <see cref="IWorkspacePathCapture"/> when it's supported and both fields are present (an older
+    /// handle written before this capability existed has neither — a no-op, exactly today's behavior). Best-effort,
+    /// same posture as the live path: any capture failure (including the directory already having been reclaimed by
+    /// the janitor) is logged and the result kept unchanged.
+    /// </summary>
+    private async Task<AgentRunResult> EnrichWithReattachWorkspaceChangesAsync(Guid runId, Guid teamId, SandboxHandle handle, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (handle.WorkspaceDirectory is not { Length: > 0 } directory || handle.WorkspaceBaseSha is not { Length: > 0 } baseSha) return result;
+        if (_workspaces.Resolve(handle.Kind) is not IWorkspacePathCapture capture) return result;
+
+        try
+        {
+            var changes = await capture.CaptureChangesFromPathAsync(directory, baseSha, cancellationToken).ConfigureAwait(false);
+
+            result = result with { ChangedFiles = changes.ChangedFiles, FileStats = changes.FileStats, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
+
+            // Separate best-effort step (see TryOffloadPatchAsync) — an artifact-store hiccup must never discard the
+            // git capture just assigned above.
+            return result with { PatchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false) };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture workspace changes on re-attach (the clone may already be reclaimed); keeping the harness-reported file list", runId);
             return result;
         }
     }
@@ -692,7 +761,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// degrade a multi-repo run to look single-repo). The primary's capture already succeeded (it's the top-level diff),
     /// so the change set always carries at least the primary.</para>
     /// </summary>
-    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
         var repoIds = task.Workspace?.Repositories.ToDictionary(r => r.Alias, r => r.RepositoryId);
         var perRepo = new List<RepositoryRunResult>();
@@ -705,6 +774,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (changes is null) continue;   // a secondary repo's capture failed (already logged) — drop it, keep the rest
 
+            // Publish-manifest (I1): offload THIS repo's full, untruncated patch — TryOffloadPatchAsync is its OWN
+            // best-effort step (never throws), so a per-repo artifact failure can only leave THAT repo's
+            // PatchArtifactId null — it can never abort this loop or discard a sibling repo's already-captured diff.
+            var patchArtifactId = await TryOffloadPatchAsync(runId, teamId, changes.Patch, cancellationToken).ConfigureAwait(false);
+
             perRepo.Add(new RepositoryRunResult
             {
                 Alias = repo.Alias,
@@ -714,6 +788,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // Capture this repo's diff (capped inline like the top-level patch) — the durable, base-anchored input
                 // the supervisor's per-repo on-disk integration consumes; a large one is offloaded at completion.
                 Patch = TruncatePatch(changes.Patch, MaxPatchChars),
+                PatchArtifactId = patchArtifactId,
                 BaseSha = changes.BaseSha,
                 BaseBranch = repo.BaseBranch,
                 Access = WorkspaceAccess.Write,
@@ -808,7 +883,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
             _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch after {Attempts} attempt(s); the run stays Succeeded with no branch output", runId, PushMaxAttempts);
             await AppendPushFailureWarningAsync(runId, ex.Message, cancellationToken).ConfigureAwait(false);
-            return result;
+            return result with { PublishError = ex.Message };
         }
     }
 
@@ -856,9 +931,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var pushed = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
+            var (pushed, error) = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
-            updated.Add(repo with { ProducedBranch = pushed });
+            updated.Add(repo with { ProducedBranch = pushed, PublishError = error });
 
             if (repo.Alias == workspace.PrimaryAlias) primaryBranch = pushed;
         }
@@ -866,18 +941,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return result with { RepositoryResults = updated, ProducedBranch = primaryBranch };
     }
 
-    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returns null, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
-    private async Task<string?> PushOneRepoOrNullAsync(Guid runId, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returned as the error half of the tuple, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
+    private async Task<(string? Branch, string? Error)> PushOneRepoOrNullAsync(Guid runId, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
         try
         {
-            return await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(alias, branchName, ct), cancellationToken).ConfigureAwait(false);
+            return (await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(alias, branchName, ct), cancellationToken).ConfigureAwait(false), null);
         }
         catch (WorkspaceException ex)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}' after {Attempts} attempt(s); keeping the other repos' branches in the change set", runId, alias, PushMaxAttempts);
             await AppendPushFailureWarningAsync(runId, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
-            return null;
+            return (null, ex.Message);
         }
     }
 
@@ -899,14 +974,65 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         result = await CaptureSessionTranscriptAsync(runId, task, result, harness, handle: null, cancellationToken).ConfigureAwait(false);
 
-        result = await EnrichWithWorkspaceChangesAsync(runId, task, result, workspace, cancellationToken).ConfigureAwait(false);
+        result = await EnrichWithWorkspaceChangesAsync(runId, run.TeamId, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
         result = await PushProducedBranchIfEnabledAsync(runId, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
+        // Publish-or-park (I1/I2): record what this pass produced + published REGARDLESS of Status — a Failed or
+        // TimedOut run's captured diff gets a row exactly like a Succeeded one. Idempotent (upserts), so an S6 revise
+        // round's re-verification safely overwrites this same row with its own latest state.
+        await PersistPublishManifestAsync(runId, run, task, result, cancellationToken).ConfigureAwait(false);
+
         return await ReviewOutputIfEnabledAsync(task, result, run, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Upsert the publish-manifest row(s) for this run — ONE per repository, single-repo top-level fields when
+    /// <see cref="AgentRunResult.RepositoryResults"/> is empty, one row per entry otherwise. Skips entirely when there
+    /// is nothing to record (no workspace, empty diff) — an empty-diff run leaves no manifest row (nothing to
+    /// publish or park). Best-effort: a manifest-write failure is logged and never flips the run's outcome, mirroring
+    /// every other capture/push step's posture — the captured diff still lives on the result row either way.
+    /// </summary>
+    private async Task PersistPublishManifestAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (result.RepositoryResults.Count > 0)
+            {
+                foreach (var repo in result.RepositoryResults)
+                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, acceptancePassed: null), cancellationToken).ConfigureAwait(false);
+
+                return;
+            }
+
+            if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null) return;   // nothing changed — no artifact to record
+
+            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to record the publish manifest; the captured diff is still on the result row", runId);
+        }
+    }
+
+    /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: a produced branch means Pushed, its absence means PatchOnly (PublishError distinguishes an intentional skip from a failed attempt); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
+    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, bool? acceptancePassed) => new()
+    {
+        TeamId = run.TeamId,
+        WorkflowRunId = run.WorkflowRunId,
+        RepositoryAlias = alias,
+        RepositoryId = repositoryId,
+        BaseSha = baseSha,
+        PatchArtifactId = patchArtifactId,
+        ChangedFileCount = changedFiles.Count,
+        ChangedFilesJson = changedFiles.Count > 0 ? JsonSerializer.Serialize(changedFiles, AgentJson.Options) : null,
+        AcceptanceState = acceptancePassed switch { true => PublishAcceptanceState.Passed, false => PublishAcceptanceState.Failed, null => PublishAcceptanceState.NotApplicable },
+        PublishStateValue = producedBranch is { Length: > 0 } ? PublishState.Pushed : PublishState.PatchOnly,
+        PublishError = publishError,
+        Branch = producedBranch,
+    };
 
     /// <summary>Hard cap on S6 revise rounds — a runaway budget is clamped here, so a task can never buy more than this many billed re-runs inside one agent run.</summary>
     internal const int MaxReviseRoundsCap = 3;
@@ -1513,7 +1639,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, string spoolKey, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
         var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
@@ -1542,7 +1668,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, spoolKey, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, spoolKey, workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
@@ -1584,10 +1710,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
     {
         if (runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, spoolKey, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, spoolKey, workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
@@ -1599,13 +1725,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, string spoolKey, string? workspaceDirectory, string? workspaceBaseSha, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
         // the token lets it RE-OPEN the endpoint with the SAME socket+token the agent's declaration file already holds.
         // The spool key is round-scoped (ReviseSpoolKey) — a revise round must never inherit a finished spool's exit marker.
-        var handle = (await durable.LaunchAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken };
+        // The workspace directory + base SHA (primary repo only) let a re-attach capture the agent's diff via
+        // IWorkspacePathCapture even though the live IWorkspaceHandle that prepared the clone died with this worker.
+        var handle = (await durable.LaunchAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken, WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha };
 
         await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 

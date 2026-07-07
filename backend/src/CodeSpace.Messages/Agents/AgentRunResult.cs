@@ -119,6 +119,9 @@ public sealed record AgentRunResult
 
     /// <summary>A stable id for the SET of branches a MULTI-repo run produced (a Change Set the downstream integration / PR-open consumes — the SOTA #3 Change-Set spine on the repo axis). Null for a single-repo run (no change-set concept).</summary>
     public string? ChangeSetId { get; init; }
+
+    /// <summary>Set ONLY when a non-empty diff failed to push after retries — the publish-manifest's signal that <see cref="ProducedBranch"/> being null was an ATTEMPT that failed, not a policy choice. Already-redacted (the workspace provider redacts before throwing). Null on success, on a policy skip, and on every non-publish outcome.</summary>
+    public string? PublishError { get; init; }
 }
 
 /// <summary>One writable repository's outcome in a multi-repo workspace run (multi-repo PR3, Rule 18.1 noun): which repo (by alias), what it changed, the branch it produced, and the base it was rooted at.</summary>
@@ -163,6 +166,9 @@ public sealed record RepositoryRunResult
 
     /// <summary>The repo's access in the workspace (always <see cref="WorkspaceAccess.Write"/> for an entry that produced an outcome).</summary>
     public WorkspaceAccess Access { get; init; } = WorkspaceAccess.Write;
+
+    /// <summary>Mirrors <see cref="AgentRunResult.PublishError"/> for this repo — set ONLY when this repo's non-empty diff failed to push after retries.</summary>
+    public string? PublishError { get; init; }
 
     /// <summary>
     /// The DIFF-FREE projection of this per-repo result — the bounded facts (alias / repository id / changed files /
