@@ -537,6 +537,33 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Build_result_reports_failure_on_exit_zero_when_the_turn_failed()
+    {
+        // Codex's own process can exit 0 (it didn't crash) while it emits turn.failed mid-run — that must NOT
+        // read as a silent Succeeded.
+        var failedTurn = Harness.ParseEvents("""{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized"}}""").Single();
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, failedTurn };
+
+        var result = Harness.BuildResult(events, exitCode: 0);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe("harness-reported-failure");
+        result.Error.ShouldBe("unexpected status 401 Unauthorized");
+    }
+
+    [Fact]
+    public void Build_result_still_succeeds_when_a_recovered_item_error_is_followed_by_turn_completed()
+    {
+        // A per-item error (e.g. one failed tool call) that the turn recovers from, followed by the real
+        // turn.completed, must NOT flag the whole run as failed — only the LATEST terminal event decides.
+        var itemError = Harness.ParseEvents("""{"type":"item.completed","item":{"id":"item_0","type":"error","message":"transient tool error"}}""").Single();
+        var turnCompleted = Harness.ParseEvents("""{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}""").Single();
+        var events = new[] { itemError, turnCompleted };
+
+        Harness.BuildResult(events, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
     public void Build_result_populates_token_usage_from_a_token_count_event()
     {
         // D3b-i: a real codex token_count event carries the cumulative usage under info.total_token_usage.
