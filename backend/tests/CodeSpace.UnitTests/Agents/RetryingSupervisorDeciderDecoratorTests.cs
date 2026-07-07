@@ -173,6 +173,53 @@ public class RetryingSupervisorDeciderDecoratorTests
         stopwatch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5), "the backoff was interrupted by the cancellation, not waited out");
     }
 
+    // ── ComputeDelay: exponential growth, caps, jitter band — pure, no sleeps ─────────
+
+    [Theory]
+    [InlineData(1, 2)]   // attempt 1 → BaseBackoff × 2^0 = 2s
+    [InlineData(2, 4)]   // attempt 2 → 4s
+    [InlineData(3, 8)]   // attempt 3 → 8s
+    [InlineData(4, 16)]  // attempt 4 → 16s
+    public void The_backoff_grows_exponentially_within_the_jitter_band(int attempt, int expectedBaseSeconds)
+    {
+        var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions { BaseBackoff = TimeSpan.FromSeconds(2) }, attempt, retryAfter: null);
+
+        delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(expectedBaseSeconds * 0.8), "jitter floor is −20%");
+        delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(expectedBaseSeconds * 1.2), "jitter roof is +20%");
+    }
+
+    [Fact]
+    public void A_deep_attempt_is_capped_at_the_backoff_ceiling()
+    {
+        // Attempt 10 would be 2 × 2^9 = 1024s uncapped — the ceiling holds it at 60s (±20% jitter).
+        var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions { BaseBackoff = TimeSpan.FromSeconds(2) }, attempt: 10, retryAfter: null);
+
+        delay.ShouldBeLessThanOrEqualTo(SupervisorDecisionRetryOptions.BackoffCeiling * 1.2);
+    }
+
+    [Fact]
+    public void A_reasonable_Retry_After_is_honored_verbatim_without_jitter()
+    {
+        var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions(), attempt: 1, retryAfter: TimeSpan.FromSeconds(30));
+
+        delay.ShouldBe(TimeSpan.FromSeconds(30), "the provider knows when it recovers — its hint wins over the exponential schedule");
+    }
+
+    [Fact]
+    public void A_hostile_Retry_After_is_clamped_to_the_ceiling()
+    {
+        var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions(), attempt: 1, retryAfter: TimeSpan.FromHours(2));
+
+        delay.ShouldBe(SupervisorDecisionRetryOptions.RetryAfterCeiling, "a misconfigured gateway header must not pin a worker for hours");
+    }
+
+    [Fact]
+    public void A_zero_base_backoff_computes_a_zero_delay()
+    {
+        // Tests (and operators who want immediate retries) set BaseBackoff = 0 — jitter must not turn 0 into a sleep.
+        RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions { BaseBackoff = TimeSpan.Zero }, attempt: 3, retryAfter: null).ShouldBe(TimeSpan.Zero);
+    }
+
     private static async Task<SupervisorDecision> Hang(CancellationToken ct)
     {
         await Task.Delay(TimeSpan.FromSeconds(30), ct);

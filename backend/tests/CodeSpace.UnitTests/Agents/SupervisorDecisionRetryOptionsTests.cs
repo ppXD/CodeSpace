@@ -26,15 +26,24 @@ public class SupervisorDecisionRetryOptionsTests
 
         var options = SupervisorDecisionRetryOptions.FromEnvironment();
 
-        options.MaxAttempts.ShouldBe(3);
-        options.PerCallTimeout.ShouldBe(TimeSpan.FromSeconds(90));
+        options.MaxAttempts.ShouldBe(5);
+        options.PerCallTimeout.ShouldBe(TimeSpan.FromSeconds(600));
+    }
+
+    [Fact]
+    public void Backoff_ceilings_are_pinned()
+    {
+        // Raising RetryAfterCeiling re-opens the "hostile Retry-After pins a worker for hours" hole; raising
+        // BackoffCeiling unbounds the in-process sleep between attempts. Hard-pin both (Rule 8).
+        SupervisorDecisionRetryOptions.RetryAfterCeiling.ShouldBe(TimeSpan.FromMinutes(15));
+        SupervisorDecisionRetryOptions.BackoffCeiling.ShouldBe(TimeSpan.FromSeconds(60));
     }
 
     [Theory]
     [InlineData("4", 4)]          // in range → honored
-    [InlineData("99", 5)]         // above max → clamped to 5
+    [InlineData("99", 10)]        // above max → clamped to 10
     [InlineData("0", 1)]          // below min → clamped to 1
-    [InlineData("not-a-number", 3)] // garbage → default
+    [InlineData("not-a-number", 5)] // garbage → default
     public void MaxAttempts_is_read_and_clamped(string raw, int expected)
     {
         using var _ = new EnvScope(SupervisorDecisionRetryOptions.MaxAttemptsEnvVar, raw);
@@ -45,8 +54,8 @@ public class SupervisorDecisionRetryOptionsTests
     [Theory]
     [InlineData("120", 120)]   // in range → honored
     [InlineData("5", 10)]      // below min 10 → clamped
-    [InlineData("9999", 600)]  // above max 600 → clamped
-    [InlineData("", 90)]       // blank → default
+    [InlineData("9999", 900)]  // above max 900 → clamped
+    [InlineData("", 600)]      // blank → default
     public void Timeout_seconds_is_read_and_clamped(string raw, int expectedSeconds)
     {
         using var _ = new EnvScope(SupervisorDecisionRetryOptions.TimeoutSecondsEnvVar, raw);
