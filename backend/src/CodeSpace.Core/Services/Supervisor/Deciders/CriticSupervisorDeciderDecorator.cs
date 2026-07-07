@@ -167,9 +167,16 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false), false);
     }
 
-    /// <summary>ONE bounded re-decide against a critique — both review modes reset to None so the re-decide can never recurse into another review.</summary>
-    private async Task<SupervisorDecision> RedecideAsync(SupervisorTurnContext context, string critique, CancellationToken cancellationToken) =>
-        await _inner.DecideAsync(context with { DecisionReviewMode = ReviewMode.None, PlanReviewMode = ReviewMode.None, ReviewerCritique = critique }, cancellationToken).ConfigureAwait(false);
+    /// <summary>The interaction kind the bounded re-decide's model call records under (vs the ambient turn's "supervisor.decision") — the journal reads "revision", not a second anonymous decide. Pinned by a unit test.</summary>
+    public const string ReviseCallKind = "supervisor.revise";
+
+    /// <summary>ONE bounded re-decide against a critique — both review modes reset to None so the re-decide can never recurse into another review. The ambient recording scope is re-labeled <see cref="ReviseCallKind"/> for the call's duration, so the tape distinguishes the draft call from the revision.</summary>
+    private async Task<SupervisorDecision> RedecideAsync(SupervisorTurnContext context, string critique, CancellationToken cancellationToken)
+    {
+        using var relabel = Workflows.Llm.LlmCallContext.Current is { } ambient ? Workflows.Llm.LlmCallContext.Push(ambient with { Kind = ReviseCallKind }) : null;
+
+        return await _inner.DecideAsync(context with { DecisionReviewMode = ReviewMode.None, PlanReviewMode = ReviewMode.None, ReviewerCritique = critique }, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>The Gate verdict as a critique the re-decide can act on — rationale + the evidence-attached issues (Gate's schema has no critique field; the issues ARE the actionable content). Internal for direct unit pinning.</summary>
     internal static string ComposeGateCritique(CriticVerdict verdict) =>

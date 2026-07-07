@@ -203,7 +203,8 @@ function AgentDrawer({ agent, runId, onClose }: { agent: RoomAgentCard; runId: s
 /** A model call's detail in the drawer — its prompt / result / usage / trace, fetched on demand by the ledger sequence.
  *  A ledger record is immutable, so the fetch never refetches. Offloaded prompt/result are resolved server-side to text. */
 function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { kind: "modelcall" }>; onClose: () => void }) {
-  const [tab, setTab] = useState<"prompt" | "result" | "usage" | "trace">("prompt");
+  // RESULT first — the reader wants "what did this call produce", not the prompt wall; the prompt stays one tab away.
+  const [tab, setTab] = useState<"result" | "prompt" | "usage" | "trace">("result");
   const q = useQuery({
     queryKey: ["model-call", target.runId, target.sequence],
     queryFn: () => sessionsApi.getModelCallDetail(target.runId, target.sequence),
@@ -219,8 +220,15 @@ function ModelCallDrawer({ target, onClose }: { target: Extract<DrawerTarget, { 
         <span className="room-drawer-title">{jPurpose(mc.purpose)}{mc.model ? ` · ${mc.model}` : ""}</span>
         <button className="room-drawer-close" onClick={onClose} aria-label="Close"><Sym n="x" s={15} /></button>
       </div>
+      <div className="room-mcmetaline">
+        {mc.tokens != null && mc.tokens > 0 && <span>{formatTokens(mc.tokens)} tokens</span>}
+        {mc.latencyMs != null && <span>{formatLatencyMs(mc.latencyMs)}</span>}
+        {mc.costUsd != null && <span>{formatCostUsd(mc.costUsd)}</span>}
+        <span className={mc.status === "failed" ? "room-mcmeta-fail" : undefined}>{mc.status}</span>
+        {mc.error && <span className="room-mcmeta-fail">{mc.error}</span>}
+      </div>
       <div className="room-mctabs">
-        {(["prompt", "result", "usage", "trace"] as const).map((t) => (
+        {(["result", "prompt", "usage", "trace"] as const).map((t) => (
           <button key={t} className={`room-mctab${tab === t ? " room-mctab-on" : ""}`} onClick={() => setTab(t)}>{t}</button>
         ))}
       </div>
@@ -714,11 +722,23 @@ function modelCallSequence(stepId: string): number | null {
 function jPurpose(kind: string): string {
   switch (kind) {
     case "supervisor.decision": return "decision";
+    case "supervisor.revise": return "revision";
+    case "critic.review": return "critic review";
+    case "agent.critic": return "output critic";
     case "plan.author": return "planner";
     case "plan.confirm": return "plan review";
     case "llm.complete": return "synthesis";
     default: return kind;
   }
+}
+
+/** The INTENT fragment for a model fold's label — the calls' distinct purposes so the collapsed line already says what
+ *  the model was doing ("decision" / "revision" / "critic review"), not just that it was called. Up to two named, the
+ *  rest counted; empty when no call carries a purpose fact yet (a pre-enrichment poll) so the label degrades cleanly. */
+function foldIntent(steps: JournalStep[]): string {
+  const labels = [...new Set(steps.map((s) => s.modelCall?.purpose).filter((p): p is string => !!p && p !== "model call").map(jPurpose))];
+  if (labels.length === 0) return "";
+  return ` · ${labels.slice(0, 2).join(" · ")}${labels.length > 2 ? ` +${labels.length - 2}` : ""}`;
 }
 
 /** A per-call USD cost — a few cents needs 3–4 decimals to read, a larger spend 2. A real-but-tiny spend that would round
@@ -781,7 +801,7 @@ function foldLabel(category: string, steps: JournalStep[]): string {
   switch (category) {
     case "model": {
       const tokens = steps.reduce((sum, s) => sum + stepTokens(s), 0);
-      return `${n} model call${plural}${tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}`;
+      return `${n} model call${plural}${foldIntent(steps)}${tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}`;
     }
     case "tool": return `${n} tool call${plural}`;
     case "reasoning": return `${n} reasoning step${plural}`;
@@ -924,7 +944,7 @@ function AskAnswerBar({ escalation }: { escalation: boolean }) {
     try {
       const result = await sessionsApi.answerRunAsk(run.runId, answer.trim());
       if (result == null) {
-        setError("Nothing left to answer — this question was already settled.");
+        setError("Nothing to answer here — the question was already settled, or this ask has no answer surface.");
       } else {
         setSent(true);
         setText("");

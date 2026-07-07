@@ -147,6 +147,29 @@ public class CriticSupervisorDeciderDecoratorTests
             .ShouldBe("weak Issues: premature stop (evidence: two subtasks remain unfinished)");
 
     [Fact]
+    public async Task The_re_decide_relabels_the_ambient_recording_scope_as_supervisor_revise()
+    {
+        // K/L2: the journal must tell the DRAFT call from the REVISION — the re-decide's model call records under
+        // "supervisor.revise" while the first decide keeps the ambient turn kind. Scoped: restored after the call.
+        var inner = new FakeDecider();
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Improve, Critique = "tighten it", Rationale = "loose" } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        var scope = new CodeSpace.Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "sup", "sup#turn0", "supervisor.decision", Logger: null!, Offloader: null!);
+
+        using (CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Push(scope))
+        {
+            await decorator.DecideAsync(Context(ReviewMode.Improve), CancellationToken.None);
+
+            CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current!.Kind.ShouldBe("supervisor.decision", "the re-label is scoped to the re-decide — the turn's ambient kind is restored");
+        }
+
+        string.Join("|", inner.ScopeKinds).ShouldBe($"supervisor.decision|{CriticSupervisorDeciderDecorator.ReviseCallKind}",
+            "the first decide records under the turn's kind; the bounded re-decide under supervisor.revise");
+        CriticSupervisorDeciderDecorator.ReviseCallKind.ShouldBe("supervisor.revise");
+    }
+
+    [Fact]
     public void The_escalation_marker_is_pinned() =>
         SupervisorGateEscalation.EscalationMarker.ShouldBe("Reply 'approve' to proceed with this decision despite the review, or describe what to do instead.");
 
@@ -235,10 +258,12 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         public string Kind { get; set; } = SupervisorDecisionKinds.Spawn;
         public List<SupervisorTurnContext> Contexts { get; } = new();
+        public List<string?> ScopeKinds { get; } = new();
 
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
         {
             Contexts.Add(context);
+            ScopeKinds.Add(CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current?.Kind);
             return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = "{\"agents\":[]}" });
         }
     }
