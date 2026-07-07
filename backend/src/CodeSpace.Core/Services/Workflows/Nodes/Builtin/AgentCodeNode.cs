@@ -257,13 +257,24 @@ public sealed class AgentCodeNode : INodeRuntime
         }
     }
 
-    /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure.</summary>
+    /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure, marked retryable only when a fresh respawn could change the outcome.</summary>
     private static NodeResult MapResult(JsonElement payload)
     {
-        if (ReadString(payload, "status") != nameof(AgentRunStatus.Succeeded))
+        var status = ReadString(payload, "status");
+
+        if (status != nameof(AgentRunStatus.Succeeded))
         {
             var error = ReadString(payload, "error");
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? ReadString(payload, "status") : error)}");
+
+            // NeedsReview parked human-owed work, Cancelled recorded the user's own stop, and a fail-closed
+            // acceptance re-grade is a VERDICT (same code + same check would fail again — in-run improvement is the
+            // revise loop's job, plan-level revision the supervisor's) — respawning the agent can change none of
+            // them, so all three fail non-retryable. Everything else (a crashed / timed-out / abandoned run) is a
+            // candidate transient death a fresh agent may survive; the node's retry policy decides whether one is bought.
+            var deterministic = status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled)
+                || ReadString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason;
+
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };

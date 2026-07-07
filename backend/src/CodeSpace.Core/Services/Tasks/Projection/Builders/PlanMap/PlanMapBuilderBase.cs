@@ -63,7 +63,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 
             new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
 
-            new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map", Retry = AgentNodeMapping.DefaultRetry,
                     Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}"), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
             new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",

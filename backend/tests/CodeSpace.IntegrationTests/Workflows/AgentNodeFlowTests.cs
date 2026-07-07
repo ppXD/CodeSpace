@@ -616,6 +616,150 @@ public class AgentNodeFlowTests
         return scope.Resolve<InMemoryBackgroundJobClient>();
     }
 
+    // ── P0.3: transient-failure respawn — the retry policy re-stages a FRESH agent across suspend cycles ──
+
+    [Fact]
+    public async Task A_transient_agent_failure_respawns_a_fresh_agent_and_the_retry_succeeds()
+    {
+        // Retry {2 attempts, 0s backoff}: agent #1 dies transiently → the resume consumes attempt 1 and re-runs the
+        // node FRESH, staging a SECOND agent run under a new wait; its success completes the run. One transient
+        // death no longer kills the whole task.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited" });
+
+            await RunEngineAsync(runId);   // resume → attempt 1 fails → the retry re-stages a FRESH agent + parks again
+
+            Guid secondAgent;
+            using (var mid = _fixture.BeginScope())
+            {
+                var db = mid.Resolve<CodeSpaceDbContext>();
+
+                var agents = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.CreatedDate).ToListAsync();
+                agents.Count.ShouldBe(2, "the retry staged a FRESH agent run — never re-read the settled failure");
+                secondAgent = agents.Single(a => a.Id != firstAgent).Id;
+
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Suspended, "the respawned agent parks the run again — not a failure");
+
+                (await db.WorkflowRunRecord.AsNoTracking().CountAsync(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.AttemptFailed))
+                    .ShouldBe(1, "the consumed attempt is durably ledgered so the budget survives the suspend cycle");
+            }
+
+            await SimulateAgentExecutorAsync(secondAgent, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Fixed on the second try." });
+
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the respawned agent's success completes the run — the transient death was absorbed");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task The_respawn_budget_is_durable_so_a_second_transient_failure_exhausts_it()
+    {
+        // Retry {2}: two transient deaths consume the whole budget — the durable attempt ledger stops the loop at
+        // exactly MaxAttempts staged agents (never an unbounded respawn), and the run fails honestly.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited" });
+            await RunEngineAsync(runId);   // respawn (attempt 2 staged)
+
+            Guid secondAgent;
+            using (var mid = _fixture.BeginScope())
+            {
+                var db = mid.Resolve<CodeSpaceDbContext>();
+                secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.CreatedDate).ToListAsync()).Single(a => a.Id != firstAgent).Id;
+            }
+
+            await SimulateAgentExecutorAsync(secondAgent, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited again" });
+            await RunEngineAsync(runId);   // resume → durable count says attempt 2 of 2 → budget exhausted → fail
+
+            using var verify = _fixture.BeginScope();
+            var db2 = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db2.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Failure, "the second failure exhausted the durable budget");
+            (await db2.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(2, "exactly MaxAttempts agents were staged — the durable ledger prevents a runaway respawn loop");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_needs_review_outcome_is_deterministic_and_never_respawned()
+    {
+        // NeedsReview parked human-owed work — respawning cannot change that verdict, so even with retry budget
+        // remaining the node fails immediately and exactly ONE agent was ever staged.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 3));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentRunId = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.NeedsReview, ExitReason = "completed", Summary = "I need a decision on the API shape." });
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Failure, "a human-owed verdict fails the node without burning the retry budget");
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(1, "a deterministic outcome is never respawned");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    // manual → agent.code(Retry{maxAttempts, 0s}) → terminal — the respawn tests' definition (0s backoff so tests never sleep).
+    private static WorkflowDefinition RetryingAgentNodeDefinition(int maxAttempts)
+    {
+        var definition = AgentNodeDefinition(withErrorBranch: false);
+        var nodes = definition.Nodes.Select(n => n.Id == "agent" ? n with { Retry = new RetryPolicy { MaxAttempts = maxAttempts, BackoffSeconds = 0 } } : n).ToList();
+
+        return definition with { Nodes = nodes };
+    }
+
     // manual → agent.code → terminal(forwards summary + branch). Optionally agent =(error)=> caught.
     private static WorkflowDefinition AgentNodeDefinition(bool withErrorBranch)
     {
