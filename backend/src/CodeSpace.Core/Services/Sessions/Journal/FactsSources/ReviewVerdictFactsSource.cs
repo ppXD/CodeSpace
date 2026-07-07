@@ -20,6 +20,8 @@ public sealed class ReviewVerdictFactsSource : IJournalFactsSource
     {
         var rows = await _verdicts.ReadForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return rows.ToDictionary(r => ReviewVerdictTimelineMap.EventId(r.Verdict.ReviewerRunId!.Value), r => new JournalStepFacts { Review = r.Verdict });
+        return rows
+            .Where(r => r.Verdict is not null)   // an in-flight reviewer's beat has no card yet — the verdict upgrades it in place when it lands
+            .ToDictionary(r => ReviewVerdictTimelineMap.EventId(r.ReviewerRunId), r => new JournalStepFacts { Review = r.Verdict });
     }
 }

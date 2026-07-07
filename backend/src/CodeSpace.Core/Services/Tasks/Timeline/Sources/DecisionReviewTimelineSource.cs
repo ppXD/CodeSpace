@@ -34,7 +34,8 @@ public sealed class DecisionReviewTimelineSource : IRunTimelineSource, IScopedDe
             var reviews = SupervisorOutcome.ReadReviews(decision.OutcomeJson);
 
             for (var i = 0; i < reviews.Count; i++)
-                events.Add(DecisionReviewTimelineMap.ToEvent(decision, i, reviews[i]));
+                if (!reviews[i].ViaAgent)   // an agent verdict's reviewer run is already its own beat — never beat it twice
+                    events.Add(DecisionReviewTimelineMap.ToEvent(decision, i, reviews[i]));
         }
 
         return events;
@@ -51,7 +52,7 @@ public static class DecisionReviewTimelineMap
     {
         Id = EventId(decision.Id, index),
         Kind = ReviewVerdictTimelineMap.VerdictKind,
-        Title = TitleFor(review),
+        Title = TitleFor(review, index),
         Summary = review.Rationale,
         Severity = review.Approved ? TimelineSeverity.Success : TimelineSeverity.Warning,
         Level = TimelineLevel.Milestone,
@@ -60,14 +61,14 @@ public static class DecisionReviewTimelineMap
         SourceKey = ReviewVerdictTimelineMap.Key,
     };
 
-    /// <summary>The verdict beat's headline — WHO (the model critic) + outcome + WHAT (the draft when one was discarded, else the decision itself).</summary>
-    internal static string TitleFor(SupervisorDecisionReview review)
+    /// <summary>The verdict beat's headline — WHO (the model critic) + outcome + WHAT: the draft when one was discarded, the REVISED decision on a later rung (so the Gate ladder reads draft → revised), else the decision itself.</summary>
+    internal static string TitleFor(SupervisorDecisionReview review, int index = 0)
     {
         var subject = review.Scope == "plan" ? "plan" : "decision";
 
-        if (review.Approved) return $"Model critic approved the {subject}";
+        if (review.Approved) return $"Model critic approved the {(index > 0 ? "revised " : "")}{subject}";
 
-        var what = review.DraftAttribution is null ? $"the {subject}" : $"the {subject} draft";
+        var what = review.DraftAttribution is not null ? $"the {subject} draft" : index > 0 ? $"the revised {subject}" : $"the {subject}";
 
         return $"Model critic flagged {what}{(review.Issues.Count > 0 ? $" — {review.Issues.Count} issue{(review.Issues.Count == 1 ? "" : "s")}" : "")}";
     }

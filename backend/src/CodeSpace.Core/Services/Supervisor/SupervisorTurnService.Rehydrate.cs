@@ -217,7 +217,9 @@ public sealed partial class SupervisorTurnService
 
         if (token == null || !answersByToken.TryGetValue(token, out var answer)) return decision;
 
-        var folded = SupervisorOutcome.FoldAnswer(SupervisorOutcome.ReadAskHumanQuestion(decision.OutcomeJson), token, answer);
+        // Key-preserving fold: set ONLY the answer, keeping the question/token AND every enrichment folded after the
+        // park (the escalation's review chain, the authoring usage) — re-emitting the bare shape here erased them.
+        var folded = SupervisorOutcome.FoldAnswerOnto(decision.OutcomeJson, answer);
 
         return decision with { OutcomeJson = folded };
     }

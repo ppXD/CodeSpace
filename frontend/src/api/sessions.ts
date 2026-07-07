@@ -372,8 +372,6 @@ export interface JournalReviewVerdict {
   reviewerHarness?: string | null;
   /// What was reviewed — "output" / "plan" / "decision".
   scope: string;
-  /// The discarded draft this verdict flagged, pre-rendered ("plan draft · authored via metis-coder-max · 8,231 tokens"). Null when nothing was discarded.
-  draftAttribution?: string | null;
 }
 
 /// A planned subtask still blocked by an unmet dependency at a wave (the "waiting on #n"). Mirrors backend `JournalDeferredSubtask`.
@@ -438,6 +436,11 @@ export interface JournalStep {
   review?: JournalReviewVerdict | null;
   /// Whether an ASK step is a review-gate ESCALATION (the hard-Gate ladder parked the run on the human) — the "review-blocked" framing chip.
   reviewEscalation?: boolean;
+  /// The DISCARDED DRAFT this decision replaced ("plan draft · via metis-coder-max · 8.2k tokens") — the "└ replaced a draft"
+  /// line under a decision that went through a critic revision, attributing the once-anonymous authoring call. Null otherwise.
+  draft?: string | null;
+  /// Whether an ASK step is the PLAN-CONFIRMATION card — the plan checklist card is that park's answer surface, so the generic inline answer bar is suppressed.
+  planConfirmation?: boolean;
   tone: JournalTone;
   milestone: boolean;
   agents: JournalAgentCard[];
@@ -559,6 +562,18 @@ export const sessionsApi = {
   confirmRunPlan: async (runId: string, body: { approve: boolean; feedback?: string }): Promise<WorkPlanConfirmationOutcome | null> => {
     try {
       return await fetchJson<WorkPlanConfirmationOutcome>(`/api/workflows/runs/${runId}/plan/confirm`, { method: "POST", body: JSON.stringify(body) });
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+
+  /// Answer the run's NEWEST pending supervisor ASK (a content question or a review-gate escalation) straight from
+  /// the run page — resolves the SAME durable wait the conversation card's Answer button does (first answer wins).
+  /// Null when nothing is pending (already answered / not parked / foreign run — 404).
+  answerRunAsk: async (runId: string, answer: string): Promise<{ resumed: boolean } | null> => {
+    try {
+      return await fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/ask/answer`, { method: "POST", body: JSON.stringify({ answer }) });
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;

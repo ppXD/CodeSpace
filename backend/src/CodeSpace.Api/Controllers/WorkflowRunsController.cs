@@ -93,6 +93,16 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>Answer the run's NEWEST pending supervisor ask — any ask alike (a content question, a review-gate escalation where 'approve' is the one-shot absolution). Rides the same durable Action wait as the conversation card. Blank answer → 400; no pending ask / foreign / absent → 404 (conflated).</summary>
+    [HttpPost("{runId:guid}/ask/answer")]
+    public async Task<IActionResult> AnswerAsk([FromRoute] Guid runId, [FromBody] AnswerRunAskCommand command, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(command.Answer)) return BadRequest(new { error = "An answer is required." });
+
+        var result = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>The lineage's attempt ladder — the original run + every replay/rerun fork of it, oldest first, latest flagged. Drives the run-detail attempt switcher. Foreign / absent → 404.</summary>
     [HttpGet("{runId:guid}/attempts")]
     public async Task<IActionResult> GetAttempts([FromRoute] Guid runId, CancellationToken cancellationToken)

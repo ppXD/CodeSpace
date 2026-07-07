@@ -91,6 +91,38 @@ public static class SupervisorOutcome
     public static string FoldAnswer(string? question, string token, string? answer) =>
         JsonSerializer.Serialize(new { question, askHumanToken = token, answer }, AgentJson.Options);
 
+    /// <summary>
+    /// Fold the human's ANSWER onto an EXISTING ask_human outcome, preserving every other key verbatim — the question,
+    /// the wait token, and any later enrichment (the H1 review chain, the authoring usage). The rehydrate re-stamp
+    /// previously re-emitted the bare 3-field <see cref="FoldAnswer"/> shape, which silently DESTROYED the folded
+    /// reviews + usage the moment the human answered — wiping the escalation exchange (its verdict beats + the draft
+    /// attribution) off the durable tape. A generic additive merge like <see cref="AppendAcceptanceGrade"/>: existing
+    /// keys copied in source order, <c>answer</c> set in place. Idempotent — re-folding the same answer is byte-identical.
+    /// A null/blank/non-object input degrades to a bare <c>{answer}</c> object (defensive; the fold is only reached
+    /// after <see cref="ReadHumanWaitToken"/> parsed the outcome).
+    /// </summary>
+    public static string FoldAnswerOnto(string? outcomeJson, string? answer)
+    {
+        var merged = new Dictionary<string, object?>();
+
+        if (!string.IsNullOrWhiteSpace(outcomeJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(outcomeJson);
+
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                        merged[prop.Name] = prop.Value.Clone();   // Clone so the value outlives the JsonDocument's dispose
+            }
+            catch (JsonException) { merged.Clear(); }
+        }
+
+        merged["answer"] = answer;
+
+        return JsonSerializer.Serialize(merged, AgentJson.Options);
+    }
+
     /// <summary>Read the human's recorded answer text from an ask_human outcome (null until the wait resolved + the answer was folded in). The decider sees "you asked X, the human answered Y" on the next turn.</summary>
     public static string? ReadAskHumanAnswer(string? outcomeJson) => ReadStringField(outcomeJson, "answer");
 
@@ -190,6 +222,7 @@ public static class SupervisorOutcome
                 ["issues"] = issues,
                 ["scope"] = r.Scope,
                 ["draftAttribution"] = r.DraftAttribution,
+                ["viaAgent"] = r.ViaAgent,
             });
         }
 
@@ -231,6 +264,7 @@ public static class SupervisorOutcome
                     Issues = issues,
                     Scope = r.TryGetProperty("scope", out var sc) && sc.ValueKind == JsonValueKind.String ? sc.GetString()! : "decision",
                     DraftAttribution = r.TryGetProperty("draftAttribution", out var da) && da.ValueKind == JsonValueKind.String ? da.GetString() : null,
+                    ViaAgent = r.TryGetProperty("viaAgent", out var va) && va.ValueKind == JsonValueKind.True,
                 });
             }
 

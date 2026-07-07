@@ -65,8 +65,8 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         // IMPROVE: fold the critique into ONE bounded re-decide (BOTH review modes reset to None ⇒ no recursion),
         // so the decider revises against it. An AGENT verdict is Gate-shaped (no critique field) — its disapproval
         // composes the critique from rationale + evidence-attached issues; an agent APPROVAL (or a blank critique)
-        // falls through to the original. The MODEL verdict rides the surviving decision (draft attributed) so the
-        // journal shows the exchange — an AGENT verdict never rides here (its reviewer run is its own beat).
+        // falls through to the original. EVERY verdict rides the surviving decision (draft attributed) so the
+        // journal shows the exchange — an AGENT verdict rides flagged ViaAgent (its reviewer run is its own beat).
         if (mode == ReviewMode.Improve)
         {
             var critique = !string.IsNullOrWhiteSpace(verdict.Critique) ? verdict.Critique
@@ -107,13 +107,13 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         return CarryReview(decision, verdict, agentReviewed, scope, draft: null);
     }
 
-    /// <summary>Append a MODEL verdict to the decision's carried review chain — an AGENT verdict is skipped (its reviewer run is already a first-class journal beat) and a FAILED verdict never reaches here. The draft, when a revision followed, is attributed by verb + the model call that authored it.</summary>
+    /// <summary>Append a verdict to the decision's carried review chain — a FAILED verdict never reaches here. An AGENT verdict rides FLAGGED <see cref="SupervisorDecisionReview.ViaAgent"/> (its reviewer run is already a first-class journal beat, so the projection skips beating it twice — the entry exists for the DRAFT attribution). The draft, when a revision followed, is attributed by verb + the model call that authored it.</summary>
     private static SupervisorDecision CarryReview(SupervisorDecision survivor, CriticVerdict verdict, bool agentReviewed, string scope, SupervisorDecision? draft) =>
         survivor with { Reviews = survivor.Reviews.Concat(ToReviews(verdict, agentReviewed, scope, draft)).ToList() };
 
     private static IReadOnlyList<SupervisorDecisionReview> ToReviews(CriticVerdict verdict, bool agentReviewed, string scope, SupervisorDecision? draft)
     {
-        if (agentReviewed || verdict.Failed) return Array.Empty<SupervisorDecisionReview>();
+        if (verdict.Failed) return Array.Empty<SupervisorDecisionReview>();
 
         return new[]
         {
@@ -124,6 +124,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
                 Issues = verdict.Issues.Select(i => i.ToString()).ToList(),
                 Scope = scope,
                 DraftAttribution = draft is null ? null : DescribeDraft(draft),
+                ViaAgent = agentReviewed,
             },
         };
     }

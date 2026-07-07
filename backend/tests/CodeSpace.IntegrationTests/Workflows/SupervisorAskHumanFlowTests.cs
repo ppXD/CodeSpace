@@ -258,6 +258,54 @@ public class SupervisorAskHumanFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task The_run_scoped_answer_service_resumes_the_park_without_the_caller_holding_a_token()
+    {
+        // J1: the run page's inline answer bar — the caller knows only the RUN, not the card token. The service
+        // finds the newest unanswered ask on the tape, reads its recorded wait token, and resumes the SAME durable
+        // Action wait the conversation card's Answer button resolves — a third converging surface, not a new path.
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId);
+
+        ResolveJobClient().Clear();
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "too early", CancellationToken.None))
+                .ShouldBeNull("nothing is parked yet — no ask on the tape");
+
+        // Drive to the ask park: turn 0 ask_human posts a card + parks on the Action wait.
+        await RunEngineAsync(runId);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, Guid.NewGuid(), userId, "wrong team", CancellationToken.None))
+                .ShouldBeNull("a foreign team sees no ask — the tape read is team-scoped");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var outcome = await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "patch it", CancellationToken.None);
+
+            outcome.ShouldNotBeNull();
+            outcome.Resumed.ShouldBeTrue("the run-scoped answer resolved the park and re-dispatched the run");
+        }
+
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the answer resumed the supervisor → turn 1 stop → the run completes");
+
+            var ask = (await Ledger(db, runId, teamId)).Single(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+            SupervisorOutcome.ReadAskHumanAnswer(ask.OutcomeJson).ShouldBe("patch it", "the folded answer is the run-scoped surface's — same durable outcome as the card path");
+        }
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<ISupervisorAskAnswerService>().AnswerAsync(runId, teamId, userId, "second answer", CancellationToken.None))
+                .ShouldBeNull("the ask is already answered — first answer wins across every surface");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private async Task AnswerAsync(string token, string answer, Guid actorUserId, Guid teamId)

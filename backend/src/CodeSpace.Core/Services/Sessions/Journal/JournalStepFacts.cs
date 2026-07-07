@@ -35,6 +35,12 @@ public sealed record JournalStepFacts
     /// <summary>Whether an ASK step is a review-gate ESCALATION (the hard-Gate ladder parked the run on the human). False when the step isn't an ask / isn't escalated.</summary>
     public bool ReviewEscalation { get; init; }
 
+    /// <summary>Whether an ASK step is the PLAN-CONFIRMATION card (the S3 gate's park) — the plan checklist card is that park's answer surface, so the frontend suppresses the generic answer bar. False elsewhere.</summary>
+    public bool PlanConfirmation { get; init; }
+
+    /// <summary>The DISCARDED DRAFT a decision replaced (pre-rendered "plan draft · via metis-coder-max · 8.2k tokens") — rides the SURVIVING decision's beat so the once-anonymous authoring call reads as part of the exchange. Null when the decision replaced nothing.</summary>
+    public string? Draft { get; init; }
+
     /// <summary>Field-wise coalesce of two sources' facts for the SAME step — a later source's set field wins, an unset field leaves the earlier one intact. So independent sources (rationale · agents · deferred · plan · answer · model-call · review) compose onto one step without clobbering each other.</summary>
     public JournalStepFacts Merge(JournalStepFacts other) => new()
     {
@@ -46,5 +52,7 @@ public sealed record JournalStepFacts
         ModelCall = other.ModelCall ?? ModelCall,
         Review = other.Review ?? Review,
         ReviewEscalation = other.ReviewEscalation || ReviewEscalation,
+        PlanConfirmation = other.PlanConfirmation || PlanConfirmation,
+        Draft = other.Draft ?? Draft,
     };
 }

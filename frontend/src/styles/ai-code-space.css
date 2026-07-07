@@ -6074,6 +6074,28 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jdetail-err { color: var(--rm-danger); }
 .room-jdetail-warn { color: var(--rm-warn); }
 
+/* The "└ replaced a draft · plan draft · via …" attribution line under a critic-revised decision — the discarded draft, in the rationale line's muted voice. */
+.room-jdraftline { color: var(--muted-2); }
+
+/* A long ASK question clamps to 3 lines with its own "show more" toggle, so a parked card never walls the timeline. */
+.room-jask-q[data-clamp] { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.room-jask-more { display: inline-block; margin-left: 4px; font: inherit; font-size: 11px; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+.room-jask-more:hover { text-decoration: underline; }
+
+/* The inline answer bar under a PENDING ask beat — the run page's own answer surface for a parked run. */
+.room-jask-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 2px 64px; max-width: 72ch; }
+.room-jask-input { flex: 1; min-width: 220px; font: inherit; font-size: 12px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.room-jask-input:focus { outline: none; border-color: var(--accent); }
+.room-jask-input::placeholder { color: var(--muted-2); }
+.room-jask-btn { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: 12px; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.room-jask-btn:disabled { opacity: .5; cursor: default; }
+.room-jask-send { color: #fff; background: var(--accent); border: 1px solid var(--accent); font-weight: 600; }
+.room-jask-send:hover:not(:disabled) { filter: brightness(1.05); }
+.room-jask-approve { color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); }
+.room-jask-approve:hover:not(:disabled) { border-color: var(--rm-good); color: var(--rm-good); }
+.room-jask-err { font-size: 11.5px; color: var(--rm-danger); }
+.room-jask-sent { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--rm-good); }
+
 /* A spawn wave reuses the Room's own agent card (AgentSection) so the cards look identical and each row opens the side drawer; we only indent it under the decision beat. */
 .room-jagents { margin: 8px 0 2px 64px; }
 .room-jagents .room-work { margin: 0; }
@@ -6086,14 +6108,13 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jdeferred { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px 64px; }
 .room-jdefer { font-size: 11px; color: var(--rm-warn); background: var(--rm-warn-bg); border: 1px solid var(--rm-warn-line); border-radius: 999px; padding: 1px 9px; }
 
-/* The reviewer's verdict card under a REVIEW beat — mirrors the plan card's indent; approve reads calm green, a flag reads warm amber. */
-.room-jverdict { margin: 6px 0 2px 64px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px; max-width: 72ch; }
+/* The reviewer's verdict card under a REVIEW beat — mirrors the plan card's indent; approve reads calm green, a flag reads warm amber. The WHOLE card toggles open/closed (only the deep-link opts out), so an expanded card always collapses back. */
+.room-jverdict { margin: 6px 0 2px 64px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px; max-width: 72ch; cursor: pointer; }
 .room-jverdict-ok { border-color: var(--rm-good-line); background: var(--rm-good-bg); }
 .room-jverdict-warn { border-color: var(--rm-warn-line); background: var(--rm-warn-bg); }
 .room-jverdict-head { display: flex; align-items: baseline; gap: 8px; width: 100%; background: none; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; }
 .room-jverdict-rationale[data-clamp] { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .room-jverdict-chev { flex: none; align-self: center; color: var(--muted-2); }
-.room-jverdict-draft { color: var(--muted-2); font-style: italic; }
 .room-jverdict-badge { font-weight: 600; font-size: 11.5px; flex: none; }
 .room-jverdict-ok .room-jverdict-badge { color: var(--rm-good); }
 .room-jverdict-warn .room-jverdict-badge { color: var(--rm-warn); }

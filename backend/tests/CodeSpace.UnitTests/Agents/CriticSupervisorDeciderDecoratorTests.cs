@@ -96,7 +96,8 @@ public class CriticSupervisorDeciderDecoratorTests
         decision.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the blocked decision does NOT execute — the human is the tie-breaker");
         SupervisorGateEscalation.QuestionCarriesMarker(decision.PayloadJson).ShouldBeTrue("the card carries the gate's own marker");
         decision.PayloadJson.ShouldContain("still premature", customMessage: "the human rules on the CRITIQUE, not a mystery");
-        decision.PayloadJson.ShouldContain("two subtasks remain unfinished", customMessage: "the evidence rides the card");
+        decision.PayloadJson.ShouldContain("premature stop", customMessage: "the issue HEADLINE rides the card");
+        decision.PayloadJson.ShouldNotContain("two subtasks remain unfinished", customMessage: "J2: the evidence does NOT — the card is a headline; the full verdicts live on the review beats");
     }
 
     [Fact]
@@ -148,6 +149,29 @@ public class CriticSupervisorDeciderDecoratorTests
     [Fact]
     public void The_escalation_marker_is_pinned() =>
         SupervisorGateEscalation.EscalationMarker.ShouldBe("Reply 'approve' to proceed with this decision despite the review, or describe what to do instead.");
+
+    [Fact]
+    public void The_escalation_question_is_bounded_and_points_at_the_review_beats()
+    {
+        // J2: the parked card is a HEADLINE the operator reads in seconds — a verbose critic (long rationale, many
+        // evidence-heavy issues) must not turn it into a wall of text. Full verdicts live on the run's review beats.
+        var verbose = new CriticVerdict
+        {
+            Mode = ReviewMode.Gate,
+            Approved = false,
+            Rationale = new string('r', 500),
+            Issues = Enumerable.Range(1, 5).Select(i => new CriticIssue { Text = $"issue {i} " + new string('x', 400), Evidence = new string('e', 800) }).ToList(),
+        };
+
+        var card = SupervisorGateEscalation.IntoAskHuman(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}" }, verbose);
+        var question = System.Text.Json.JsonDocument.Parse(card.PayloadJson).RootElement.GetProperty("question").GetString()!;
+
+        question.Length.ShouldBeLessThan(1200, "clipped rationale + 3 clipped issues + fixed prose — never the review dossier");
+        question.ShouldContain("(+2 more)", customMessage: "the dropped issues are counted, not silently vanished");
+        question.ShouldContain("The full verdicts are on this run's review steps.", customMessage: "the card points at where the evidence lives");
+        question.ShouldNotContain(new string('e', 100), customMessage: "evidence text never rides the card — it belongs to the review beats");
+        question.ShouldEndWith(SupervisorGateEscalation.EscalationMarker);
+    }
 
     private static CriticVerdict Disapproved(string rationale) => new()
     {
@@ -431,9 +455,11 @@ public class CriticSupervisorDeciderDecoratorTests
     }
 
     [Fact]
-    public async Task An_agent_verdict_is_never_folded_onto_the_decision()
+    public async Task An_agent_verdict_folds_flagged_via_agent_so_the_projection_skips_its_beat()
     {
-        // The grounded reviewer's run is ALREADY a first-class journal beat — folding its verdict here would double it.
+        // The grounded reviewer's run is ALREADY a first-class journal beat — the fold carries the verdict for the
+        // DRAFT attribution (the surviving decision's "└ replaced a draft" line), flagged ViaAgent so the timeline
+        // and facts sources never beat it a second time.
         var inner = new FakeDecider { Kind = SupervisorDecisionKinds.Plan };
         var critic = new FakeCritic();
         var agent = new RecordingAgentPlanReviewer { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "grounded ok" } };
@@ -441,7 +467,9 @@ public class CriticSupervisorDeciderDecoratorTests
 
         var decision = await decorator.DecideAsync(GroundedContext(ReviewMode.Gate, Guid.NewGuid()), CancellationToken.None);
 
-        decision.Reviews.ShouldBeEmpty("an agent verdict rides its reviewer run's own beat, not the decision outcome");
+        decision.Reviews.Count.ShouldBe(1, "the agent verdict rides the tape like any other rung");
+        decision.Reviews[0].ViaAgent.ShouldBeTrue("flagged — its reviewer run is its own beat, the projection must not double it");
+        decision.Reviews[0].Rationale.ShouldBe("grounded ok");
     }
 
     [Fact]
@@ -449,7 +477,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var reviews = new[]
         {
-            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens" },
+            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens", ViaAgent = true },
             new SupervisorDecisionReview { Approved = true, Rationale = "fixed", Scope = "plan" },
         };
 
@@ -462,7 +490,9 @@ public class CriticSupervisorDeciderDecoratorTests
         read[0].Issues.ShouldBe(new[] { "no tests (evidence: none named)" });
         read[0].Scope.ShouldBe("plan");
         read[0].DraftAttribution.ShouldBe("plan draft · authored via m1 · 8,200 tokens");
+        read[0].ViaAgent.ShouldBeTrue("the agent flag survives the fold — the projection needs it to skip the double beat");
         read[1].Approved.ShouldBeTrue();
+        read[1].ViaAgent.ShouldBeFalse();
 
         SupervisorOutcome.WriteReviews("""{"outcome":"planned"}""", Array.Empty<SupervisorDecisionReview>())
             .ShouldBe("""{"outcome":"planned"}""", "no reviews ⇒ byte-identical — every pre-chain decision replays exactly as before");

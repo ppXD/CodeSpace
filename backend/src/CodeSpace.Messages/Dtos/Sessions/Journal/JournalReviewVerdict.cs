@@ -23,9 +23,6 @@ public sealed record JournalReviewVerdict
     /// <summary>The harness the reviewer ran on (e.g. <c>claude-code</c> when the producer ran <c>codex-cli</c>) — the independence line the card shows. Null when unknown / a model critic.</summary>
     public string? ReviewerHarness { get; init; }
 
-    /// <summary>The DISCARDED draft this verdict flagged, when a revision followed — pre-rendered ("plan draft · authored via metis-coder-max · 8,231 tokens") so the once-anonymous model call is attributed to the exchange. Null when nothing was discarded.</summary>
-    public string? DraftAttribution { get; init; }
-
     /// <summary>WHAT was reviewed — <see cref="OutputScope"/> (a produced change) or <see cref="PlanScope"/> (a plan verified against the repository).</summary>
     public required string Scope { get; init; }
 

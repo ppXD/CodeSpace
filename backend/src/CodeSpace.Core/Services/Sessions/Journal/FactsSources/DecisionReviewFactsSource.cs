@@ -31,20 +31,28 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
             {
                 var r = reviews[i];
 
-                facts[DecisionReviewTimelineMap.EventId(decision.Id, i)] = new JournalStepFacts
-                {
-                    Review = new JournalReviewVerdict
+                if (!r.ViaAgent)   // an agent verdict has no synthetic decision-review beat (its reviewer run is the beat)
+                    facts[DecisionReviewTimelineMap.EventId(decision.Id, i)] = new JournalStepFacts
                     {
-                        Approved = r.Approved,
-                        Rationale = r.Rationale,
-                        Issues = r.Issues,
-                        ReviewerRunId = null,
-                        ReviewerHarness = null,
-                        Scope = r.Scope,
-                        DraftAttribution = r.DraftAttribution,
-                    },
-                };
+                        Review = new JournalReviewVerdict
+                        {
+                            Approved = r.Approved,
+                            Rationale = r.Rationale,
+                            Issues = r.Issues,
+                            ReviewerRunId = null,
+                            ReviewerHarness = null,
+                            Scope = r.Scope,
+                        },
+                    };
             }
+
+            // The DISCARDED DRAFT'S attribution lands on the SURVIVING DECISION's own beat ("└ replaced a draft · plan
+            // draft · via metis-coder-max · 8.2k tokens") — one home for the draft line regardless of WHO flagged it
+            // (model critic or real agent), so the once-anonymous authoring call always reads as part of the exchange.
+            var draft = reviews.FirstOrDefault(r => r.DraftAttribution is not null)?.DraftAttribution;
+
+            if (draft is not null)
+                facts[SupervisorDecisionTimelineMap.EventId(decision)] = new JournalStepFacts { Draft = draft };
         }
 
         return facts;
