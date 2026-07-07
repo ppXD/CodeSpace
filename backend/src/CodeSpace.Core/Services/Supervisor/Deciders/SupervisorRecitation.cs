@@ -32,6 +32,13 @@ public static class SupervisorRecitation
 
             builder.AppendLine().Append($"- [{subtask.Id}] {subtask.Title}: {state}");
 
+            // Authoring LINT, recited every turn until fixed (the free tier-0 check the supervisor lane's plans
+            // never got): a half-authored acceptance spec (judge without rubric, schema check without schema) can
+            // NEVER pass at grade time — telling the model NOW turns a paid clone + a fail-closed verdict + a retry
+            // temptation into one re-plan. Pure over the authored spec; a valid/absent spec adds nothing.
+            if (subtask.Acceptance is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
+                builder.Append($" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check.");
+
             if (state is not ("done (accepted)" or "done")) unfinished.Add(subtask.Id);
         }
 
@@ -84,11 +91,19 @@ public static class SupervisorRecitation
     private static string Describe(SupervisorAgentResult result) => result.Status switch
     {
         "Succeeded" when result.AcceptancePassed == true => "done (accepted)",
+        // Same three-way split as the decider's verdict line — the recitation and the results section must never
+        // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).
+        "Succeeded" when result.AcceptancePassed == false && IsInfraRejection(result) => $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — re-plan the check, do not retry the agent",
         "Succeeded" when result.AcceptancePassed == false => $"done but REJECTED by its acceptance check ({Truncate(result.AcceptanceDetail)})",
         "Succeeded" => "done",
+        "Failed" when result.AcceptancePassed == false && IsInfraRejection(result) => $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — re-plan the check, do not retry the agent",
         "Failed" => $"failed ({Truncate(result.Error ?? result.AcceptanceDetail)})",
         var other => (other ?? "running").ToLowerInvariant(),
     };
+
+    /// <summary>The shared infra classification over the compact — the SAME split (and the SAME work-present read) the decider's verdict line renders, so the two prompt sections can't disagree about a row.</summary>
+    private static bool IsInfraRejection(SupervisorAgentResult result) =>
+        Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, SupervisorOutcome.ResultShowsWork(result));
 
     private static int IndexOf(IReadOnlyList<string> ids, string subtaskId)
     {

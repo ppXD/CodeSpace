@@ -69,6 +69,22 @@ public sealed class LlmRubricJudgeTests
             .ShouldBe(new[] { "id", "met", "evidence" }, customMessage: "evidence is REQUIRED — an unevidenced verdict is not auditable");
     }
 
+    // ─── IsInfraFailure (the shared failure classification every retry-shaped decision steers on — P0) ───
+
+    [Theory]
+    [InlineData("grade-error: judge parse failed", false, true)]   // the grader's own failure — infra regardless of work
+    [InlineData("grade-error: judge parse failed", true, true)]
+    [InlineData("clone-failed: authentication failed", false, true)]   // the grading CLONE failed (WorkspaceException arm — never grade-error-prefixed)
+    [InlineData("no-rubric", false, true)]                      // half-authored spec — an agent cannot author the missing rubric
+    [InlineData("no-schema", true, true)]
+    [InlineData("no-branch-or-repo", true, true)]               // work EXISTS but publish failed — another agent pass changes nothing
+    [InlineData("no-branch-or-repo", false, false)]             // NO work — the fix is to DO the work, which an agent pass CAN
+    [InlineData("tests-failed-exit-1", true, false)]            // a real check verdict — the work is wrong; a retry can fix it
+    [InlineData(null, true, false)]
+    public void The_infra_classification_separates_unrunnable_checks_from_failed_work(string? detail, bool workPresent, bool expectInfra) =>
+        AgentAcceptanceContract.IsInfraFailure(detail, workPresent)
+            .ShouldBe(expectInfra, "retry-the-agent must never be spent on a failure class a retry cannot fix — the executor's revise loop, the decider prompt, and the evidence fold all steer on this one classification");
+
     // ─── ValidateAuthored (the shared authoring rule the node applies fail-loud) ───
 
     [Fact]

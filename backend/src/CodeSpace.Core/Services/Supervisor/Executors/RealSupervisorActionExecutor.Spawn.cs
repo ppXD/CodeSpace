@@ -349,7 +349,11 @@ public sealed partial class RealSupervisorActionExecutor
 
         // Stamp the subtask id (D1 retry-resume linking key) so a later RETRY of this subtask can find this attempt and
         // resume its conversation. Blank id → null (byte-identical; the generic BuildTaskWithGoal never sets it).
-        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, spec: spec) with
+        // F4 on the SUPERVISOR lane (the AgentCodeNode rule, missing here until it killed a real run): a per-unit
+        // contract implies a GRADABLE branch — the fold grades this subtask's oracle on its produced branch, so the
+        // publish opt-in is forced ON. Without it a stock profile (push off) fails every contracted unit
+        // "no-branch-or-repo" even when the work and the check are both perfect.
+        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, forcePushBranch: planned?.Acceptance is not null, spec: spec) with
         {
             SubtaskId = string.IsNullOrWhiteSpace(subtaskId) ? null : subtaskId,
         };
@@ -364,8 +368,9 @@ public sealed partial class RealSupervisorActionExecutor
     /// retry, AND resolve (#379) paths reuse so a supervisor-spawned agent is always a REAL team agent (repo /
     /// harness / model / persona / credential / runner / MCP / autonomy + the supervisor's conversation as its
     /// approval surface), regardless of which verb spawned it. <paramref name="forcePushBranch"/> overrides the
-    /// profile's push opt-in to TRUE (the resolver MUST push its reconciled branch so a downstream PR-open has a
-    /// head); spawn/retry pass false → byte-identical to before (the profile's <c>PushBranch</c> wins).
+    /// profile's push opt-in to TRUE — the resolver MUST push its reconciled branch (a downstream PR-open needs a
+    /// head), and a CONTRACT-BEARING subtask must push so its acceptance can grade (F4). A contract-less spawn/retry
+    /// passes false → byte-identical to before (the profile's <c>PushBranch</c> wins).
     /// </summary>
     internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false, SupervisorAgentDispatch? spec = null)
     {

@@ -63,6 +63,10 @@ public static class SupervisorGateEscalation
     public static bool IsEscalationCard(SupervisorPriorDecision decision) =>
         decision.DecisionKind == SupervisorDecisionKinds.AskHuman && QuestionCarriesMarker(decision.PayloadJson);
 
+    /// <summary>An ANSWERED escalation card — the human RULED on a blocked decision (approve or redirect). The no-progress fold counts it as engagement, exactly like an answered plan-confirmation card. The marker itself is text-matchable, but the ANSWER only exists once a resolved Action wait wrote it — so a counted card always cost a real human interaction; a model minting marker text gains nothing unattended.</summary>
+    public static bool IsAnsweredEscalationCard(SupervisorPriorDecision decision) =>
+        IsEscalationCard(decision) && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) != null;
+
     /// <summary>Whether an ask_human payload's question carries the escalation marker — payload-level, so a content ask or another gate's card never matches.</summary>
     public static bool QuestionCarriesMarker(string? askHumanPayloadJson)
     {

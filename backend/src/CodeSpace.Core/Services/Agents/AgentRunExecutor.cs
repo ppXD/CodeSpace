@@ -898,10 +898,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return null;
     }
 
-    /// <summary>An oracle failure the agent can plausibly fix with another pass. A real check verdict always is. A <c>grade-error:</c> is the grader's own failure — infra. <c>no-branch-or-repo</c> is fixable ONLY when the run produced NO work (the fix is to do the work); when work EXISTS but no branch published, the PUBLISH failed (credential-less clone / push infra) and another agent pass would burn the whole budget without ever changing that.</summary>
+    /// <summary>An oracle failure the agent can plausibly fix with another pass — the negation of the SHARED infra classification (<see cref="AgentAcceptanceContract.IsInfraFailure"/>): grader failures, half-authored specs (<c>no-rubric</c>/<c>no-schema</c> — an agent cannot author the missing half), and publish failures with work present never buy a revise round.</summary>
     private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
-        !detail.StartsWith("grade-error:", StringComparison.Ordinal)
-        && !(detail == "no-branch-or-repo" && (result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch)));
+        !AgentAcceptanceContract.IsInfraFailure(detail, workPresent: result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch));
 
     /// <summary>Sum the rounds' token usage — the final result must bill the WHOLE run (the cost plane prices <c>ResultJson.TokenUsage</c>), not just the last round. Null when neither round reported usage.</summary>
     internal static AgentTokenUsage? SumTokenUsage(AgentTokenUsage? prior, AgentTokenUsage? current) =>

@@ -33,6 +33,23 @@ public static class AgentAcceptanceContract
     };
 
     /// <summary>
+    /// Whether an acceptance-failure DETAIL is INFRASTRUCTURE-classed — the check itself could not run, so another
+    /// agent pass can NEVER change the verdict: a <c>grade-error:</c> is the grader's own failure; <c>clone-failed:</c>
+    /// is the grading CLONE's failure (auth/network/timeout — the supervisor grader's <c>WorkspaceException</c> arm,
+    /// which never wears the grade-error prefix); <c>no-rubric</c> / <c>no-schema</c> mean the SPEC was authored
+    /// incomplete (an agent cannot author the missing rubric/schema); <c>no-branch-or-repo</c> is infra only when work
+    /// EXISTS (the publish failed — with NO work the fix is to do the work, which an agent pass CAN do). The ONE
+    /// classification the executor's revise loop, the supervisor's decider prompt, the recitation, and the no-progress
+    /// evidence fold all share — so "retry the agent" is never spent on a failure class a retry cannot fix, at any tier.
+    /// </summary>
+    public static bool IsInfraFailure(string? detail, bool workPresent) =>
+        detail is not null
+        && (detail.StartsWith("grade-error:", StringComparison.Ordinal)
+            || detail.StartsWith("clone-failed:", StringComparison.Ordinal)
+            || detail is "no-rubric" or "no-schema"
+            || (detail == "no-branch-or-repo" && workPresent));
+
+    /// <summary>
     /// Validate an AUTHORED spec's kind-specific completeness (triad S7) — the single rule the plan-map node applies
     /// FAIL-LOUD at staging: an operator/model authored a contract, and silently dropping half of it (a judge with no
     /// rubric, a schema check with no schema) would invert the gate's fail-closed philosophy. Null = valid; else the

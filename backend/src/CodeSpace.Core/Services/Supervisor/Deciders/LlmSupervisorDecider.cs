@@ -408,13 +408,27 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         });
     }
 
-    /// <summary>Render a unit's per-unit OBJECTIVE acceptance verdict (loopability slice 3) under its result line so the brain ACTS on it: a PASSED unit's work is server-verified; a FAILED unit's branch is NOT mergeable and is the precise subtask to RETRY (objective truth overrides the agent's self-report). Absent (the subtask authored no acceptance, or a multi-repo unit was deferred) → nothing, byte-identical to before.</summary>
+    /// <summary>
+    /// Render a unit's per-unit OBJECTIVE acceptance verdict (loopability slice 3) under its result line so the brain
+    /// ACTS on it — THREE-way, on the shared failure classification: a PASSED unit's work is server-verified; a
+    /// WORK-classed failure names the precise subtask to RETRY; an INFRA-classed failure (grader error, half-authored
+    /// spec, publish failure with work present — <see cref="Agents.AgentAcceptanceContract.IsInfraFailure"/>) says the
+    /// CHECK could not run, NOT that the work is wrong — a retry re-bills an agent and fails identically forever, the
+    /// exact loop that marched a real run into its no-progress kill. Absent verdict (no per-unit contract / a deferred
+    /// multi-repo unit) → nothing, byte-identical to before.
+    /// </summary>
     private static void AppendUnitAcceptanceVerdict(StringBuilder builder, SupervisorAgentResult result)
     {
         if (result.AcceptancePassed is not { } passed) return;
 
-        builder.AppendLine(passed
-            ? "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified."
+        if (passed)
+        {
+            builder.AppendLine("      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
+            return;
+        }
+
+        builder.AppendLine(Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, SupervisorOutcome.ResultShowsWork(result))
+            ? $"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — the CHECK could not run (grader/spec/publish infrastructure), NOT a verdict on the work; the produced work is preserved on this unit. Do NOT retry the agent — another pass cannot fix the check. Re-plan this item with a check its agent can satisfy, or ask a human to rule."
             : $"      acceptance FAILED — this unit's own check did NOT pass ({result.AcceptanceDetail}); its branch is NOT mergeable. RETRY this exact subtask (do not merge it).");
     }
 

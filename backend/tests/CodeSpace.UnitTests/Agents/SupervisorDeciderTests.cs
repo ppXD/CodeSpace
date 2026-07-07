@@ -152,6 +152,38 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_renders_an_infra_classed_rejection_as_unverified_never_as_retry_bait()
+    {
+        // P0: 'no-branch-or-repo' with work present means the CHECK could not run — telling the brain to RETRY it
+        // re-bills an agent and fails identically forever (the loop that marched a real run into its no-progress
+        // kill). The prompt must steer to re-plan/ask instead.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "wrote the report", ChangedFiles = new[] { "report.md" },
+                    AcceptancePassed = false, AcceptanceDetail = "no-branch-or-repo",
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("acceptance UNVERIFIED", Case.Sensitive, "an unrunnable check is NOT a verdict on the work");
+        prompt.ShouldContain("Do NOT retry the agent", Case.Sensitive, "the one instruction that breaks the infinite-retry loop");
+        prompt.ShouldContain("Re-plan this item", Case.Insensitive, "the steer: fix the CHECK, not the work");
+        prompt.ShouldNotContain("RETRY this exact subtask", Case.Sensitive, "the retry bait line must not render for an infra-classed failure");
+    }
+
+    [Fact]
     public void The_user_prompt_has_no_acceptance_line_for_an_ungraded_unit()
     {
         // A unit whose subtask authored no acceptance carries no verdict — the prompt is byte-identical to before the slice.
