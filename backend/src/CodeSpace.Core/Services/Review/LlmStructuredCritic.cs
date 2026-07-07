@@ -154,6 +154,16 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         builder.AppendLine($"The {request.ArtifactKind} to review:");
         builder.AppendLine(request.Artifact);
         builder.AppendLine();
+
+        // ⑧ plan-review satisfiability: when the artifact is a PLAN, add the acceptance-verifiability check — the error
+        // class (an acceptance that can NEVER pass as written) that dooms a subtask to endless retry. Scoped by the
+        // SHARED CriticArtifactKinds.WorkflowPlan constant (an EXACT match, not a "plan" substring that a future kind
+        // like "explanation" would trip), so the generic critic is byte-identical for every other kind. The model judges
+        // STRUCTURAL satisfiability from the plan text (a rubric/schema check with no rubric/schema, an artifact-dependent
+        // check the plan never produces); the grounded reviewer — which has the real code — catches the code-dependent cases.
+        if (string.Equals(request.ArtifactKind, CriticArtifactKinds.WorkflowPlan, StringComparison.OrdinalIgnoreCase))
+            builder.AppendLine("Also check ACCEPTANCE SATISFIABILITY: for each subtask, can the way the plan declares it 'done' be verified AS WRITTEN? Treat as a BLOCKER any acceptance that can never pass — a rubric / citation / schema check with no rubric or schema supplied, or one requiring an artifact (a repo binding, a built binary, a produced branch) the plan never creates. An unsatisfiable acceptance dooms its subtask to endless retry.");
+
         builder.AppendLine(request.Mode == ReviewMode.Improve
             ? "Critique it: what is weak, missing, or wrong, and specifically how to improve it to better serve the goal. Return ONLY the schema-constrained JSON."
             : "Judge it: does it soundly achieve the goal? Score it, approve only if there is no material flaw, and list concrete issues. Return ONLY the schema-constrained JSON.");

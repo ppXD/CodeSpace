@@ -171,7 +171,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         if (!verdict.Failed) return (verdict, true);
 
         return (await _critic.ReviewAsync(
-            new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? "workflow plan" : "supervisor decision", Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
+            new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? CriticArtifactKinds.WorkflowPlan : CriticArtifactKinds.SupervisorDecision, Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false), false);
     }
 

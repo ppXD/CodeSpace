@@ -3,6 +3,18 @@ using CodeSpace.Messages.Review;
 
 namespace CodeSpace.Core.Services.Review;
 
+/// <summary>
+/// The canonical <see cref="CriticRequest.ArtifactKind"/> vocabulary — a shared constant so a PRODUCER and a
+/// kind-scoped CONSUMER (the ⑧ plan-satisfiability clause) agree on the EXACT wire string. Without it, the consumer
+/// would match a fragile substring (a future kind like "explanation" contains "plan"); with it, a new kind is added
+/// HERE and every site references it, so producer and guard can never silently drift apart (Rule 8 — pin the string).
+/// </summary>
+public static class CriticArtifactKinds
+{
+    public const string WorkflowPlan = "workflow plan";
+    public const string SupervisorDecision = "supervisor decision";
+}
+
 /// <summary>What an <see cref="IStructuredCritic"/> reviews (Rule 18.1 — a data noun): the producer's output rendered as text, the kind of artifact, the mode, and the goal it should serve.</summary>
 public sealed record CriticRequest
 {

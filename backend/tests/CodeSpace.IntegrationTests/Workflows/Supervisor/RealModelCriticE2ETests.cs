@@ -301,6 +301,64 @@ public sealed class RealModelCriticE2ETests
         });
     }
 
+    /// <summary>
+    /// The ⑧ SATISFIABILITY gate: the same live reviewer, given a PLAN whose subtask acceptance can NEVER be verified as
+    /// written (a rubric-kind check with no rubric supplied), must flag it as a BLOCKER — the exact error class that
+    /// dooms a subtask to endless retry (the forensics run's kill point). A plan with a concrete, runnable acceptance is
+    /// REPORTED (it may draw other issues on a terse plan, so only the unsatisfiable side is gated). Infra failures stay non-gating.
+    /// </summary>
+    [Fact]
+    public async Task A_live_plan_reviewer_blocks_an_unsatisfiable_acceptance()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip
+
+        const string goal = "Add a config validator to the API and prove it rejects malformed config.";
+
+        // UNSATISFIABLE: the subtask declares a rubric-kind acceptance but supplies NO rubric — the grader has nothing to
+        // score against, so the check can NEVER pass and the subtask would retry forever.
+        const string unsatisfiablePlan =
+            "Goal: add a config validator.\nSubtasks:\n" +
+            "  - id=validate: implement the config validator.\n" +
+            "    ACCEPTANCE: kind=rubric — BUT no rubric criteria are supplied anywhere in the plan, so the judge has nothing to grade against.\n";
+
+        // SATISFIABLE: the same subtask with a concrete, runnable acceptance — a test command the repo can execute.
+        const string satisfiablePlan =
+            "Goal: add a config validator.\nSubtasks:\n" +
+            "  - id=validate: implement the config validator with a unit test covering a malformed-config case.\n" +
+            "    ACCEPTANCE: kind=tests, command=[\"dotnet\",\"test\"] — the run's agents have a writable workspace and can build + run the test suite.\n";
+
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCredentialedModelAsync(teamId, model, baseUrl, apiKey);
+
+        await RealModelGate.AssessLiveAsync(Custom, async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            var critic = new LlmStructuredCritic(RealModelLiveWire.Registry(), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>());
+
+            var unsat = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "workflow plan", Artifact = unsatisfiablePlan, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+            var sat = await critic.ReviewAsync(
+                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "workflow plan", Artifact = satisfiablePlan, Goal = goal },
+                teamId, reviewerRowId, CancellationToken.None);
+
+            if (unsat.Failed || sat.Failed)
+                return (true, "the reviewer produced no verdict on one side (gateway infra) — not gating");
+
+            // GATED: the unsatisfiable acceptance MUST be blocked with a Blocker issue (the ⑧ claim). The satisfiable side
+            // is REPORTED (a terse plan can legitimately draw other blockers) so the gate never flakes on the sound side.
+            var blockedUnsatisfiable = !unsat.Approved && unsat.Issues.Any(i => i.Severity == CriticSeverity.Blocker);
+
+            return (blockedUnsatisfiable,
+                $"unsatisfiable: approved={unsat.Approved} (want false), blockers={unsat.Issues.Count(i => i.Severity == CriticSeverity.Blocker)} — {unsat.Rationale} · " +
+                $"satisfiable (reported): approved={sat.Approved}, issues={sat.Issues.Count}");
+        });
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid> SeedCredentialedModelAsync(Guid teamId, string modelId, string baseUrl, string apiKey)

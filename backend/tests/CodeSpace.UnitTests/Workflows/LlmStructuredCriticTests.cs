@@ -69,6 +69,22 @@ public class LlmStructuredCriticTests
     }
 
     [Fact]
+    public void The_plan_review_prompt_adds_the_acceptance_satisfiability_check_only_for_plans()
+    {
+        // ⑧ (fallback rung): when the grounded reviewer ladders DOWN to the model critic (ArtifactKind "workflow plan"),
+        // the critic asks whether each subtask's acceptance can be verified as written — the endless-retry error class.
+        var planPrompt = LlmStructuredCritic.BuildUserPromptForTest(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "workflow plan", Artifact = "plan text", Goal = "ship" });
+
+        planPrompt.ShouldContain("ACCEPTANCE SATISFIABILITY", customMessage: "⑧: a PLAN review asks whether each subtask's acceptance can ever pass as written");
+        planPrompt.ShouldContain("endless retry", customMessage: "the error class the satisfiability check guards against");
+
+        // The clause is PLAN-SCOPED — the generic critic is byte-identical for every other artifact kind.
+        var changePrompt = LlmStructuredCritic.BuildUserPromptForTest(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = "a diff", Goal = "ship" });
+
+        changePrompt.ShouldNotContain("ACCEPTANCE SATISFIABILITY", customMessage: "the clause is plan-scoped — a non-plan artifact review is unchanged (the generic critic is not widened for every kind)");
+    }
+
+    [Fact]
     public void Project_improve_suppresses_a_minor_only_critique()
     {
         // A revision round is not worth spending on nitpicks — the critique is suppressed so the producer keeps its

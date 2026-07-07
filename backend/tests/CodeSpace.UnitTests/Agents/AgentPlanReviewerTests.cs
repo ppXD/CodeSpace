@@ -22,6 +22,8 @@ public sealed class AgentPlanReviewerTests
         body.ShouldContain("feasible and necessary", customMessage: "check (2)");
         body.ShouldContain("already done", customMessage: "check (3): a plan scheduling finished work is a broken plan");
         body.ShouldContain("go unplanned", customMessage: "check (4): completeness against the goal");
+        body.ShouldContain("ACCEPTANCE actually SATISFIABLE", customMessage: "check (5) ⑧: whether each subtask's declared 'done' can even be verified against the tree");
+        body.ShouldContain("dooms its subtask to endless retry", customMessage: "⑧: the error class that killed the forensics run — an acceptance that can never pass, retried forever, invisible to every reviewer rung until now");
         body.ShouldContain("You did not write the plan", customMessage: "the independence framing");
         body.ShouldContain("Do NOT modify anything", customMessage: "the reviewer READS — it never writes");
         body.ShouldContain("READ-ONLY and command-restricted", customMessage: "the capability context — the reviewer's sandbox is restricted BY DESIGN");
