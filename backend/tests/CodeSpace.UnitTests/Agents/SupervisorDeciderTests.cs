@@ -821,6 +821,89 @@ public class SupervisorDeciderTests
         client.Requests.Count.ShouldBe(2, "primary + one repair, never an unbounded loop");
     }
 
+    // ── bounded re-plan: a STRUCTURALLY invalid plan (SupervisorPlanValidator) buys ONE re-plan before the caller's terminal PlanInvalid stop ──
+
+    [Fact]
+    public async Task A_structurally_invalid_plan_buys_ONE_bounded_replan_and_the_valid_retry_lands()
+    {
+        // b depends on undeclared 'z' — SupervisorPlanValidator would force-stop this at SupervisorTurnService's
+        // gate with no chance to recover. The retry re-authors a VALID dependsOn graph (b now depends on a); the
+        // decider must land THAT, not the invalid original.
+        var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
+        var valid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["a"]}]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(invalid, valid);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(2, "exactly one bounded re-plan round-trip");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+        decision.PayloadJson.ShouldContain("\"dependsOn\":[\"a\"]", customMessage: "the decision reflects the RETRIED (valid) plan, not the invalid original");
+        client.Requests[1].UserPrompt.ShouldContain("structurally INVALID", customMessage: "the re-plan prompt names the failure so the model targets the right fix");
+        client.Requests[1].UserPrompt.ShouldContain("\"z\"", customMessage: "the model sees its OWN invalid plan payload, not a fresh ask");
+    }
+
+    [Fact]
+    public async Task A_structurally_valid_plan_never_pays_the_replan_retry()
+    {
+        // Byte-identical to before this fix on the dominant (already-valid) path — no wasted extra call.
+        var valid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["a"]}]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(valid);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(1, "a structurally valid plan never triggers the re-plan retry");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+    }
+
+    [Fact]
+    public async Task A_non_plan_decision_never_pays_the_replan_retry()
+    {
+        // SupervisorPlanValidator.Validate is a no-op for every non-plan kind — a spawn/stop/etc. never even
+        // consults it, so this path is provably inert outside 'plan'.
+        var spawn = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["a"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(spawn);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(1, "a non-plan decision is never validated for plan structure");
+    }
+
+    [Fact]
+    public async Task A_replan_retry_that_is_still_invalid_falls_back_to_the_original_invalid_decision()
+    {
+        // The retry ALSO produces a structurally invalid plan (still cites the undeclared 'z') — the decider must
+        // fall back to the ORIGINAL invalid decision (not crash, not loop again) so SupervisorTurnService's
+        // existing gate still force-stops it exactly as before this fix existed.
+        var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(invalid, invalid);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests.Count.ShouldBe(2, "one bounded re-plan attempt, never an unbounded loop");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+        decision.PayloadJson.ShouldContain("\"z\"", customMessage: "still invalid — the caller's SupervisorPlanValidator gate force-stops this exactly as before");
+    }
+
+    [Fact]
+    public async Task A_replan_retry_that_capability_misses_falls_back_to_the_original_invalid_decision()
+    {
+        // The retry itself hits a model-side miss (the SAME class TryRepairAsync/TryRetryWithRaisedBudgetAsync
+        // already tolerate) — fail TOWARD the original invalid decision rather than crashing the run.
+        var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
+        var client = new TruncatedThenCapabilityMissClient(invalid, finishReason: null!);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Calls.ShouldBe(2, "the re-plan retry was attempted once, then the decider fell back");
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+        decision.PayloadJson.ShouldContain("\"z\"", customMessage: "the ORIGINAL invalid plan still lands — never a crash");
+    }
+
     [Fact]
     public void The_full_featured_decision_shape_binds_and_projects_end_to_end()
     {
