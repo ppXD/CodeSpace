@@ -573,6 +573,44 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_transient_push_failure_recovers_via_retry_through_the_real_completion_pipeline()
+    {
+        // P1.5-B end-to-end: F4 forces the push opt-in for a contract-bearing task, so ONE untried transient push
+        // failure used to leave ProducedBranch null → a downstream AcceptanceFailed for a run that did everything
+        // right. Driven through the REAL AgentRunExecutor.ExecuteAsync completion pipeline (real Postgres
+        // persistence, real epoch/fence checks) — only the git push itself is faked, failing web's FIRST attempt
+        // once (api never fails) — proving the retry recovers it with no operator-visible warning and both
+        // branches land in result_jsonb exactly as a fully-successful run would.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateMultiRepoRunAsync(teamId, push: true,
+            ("web", Guid.NewGuid(), WorkspaceAccess.Write, true),
+            ("api", Guid.NewGuid(), WorkspaceAccess.Write, false));
+
+        var provider = new MultiRepoRecordingWorkspaceProvider(
+            repos: new[] { ("web", WorkspaceAccess.Write, true), ("api", WorkspaceAccess.Write, false) },
+            failFirstNPushCallsFor: new Dictionary<string, int> { ["web"] = 1 });   // web's FIRST push attempt fails, api never does
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), provider, CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the transient push failure recovered — the run never even flirted with Failed");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        var branch = AgentRunExecutor.BuildBranchName(runId);
+
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(branch, "web's transient FIRST-attempt failure recovered on retry — the branch is NOT lost");
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(branch);
+        result.ProducedBranch.ShouldBe(branch, "the top-level branch mirrors the primary (web) — exactly as if the blip never happened");
+
+        var events = await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.Where(e => e.AgentRunId == runId).ToListAsync(CancellationToken.None);
+        events.ShouldNotContain(e => e.Kind == AgentEventKind.Warning && e.Text.Contains("push"),
+            "a RECOVERED transient push failure is invisible to the operator — no warning for a blip that resolved itself");
+    }
+
+    [Fact]
     public async Task A_secondary_repo_capture_failure_drops_only_that_repo_and_keeps_the_change_set()
     {
         // The per-repo capture-isolation fix: a SECONDARY repo's capture hiccup drops only that repo — it must never
@@ -1037,16 +1075,18 @@ public class AgentRunExecutorTests
         }
     }
 
-    /// <summary>A configurable multi-repo workspace whose per-alias capture returns distinct, deterministic changes and whose push (it IS an <see cref="IWorkspacePushHandle"/>) echoes the branch — drives the executor's multi-repo Enrich + Push paths without real git. A capture can be made to throw to exercise per-repo isolation.</summary>
+    /// <summary>A configurable multi-repo workspace whose per-alias capture returns distinct, deterministic changes and whose push (it IS an <see cref="IWorkspacePushHandle"/>) echoes the branch — drives the executor's multi-repo Enrich + Push paths without real git. A capture can be made to throw to exercise per-repo isolation; a push can be made to fail its first N calls per alias to exercise P1.5-B's retry.</summary>
     private sealed class MultiRepoRecordingWorkspaceProvider : IWorkspaceProvider
     {
         private readonly IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> _repos;
         private readonly HashSet<string> _throwCaptureFor;
+        private readonly IReadOnlyDictionary<string, int> _failFirstNPushCallsFor;
 
-        public MultiRepoRecordingWorkspaceProvider(IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)>? repos = null, HashSet<string>? throwCaptureFor = null)
+        public MultiRepoRecordingWorkspaceProvider(IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)>? repos = null, HashSet<string>? throwCaptureFor = null, IReadOnlyDictionary<string, int>? failFirstNPushCallsFor = null)
         {
             _repos = repos ?? new[] { ("web", WorkspaceAccess.Write, true), ("api", WorkspaceAccess.Write, false) };
             _throwCaptureFor = throwCaptureFor ?? new HashSet<string>();
+            _failFirstNPushCallsFor = failFirstNPushCallsFor ?? new Dictionary<string, int>();
         }
 
         public string Kind => LocalProcessRunner.LocalKind;
@@ -1055,7 +1095,7 @@ public class AgentRunExecutorTests
         {
             var root = Path.Combine(Path.GetTempPath(), "cs-multirepo-test-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            return Task.FromResult<IWorkspaceHandle>(new Handle(root, _repos, _throwCaptureFor));
+            return Task.FromResult<IWorkspaceHandle>(new Handle(root, _repos, _throwCaptureFor, _failFirstNPushCallsFor));
         }
 
         private sealed class Handle : IWorkspaceHandle, IWorkspacePushHandle
@@ -1063,10 +1103,12 @@ public class AgentRunExecutorTests
             private readonly string _root;
             private readonly IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> _repos;
             private readonly HashSet<string> _throwCaptureFor;
+            private readonly IReadOnlyDictionary<string, int> _failFirstNPushCallsFor;
+            private readonly Dictionary<string, int> _pushCallCountByAlias = new();
 
-            public Handle(string root, IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> repos, HashSet<string> throwCaptureFor)
+            public Handle(string root, IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> repos, HashSet<string> throwCaptureFor, IReadOnlyDictionary<string, int> failFirstNPushCallsFor)
             {
-                _root = root; Directory = root; _repos = repos; _throwCaptureFor = throwCaptureFor;
+                _root = root; Directory = root; _repos = repos; _throwCaptureFor = throwCaptureFor; _failFirstNPushCallsFor = failFirstNPushCallsFor;
             }
 
             public string Directory { get; }
@@ -1084,8 +1126,18 @@ public class AgentRunExecutorTests
                 return Task.FromResult(new WorkspaceChanges { BaseSha = $"base-{alias}", Patch = $"diff for {alias}", ChangedFiles = new[] { $"{alias}.txt" } });
             }
 
-            // Each writable repo "pushes" by echoing the branch (records nothing — the executor folds it into the result).
-            public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken) => Task.FromResult<string?>(branchName);
+            // Each writable repo "pushes" by echoing the branch (records nothing — the executor folds it into the result)
+            // UNLESS configured to fail its first N calls for THIS alias — models a transient push blip P1.5-B retries past.
+            public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken)
+            {
+                _pushCallCountByAlias[alias] = _pushCallCountByAlias.GetValueOrDefault(alias) + 1;
+
+                if (_failFirstNPushCallsFor.TryGetValue(alias, out var failFirstN) && _pushCallCountByAlias[alias] <= failFirstN)
+                    throw new WorkspaceException($"simulated transient push failure for '{alias}' (attempt {_pushCallCountByAlias[alias]})");
+
+                return Task.FromResult<string?>(branchName);
+            }
+
             public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken) => Task.FromResult<string?>(branchName);
 
             public ValueTask DisposeAsync()

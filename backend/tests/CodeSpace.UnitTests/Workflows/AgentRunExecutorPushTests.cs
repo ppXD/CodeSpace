@@ -524,7 +524,52 @@ public sealed class AgentRunExecutorPushTests
             runs.AppendedEvents[0].Text.ShouldContain("[api]", customMessage: "the warning names the failed repo");
         });
 
-    // ─── Best-effort failure handling ────────────────────────────────────────
+    // ─── P1.5-B: bounded retry before giving up (F4 made push mandatory for a contract — a single transient ──
+    // ─── failure must not convert a correct run into AcceptanceFailed) ──────────────────────────────────────
+
+    [Fact]
+    public void PushMaxAttempts_and_backoff_are_pinned()
+    {
+        // A contract-bearing task fails closed to AcceptanceFailed("no-branch-or-repo") the instant this push
+        // comes back empty — shrinking the attempt count (or the backoff) reopens the single-transient-failure
+        // hole this exists to close (Rule 8).
+        AgentRunExecutor.PushMaxAttempts.ShouldBe(3);
+        AgentRunExecutor.PushRetryBackoff.ShouldBe(TimeSpan.FromMilliseconds(500));
+    }
+
+    [Fact]
+    public async Task A_single_repo_push_that_fails_twice_then_succeeds_is_retried_to_success() =>
+        await WithFlagAsync("1", async () =>
+        {
+            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new RecordingPushHandle { FailFirstNCalls = 2 };   // under PushMaxAttempts=3 → recovers
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+
+            result.Status.ShouldBe(AgentRunStatus.Succeeded);
+            result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
+            handle.PushCallCount.ShouldBe(3, "exactly two failed attempts + the one that succeeded — never more, never fewer");
+            runs.AppendedEvents.ShouldBeEmpty("a recovered push is invisible to the operator — no warning for a transient blip that resolved itself");
+        });
+
+    [Fact]
+    public async Task A_multi_repo_push_that_fails_once_then_succeeds_is_retried_in_isolation_per_repo() =>
+        await WithFlagAsync("1", async () =>
+        {
+            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new MultiRepoRecordingPushHandle { FailFirstNCallsByAlias = { ["api"] = 1 } };   // web never fails; api fails once then recovers
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+
+            result.Status.ShouldBe(AgentRunStatus.Succeeded);
+            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
+            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "api's transient first failure recovered on retry — no branch lost");
+            handle.CallCountByAlias["web"].ShouldBe(1, "web never failed — one call, no wasted retries");
+            handle.CallCountByAlias["api"].ShouldBe(2, "api's one failure + the retry that succeeded");
+            runs.AppendedEvents.ShouldBeEmpty("both repos recovered — no operator-facing warning for a resolved transient blip");
+        });
+
+    // ─── Best-effort failure handling (retries EXHAUSTED — the deterministic-failure / persistent-outage floor) ──
 
     [Fact]
     public async Task A_thrown_workspace_exception_is_swallowed_and_recorded_as_a_warning() =>
@@ -537,6 +582,7 @@ public sealed class AgentRunExecutorPushTests
 
             result.Status.ShouldBe(AgentRunStatus.Succeeded, "a push failure NEVER flips a Succeeded run to Failed");
             result.ProducedBranch.ShouldBeNull();
+            handle.PushCallCount.ShouldBe(AgentRunExecutor.PushMaxAttempts, "a persisting (non-transient) failure burns the WHOLE retry budget before giving up");
             runs.AppendedEvents.Count.ShouldBe(1, "the operator sees a timeline warning explaining why no branch appeared");
             runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
             runs.AppendedEvents[0].Text.ShouldContain("***", customMessage: "the redacted exception message is carried onto the warning");
@@ -603,9 +649,13 @@ public sealed class AgentRunExecutorPushTests
     private sealed class RecordingPushHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
         public bool PushCalled { get; private set; }
+        public int PushCallCount { get; private set; }
         public string? BranchPushed { get; private set; }
         public string? ReturnBranch { get; set; } = "set-on-push";
         public Exception? ThrowOnPush { get; set; }
+
+        /// <summary>The push throws <see cref="ThrowOnPush"/> (or a default WorkspaceException) for this many calls, then succeeds — models a transient failure the retry outlives.</summary>
+        public int FailFirstNCalls { get; set; }
 
         public string Directory => "/tmp/fake";
 
@@ -617,9 +667,11 @@ public sealed class AgentRunExecutorPushTests
         public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
         {
             PushCalled = true;
+            PushCallCount++;
             BranchPushed = branchName;
 
-            if (ThrowOnPush is not null) throw ThrowOnPush;
+            if (PushCallCount <= FailFirstNCalls) throw ThrowOnPush ?? new WorkspaceException("git push failed: transient");
+            if (FailFirstNCalls == 0 && ThrowOnPush is not null) throw ThrowOnPush;
 
             // When the test wants the pushed name folded, return the branch the executor asked for.
             return Task.FromResult(ReturnBranch == "set-on-push" ? branchName : ReturnBranch);
@@ -644,6 +696,12 @@ public sealed class AgentRunExecutorPushTests
         public HashSet<string> NullForAliases { get; } = new();
         public HashSet<string> ThrowForAliases { get; } = new();
 
+        /// <summary>Per-alias call counter — so a test can prove ONE repo's transient failure retries in isolation from its siblings.</summary>
+        public Dictionary<string, int> CallCountByAlias { get; } = new();
+
+        /// <summary>Per-alias "fail the first N calls, then succeed" — models a transient failure the retry outlives for exactly that repo.</summary>
+        public Dictionary<string, int> FailFirstNCallsByAlias { get; } = new();
+
         public string Directory => "/tmp/fake-multi";
         public string PrimaryAlias => "web";
 
@@ -655,7 +713,11 @@ public sealed class AgentRunExecutorPushTests
 
         public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken)
         {
-            if (ThrowForAliases.Contains(alias)) throw new WorkspaceException($"git push failed for '{alias}': *** rejected");
+            CallCountByAlias[alias] = CallCountByAlias.GetValueOrDefault(alias) + 1;
+            var failFirstN = FailFirstNCallsByAlias.GetValueOrDefault(alias);
+
+            if (CallCountByAlias[alias] <= failFirstN) throw new WorkspaceException($"git push failed for '{alias}': *** rejected (transient)");
+            if (failFirstN == 0 && ThrowForAliases.Contains(alias)) throw new WorkspaceException($"git push failed for '{alias}': *** rejected");
 
             var pushed = NullForAliases.Contains(alias) ? null : branchName;
             PushedByAlias[alias] = pushed;
