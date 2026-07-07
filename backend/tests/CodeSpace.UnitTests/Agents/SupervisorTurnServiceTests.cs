@@ -289,6 +289,67 @@ public class SupervisorTurnServiceTests
     }
 
     [Fact]
+    public void Finish_reports_Stopped_for_a_server_forced_stop_never_Completed()
+    {
+        // A bound/budget trip (e.g. "no progress") ended the run mid-way — the status output must say so.
+        var forced = new SupervisorStopClassification { Kind = SupervisorStopKind.Forced, Reason = SupervisorStopReasons.NoProgress };
+
+        var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", SupervisorStopReasons.NoProgress, stopClassification: forced)).Outputs;
+
+        outputs["status"].GetString().ShouldBe("Stopped", "a run the server force-stopped mid-way must never claim Completed");
+        outputs["reason"].GetString().ShouldBe(SupervisorStopReasons.NoProgress);
+    }
+
+    [Fact]
+    public void Finish_reports_Stopped_for_a_model_give_up_with_the_outcome_as_the_reason()
+    {
+        // A fail-closed give-up (e.g. the decider's non-conformant "no-decision" stop) carries no payload reason —
+        // the classification's outcome label backfills the reason output so the Stopped status always names why.
+        var gaveUp = new SupervisorStopClassification { Kind = SupervisorStopKind.GaveUp, Reason = "no-decision", Summary = "the model returned no usable decision" };
+
+        var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", terminalReason: null, stopClassification: gaveUp)).Outputs;
+
+        outputs["status"].GetString().ShouldBe("Stopped", "a model give-up produced no delivered work — it must never read as Completed");
+        outputs["reason"].GetString().ShouldBe("no-decision");
+    }
+
+    [Fact]
+    public void Finish_reports_Completed_for_a_genuine_model_success_stop()
+    {
+        var success = new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = "shipped" };
+
+        var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", terminalReason: null, stopClassification: success)).Outputs;
+
+        outputs["status"].GetString().ShouldBe("Completed");
+    }
+
+    [Fact]
+    public void Finish_lets_a_failed_acceptance_grade_outrank_the_stop_classification()
+    {
+        // AcceptanceFailed is the OBJECTIVE verdict (the server ran the model's definition of done and it failed) —
+        // it outranks the self-reported success classification.
+        var success = new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = "claimed done" };
+
+        var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", null, acceptancePassed: false, stopClassification: success)).Outputs;
+
+        outputs["status"].GetString().ShouldBe("AcceptanceFailed");
+    }
+
+    [Theory]
+    [InlineData("""{"reason":"no progress"}""", """{"stopped":true}""", SupervisorStopKind.Forced)]                             // server-forced: payload reason, no outcome
+    [InlineData("{}", """{"stopped":true,"outcome":"no-decision","summary":"s"}""", SupervisorStopKind.GaveUp)]                 // model give-up: non-success outcome
+    [InlineData("{}", """{"stopped":true,"outcome":"completed","summary":"done"}""", SupervisorStopKind.Succeeded)]             // genuine success
+    public void BuildResult_carries_the_shared_stop_classification_onto_the_finish(string payloadJson, string outcomeJson, SupervisorStopKind expectedKind)
+    {
+        var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = payloadJson };
+
+        var result = SupervisorTurnService.BuildResult(StopContextWithFinalBranch(), decision, SupervisorExecution.Synchronous(outcomeJson));
+
+        result.StopClassification.ShouldNotBeNull();
+        result.StopClassification.Kind.ShouldBe(expectedKind);
+    }
+
+    [Fact]
     public async Task A_full_turn_stop_with_a_model_acceptance_that_FAILS_grades_once_reports_failure_and_withholds_the_branch()
     {
         var ledger = SeedRunWithCleanMerge();

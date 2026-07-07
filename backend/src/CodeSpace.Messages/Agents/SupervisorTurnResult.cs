@@ -57,6 +57,15 @@ public sealed record SupervisorTurnResult
     /// </summary>
     public bool? AcceptancePassed { get; init; }
 
+    /// <summary>
+    /// The classified terminal shape on finish (built by <c>SupervisorOutcome.ClassifyStop</c> — the SAME authority the
+    /// RESULT card and the journal step read): a server-forced stop (a bound/budget/governance trip) or a model give-up
+    /// (a fail-closed no-decision / non-success outcome) is <c>Degraded</c>, so the node reports <c>Stopped</c> instead
+    /// of a false <c>Completed</c> — a run that died mid-way must never read as finished. Null while parking (and on a
+    /// legacy caller that never classified — which reads as the non-degraded default).
+    /// </summary>
+    public SupervisorStopClassification? StopClassification { get; init; }
+
     /// <summary>The folded context for the NEXT turn — carried as the self-advance park wait's payload. Null on finish.</summary>
     public SupervisorTurnContext? NextTurn { get; init; }
 
@@ -76,8 +85,8 @@ public sealed record SupervisorTurnResult
     /// <summary>True when this turn parked on a human answer (ask_human) — the node suspends on a single Action wait keyed to <see cref="HumanWaitToken"/>.</summary>
     public bool ParkedOnHuman => !IsFinished && HumanWaitToken != null;
 
-    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason, string? integratedBranch = null, IReadOnlyList<SupervisorRepositoryBranch>? repositoryBranches = null, bool? acceptancePassed = null) =>
-        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason, IntegratedBranch = integratedBranch, RepositoryBranches = repositoryBranches ?? Array.Empty<SupervisorRepositoryBranch>(), AcceptancePassed = acceptancePassed };
+    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason, string? integratedBranch = null, IReadOnlyList<SupervisorRepositoryBranch>? repositoryBranches = null, bool? acceptancePassed = null, SupervisorStopClassification? stopClassification = null) =>
+        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason, IntegratedBranch = integratedBranch, RepositoryBranches = repositoryBranches ?? Array.Empty<SupervisorRepositoryBranch>(), AcceptancePassed = acceptancePassed, StopClassification = stopClassification };
 
     /// <summary>A SYNCHRONOUS non-terminal decision (plan / merge) — the node self-advances on a SupervisorDecision wait carrying the next-turn context.</summary>
     public static SupervisorTurnResult SelfAdvance(string decisionKind, SupervisorTurnContext nextTurn) =>
