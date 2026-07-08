@@ -504,6 +504,110 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
 
     [Fact]
+    public async Task The_real_model_never_reaches_a_terminal_stop_with_accepted_unpublished_work()
+    {
+        // I3 (publish-or-park) — the STRUCTURAL floor, proven against a REAL live-model run: unlike the dispatch /
+        // phases / DoD / S1-handoff / S2 authorship arms above, I3 is NOT something a model opts into — it is
+        // enforced server-side on EVERY stop attempt (SupervisorPublishGate), so this arm is GATING, never
+        // report-only. Two independent checks, both against the SAME real run: (1) every decision the ledger
+        // actually PERSISTED as a genuine `stop` must independently re-validate as null under
+        // SupervisorPublishGate.Validate applied to the tape AS IT STOOD immediately before that row — if the gate
+        // would have rewritten it (to a forced merge or an ask_human park) but a live Stop landed anyway, I3 broke
+        // for real production code, not a hand-crafted fixture. (2) if the run reached Success and ever produced
+        // accepted work, the run's final integrated branch must be a REAL branch that actually exists on the real
+        // bare remote — the live end-to-end guarantee I3 exists to give an operator (never silently losing work).
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
+
+        // GATING best-of-N (uniform with the other strict arms): a FRESH run per attempt; reds only if EVERY
+        // non-infra attempt violates I3. A CodeFault reds at once; a gateway outage is non-gating LOUD infra.
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
+        {
+            jobClient.Clear();
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            var (outcome, note) = await EvaluateI3InvariantAsync(runId, teamId, remote);
+            return (outcome, $"{Provider} model '{model}' I3 publish-or-park — {note}");
+        });
+    }
+
+    /// <summary>
+    /// The I3 hard-gate invariant, checked against a REAL run's REAL decision tape (see the caller for the two
+    /// checks). A run with no recorded <c>stop</c> at all did not put I3 to the test this attempt (still spawning,
+    /// or parked short on an unrelated ask_human) — reported as a capability miss the best-of-N floor retries,
+    /// never a code fault (I3 can only be violated by a stop that actually happened).
+    /// </summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateI3InvariantAsync(Guid runId, Guid teamId, BareRemote remote)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        await ThrowIfGatewayInfraFailureAsync(db, runId);
+
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        var stops = priorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Stop).ToList();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        if (stops.Count == 0)
+            return (Classify(run.Status, drove: false), $"status={run.Status}, no stop decision was recorded this attempt — I3 was not exercised");
+
+        // Check 1: re-validate EVERY persisted stop against the tape as it stood immediately before that row. A
+        // real violation here means the LIVE production gate let an accepted-unpublished stop through for real.
+        foreach (var stop in stops)
+        {
+            var priorToThisStop = priorDecisions.Where(d => d.Sequence < stop.Sequence).ToList();
+            var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson });
+
+            gateVerdict.ShouldBeNull($"a Stop decision (sequence {stop.Sequence}) was actually PERSISTED as a genuine stop, but SupervisorPublishGate.Validate says it should have been rewritten to '{gateVerdict?.Kind}' — I3 did not hold for this real run.");
+        }
+
+        // Check 2: the strongest, most direct proof — a Success completion with any accepted work must carry a
+        // REAL branch that genuinely exists on the real remote, never just a name in result_jsonb.
+        var everProducedWork = priorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+            .Any(SupervisorOutcome.ResultShowsWork);
+
+        if (run.Status == WorkflowRunStatus.Success && everProducedWork)
+        {
+            var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions);
+            integratedBranch.ShouldNotBeNullOrEmpty("the run completed Success with accepted work, but carries no final integrated branch — I3 must never let this combination reach Completed silently");
+
+            var branchesOnRemote = await remote.ListBranchesAsync();
+            branchesOnRemote.ShouldContain(integratedBranch!, "the run's own final branch must genuinely exist on the real remote, not just be a name recorded in the ledger");
+        }
+
+        return (Classify(run.Status, drove: true), $"status={run.Status}, stops={stops.Count}, everProducedWork={everProducedWork}, all I3 checks held");
+    }
+
+    [Fact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to

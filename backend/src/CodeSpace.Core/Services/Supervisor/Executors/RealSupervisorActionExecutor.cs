@@ -56,9 +56,12 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly IWorkPlanService _workPlans;
+    // The publish guard chain (Order ascending), the SAME registry AgentRunExecutor's per-agent push evaluates —
+    // so an integration's push respects the identical repo policy / credential floor. Sorted once at construction.
+    private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, IEnumerable<IPublishGuard> publishGuards, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -73,6 +76,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _modelSelector = modelSelector;
         _harnesses = harnesses;
         _workPlans = workPlans;
+        _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
         _logger = logger;
     }
 

@@ -1,9 +1,12 @@
 using System.Text;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor.Executors;
@@ -26,17 +29,18 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
-    /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical.</summary>
-    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical. <paramref name="forcedByPublishGate"/> (I3) bypasses the operator's integrate opt-in entirely — a correctness floor is never left off — and skips synthesis (the server is trying to PUBLISH, not narrate; no LLM call the operator didn't ask for).</summary>
+    private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, bool forcedByPublishGate, CancellationToken cancellationToken)
     {
         var profile = context.AgentProfile;
 
-        if (!AgentRunExecutor.ShouldIntegrate(perRunOptIn: profile?.IntegrateBranches == true)) return;
+        if (!forcedByPublishGate && !AgentRunExecutor.ShouldIntegrate(perRunOptIn: profile?.IntegrateBranches == true)) return;
         if (merged.Count == 0) return;
 
-        // Synthesis (facet b) reads the diffs — no repo needed; runs whenever the gate is on. Best-effort: a model
-        // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
-        outcome["synthesis"] = await TrySynthesizeAsync(context.TeamId, context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
+        if (!forcedByPublishGate)
+            // Synthesis (facet b) reads the diffs — no repo needed; runs whenever the gate is on. Best-effort: a model
+            // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
+            outcome["synthesis"] = await TrySynthesizeAsync(context.TeamId, context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
 
         // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
         // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
@@ -54,6 +58,29 @@ public sealed partial class RealSupervisorActionExecutor
 
     /// <summary>Whether this merge spans MULTIPLE repositories — ANY merged agent recorded per-repo results (a multi-repo workspace run). A single-repo run has none, so it takes the byte-identical flat <see cref="IntegrateMergedAsync"/> path.</summary>
     private static bool HasPerRepoResults(IReadOnlyList<MergedAgent> merged) => merged.Any(m => m.RepositoryResults.Count > 0);
+
+    /// <summary>
+    /// The SAME publish guard chain <c>AgentRunExecutor</c>'s per-agent push evaluates (Order ascending, first
+    /// non-null wins) — so an integration's push respects the identical repo policy (<c>PublishMode.PatchOnly</c>)
+    /// / no-credential floor, never just the per-agent push. A neutral task (no <see cref="AgentTask.PushProducedBranch"/>
+    /// opt-out) is evaluated against the resolved repo — a merge has no per-task opt-out concept, so only the
+    /// repo-scoped guards (credential, policy) can ever fire here. Null when the repo can't be resolved (a
+    /// different Skipped path already names that) or no guard blocks.
+    /// </summary>
+    private async Task<PublishGuardVerdict?> EvaluatePublishGuardAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var repository = await _db.Repository.AsNoTracking().SingleOrDefaultAsync(r => r.Id == repositoryId, cancellationToken).ConfigureAwait(false);
+
+        if (repository is null) return null;
+
+        var neutralTask = new AgentTask { Goal = "", Harness = "" };
+
+        foreach (var guard in _publishGuards)
+            if (guard.Evaluate(neutralTask, repository) is { } verdict)
+                return verdict;
+
+        return null;
+    }
 
     /// <summary>
     /// The branch a VERIFIED resolver produced — but ONLY when the most recent agent-staging decision (spawn / retry /
@@ -220,6 +247,9 @@ public sealed partial class RealSupervisorActionExecutor
         var excluded = merged.Where(m => !IsIntegrable(m)).Select(m => m.AgentRunId.ToString()).ToList();
 
         if (eligible.Count == 0) return new { status = "Skipped", reason = "no agent recorded a base revision (an analysis-only run has nothing to integrate)", excludedAgents = excluded };
+
+        if (await EvaluatePublishGuardAsync(repoId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
+            return new { status = "Skipped", reason = $"publish policy: {guardVerdict.Reason}", excludedAgents = excluded };
 
         var request = BuildIntegrationRequest(repoId, context, workspace, eligible[0].BaseSha!, eligible);
 
@@ -392,6 +422,9 @@ public sealed partial class RealSupervisorActionExecutor
         if (workspace is null) return ("Skipped", RepoSkipBlock(repo, "Skipped", "the repository could not be resolved to a clone target", excluded));
 
         if (eligible.Count == 0) return ("Skipped", RepoSkipBlock(repo, "Skipped", "no agent changed this repository with a recorded base revision", excluded));
+
+        if (await EvaluatePublishGuardAsync(repo.RepositoryId, cancellationToken).ConfigureAwait(false) is { } guardVerdict)
+            return ("Skipped", RepoSkipBlock(repo, "Skipped", $"publish policy: {guardVerdict.Reason}", excluded));
 
         var request = BuildPerRepoIntegrationRequest(repo.RepositoryId, context, workspace, eligible[0].RepoResult.BaseSha!, eligible);
 

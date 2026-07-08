@@ -734,6 +734,32 @@ public static class SupervisorOutcome
         return Array.Empty<SupervisorRepositoryBranch>();
     }
 
+    /// <summary>
+    /// I3's frontier read: given the run has NO published output (<see cref="ReadFinalIntegratedBranch"/> and
+    /// <see cref="ReadFinalRepositoryBranches"/> both empty), name the decision responsible — mirrors their EXACT
+    /// reverse walk (same three checks, same order) so the two can never drift on what "nothing published" means.
+    /// Null when NOTHING was ever produced (no staging decision exists at all — a stop with no accepted work, out
+    /// of I3's scope by construction). Otherwise the most recent staging decision (spawn/retry, or an unverified/
+    /// branchless resolve) the walk lands on — the caller checks its OWN folded results for real work, and checks
+    /// the tape for any later <c>merge</c> to tell "never consolidated" from "consolidated and still unpublished" apart.
+    /// </summary>
+    public static SupervisorPriorDecision? FindUnpublishedFrontier(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            var decision = priorDecisions[i];
+
+            if (decision.DecisionKind == SupervisorDecisionKinds.Merge && ReadIntegration(decision.OutcomeJson) is { IntegratedBranch: { Length: > 0 } })
+                return null;
+
+            if (ResolvedBranch(decision) is not null) return null;
+
+            if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return decision;
+        }
+
+        return null;
+    }
+
     /// <summary>Read the CLEAN per-repo integrated branches off ONE multi-repo merge's <c>integration.repositories[]</c> block — each repo whose status is <c>Clean</c> with a non-empty <c>integratedBranch</c>. Empty for a single-repo merge (no <c>repositories[]</c>) or a block with no clean repos. Best-effort + pure.</summary>
     private static IReadOnlyList<SupervisorRepositoryBranch> ReadMergeRepositoryBranches(string? outcomeJson)
     {
