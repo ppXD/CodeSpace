@@ -46,14 +46,15 @@ public sealed class RealModelSessionSummaryFlowTests
         {
             var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
             var registry = new LLMClientRegistry(new ILLMClient[] { new Core.Services.Workflows.Llm.Anthropic.AnthropicClient(SharedHttp), new Core.Services.Workflows.Llm.OpenAi.OpenAiClient(SharedHttp) });
-            var summarizer = new SessionSummarizer(db: null!, registry, new FixedPoolSelector(model, credential), NullLogger<SessionSummarizer>.Instance);
+            var summarizer = new SessionSummarizer(db: null!, manifests: null!, registry, new FixedPoolSelector(model, credential), NullLogger<SessionSummarizer>.Instance);
 
             var turns = OlderTurns.Select((t, i) => new SessionSummarizer.TurnRow(
-                i + 1, "Success",
+                Guid.NewGuid(), i + 1, "Success",
                 JsonSerializer.Serialize(new { summary = t.Result }),
                 JsonSerializer.Serialize(new { goal = t.Goal }))).ToList();
 
-            var summary = await summarizer.TryDistillAsync(Guid.NewGuid(), existingSummary: null, turns, CancellationToken.None);
+            var noManifests = new Dictionary<Guid, IReadOnlyList<Core.Persistence.Entities.PublishManifest>>();
+            var summary = await summarizer.TryDistillAsync(Guid.NewGuid(), existingSummary: null, turns, noManifests, CancellationToken.None);
 
             if (string.IsNullOrWhiteSpace(summary))
                 return (false, $"{provider} model '{model}' produced an EMPTY summary");

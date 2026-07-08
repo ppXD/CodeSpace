@@ -1,17 +1,18 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Publish;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
 /// Default <see cref="ISessionBranchResolver"/>. Scans the session's recent top-level turns newest first and, for each
-/// requested repo, returns the newest turn's produced branch for it. A single-repo turn surfaces its one repo's branch
-/// in <c>OutputsJson.branch</c>; a multi-repo turn surfaces every writable repo's branch in
-/// <c>OutputsJson.repositoryResults[]</c> (each entry's <c>repositoryId</c> + <c>producedBranch</c>). The partial
-/// <c>idx_workflow_run_session</c> index (migration 0070) keeps the lookup cheap; the scan is bounded since the latest
-/// produced branch is always in a recent turn.
+/// requested repo, returns the newest turn's produced branch for it — preferring each turn's <see cref="Agents.Publish.IPublishManifestStore"/>
+/// rows (I2: the single source of truth, via <see cref="SessionManifestBranches"/>) and falling back to the legacy
+/// <c>OutputsJson.branch</c> / <c>repositoryResults[]</c> read only for a turn with no manifest rows (older data, or a
+/// supervisor fold nobody has opened a PR for yet). The partial <c>idx_workflow_run_session</c> index (migration 0070)
+/// keeps the lookup cheap; the scan is bounded since the latest produced branch is always in a recent turn.
 /// <para>A turn that surfaces no branch for a repo (an analysis-only turn, or a plan-map turn whose terminal carries
 /// only the synthesized text) simply contributes none, so the scan skips to the last turn that did — the safe, correct
 /// fallback (an absent repo ⇒ its default branch). Reading <c>repositoryResults</c> generically also fixes the v1
@@ -20,15 +21,17 @@ namespace CodeSpace.Core.Services.Sessions;
 public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IPublishManifestStore _manifests;
 
     /// <summary>Bound the newest-first scan — the latest produced branch is in a recent turn; an all-analysis tail beyond this is vanishingly rare and degrades to the safe default-branch fallback.</summary>
     internal const int MaxTurnsScanned = 50;
 
     private static readonly IReadOnlyDictionary<Guid, string> Empty = new Dictionary<Guid, string>();
 
-    public SessionBranchResolver(CodeSpaceDbContext db)
+    public SessionBranchResolver(CodeSpaceDbContext db, IPublishManifestStore manifests)
     {
         _db = db;
+        _manifests = manifests;
     }
 
     public async Task<IReadOnlyDictionary<Guid, string>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken)
@@ -39,8 +42,10 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
             .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
             .OrderByDescending(r => r.SessionTurnIndex)
             .Take(MaxTurnsScanned)
-            .Select(r => new { r.ScopeRepositoryIds, r.OutputsJson })
+            .Select(r => new { r.Id, r.ScopeRepositoryIds, r.OutputsJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(recent.Select(r => r.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
         var wanted = new HashSet<Guid>(repositoryIds);
         var resolved = new Dictionary<Guid, string>();
@@ -49,13 +54,27 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
         {
             if (resolved.Count == wanted.Count) break;
 
-            foreach (var (repoId, branch) in ReadProducedBranches(row.OutputsJson, row.ScopeRepositoryIds))
+            foreach (var (repoId, branch) in ProducedBranchesFor(row.Id, row.OutputsJson, row.ScopeRepositoryIds, manifestsByRunId))
             {
                 if (wanted.Contains(repoId) && !resolved.ContainsKey(repoId)) resolved[repoId] = branch;
             }
         }
 
         return resolved;
+    }
+
+    /// <summary>One turn's (repositoryId, branch) pairs — the manifest (I2) when it has any live pushed branch for this run, else the legacy raw-JSON read.</summary>
+    private static IEnumerable<(Guid repoId, string branch)> ProducedBranchesFor(Guid runId, string outputsJson, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyDictionary<Guid, IReadOnlyList<Persistence.Entities.PublishManifest>> manifestsByRunId)
+    {
+        var manifests = manifestsByRunId.GetValueOrDefault(runId);
+
+        var multiRepo = SessionManifestBranches.ResolveRepositoryBranches(manifests);
+        if (multiRepo.Count > 0) return multiRepo.Select(b => (b.RepositoryId, b.Branch));
+
+        var single = SessionManifestBranches.ResolveSingleRepoBranch(manifests);
+        if (single != null && scopeRepositoryIds.Count == 1) return new[] { (scopeRepositoryIds[0], single) };
+
+        return ReadProducedBranches(outputsJson, scopeRepositoryIds);
     }
 
     /// <summary>

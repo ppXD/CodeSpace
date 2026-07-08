@@ -31,6 +31,14 @@ public interface IPublishManifestStore
 
     /// <summary>Every manifest row (agent + integration) for one workflow run, newest first, team-scoped — the room / decider / session-fold read path.</summary>
     Task<IReadOnlyList<PublishManifest>> ListForWorkflowRunAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The bulk sibling of <see cref="ListForWorkflowRunAsync"/> — every manifest row for MANY workflow runs in one
+    /// query, grouped by <c>WorkflowRunId</c>, team-scoped. For a session's turn-by-turn fold / continuity scan,
+    /// which needs "does THIS run have a manifest" for every run it's already loaded — never one query per run.
+    /// A run with no manifest rows is simply absent from the result (never an empty-list entry).
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForWorkflowRunsAsync(IReadOnlyCollection<Guid> workflowRunIds, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class PublishManifestStore : IPublishManifestStore, IScopedDependency
@@ -137,6 +145,20 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             .Where(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId)
             .OrderByDescending(m => m.CreatedDate)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>> ListForWorkflowRunsAsync(IReadOnlyCollection<Guid> workflowRunIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (workflowRunIds.Count == 0) return EmptyByRun;
+
+        var rows = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.WorkflowRunId != null && workflowRunIds.Contains(m.WorkflowRunId.Value) && m.TeamId == teamId)
+            .OrderByDescending(m => m.CreatedDate)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(m => m.WorkflowRunId!.Value).ToDictionary(g => g.Key, g => (IReadOnlyList<PublishManifest>)g.ToList());
+    }
+
+    private static readonly IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> EmptyByRun = new Dictionary<Guid, IReadOnlyList<PublishManifest>>();
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };

@@ -277,7 +277,7 @@ public class WorkSessionSummaryFlowTests
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var summarizer = new SessionSummarizer(db, new LLMClientRegistry(new[] { client }), selector ?? scope.Resolve<IModelPoolSelector>(), NullLogger<SessionSummarizer>.Instance);
+        var summarizer = new SessionSummarizer(db, scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(), new LLMClientRegistry(new[] { client }), selector ?? scope.Resolve<IModelPoolSelector>(), NullLogger<SessionSummarizer>.Instance);
 
         await summarizer.EnsureSummaryUpToDateAsync(sessionId, teamId, CancellationToken.None);
         await db.SaveChangesAsync();   // the summarizer stages on the shared DbContext; the run starter commits in prod

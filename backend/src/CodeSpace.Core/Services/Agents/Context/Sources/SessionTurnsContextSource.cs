@@ -1,6 +1,8 @@
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -12,14 +14,17 @@ namespace CodeSpace.Core.Services.Agents.Context.Sources;
 /// This is the pull-not-push complement to <see cref="SessionContextBuilder"/>: the launch digest clips each turn's
 /// result to <see cref="SessionTurnText.MaxResultChars"/> so the prompt stays bounded; when the agent needs the whole
 /// thing back it pulls it here. Reads the SAME clean sources the digest does (each run's launch goal + its declared
-/// <c>OutputsJson</c> result + produced branch, via the shared <see cref="SessionTurnText"/>) so the two never drift —
-/// the only difference is no per-turn clip. Newest-first, team- + session-scoped, bounded by a total-character budget
-/// (a giant thread can't blow up the model's context); an optional <see cref="AgentContextQuery.Query"/> filters to
-/// turns whose goal/result contains it (case-insensitive).
+/// <c>OutputsJson</c> result + produced branch — preferring the run's <see cref="PublishManifest"/> row over the raw
+/// <c>OutputsJson.branch</c> guess, via the shared <see cref="SessionManifestBranches"/> choke point, and the shared
+/// <see cref="SessionTurnText"/> for everything else) so the two never drift — the only difference is no per-turn clip.
+/// Newest-first, team- + session-scoped, bounded by a total-character budget (a giant thread can't blow up the
+/// model's context); an optional <see cref="AgentContextQuery.Query"/> filters to turns whose goal/result contains it
+/// (case-insensitive).
 /// </summary>
 public sealed class SessionTurnsContextSource : IContextSource, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IPublishManifestStore _manifests;
 
     /// <summary>Cap the newest turns scanned from the DB — a thread longer than this carries its older turns in the rolling summary, not here (bounds the read; pinned by a test).</summary>
     internal const int MaxTurnsScanned = 50;
@@ -27,9 +32,10 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     /// <summary>Total-character budget for the rendered output — newest turns are kept first; older ones beyond it are noted, not silently dropped (pinned by a test).</summary>
     internal const int MaxOutputChars = 40_000;
 
-    public SessionTurnsContextSource(CodeSpaceDbContext db)
+    public SessionTurnsContextSource(CodeSpaceDbContext db, IPublishManifestStore manifests)
     {
         _db = db;
+        _manifests = manifests;
     }
 
     public string Kind => "session.turns";
@@ -48,12 +54,14 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
             .Where(r => r.SessionId == sessionId && r.TeamId == query.TeamId && r.SessionTurnIndex != null)
             .OrderByDescending(r => r.SessionTurnIndex)
             .Take(MaxTurnsScanned)
-            .Select(r => new TurnRow(r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
+            .Select(r => new TurnRow(r.Id, r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (turns.Count == 0) return AgentContextResult.Empty;
 
-        var rendered = turns.Select(Render).ToList();
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(turns.Select(t => t.Id).ToList(), query.TeamId, cancellationToken).ConfigureAwait(false);
+
+        var rendered = turns.Select(t => Render(t, manifestsByRunId.GetValueOrDefault(t.Id))).ToList();
 
         var matched = Filter(rendered, query.Query);
 
@@ -63,7 +71,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     }
 
     /// <summary>Render one turn FULL (un-clipped) — same fields + order as the digest, just without <see cref="SessionTurnText.Clip"/>.</summary>
-    private static RenderedTurn Render(TurnRow row)
+    private static RenderedTurn Render(TurnRow row, IReadOnlyList<PublishManifest>? manifests)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"## Turn {row.Turn} ({row.Status})");
@@ -74,7 +82,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         var result = SessionTurnText.ReadResult(row.OutputsJson);
         if (result != null) sb.AppendLine($"Result: {result}");
 
-        var branch = SessionTurnText.ReadString(row.OutputsJson, "branch");
+        var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifests) ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
         if (branch != null) sb.AppendLine($"Produced branch: {branch}");
 
         return new RenderedTurn(row.Turn, sb.ToString().TrimEnd());
@@ -136,7 +144,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     /// <summary>Clip one over-budget turn's text to the budget, leaving room for the truncation marker.</summary>
     private static string ClipToBudget(string text) => text[..(MaxOutputChars - TurnTruncationMarker.Length)] + TurnTruncationMarker;
 
-    private readonly record struct TurnRow(int? Turn, string Status, string OutputsJson, string Payload);
+    private readonly record struct TurnRow(Guid Id, int? Turn, string Status, string OutputsJson, string Payload);
 
     private readonly record struct RenderedTurn(int? Turn, string Text);
 }

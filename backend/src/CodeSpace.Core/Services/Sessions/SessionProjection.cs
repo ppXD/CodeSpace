@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Enums;
 
@@ -26,7 +27,14 @@ internal static class SessionProjection
     /// with no top-level member (an orphaned child / replay whose root isn't itself a turn) is skipped. Latest-wins: the
     /// turn's headline outcome is its newest attempt's; the ladder is oldest → newest. Ordered by turn ordinal.
     /// </summary>
-    internal static IReadOnlyList<SessionTurn> BuildTurns(IEnumerable<RunRow> runs, ISet<Guid> pendingDecisionRunIds)
+    /// <param name="manifestsByRunId">
+    /// The latest attempt's own <see cref="PublishManifest"/> rows, keyed by run id (I2) — the caller bulk-loads these
+    /// (<c>IPublishManifestStore.ListForWorkflowRunsAsync</c>) so this projection stays pure/DB-free. Preferred over
+    /// the legacy raw <c>OutputsJson.branch</c> / <c>repositoryResults[]</c> read; a run with no manifest rows (older
+    /// data, or a supervisor fold nobody has opened a PR for yet — <c>RoomPullRequestService</c> is still the only
+    /// writer of an Integration-kind row today) falls back to the legacy read, never a silent blank.
+    /// </param>
+    internal static IReadOnlyList<SessionTurn> BuildTurns(IEnumerable<RunRow> runs, ISet<Guid> pendingDecisionRunIds, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>? manifestsByRunId = null)
     {
         var turns = new List<SessionTurn>();
 
@@ -38,7 +46,16 @@ internal static class SessionProjection
             if (turnRun == null) continue;   // not a top-level turn — skip (orphaned attempts)
 
             var latest = ordered[^1];
-            var repositoryResults = ReadRepositoryResults(latest.OutputsJson);
+            var manifests = manifestsByRunId?.GetValueOrDefault(latest.Id);
+
+            var manifestRepoResults = SessionManifestBranches.ResolveRepositoryBranches(manifests);
+            var repositoryResults = manifestRepoResults.Count > 0
+                ? manifestRepoResults.Select(b => new SessionTurnRepoResult { RepositoryId = b.RepositoryId, ProducedBranch = b.Branch }).ToList()
+                : ReadRepositoryResults(latest.OutputsJson);
+
+            var producedBranch = repositoryResults == null
+                ? SessionManifestBranches.ResolveSingleRepoBranch(manifests) ?? SessionTurnText.ReadString(latest.OutputsJson, "branch")
+                : null;
 
             turns.Add(new SessionTurn
             {
@@ -49,7 +66,7 @@ internal static class SessionProjection
                 RunStatus = latest.Status,
                 ProjectionKind = latest.ProjectionKind,
                 Result = ClipResult(latest.OutputsJson),
-                ProducedBranch = repositoryResults == null ? SessionTurnText.ReadString(latest.OutputsJson, "branch") : null,
+                ProducedBranch = producedBranch,
                 RepositoryResults = repositoryResults,
                 HasPendingDecision = pendingDecisionRunIds.Contains(latest.Id),
                 CreatedDate = turnRun.CreatedDate,

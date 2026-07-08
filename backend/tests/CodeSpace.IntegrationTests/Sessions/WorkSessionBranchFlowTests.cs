@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Tasks;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -27,11 +28,15 @@ namespace CodeSpace.IntegrationTests.Sessions;
 ///   later analysis-only turn; (c) no prior branch ⇒ no ref ⇒ the repo's default branch (safe fallback); (d) a
 ///   different repo never inherits another repo's branch; (e) a fresh launch carries no ref (byte-identical);
 ///   (f) a MULTI-repo continue inherits EACH repo's own prior branch from the prior turn's <c>repositoryResults</c>;
-///   (g) a multi-repo prior turn also feeds a later SINGLE-repo continue's primary (the v1 Count!=1 limitation, fixed).
+///   (g) a multi-repo prior turn also feeds a later SINGLE-repo continue's primary (the v1 Count!=1 limitation, fixed);
+///   (h) I2: a turn's <see cref="PublishManifest"/> row wins over a disagreeing raw <c>OutputsJson.branch</c> guess;
+///   (i)/(j) I2 MIXED-batch: in the same scanned window, a manifest-less turn never leaks an adjacent turn's manifest
+///   branch, and a manifest-bearing turn's own manifest always wins over its own stale raw branch.
 ///
 /// <para>Tier: high-fidelity Integration — real launch service + branch resolver over real Postgres; runs are
-/// staged, not executed (the binding is established at launch). Per-repo branches read from <c>OutputsJson.repository-
-/// Results[].producedBranch</c> (multi-repo) or the flat <c>branch</c> (single-repo).</para>
+/// staged, not executed (the binding is established at launch). Per-repo branches read from the run's
+/// <see cref="PublishManifest"/> row(s) when present (I2's single source of truth), else fall back to the legacy
+/// <c>OutputsJson.repositoryResults[].producedBranch</c> (multi-repo) or flat <c>branch</c> (single-repo).</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -71,6 +76,64 @@ public class WorkSessionBranchFlowTests
 
         (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-2/x",
             "the latest code state is turn 2's branch (turn 3 produced none) — not turn 1, not base");
+    }
+
+    [Fact]
+    public async Task Continue_clones_at_the_manifests_branch_even_when_OutputsJson_disagrees()
+    {
+        // I2 (real Postgres): PublishManifest is the single source of truth for what a turn produced — a CONTINUE
+        // must never clone at a stale/guessed OutputsJson.branch once the manifest has the real answer.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedTurnWithManifestAsync(teamId, sessionId, turn: 1, repoId, outputsBranch: "stale-guessed-branch", manifestBranch: "codespace/agent/real");
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoId, "Add tests on top"));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("codespace/agent/real",
+            "the manifest's branch wins over OutputsJson's — I2's single source of truth applies to session continuity, not just the room's own display");
+    }
+
+    [Fact]
+    public async Task Continue_does_not_leak_an_older_turns_manifest_branch_onto_a_newer_manifest_less_turn()
+    {
+        // I2 (real Postgres, MIXED batch): the resolver bulk-loads manifests for every scanned turn in one query — a
+        // newer turn with NO manifest row must fall back to ITS OWN raw OutputsJson, never accidentally pick up an
+        // older turn's manifest branch through a dictionary-keying mistake.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedTurnWithManifestAsync(teamId, sessionId, turn: 1, repoId, outputsBranch: "run-1/stale-raw", manifestBranch: "run-1/manifest");
+        await SeedCodeTurnAsync(teamId, sessionId, 2, repoId, "run-2/raw-only");   // newer, no manifest row at all
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoId, "Continue"));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-2/raw-only",
+            "turn 2 (newest) has no manifest — must read its OWN raw branch, never turn 1's manifest branch");
+    }
+
+    [Fact]
+    public async Task Continue_prefers_the_newer_turns_manifest_over_its_own_stale_raw_branch_in_a_mixed_batch()
+    {
+        // The reverse direction of the sibling test above: the NEWEST turn has BOTH a manifest and a disagreeing raw
+        // OutputsJson, while an OLDER turn has only a raw branch — the bulk lookup must resolve the newest turn's own
+        // manifest, never fall through to its raw read just because an earlier turn in the same batch had no manifest.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedCodeTurnAsync(teamId, sessionId, 1, repoId, "run-1/raw-only");   // older, no manifest row at all
+        await SeedTurnWithManifestAsync(teamId, sessionId, turn: 2, repoId, outputsBranch: "run-2/stale-raw", manifestBranch: "run-2/manifest-wins");
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoId, "Continue"));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-2/manifest-wins",
+            "turn 2 (newest) has its OWN manifest — it must win over its own stale raw branch");
     }
 
     [Fact]
@@ -347,6 +410,41 @@ public class WorkSessionBranchFlowTests
         });
 
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stage a finished single-repo turn whose OutputsJson disagrees with its authoritative PublishManifest row — proves I2's "manifest wins" applies to session continuity, not just the room's own display.</summary>
+    private async Task<Guid> SeedTurnWithManifestAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string outputsBranch, string manifestBranch)
+    {
+        using var dbScope = _fixture.BeginScope();
+        var db = dbScope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed,
+            ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
+            ScopeRepositoryIds = new[] { repoId }.ToList(),
+            OutputsJson = JsonSerializer.Serialize(new { branch = outputsBranch }),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, RepositoryAlias = "primary",
+            RepositoryId = repoId, Branch = manifestBranch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return runId;
     }
 
     private async Task<Guid> SeedRepositoryAsync(Guid teamId)

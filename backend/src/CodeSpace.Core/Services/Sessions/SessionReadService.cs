@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
@@ -19,13 +20,15 @@ namespace CodeSpace.Core.Services.Sessions;
 public sealed class SessionReadService : ISessionReadService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IPublishManifestStore _manifests;
 
     /// <summary>Clamp the page size — a sidebar page is small; a caller can't force an unbounded scan.</summary>
     internal const int MaxPageSize = 100;
 
-    public SessionReadService(CodeSpaceDbContext db)
+    public SessionReadService(CodeSpaceDbContext db, IPublishManifestStore manifests)
     {
         _db = db;
+        _manifests = manifests;
     }
 
     public async Task<SessionPage> ListAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
@@ -159,9 +162,12 @@ public sealed class SessionReadService : ISessionReadService, IScopedDependency
             r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.ProjectionKind, r.SourceType, r.RerunFromNodeId,
             r.CreatedDate, r.StartedAt, r.CompletedAt, r.Error, r.OutputsJson, r.Goal, r.ScopeRepositoryIds)).ToList();
 
-        var pending = await LoadPendingDecisionRunIdsAsync(rows.Select(r => r.Id).ToList(), cancellationToken).ConfigureAwait(false);
+        var runIds = rows.Select(r => r.Id).ToList();
 
-        return SessionProjection.BuildTurns(rows, pending);
+        var pending = await LoadPendingDecisionRunIdsAsync(runIds, cancellationToken).ConfigureAwait(false);
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
+
+        return SessionProjection.BuildTurns(rows, pending, manifestsByRunId);
     }
 
     /// <summary>
