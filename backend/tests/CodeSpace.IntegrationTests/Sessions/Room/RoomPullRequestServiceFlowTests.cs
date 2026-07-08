@@ -218,6 +218,95 @@ public sealed class RoomPullRequestServiceFlowTests
         (await ManifestRowCountAsync(runId, teamId)).ShouldBe(2);
     }
 
+    [Fact]
+    public async Task A_multi_repo_call_returns_a_MIXED_result_when_one_repo_already_has_a_PR_and_another_does_not()
+    {
+        // Deep-audit finding: only the UNIFORM cases were covered (all-fresh, then all-reused). The service's own
+        // logic partitions targets into degraded/alreadyOpened/toOpen and re-zips toOpen[i] against the ChangeSet
+        // result by INDEX (RoomPullRequestService.OpenAsync) — a genuinely mixed set is the one shape that could
+        // expose an index-alignment bug the uniform tests can never reach.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId);
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedMultiRepoMergeAsync(runId, teamId,
+            (webRepoId, "web", "codespace/integration/run/turn1", "main"),
+            (apiRepoId, "api", "codespace/integration/run/turn1", "main"));
+
+        // "web" already has a PR from an earlier call — seeded directly (bypassing OpenAsync) so this call is the
+        // FIRST time "api" is ever opened, proving the mixed partition from a clean slate.
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<IPublishManifestStore>().UpsertForIntegrationAsync(new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = runId, RepositoryAlias = "web", RepositoryId = webRepoId,
+                Branch = "codespace/integration/run/turn1", PublishStateValue = PublishState.Pushed,
+                PullRequestNumber = 999, PullRequestUrl = "https://example.test/org/web/pull/999",
+            }, CancellationToken.None);
+        }
+
+        var result = await OpenAsync(runId, teamId);
+
+        result.PullRequests.Count.ShouldBe(2);
+
+        var web = result.PullRequests.Single(p => p.Alias == "web");
+        web.Disposition.ShouldBe(RoomPullRequestDisposition.AlreadyOpened);
+        web.Url.ShouldBe("https://example.test/org/web/pull/999");
+
+        var api = result.PullRequests.Single(p => p.Alias == "api");
+        api.Disposition.ShouldBe(RoomPullRequestDisposition.Opened, "this is api's FIRST open — it must not be conflated with web's already-open state");
+        api.Number.ShouldBe(777);
+
+        (await ManifestRowCountAsync(runId, teamId)).ShouldBe(2, "web's pre-seeded row plus api's freshly-recorded row");
+    }
+
+    [Theory]
+    [InlineData(WorkflowRunStatus.Cancelled)]
+    [InlineData(WorkflowRunStatus.Failure)]
+    public async Task A_run_whose_final_turn_ended_badly_can_still_open_a_PR_for_an_earlier_turns_published_work(WorkflowRunStatus finalStatus)
+    {
+        // Deep-audit finding: every other test in this file seeds Success. But the whole point of I3 (publish-or-
+        // park) is that an EARLIER turn can genuinely merge + push real work even though the run's OWN final turn
+        // later stops badly (the operator cancels a stuck run, or a later step crashes) — WorkflowRunState.IsTerminal
+        // covers Success/Failure/Cancelled precisely so a user can still land already-accepted work off a run that
+        // didn't end cleanly. A regression that narrowed the gate to "== Success" would pass every OTHER test here.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId, finalStatus);
+
+        await SeedSingleRepoMergeAsync(runId, teamId, "codespace/integration/run/turn1");
+        await StampTerminalRepositoryIdAsync(runId, repoId);
+
+        var result = await OpenAsync(runId, teamId);
+
+        var opened = result.PullRequests.Single();
+        opened.Disposition.ShouldBe(RoomPullRequestDisposition.Opened, $"a {finalStatus} run must still be able to open a PR for work an earlier turn already published");
+    }
+
+    [Fact]
+    public async Task A_foreign_teams_run_id_is_never_resolved_never_leaked()
+    {
+        // Tenancy isolation — the same invariant RoomProjectorFlowTests pins for the sibling RoomProjector
+        // (A_foreign_run_or_session_projects_to_null_never_leaked). OpenAsync's very first read is team-scoped;
+        // a run id that's real but belongs to ANOTHER team must read as "not found", never resolve against the
+        // wrong team's repository/credential.
+        var (ownerTeamId, ownerUserId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var repoId = await SeedBoundRepositoryAsync(ownerTeamId);
+        var runId = await SeedSupervisorRunAsync(ownerTeamId, ownerUserId);
+
+        await SeedSingleRepoMergeAsync(runId, ownerTeamId, "codespace/integration/run/turn1");
+        await StampTerminalRepositoryIdAsync(runId, repoId);
+
+        using var scope = _fixture.BeginScope();
+        var service = scope.Resolve<IRoomPullRequestService>();
+
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => service.OpenAsync(runId, otherTeamId, actorUserId: null, CancellationToken.None));
+        ex.Message.ShouldBe("Run not found.");
+    }
+
     // ─── Action driver ──────────────────────────────────────────────────────────────
 
     private async Task<RoomPullRequestResult> OpenAsync(Guid runId, Guid teamId)
@@ -241,8 +330,8 @@ public sealed class RoomPullRequestServiceFlowTests
 
     // ─── Seeding ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>Seeds a manual run and immediately stamps it Success — <c>SeedManualRunAsync</c> defaults to <c>Enqueued</c> (mirroring the engine's own entry state for tests that drive the engine), but <see cref="IRoomPullRequestService.OpenAsync"/> now requires a TERMINAL run (a real gap the hidden-dependency sweep found: a mid-run Suspended supervisor already has a genuine merged branch on its decision tape, but its run-level OutputsJson isn't written until the run's own terminal completion) — this suite hand-seeds the decision tape directly, bypassing the engine entirely, so the run's own status needs the same hand-stamp.</summary>
-    private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId)
+    /// <summary>Seeds a manual run and immediately stamps its status — <c>SeedManualRunAsync</c> defaults to <c>Enqueued</c> (mirroring the engine's own entry state for tests that drive the engine), but <see cref="IRoomPullRequestService.OpenAsync"/> now requires a TERMINAL run (a real gap the hidden-dependency sweep found: a mid-run Suspended supervisor already has a genuine merged branch on its decision tape, but its run-level OutputsJson isn't written until the run's own terminal completion) — this suite hand-seeds the decision tape directly, bypassing the engine entirely, so the run's own status needs the same hand-stamp. Defaults to <c>Success</c>; a caller proving I3's own doctrine (an EARLIER turn published real work even though the run's OWN final turn ended in <c>Cancelled</c>/<c>Failure</c>) passes a different terminal status.</summary>
+    private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId, WorkflowRunStatus status = WorkflowRunStatus.Success)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Messages.Constants.Roles.Admin);
         var workflowId = await scope.Resolve<MediatR.IMediator>().Send(new Messages.Commands.Workflows.CreateWorkflowCommand
@@ -259,7 +348,7 @@ public sealed class RoomPullRequestServiceFlowTests
         using var mutate = _fixture.BeginScope();
         var db = mutate.Resolve<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
-        run.Status = WorkflowRunStatus.Success;
+        run.Status = status;
         await db.SaveChangesAsync();
 
         return runId;

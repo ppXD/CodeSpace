@@ -72,6 +72,20 @@ public class RoomPullRequestServiceTests
     }
 
     [Fact]
+    public void Falls_back_to_a_generic_title_when_the_first_line_is_blank_but_the_summary_is_not()
+    {
+        // Deep-audit finding: the summary as a whole passes the outer IsNullOrWhiteSpace check (there IS real
+        // content), but its FIRST line is whitespace-only — the post-truncation "title.Length > 0" fallback branch
+        // this guards against was never exercised by any existing case.
+        var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"   \nthe real content is on the second line"}""") };
+
+        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+
+        title.ShouldBe("Merge agent changes", "the first line trims to nothing — the title must fall back, never ship a blank PR title");
+        body.ShouldBe("   \nthe real content is on the second line", "the body is never touched by the title's fallback — it carries the summary verbatim");
+    }
+
+    [Fact]
     public void Uses_the_LATEST_stop_when_the_tape_somehow_carries_more_than_one()
     {
         var decisions = new[]
