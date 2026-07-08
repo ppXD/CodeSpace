@@ -53,4 +53,37 @@ public class AgentRunExecutorMappingTests
         using var doc = System.Text.Json.JsonDocument.Parse($"{{\"input_tokens\":{input},\"output_tokens\":{output}}}");
         return new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "", Data = doc.RootElement.Clone() };
     }
+
+    [Theory]
+    [InlineData(SandboxStatus.TimedOut)]
+    [InlineData(SandboxStatus.Stalled)]
+    public void A_forced_terminal_captures_a_session_id_the_events_carried(SandboxStatus status)
+    {
+        // A killed-before-completion agent may still have emitted its harness's early session-bearing lifecycle
+        // event (Claude's system/init line, Codex's thread.started) before the kill — capture it so a later RETRY
+        // can warm-resume the conversation instead of always cold-starting.
+        var events = new[] { SessionIdEvent("sess-forced-terminal-1") };
+
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, events);
+
+        result.SessionId.ShouldBe("sess-forced-terminal-1");
+    }
+
+    [Theory]
+    [InlineData(SandboxStatus.TimedOut)]
+    [InlineData(SandboxStatus.Stalled)]
+    public void A_forced_terminal_with_no_session_bearing_event_leaves_session_id_null(SandboxStatus status)
+    {
+        // Byte-identical to before this fix when the stream carried no id at all (e.g. the process was killed
+        // before even its first lifecycle line) — never a fabricated value.
+        var result = AgentRunExecutor.MapSandboxResult(Sandbox(status), harness: null!, System.Array.Empty<AgentEvent>());
+
+        result.SessionId.ShouldBeNull();
+    }
+
+    private static AgentEvent SessionIdEvent(string sessionId)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse($"{{\"session_id\":\"{sessionId}\"}}");
+        return new AgentEvent { Kind = AgentEventKind.Started, Text = "Session started", Data = doc.RootElement.Clone() };
+    }
 }

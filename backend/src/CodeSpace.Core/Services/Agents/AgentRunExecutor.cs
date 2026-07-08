@@ -500,14 +500,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// a C3 STALL (no output for the idle window — likely a nested interactive prompt the agent can't answer) is surfaced
     /// for a human as <see cref="AgentRunStatus.NeedsReview"/> / <see cref="CompletionDisposition.Blocked"/>; any other
     /// terminal is folded by the harness from its events. Shared by the live + reattach paths so they can't drift.
+    /// Both forced-terminal branches also capture <see cref="AgentRunResult.SessionId"/> when the events carry one —
+    /// the sole missing input a later RETRY needs to WARM-resume the killed agent's conversation instead of cold-starting.
     /// </summary>
     internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, IReadOnlyList<AgentEvent> events) => sandbox.Status switch
     {
         // A timed-out / stalled agent still BURNED tokens before we killed it — capture the usage from its events
         // (the harness's own fold does this for a clean/non-zero exit; these forced-terminal paths must too) so the
-        // spend shows on the run regardless of outcome.
-        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
-        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
+        // spend shows on the run regardless of outcome. It may ALSO have a resumable session (a harness's early
+        // lifecycle event — Claude's system/init line, Codex's thread.started — carries the id before the kill), so
+        // capture that too: this is what turns a forced-terminal's later RETRY warm (continuing the conversation)
+        // instead of always cold — AgentSessionIdReader.TryRead + the AgentRun.SessionId write + the supervisor's
+        // FindResumableSubtaskAttemptAsync are already generic over every terminal status; this was the missing input.
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
         _ => harness.BuildResult(events, sandbox.ExitCode),
     };
 

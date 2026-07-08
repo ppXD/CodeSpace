@@ -437,9 +437,25 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
-    public void System_init_lines_carry_no_event()
+    public void System_init_lines_surface_as_a_minimal_started_event_carrying_the_session_id()
     {
-        Harness.ParseEvents("""{"type":"system","subtype":"init","cwd":"/tmp/ws"}""").ShouldBeEmpty();
+        // The init line is the FIRST reliable carrier of session_id (confirmed against real claude v2.1.x output) —
+        // it must surface (not be silently dropped) so a run killed before its terminal "result" line still yields
+        // a resumable session id (AgentRunExecutor's TimedOut/Stalled paths).
+        var ev = Harness.ParseEvents("""{"type":"system","subtype":"init","cwd":"/tmp/ws","session_id":"sess-early-1"}""").Single();
+
+        ev.Kind.ShouldBe(AgentEventKind.Started);
+        AgentSessionIdReader.TryRead(new[] { ev }).ShouldBe("sess-early-1", "the session reader must find the id off this early event, not only the terminal result line");
+    }
+
+    [Theory]
+    [InlineData("hook_started")]
+    [InlineData("hook_response")]
+    public void Other_system_subtypes_still_carry_no_event(string subtype)
+    {
+        // Only "init" is the reliable, always-present session-id carrier — every OTHER system subtype (hook
+        // lifecycle noise) stays dropped, byte-identical to before this change.
+        Harness.ParseEvents($$"""{"type":"system","subtype":"{{subtype}}","session_id":"sess-x"}""").ShouldBeEmpty();
     }
 
     [Theory]
