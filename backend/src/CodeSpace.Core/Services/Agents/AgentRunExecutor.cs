@@ -830,11 +830,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// When enabled, push a SUCCESSFUL run's non-empty diff to a deterministically-named remote branch and fold
-    /// the pushed name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a
-    /// downstream git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING
-    /// write to the user's remote, so it is gated hard: the flag must be on, the run must have Succeeded with a
-    /// non-empty diff, and the handle must be push-capable; ANY guard failing returns the result UNCHANGED.
+    /// When enabled, push a run's non-empty diff to a deterministically-named remote branch and fold the pushed
+    /// name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a downstream
+    /// git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING write to
+    /// the user's remote, so it is gated hard: the flag must be on, the handle must be push-capable, and the run
+    /// must have a non-empty diff; ANY guard failing returns the result UNCHANGED.
+    ///
+    /// <para>P2.2 (salvage): a FORCED-terminal run (<see cref="AgentRunStatus.TimedOut"/>, or the C3-stalled
+    /// <see cref="AgentRunStatus.NeedsReview"/>) still qualifies — <see cref="EnrichWithWorkspaceChangesAsync"/>
+    /// already captures whatever the agent had ACTUALLY written to disk before it was killed (git ground truth,
+    /// independent of the kill signal), so a genuinely mid-progress kill no longer silently discards that work: it
+    /// lands as a real, reviewable branch instead of vanishing with the process. Every OTHER non-Succeeded status
+    /// (Failed, Cancelled) is unchanged — a run that failed or was cancelled on its own terms is a different
+    /// question from one CodeSpace itself force-terminated mid-flight.</para>
     ///
     /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
     /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
@@ -843,14 +851,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// overwrite (no divergent branch).</para>
     ///
     /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> is
-    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips a Succeeded run to Failed) but is
+    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips the run's own status) but is
     /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
     /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
     /// </summary>
     internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
         if (!ShouldPushProducedBranch(task)) return result;
-        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (result.Status is not (AgentRunStatus.Succeeded or AgentRunStatus.TimedOut or AgentRunStatus.NeedsReview)) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
 
         var multiRepo = workspace.Repositories.Count > 1;
