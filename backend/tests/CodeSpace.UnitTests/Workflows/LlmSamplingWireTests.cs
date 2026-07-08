@@ -206,6 +206,90 @@ public class LlmSamplingWireTests
         JsonDocument.Parse(handler.Body!).RootElement.GetProperty("max_tokens").GetInt32().ShouldBe(onWire);
     }
 
+    // ── streaming: a large cap streams; the SSE events fold into the completion; a small cap stays buffered ────────
+
+    private const string AnthropicSse = """
+        event: message_start
+        data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":5,"output_tokens":0}}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there"}}
+
+        event: message_delta
+        data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+        """;
+
+    private const string OpenAiSse = """
+        data: {"model":"gpt-x","choices":[{"delta":{"content":"hello "},"finish_reason":null}]}
+
+        data: {"model":"gpt-x","choices":[{"delta":{"content":"there"},"finish_reason":null}]}
+
+        data: {"model":"gpt-x","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+        data: {"model":"gpt-x","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}
+
+        data: [DONE]
+        """;
+
+    [Fact]
+    public async Task Anthropic_streams_a_large_cap_and_folds_the_sse_events_into_the_completion()
+    {
+        var handler = new CapturingHandler(AnthropicSse);
+        var client = new AnthropicClient(Factory(handler));
+
+        var result = await client.CompleteAsync(new LLMCompletionRequest { Model = "claude-opus-4-8", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("Anthropic") }, CancellationToken.None);
+
+        var body = JsonDocument.Parse(handler.Body!).RootElement;
+        body.GetProperty("stream").GetBoolean().ShouldBeTrue("a cap above the streaming threshold must stream so a long output can't idle-timeout");
+        body.GetProperty("max_tokens").GetInt32().ShouldBe(60000);
+
+        result.Text.ShouldBe("hello there", "the text_delta events accumulate into the completion");
+        result.Model.ShouldBe("claude-x");
+        result.Usage.InputTokens.ShouldBe(5);
+        result.Usage.OutputTokens.ShouldBe(3);
+        result.Usage.FinishReason.ShouldBe("end_turn");
+    }
+
+    [Fact]
+    public async Task OpenAi_streams_a_large_cap_with_usage_and_folds_the_sse_chunks_into_the_completion()
+    {
+        var handler = new CapturingHandler(OpenAiSse);
+        var client = new OpenAiClient(Factory(handler));
+
+        var result = await client.CompleteAsync(new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("OpenAI") }, CancellationToken.None);
+
+        var body = JsonDocument.Parse(handler.Body!).RootElement;
+        body.GetProperty("stream").GetBoolean().ShouldBeTrue();
+        body.GetProperty("stream_options").GetProperty("include_usage").GetBoolean().ShouldBeTrue("ask the wire for a final usage chunk");
+        body.GetProperty("max_tokens").GetInt32().ShouldBe(60000);
+
+        result.Text.ShouldBe("hello there");
+        result.Model.ShouldBe("gpt-x");
+        result.Usage.InputTokens.ShouldBe(5);
+        result.Usage.OutputTokens.ShouldBe(3);
+        result.Usage.FinishReason.ShouldBe("stop");
+    }
+
+    [Fact]
+    public async Task A_small_cap_stays_non_streaming_on_both_wires()
+    {
+        var a = new CapturingHandler("""{"model":"m","content":[{"type":"text","text":"hi"}]}""");
+        await new AnthropicClient(Factory(a)).CompleteAsync(new LLMCompletionRequest { Model = "claude-opus-4-8", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 2048, Credential = Cred("Anthropic") }, CancellationToken.None);
+        JsonDocument.Parse(a.Body!).RootElement.TryGetProperty("stream", out _).ShouldBeFalse("a small cap must NOT stream — byte-identical to the pre-streaming body");
+
+        var o = new CapturingHandler("""{"model":"m","choices":[{"message":{"content":"hi"}}]}""");
+        await new OpenAiClient(Factory(o)).CompleteAsync(new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 2048, Credential = Cred("OpenAI") }, CancellationToken.None);
+        var ob = JsonDocument.Parse(o.Body!).RootElement;
+        ob.TryGetProperty("stream", out _).ShouldBeFalse();
+        ob.TryGetProperty("stream_options", out _).ShouldBeFalse();
+    }
+
     // ── Harness ──────────────────────────────────────────────────────────────────────
 
     private static ResolvedModelCredential Cred(string provider) => new() { Provider = provider, ApiKey = "k" };

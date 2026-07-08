@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
@@ -56,6 +57,60 @@ internal static class LlmHttpTransport
             catch (JsonException ex)
             {
                 throw new LlmApiException(provider, (int)response.StatusCode, LlmErrorCategory.Malformed, $"{provider} API returned an unparseable body: {ex.Message}", inner: ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stream a Server-Sent-Events response, yielding each <c>data:</c> line's parsed JSON event for the caller to
+    /// accumulate — the shared streaming mechanic behind large / unbounded completions (a non-streaming request whose
+    /// output can exceed the threshold risks an idle-connection timeout; streaming sends bytes continuously to keep it
+    /// alive). Uses <see cref="HttpCompletionOption.ResponseHeadersRead"/> so parsing begins as headers arrive, and turns
+    /// the SAME failure shapes into the SAME typed <see cref="LlmApiException"/> as <see cref="SendForJsonAsync{T}"/>
+    /// (timeout/transport → Transient; a non-2xx before the stream → the classified status). A malformed/partial
+    /// <c>data:</c> line is skipped (robust), and OpenAI's <c>[DONE]</c> sentinel + non-<c>data:</c> lines are ignored.
+    /// </summary>
+    public static async IAsyncEnumerable<JsonElement> StreamSseAsync(HttpClient http, HttpRequestMessage request, string provider, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new LlmApiException(provider, null, LlmErrorCategory.Transient, "the request timed out before the gateway responded");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex);
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                var status = (int)response.StatusCode;
+                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+                throw new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response));
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var reader = new System.IO.StreamReader(stream);
+
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;   // skip event: / id: / comment / blank lines
+
+                var data = line[5..].TrimStart();
+                if (data.Length == 0 || data == "[DONE]") continue;                  // OpenAI's terminal sentinel
+
+                JsonElement? evt = null;
+                try { using var doc = JsonDocument.Parse(data); evt = doc.RootElement.Clone(); }
+                catch (JsonException) { /* a partial/malformed data line — skip, keep reading */ }
+
+                if (evt is { } e) yield return e;
             }
         }
     }
