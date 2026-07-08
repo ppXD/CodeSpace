@@ -189,20 +189,33 @@ public static class LlmModelCapabilities
 
     // ── matching ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Whether <paramref name="model"/> matches any built-in OR operator-added prefix. Blank ⇒ no match (default-allow / classic). PURE.</summary>
+    /// <summary>
+    /// Whether <paramref name="model"/> matches any built-in OR operator-added prefix — with an explicit ESCAPE HATCH:
+    /// an override token prefixed <c>!</c> (e.g. <c>!o3-house</c>) EXCLUDES a matching id, overriding a built-in match.
+    /// This is what lets an operator whose Custom gateway serves a model whose id collides with a built-in family — an
+    /// <c>o3-*</c> alias fronting a classic-<c>max_tokens</c> backend, a strict gateway that 400s on <c>reasoning_effort</c>,
+    /// a model that DOES accept sampling despite a no-sampling-prefixed name — force the default-allow behavior without a
+    /// code change or a rename. Exclusion always wins over any add/built-in match; the override was previously append-only,
+    /// so a colliding id had no opt-out. A bare <c>!</c> token is a no-op. Blank model ⇒ no match (default-allow). PURE.
+    /// </summary>
     private static bool MatchesAny(string? model, IReadOnlyList<string> defaults, string? rawOverride)
     {
         if (string.IsNullOrWhiteSpace(model)) return false;
 
         var id = model.Trim();
 
+        var tokens = string.IsNullOrWhiteSpace(rawOverride)
+            ? System.Array.Empty<string>()
+            : rawOverride.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        foreach (var token in tokens)
+            if (token.Length > 1 && token[0] == '!' && Matches(id, token[1..])) return false;   // explicit exclusion wins over built-in + add
+
         foreach (var prefix in defaults)
             if (Matches(id, prefix)) return true;
 
-        if (string.IsNullOrWhiteSpace(rawOverride)) return false;
-
-        foreach (var extra in rawOverride.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            if (Matches(id, extra)) return true;
+        foreach (var token in tokens)
+            if (token[0] != '!' && Matches(id, token)) return true;
 
         return false;
     }

@@ -100,6 +100,23 @@ public class LlmModelCapabilitiesTests
         LlmModelCapabilities.SupportsReasoningEffort("gpt-4o", "house-reasoner").ShouldBeFalse();
     }
 
+    [Fact]
+    public void A_bang_prefixed_override_token_EXCLUDES_a_colliding_id_from_a_built_in_family()
+    {
+        // The escape hatch: an operator whose Custom gateway serves a model whose id collides with a built-in reasoning
+        // family — an 'o3-*' alias fronting a classic-max_tokens backend — forces default-allow with NO code change / rename.
+        LlmModelCapabilities.UsesMaxCompletionTokens("o3-house", "!o3-house").ShouldBeFalse();   // excluded → classic max_tokens
+        LlmModelCapabilities.UsesMaxCompletionTokens("o3-house", null).ShouldBeTrue();            // without the opt-out it would rename (the break)
+        LlmModelCapabilities.SupportsReasoningEffort("o1-preview", "!o1").ShouldBeFalse();         // strict gateway that 400s on reasoning_effort
+        LlmModelCapabilities.AcceptsSampling("claude-opus-4-8", "!claude-opus-4-8").ShouldBeTrue(); // a gateway model that DOES accept temperature
+
+        // Exclusion wins over a simultaneous add clause; a non-excluded sibling is unaffected; a bare '!' is a no-op.
+        LlmModelCapabilities.UsesMaxCompletionTokens("o3-house", "!o3-house, gpt-5-proxy").ShouldBeFalse();
+        LlmModelCapabilities.UsesMaxCompletionTokens("gpt-5-proxy", "!o3-house, gpt-5-proxy").ShouldBeTrue();
+        LlmModelCapabilities.UsesMaxCompletionTokens("o3-mini", "!o3-house").ShouldBeTrue();       // a different o3 id still renames
+        LlmModelCapabilities.UsesMaxCompletionTokens("o3-mini", "!").ShouldBeTrue();               // bare '!' excludes nothing
+    }
+
     // ── required-field output-cap default ─────────────────────────────────────────────────────────────────────────
 
     [Theory]

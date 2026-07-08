@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
+using CodeSpace.Core.Services.Workflows.Llm.Custom;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -335,6 +336,69 @@ public class LlmSamplingWireTests
         var ob = JsonDocument.Parse(o.Body!).RootElement;
         ob.TryGetProperty("stream", out _).ShouldBeFalse();
         ob.TryGetProperty("stream_options", out _).ShouldBeFalse();
+    }
+
+    // ── Custom (OpenAI-compatible gateway) wire: the rename + streaming + gateway SSE quirks flow through the delegate ──
+    // CustomClient wraps OpenAiClient verbatim, so a LiteLLM / vLLM / OpenRouter / self-hosted relay speaks the identical
+    // wire. These pin that the param rework reaches the Custom seam — not just the OpenAI-tagged client.
+
+    [Theory]
+    [InlineData("o3-mini", true)]           // an OpenAI reasoning id fronted by a Custom gateway → renamed to max_completion_tokens
+    [InlineData("metis-coder-max", false)]  // a plain gateway model (the natural vLLM/Qwen/Llama naming) → classic max_tokens
+    public async Task The_max_completion_tokens_rename_flows_through_the_custom_seam(string model, bool renamed)
+    {
+        var handler = new CapturingHandler("""{"model":"m","choices":[{"message":{"content":"hi"}}]}""");
+        var client = new CustomClient(Factory(handler));
+
+        await client.CompleteAsync(new LLMCompletionRequest { Model = model, SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, Credential = Cred("Custom") }, CancellationToken.None);
+
+        var body = JsonDocument.Parse(handler.Body!).RootElement;
+        body.TryGetProperty("max_completion_tokens", out var mct).ShouldBe(renamed, renamed ? "a reasoning-family id renames" : "a plain gateway id keeps classic max_tokens");
+        body.TryGetProperty("max_tokens", out var mt).ShouldBe(!renamed);
+        (renamed ? mct : mt).GetInt32().ShouldBe(1024, "the cap rides verbatim under whichever key the model family requires");
+    }
+
+    [Fact]
+    public async Task A_custom_gateway_streams_a_large_cap_and_folds_the_sse_chunks()
+    {
+        var handler = new CapturingHandler(OpenAiSse);
+        var client = new CustomClient(Factory(handler));
+
+        var result = await client.CompleteAsync(new LLMCompletionRequest { Model = "metis-coder-max", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("Custom") }, CancellationToken.None);
+
+        var body = JsonDocument.Parse(handler.Body!).RootElement;
+        body.GetProperty("stream").GetBoolean().ShouldBeTrue("the Custom seam delegates the streaming decision verbatim");
+        body.GetProperty("stream_options").GetProperty("include_usage").GetBoolean().ShouldBeTrue();
+
+        result.Text.ShouldBe("hello there", "the SSE fold works identically through the Custom delegate");
+        result.Usage.FinishReason.ShouldBe("stop");
+    }
+
+    [Fact]
+    public async Task The_sse_parser_skips_openrouter_keep_alive_comments_and_the_done_sentinel()
+    {
+        // A real OpenRouter Custom gateway interleaves ': OPENROUTER PROCESSING' comment keep-alives (and bare ':' lines)
+        // between data chunks; the parser must skip them (they are not 'data:' lines) and still fold the completion.
+        const string quirky = """
+            : OPENROUTER PROCESSING
+
+            data: {"model":"gpt-x","choices":[{"delta":{"content":"hello "},"finish_reason":null}]}
+
+            :
+
+            data: {"model":"gpt-x","choices":[{"delta":{"content":"there"},"finish_reason":null}]}
+
+            data: {"model":"gpt-x","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+            data: [DONE]
+            """;
+        var handler = new CapturingHandler(quirky);
+        var client = new CustomClient(Factory(handler));
+
+        var result = await client.CompleteAsync(new LLMCompletionRequest { Model = "or-model", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("Custom") }, CancellationToken.None);
+
+        result.Text.ShouldBe("hello there", "the OpenRouter comment keep-alives and the [DONE] sentinel are skipped, not folded into the text");
+        result.Usage.FinishReason.ShouldBe("stop");
     }
 
     // ── Harness ──────────────────────────────────────────────────────────────────────

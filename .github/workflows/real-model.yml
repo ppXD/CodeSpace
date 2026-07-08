@@ -77,6 +77,11 @@ jobs:
         #     Also covers the large-cap streaming smoke and the reasoning_effort live smoke (report-only: honored iff the
         #     configured model is a reasoning model, else dropped before the wire — non-breaking either way).
         #     DB-free component eval, so this no-Postgres job is its home; blessed Anthropic gates, Custom reports.
+        #   ~RealModelCustom → the Custom-tagged supervisor gate (RealModelCustomProviderFlowTests): the SAME live gateway
+        #     tagged Provider="Custom" routes through the Custom OpenAI-compatible client to the supervisor decider and must
+        #     score the golden decisions correctly — the live proof that "Custom endpoints run to the supervisor". Its class
+        #     token is "RealModelCustom", NOT "RealModelSupervisor", so the older clause set silently de-selected it — it ran
+        #     on NO lane (same de-selection bug the session evals hit). GATES the Custom wire (AssessLiveAsync default gate).
         # The DB-backed whole-loop gates live in the E2ETests assembly and run in their own Postgres job below. The planner
         # RealModel test is a separate, DB-backed concern with its own ANTHROPIC-native key, so it is not run here.
         #
@@ -86,7 +91,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelSampling"
+          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelSampling|FullyQualifiedName~RealModelCustom"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
           --results-directory backend/TestResults
