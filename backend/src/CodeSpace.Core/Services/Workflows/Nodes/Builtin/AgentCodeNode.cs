@@ -203,6 +203,8 @@ public sealed class AgentCodeNode : INodeRuntime
             Acceptance = acceptance,
         };
 
+        task = ApplyRespawnResumeHint(task, context.PriorAttemptPayload);
+
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
         {
             Kind = WorkflowWaitKinds.AgentRun,
@@ -289,6 +291,26 @@ public sealed class AgentCodeNode : INodeRuntime
         CopyIfNonNull(payload, "changeSetId", outputs);
 
         return NodeResult.Ok(outputs);
+    }
+
+    /// <summary>
+    /// P2.3: stamp the retry-resume hint from the RETIRING prior attempt's own resume payload (the same
+    /// sessionId/transcript triple <c>RealSupervisorActionExecutor.ApplyRetryResumeHintAsync</c> reads from a DB
+    /// query for a supervisor-orchestrated subtask retry) — or return the task unchanged when this isn't a
+    /// respawn, or the retiring attempt captured no resumable session (cold-start, byte-identical to before).
+    /// </summary>
+    private static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
+    {
+        if (priorAttemptPayload is not { } payload) return task;
+
+        if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return task;
+
+        return task with
+        {
+            ResumeFromSessionId = sessionId,
+            RestoredTranscript = ReadOptionalString(payload, "sessionTranscript"),
+            RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
+        };
     }
 
     private static Task<NodeResult> Fail(string message) => Task.FromResult(NodeResult.Fail(message));
@@ -380,6 +402,15 @@ public sealed class AgentCodeNode : INodeRuntime
 
     private static string ReadString(JsonElement bag, string key) =>
         bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    private static string? ReadOptionalString(JsonElement bag, string key)
+    {
+        var s = ReadString(bag, key);
+        return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    private static Guid? ReadOptionalGuid(JsonElement bag, string key) =>
+        Guid.TryParse(ReadOptionalString(bag, key), out var id) ? id : null;
 
     private static string? ReadOptionalString(IReadOnlyDictionary<string, JsonElement> bag, string key)
     {

@@ -104,6 +104,14 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // WHY the run ended (e.g. the fail-closed "acceptance-failed" re-grade) — the machine-readable half the
             // node's retry verdict keys on: a deterministic verdict failure must not be respawned as if transient.
             exitReason = result?.ExitReason,
+            // Warm-resume triple (P2.3): unused on a Succeeded outcome, but on a RETRYABLE failure this is the exact
+            // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.code's fresh respawn
+            // can stamp AgentTask.ResumeFromSessionId/RestoredTranscript(ArtifactId) — the same triple
+            // ApplyRetryResumeHintAsync reads for a supervisor-orchestrated subtask retry, just sourced from the
+            // in-hand payload instead of a DB re-query.
+            sessionId = run.SessionId,
+            sessionTranscript = result?.SessionTranscript,
+            sessionTranscriptArtifactId = result?.SessionTranscriptArtifactId,
         }, AgentJson.Options);
     }
 }
