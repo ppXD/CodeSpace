@@ -87,6 +87,40 @@ public sealed class RealClaudeResumeE2ETests
         }
     }
 
+    [Fact]
+    public async Task A_session_id_is_recoverable_from_the_real_binarys_early_init_line_even_when_killed_before_completion()
+    {
+        // P2.1: AgentRunExecutor's TimedOut/Stalled paths force-kill the process before it ever reaches its clean
+        // "result" line — proving the production harness can still recover a resumable session id from whatever
+        // the REAL binary emitted before the kill (its "system"/"init" line) is what makes a forced-terminal
+        // agent's later retry WARM instead of always cold. Ground truth, not a synthetic JSON fixture.
+        if (OperatingSystem.IsWindows()) return;
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(GateEnvVar))) return;   // opt-in only
+        if (!ClaudeResolves()) return;
+
+        try
+        {
+            var workspace = NewWorkspace();
+            var cwd = await ResolveRealPathAsync(workspace);
+            var configDir = NewDir();
+
+            var earlyLines = await RunClaudeUntilInitThenKillAsync(Harness.BuildInvocation(FreshTask(cwd)), configDir);
+
+            earlyLines.ShouldNotBeEmpty("the real binary emitted at least its system/init line before being killed");
+
+            var events = earlyLines.SelectMany(Harness.ParseEvents).ToList();
+            events.ShouldContain(e => e.Kind == AgentEventKind.Started, "the init line surfaces as a minimal lifecycle event instead of being silently dropped");
+
+            AgentSessionIdReader.TryRead(events).ShouldNotBeNullOrEmpty(
+                "a run killed before completion still yields a resumable session id from its early init line");
+        }
+        finally
+        {
+            foreach (var dir in _tempDirs)
+                try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup of the gated run's temp dirs */ }
+        }
+    }
+
     // ─── Tasks (production harness inputs) ────────────────────────────────────────
 
     private static AgentTask FreshTask(string cwd) => new()
@@ -138,6 +172,55 @@ public sealed class RealClaudeResumeE2ETests
         catch (OperationCanceledException) { try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ } throw new TimeoutException("the real claude run exceeded 90s"); }
 
         return (proc.ExitCode, await stdoutTask, await stderrTask);
+    }
+
+    /// <summary>
+    /// Spawn the real claude, read stdout LINE BY LINE, and KILL the process the instant its "system"/"init" line
+    /// arrives — simulating exactly what AgentRunExecutor's TimedOut/Stalled paths do: force-terminate before the
+    /// run ever reaches its clean "result" line. Returns every line read (including the init line). A 60s safety
+    /// deadline guards against a binary that never emits init at all (falls through to the kill regardless).
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> RunClaudeUntilInitThenKillAsync(SandboxSpec spec, string configDir)
+    {
+        LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configDir);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = spec.Command,
+            WorkingDirectory = spec.WorkingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+        };
+
+        foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
+        psi.Environment[ClaudeCodeHarness.ConfigDirEnvVar] = configDir;
+        foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
+
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Close();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var lines = new List<string>();
+
+        try
+        {
+            while (true)
+            {
+                var line = await proc.StandardOutput.ReadLineAsync(cts.Token);
+                if (line is null) break;   // the process closed stdout (exited) before init ever arrived
+
+                lines.Add(line);
+
+                if (line.Contains("\"subtype\":\"init\"", StringComparison.Ordinal)) break;
+            }
+        }
+        catch (OperationCanceledException) { /* the 60s safety deadline fired — fall through to the kill below regardless */ }
+
+        try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+
+        return lines;
     }
 
     private static IReadOnlyList<AgentEvent> ParseAll(string streamJson) =>

@@ -2874,7 +2874,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // must re-run the node FRESH so it re-stages its work (a new agent run, a new wait) and suspends again.
             // The durable attempt count above keeps the budget honest across those cycles, so the respawn can never
             // run away. In-process (non-suspending) retries keep the payload untouched (it is null for them anyway).
-            if (exec.ResumePayload is not null) exec = exec with { ResumePayload = null };
+            //
+            // The retiring payload rides forward one cycle as PriorAttemptPayload before being cleared — a node
+            // whose failed attempt captured a resumable session (agent.code's sessionId/sessionTranscript) reads it
+            // on the fresh pass to warm-continue instead of cold-starting, mirroring the supervisor's own
+            // ApplyRetryResumeHintAsync for its subtask retries. A node with no such payload shape just finds
+            // nothing to read.
+            if (exec.ResumePayload is not null) exec = exec with { PriorAttemptPayload = exec.ResumePayload, ResumePayload = null };
         }
 
         // Defensive: the loop always returns on its final attempt.
@@ -3058,7 +3064,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// values into one argument so the helpers stay under Rule 1's 5-param cap — a data holder with
     /// no behaviour.
     /// </summary>
-    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, IReadOnlyDictionary<string, JsonElement> RedactedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt, string IterationKey);
+    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, IReadOnlyDictionary<string, JsonElement> RedactedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt, string IterationKey, JsonElement? PriorAttemptPayload = null);
 
     /// <summary>
     /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
@@ -3081,6 +3087,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Logger = nodeLogger,
             Observability = observability,
             ResumePayload = exec.ResumePayload,
+            PriorAttemptPayload = exec.PriorAttemptPayload,
             NodeId = exec.Node.Id,
         };
     }

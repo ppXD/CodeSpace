@@ -291,17 +291,40 @@ public sealed class AgentRunExecutorPushTests
         result.PublishSkipReason.ShouldBeNull();
     }
 
-    [Fact]
-    public async Task Non_succeeded_status_returns_unchanged_and_never_pushes()
+    [Theory]
+    [InlineData(AgentRunStatus.Failed)]
+    [InlineData(AgentRunStatus.Cancelled)]
+    public async Task A_run_that_ended_on_its_own_terms_never_pushes(AgentRunStatus status)
     {
+        // Failed / Cancelled are the agent's OWN outcome, not a forced kill — a different question from P2.2's
+        // salvage (which applies only to TimedOut / the C3-stalled NeedsReview, see the sibling tests below).
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle();
 
-        var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, failed, handle, ClaimedEpoch, CancellationToken.None);
+        var ended = SucceededWithChanges() with { Status = status };
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, ended, handle, ClaimedEpoch, CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull();
-        handle.PushCalled.ShouldBeFalse("a non-Succeeded run never pushes");
+        handle.PushCalled.ShouldBeFalse($"a {status} run ended on its own terms — never pushed");
+    }
+
+    [Theory]
+    [InlineData(AgentRunStatus.TimedOut)]
+    [InlineData(AgentRunStatus.NeedsReview)]
+    public async Task P2_2_a_forced_terminal_run_still_salvages_its_real_changes_as_a_branch(AgentRunStatus status)
+    {
+        // TimedOut (a wall-clock kill) and NeedsReview (the C3 stall kill) are CodeSpace's OWN forced terminations,
+        // not the agent's outcome — EnrichWithWorkspaceChangesAsync already captured whatever was ACTUALLY on disk
+        // before the kill (git ground truth), so that real progress must not silently vanish with the process.
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
+
+        var killed = SucceededWithChanges() with { Status = status };
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, killed, handle, ClaimedEpoch, CancellationToken.None);
+
+        handle.PushCalled.ShouldBeTrue($"a {status} run's real on-disk changes are salvaged as a branch, not discarded");
+        result.ProducedBranch.ShouldBe(handle.BranchPushed);
+        result.Status.ShouldBe(status, "the salvage push never changes the run's own terminal status — only adds a branch");
     }
 
     [Fact]

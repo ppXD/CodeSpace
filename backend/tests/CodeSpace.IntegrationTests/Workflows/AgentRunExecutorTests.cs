@@ -439,6 +439,35 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task P2_4_an_ordinary_fast_run_succeeds_with_the_stall_watchdog_left_at_its_default()
+    {
+        // The watchdog now defaults ON (P2.4) when the operator never touched the env var at all — this proves the
+        // new default doesn't regress the common case: a real run through the actual durable/watchdog-bearing
+        // AttachAsync path (the same one AgentRunExecutor uses in production) still succeeds normally when it emits
+        // output well inside the (10-minute) default window. The kill mechanism itself is proven generically by the
+        // existing LocalProcessRunnerEnvScrubTests C3 suite for whatever window IdleTimeout() returns.
+        if (OperatingSystem.IsWindows()) return;
+
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, null);
+
+            var teamId = await SeedTeamAsync();
+            var runId = await CreateScriptedRunAsync(teamId);
+
+            await ExecuteAsync(runId, new ScriptedHarness("echo done"));
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "a fast, active run is never falsely flagged stalled by the new default");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, original);
+        }
+    }
+
+    [Fact]
     public void Executor_is_registered_in_the_container()
     {
         using var scope = _fixture.BeginScope();

@@ -105,16 +105,72 @@ public class SupervisorRetryResumeFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_supervisor_retry_resumes_a_timed_out_attempts_conversation()
+    {
+        // P2.1: a TIMED-OUT (or stalled) attempt is no less resumable than a clean failure — AgentRunExecutor now
+        // captures a SessionId off the forced-terminal's own events, so FindResumableSubtaskAttemptAsync (keyed
+        // ONLY on AgentRun.SessionId != null, no status filter) picks it up exactly like a Succeeded attempt would.
+        // This proves the FULL chain: forced-terminal → SessionId persisted → retry-resume finds it → warm task.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            Guid agentSa, agentSb;
+            using (var verify = _fixture.BeginScope())
+            {
+                var waits = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                    .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+                    .OrderBy(w => w.IterationKey).ToListAsync();
+
+                waits.Count.ShouldBe(2);
+                agentSa = Guid.Parse(waits[0].Token);
+                agentSb = Guid.Parse(waits[1].Token);
+            }
+
+            await SimulateAgentCompletionAsync(agentSa, "sess-sa", "alpha convo\n");
+            // sb TIMED OUT (never reached a clean exit) but its early harness lifecycle event still carried a
+            // session id — exactly what MapSandboxResult's TimedOut branch now captures.
+            await SimulateAgentCompletionAsync(agentSb, "sess-sb-timed-out", "the beta conversation cut short by the kill\n", AgentRunStatus.TimedOut);
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var retryAgent = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+                    .SingleAsync(r => r.WorkflowRunId == runId && r.IterationKey == "sup#turn2");
+
+                var task = JsonSerializer.Deserialize<AgentTask>(retryAgent.TaskJson, AgentJson.Options)!;
+
+                task.ResumeFromSessionId.ShouldBe("sess-sb-timed-out", "the retry resumes the TIMED-OUT attempt's conversation, not a cold restart");
+                task.RestoredTranscript.ShouldBe("the beta conversation cut short by the kill\n");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers (self-contained per the supervisor-flow-test convention) ─────────────────────
 
-    private async Task SimulateAgentCompletionAsync(Guid agentRunId, string sessionId, string transcript)
+    private async Task SimulateAgentCompletionAsync(Guid agentRunId, string sessionId, string transcript, AgentRunStatus status = AgentRunStatus.Succeeded)
     {
         using var scope = _fixture.BeginScope();
         var runs = scope.Resolve<IAgentRunService>();
         var notifier = scope.Resolve<IAgentRunCompletionNotifier>();
 
         await runs.MarkRunningAsync(agentRunId, CancellationToken.None);
-        await runs.CompleteAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = sessionId, SessionTranscript = transcript }, CancellationToken.None);
+        await runs.CompleteAsync(agentRunId, new AgentRunResult { Status = status, ExitReason = status == AgentRunStatus.Succeeded ? "completed" : "timed-out", SessionId = sessionId, SessionTranscript = transcript }, CancellationToken.None);
         await notifier.NotifyCompletedAsync(agentRunId, CancellationToken.None);
     }
 

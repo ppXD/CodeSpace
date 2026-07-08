@@ -507,6 +507,67 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task P2_3_a_respawn_carrying_a_prior_sessionId_warm_resumes_instead_of_cold_starting()
+    {
+        // The engine threads the retiring resume payload forward as PriorAttemptPayload right before a retry
+        // clears ResumePayload and re-runs the node fresh (WorkflowEngine.ExecuteNodeAsync). A prior attempt that
+        // captured a resumable session must have that session stamped onto the FRESH AgentTask, not discarded.
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","error":"gateway 429","exitReason":"non-zero-exit","sessionId":"sess-123","sessionTranscript":"{\"role\":\"user\"}"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended, "a respawn still stages a fresh AgentRun wait — only its task envelope carries the resume hint");
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ResumeFromSessionId.ShouldBe("sess-123");
+        task.RestoredTranscript.ShouldBe("{\"role\":\"user\"}");
+    }
+
+    [Fact]
+    public async Task P2_3_a_respawn_carrying_a_prior_transcript_artifact_ref_threads_it_through()
+    {
+        var artifactId = Guid.NewGuid();
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"TimedOut","error":"timed out","sessionId":"sess-456","sessionTranscriptArtifactId":"{{artifactId}}"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ResumeFromSessionId.ShouldBe("sess-456");
+        task.RestoredTranscriptArtifactId.ShouldBe(artifactId);
+    }
+
+    [Fact]
+    public async Task P2_3_a_first_pass_with_no_prior_attempt_cold_starts_byte_identical()
+    {
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ResumeFromSessionId.ShouldBeNull();
+        task.RestoredTranscript.ShouldBeNull();
+        task.RestoredTranscriptArtifactId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task P2_3_a_prior_attempt_with_no_captured_session_cold_starts_byte_identical()
+    {
+        // The retiring payload exists (this WAS a respawn) but the prior attempt never captured a session
+        // (e.g. it died before any session-bearing event) — nothing to warm-resume from, so it cold-starts exactly
+        // like a first pass, not a half-populated task.
+        var priorAttempt = JsonDocument.Parse("""{"status":"Failed","error":"crashed before any output","exitReason":"non-zero-exit"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ResumeFromSessionId.ShouldBeNull();
+        task.RestoredTranscript.ShouldBeNull();
+        task.RestoredTranscriptArtifactId.ShouldBeNull();
+    }
+
+    [Fact]
     public void The_fail_closed_acceptance_exit_reason_is_pinned()
     {
         // The node's retry verdict and the acceptance re-grade key on this literal — a rename would silently turn
@@ -764,7 +825,7 @@ public class AgentCodeNodeTests
         ["model"] = Str("gpt-5.3-codex"),
     };
 
-    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume, Dictionary<string, JsonElement>? inputs = null) => new()
+    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume, Dictionary<string, JsonElement>? inputs = null, JsonElement? priorAttemptPayload = null) => new()
     {
         Inputs = inputs ?? new Dictionary<string, JsonElement>(),
         Config = config,
@@ -774,5 +835,6 @@ public class AgentCodeNodeTests
         Logger = NullLogger.Instance,
         Observability = NodeObservability.NoOp,
         ResumePayload = resume,
+        PriorAttemptPayload = priorAttemptPayload,
     };
 }
