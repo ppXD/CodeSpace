@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -151,6 +152,139 @@ public class SupervisorAcceptanceGraderTests
         grade.Detail.ShouldContain("clone exit 128", Case.Insensitive);
     }
 
+    // ── S2: GradePatchAsync — the branch-less twin (a fresh clone at the BASE SHA + apply, no push) ────
+
+    [Fact]
+    public async Task GradePatchAsync_clones_at_the_base_sha_not_a_branch()
+    {
+        var resolver = new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" });
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(resolver, new FakeGrader(Pass), runners: runners);
+
+        var repoId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        await grader.GradePatchAsync(repoId, teamId, "deadbeef", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
+
+        resolver.RepositoryId.ShouldBe(repoId);
+        resolver.TeamId.ShouldBe(teamId);
+        // git clone --branch (the resolver-driven path GradeAsync uses) can never check out a raw commit SHA, so
+        // the base is checked out via a SEPARATE detached checkout — never threaded through the resolver's ref.
+        resolver.Ref.ShouldBeNull("a base SHA is never passed as the branch-oriented resolver ref");
+        runners.Invocations.ShouldContain(i => i.Args.Contains("checkout") && i.Args.Contains("--detach") && i.Args.Contains("deadbeef"), "the base SHA is checked out detached after a full clone");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_resolves_an_offloaded_patch_team_scoped_before_applying()
+    {
+        var offloader = new FakeOffloader();
+        var artifactId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        offloader.Store(artifactId, teamId, "diff --git a/x b/x\n");
+
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, offloader: offloader);
+
+        var grade = await grader.GradePatchAsync(Guid.NewGuid(), teamId, "base", "", artifactId, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+        offloader.Resolved.ShouldContain((teamId, (Guid?)artifactId), "the offloaded patch is resolved under the SAME team the grade runs for");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_grades_the_workspace_after_a_successful_apply()
+    {
+        var oracle = new FakeGrader(Pass);
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var grade = await grader.GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+        var cloneDirectory = CloneDirectory(runners);
+        oracle.Context!.WorkspaceDirectory.ShouldBe(cloneDirectory, "the SAME oracle tail GradeAsync uses grades the post-apply working tree");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_removes_the_clone_on_the_happy_path()
+    {
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners)
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff", null, Spec(), 30, CancellationToken.None);
+
+        Directory.Exists(CloneDirectory(runners)).ShouldBeFalse("the clone directory is removed after grading, exactly like the branch-based path's handle disposal");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_fails_closed_when_the_patch_resolves_to_nothing()
+    {
+        // Neither an inline patch nor a resolvable artifact (missing / cross-team) — nothing to apply.
+        var grade = await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: new ScriptedApplyRunnerRegistry(applySucceeds: true))
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "", null, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse("an empty/unresolvable patch is nothing to verify — fail closed, never a silent pass");
+        grade.Detail.ShouldBe("no-branch-or-repo", "the SAME detail the branch-less path uses when there is genuinely nothing to grade");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_fails_closed_when_the_patch_does_not_apply_onto_its_recorded_base()
+    {
+        var grade = await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass),
+                runners: new ScriptedApplyRunnerRegistry(applySucceeds: false, stderr: "error: patch does not apply"))
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldContain("patch-apply-failed");
+        grade.Detail.ShouldContain("patch does not apply", Case.Insensitive, "git's own stderr is legible to the operator");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_never_stages_or_pushes_read_only_by_construction()
+    {
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners)
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
+
+        var apply = runners.Invocations.Single(i => i.Args.Contains("apply"));
+        apply.Args.ShouldNotContain("--index", "no stage — this grade is read-only, nothing is ever committed");
+        runners.Invocations.ShouldNotContain(i => i.Args.Contains("push"), "no push — the clone is graded then discarded");
+        runners.Invocations.ShouldNotContain(i => i.Args.Contains("commit"), "no commit — the clone is graded then discarded");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_a_null_clone_request_fails_closed()
+    {
+        var grade = await Build(new FakeResolver(clone: null), new FakeGrader(Pass), runners: new ScriptedApplyRunnerRegistry(applySucceeds: true))
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff", null, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldContain("clone-failed");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_a_clone_command_failure_fails_closed_without_throwing()
+    {
+        var grade = await Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass),
+                runners: new ScriptedApplyRunnerRegistry(applySucceeds: true, cloneSucceeds: false))
+            .GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse("git clone itself failing (not just resolving to no request) still fails closed");
+        grade.Detail.ShouldContain("clone-failed");
+    }
+
+    [Fact]
+    public async Task GradePatchAsync_a_cancellation_propagates_and_still_removes_the_clone()
+    {
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(new OperationCanceledException()), runners: runners);
+
+        await Should.ThrowAsync<OperationCanceledException>(() => grader.GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base", "diff", null, Spec(), 30, CancellationToken.None));
+
+        Directory.Exists(CloneDirectory(runners)).ShouldBeFalse("the clone is removed even when grading is cancelled");
+    }
+
+    /// <summary>The destination directory argument of the scripted <c>git clone</c> invocation — <c>GradePatchAsync</c> generates this path itself (a fresh GUID under the shared workspaces root), so tests read it back off the runner rather than injecting it.</summary>
+    private static string CloneDirectory(ScriptedApplyRunnerRegistry runners) => runners.Invocations.First(i => i.Args.Contains("clone")).Args[^1];
+
     // ── The corpus-stub factory the adapter reuses ───────────────────────────────────
 
     [Theory]
@@ -171,13 +305,13 @@ public class SupervisorAcceptanceGraderTests
 
     private static readonly BenchmarkGrade Pass = new() { Passed = true, Detail = "tests-passed" };
 
-    private static SupervisorAcceptanceGrader Build(FakeResolver resolver, FakeGrader oracle, string handleDir = "/tmp/clone", WorkspaceException? throwOnPrepare = null) =>
+    private static SupervisorAcceptanceGrader Build(FakeResolver resolver, FakeGrader oracle, string handleDir = "/tmp/clone", WorkspaceException? throwOnPrepare = null, ISandboxRunnerRegistry? runners = null, IArtifactOffloader? offloader = null) =>
         new(resolver, new FakeProviderRegistry(new FakeProvider(new FakeHandle(handleDir), throwOnPrepare)),
-            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            runners ?? new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), offloader ?? new FakeOffloader(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     private static SupervisorAcceptanceGrader BuildWithHandle(FakeHandle handle, FakeGrader oracle) =>
         new(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeProviderRegistry(new FakeProvider(handle, null)),
-            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), new FakeOffloader(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     // ── Fakes ────────────────────────────────────────────────────────────────────────
 
@@ -277,6 +411,72 @@ public class SupervisorAcceptanceGraderTests
             Context = context;
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade!);
+        }
+    }
+
+    /// <summary>Inline text passes through; an artifact id resolves to whatever was <see cref="Store"/>d for it (team-scoped, mirroring the real offloader's cross-team gate), else empty. Records every (team, artifactId) it was asked to resolve.</summary>
+    private sealed class FakeOffloader : IArtifactOffloader
+    {
+        private readonly Dictionary<Guid, (Guid Team, string Text)> _store = new();
+        public List<(Guid Team, Guid? ArtifactId)> Resolved { get; } = new();
+
+        public void Store(Guid artifactId, Guid team, string text) => _store[artifactId] = (team, text);
+
+        public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken)
+        {
+            Resolved.Add((teamId, artifactId));
+
+            if (artifactId is null) return Task.FromResult(inline ?? "");
+
+            return Task.FromResult(_store.TryGetValue(artifactId.Value, out var e) && e.Team == teamId ? e.Text : "");
+        }
+
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("the grader never offloads");
+    }
+
+    /// <summary>A runner whose <c>git clone</c>/<c>apply</c> outcomes are independently scripted — the seam <see cref="SupervisorAcceptanceGrader.GradePatchAsync"/>'s clone-at-base-SHA + patch application drive, unlike <see cref="StubRunner"/> (which the branch-based path never actually calls). Checkout always succeeds (a scripted checkout failure is covered at the real-git integration tier).</summary>
+    private sealed class ScriptedApplyRunnerRegistry : ISandboxRunnerRegistry
+    {
+        private readonly ScriptedApplyRunner _runner;
+        public ScriptedApplyRunnerRegistry(bool applySucceeds, string stderr = "", bool cloneSucceeds = true) => _runner = new ScriptedApplyRunner(applySucceeds, stderr, cloneSucceeds);
+        public ISandboxRunner Resolve(string kind) => _runner;
+        public IReadOnlyList<ISandboxRunner> All => new ISandboxRunner[] { _runner };
+        public IReadOnlyList<SandboxSpec> Invocations => _runner.Invocations;
+    }
+
+    private sealed class ScriptedApplyRunner : ISandboxRunner
+    {
+        private readonly bool _applySucceeds;
+        private readonly string _stderr;
+        private readonly bool _cloneSucceeds;
+
+        public ScriptedApplyRunner(bool applySucceeds, string stderr, bool cloneSucceeds) { _applySucceeds = applySucceeds; _stderr = stderr; _cloneSucceeds = cloneSucceeds; }
+
+        public List<SandboxSpec> Invocations { get; } = new();
+        public string Kind => "local";
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocations.Add(spec);
+
+            if (spec.Args.Contains("clone"))
+            {
+                // Mimic git's own side effect (creating the destination directory) so the REAL patch-file write
+                // ApplyPatchAsync performs next lands somewhere that genuinely exists on disk.
+                if (_cloneSucceeds) Directory.CreateDirectory(spec.Args[^1]);
+
+                return Task.FromResult(_cloneSucceeds
+                    ? new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" }
+                    : new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: could not read from remote repository" });
+            }
+
+            if (spec.Args.Contains("checkout"))
+                return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+
+            return Task.FromResult(_applySucceeds
+                ? new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" }
+                : new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = _stderr });
         }
     }
 }

@@ -73,6 +73,93 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
     }
 
+    // ── S2: a branch-less unit's OWN recorded manifest (never the outcome-JSON snapshot — I2) ──────────
+
+    [Fact]
+    public async Task A_unit_with_no_branch_but_a_recorded_patch_grades_via_the_patch_not_fail_closed()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: null)));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: null, baseSha: "deadbeef", patchArtifactId: Guid.NewGuid());
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(0, "no branch → the branch-based path is never invoked");
+        grader.PatchCalls.Count.ShouldBe(1, "the unit's OWN recorded manifest carries a gradeable patch — grade it instead of failing closed");
+        grader.PatchCalls[0].RepositoryId.ShouldBe(repoId);
+        grader.PatchCalls[0].BaseSha.ShouldBe("deadbeef");
+        grader.PatchCalls[0].Command.ShouldBe(Check);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AcceptancePassed.ShouldBe(true);
+    }
+
+    [Fact]
+    public async Task A_unit_with_no_branch_no_patch_and_expects_changes_false_is_a_vacuous_pass()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayloadWithExpectsChanges("s1", Check, expectsChanges: false));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), producedBranch: null)));
+        // No manifest seeded at all — the producer genuinely made no changes, matching a real investigate-only subtask.
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(0);
+        grader.PatchCalls.Count.ShouldBe(0);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var unit = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        unit.AcceptancePassed.ShouldBe(true, "the subtask declared no changes were expected, and none were produced — the correctly-predicted outcome, never a failure");
+        unit.AcceptanceDetail.ShouldStartWith("not-applicable");
+    }
+
+    [Fact]
+    public async Task A_unit_with_no_branch_no_patch_and_expects_changes_true_fails_closed_exactly_like_the_default()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayloadWithExpectsChanges("s1", Check, expectsChanges: true));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), producedBranch: null)));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var unit = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        unit.AcceptancePassed.ShouldBe(false);
+        unit.AcceptanceDetail.ShouldBe("no-branch-or-repo");
+    }
+
+    [Fact]
+    public async Task A_verb_inferred_read_only_subtask_with_no_branch_is_a_vacuous_pass_without_an_explicit_declaration()
+    {
+        // No explicit expectsChanges — the server infers it from the instruction's leading verb ("investigate").
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, InvestigatePlanPayload("s1", Check));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), producedBranch: null)));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AcceptancePassed.ShouldBe(true, "'investigate' is a read-only verb — the server infers no changes were expected");
+    }
+
     [Fact]
     public async Task A_subtask_authored_artifact_present_kind_is_forwarded_to_the_per_unit_grade()
     {
@@ -348,6 +435,30 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     private static string ArtifactPlanPayload(string id, string[] paths) =>
         JsonSerializer.Serialize(new { goal = Goal, subtasks = new[] { new { id, title = id, instruction = "do " + id, acceptance = new { command = paths, kind = "ArtifactPresent" } } } }, AgentJson.Options);
 
+    /// <summary>A single-subtask plan with an EXPLICIT S2 <c>expectsChanges</c> declaration alongside its acceptance command.</summary>
+    private static string PlanPayloadWithExpectsChanges(string id, string[] command, bool expectsChanges) =>
+        JsonSerializer.Serialize(new { goal = Goal, subtasks = new[] { new { id, title = id, instruction = "do " + id, acceptance = new { command }, expectsChanges } } }, AgentJson.Options);
+
+    /// <summary>A single-subtask plan whose instruction opens with a read-only verb and carries NO explicit expectsChanges — exercises the server's verb-based S2 fallback.</summary>
+    private static string InvestigatePlanPayload(string id, string[] command) =>
+        JsonSerializer.Serialize(new { goal = Goal, subtasks = new[] { new { id, title = id, instruction = "investigate the root cause", acceptance = new { command } } } }, AgentJson.Options);
+
+    /// <summary>Seed a manifest row directly (bypassing IPublishManifestStore, mirroring SeedDecisionAsync's direct-row style) — the durable per-unit source S2's patch fallback reads (I2), never re-derived from the decision's own outcome snapshot.</summary>
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, Guid repositoryId, string? branch, string? baseSha, Guid? patchArtifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
+            RepositoryAlias = "primary", Branch = branch, BaseSha = baseSha, PatchArtifactId = patchArtifactId,
+            PublishStateValue = branch is not null ? PublishState.Pushed : PublishState.PatchOnly,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
     private static SupervisorAgentResult Unit(Guid agentRunId, string? producedBranch) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch };
 
@@ -367,7 +478,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }
@@ -461,11 +572,20 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         public int CallCount => Calls.Count;
         public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall => Calls.Count > 0 ? Calls[^1] : null;
 
+        public List<(Guid RepositoryId, Guid TeamId, string BaseSha, Guid? PatchArtifactId, IReadOnlyList<string> Command)> PatchCalls { get; } = new();
+
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             Calls.Add((repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass));
             if (_throw != null) throw _throw;
             return Task.FromResult(_gradeByBranch?.Invoke(branch) ?? _grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            PatchCalls.Add((repositoryId, teamId, baseSha, patchArtifactId, spec.Command));
+            if (_throw != null) throw _throw;
+            return Task.FromResult(_grade);
         }
     }
 }

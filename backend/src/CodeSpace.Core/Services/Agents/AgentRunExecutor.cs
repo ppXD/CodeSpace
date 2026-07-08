@@ -1159,6 +1159,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// the subjective output critic, so a failed oracle never bills a review. Deferred (verdict null, run intact):
     /// no contract, a non-success result, or a multi-repo result (per-repo grading is a follow-on, mirroring the
     /// supervisor fold's same deferral). Grader errors record not-accepted rather than crashing the completion.
+    ///
+    /// <para>S2: a run with NO pushed branch (a patch-only publish policy, or a guard-blocked push) is graded
+    /// against its own RECORDED PATCH instead of failing closed, when one exists — the same agent-independent
+    /// grader, just anchored on the base SHA instead of a ref (<see cref="ISupervisorAcceptanceGrader.GradePatchAsync"/>).
+    /// Only when there is truly nothing to grade (no branch, no patch) does <see cref="AgentAcceptanceContract.ExpectsChanges"/>
+    /// decide the outcome: <c>false</c> is the correctly-predicted no-diff case (a vacuous pass, never a failure);
+    /// otherwise (the byte-identical default) it fails closed exactly as before this field existed.</para>
     /// </summary>
     internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
     {
@@ -1179,10 +1186,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var spec = task.Acceptance!;
         var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
 
-        if (string.IsNullOrEmpty(result.ProducedBranch) || task.RepositoryId is not { } repositoryId)
+        if (task.RepositoryId is not { } repositoryId)
         {
-            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no produced branch/repo to grade — failing closed", run.Id);
+            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no repository to grade against — failing closed", run.Id);
 
+            return AcceptanceFailed(result, "no-branch-or-repo");
+        }
+
+        var hasBranch = !string.IsNullOrEmpty(result.ProducedBranch);
+        var hasPatch = HasGradeablePatch(result);
+
+        if (!hasBranch && !hasPatch)
+        {
+            if (!AgentAcceptanceContract.ExpectsChanges(task))
+            {
+                _logger.LogInformation("Agent run {RunId}: no diff was expected and none was produced — the acceptance contract is vacuously satisfied", run.Id);
+                return AgentAcceptanceContract.NotApplicable(result, "not-applicable: no changes were expected and none were produced");
+            }
+
+            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no produced branch or recorded patch to grade — failing closed", run.Id);
             return AcceptanceFailed(result, "no-branch-or-repo");
         }
 
@@ -1190,8 +1212,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             using var scope = _scopeFactory.CreateScope();
-            grade = await scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>()
-                .GradeAsync(repositoryId, run.TeamId, result.ProducedBranch, spec with { Command = command }, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
+            var fullSpec = spec with { Command = command };
+
+            grade = hasBranch
+                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false)
+                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1211,6 +1237,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return AcceptanceFailed(result, grade.Detail);
     }
+
+    /// <summary>Whether <paramref name="result"/> carries a recorded patch this executor could grade with (S2) — a base to anchor the independent clone on, PLUS either an inline diff or an offloaded artifact reference. Absent any one of these there is genuinely nothing to apply.</summary>
+    private static bool HasGradeablePatch(AgentRunResult result) =>
+        !string.IsNullOrEmpty(result.BaseSha) && (result.PatchArtifactId is not null || !string.IsNullOrEmpty(result.Patch));
 
     private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => AgentAcceptanceContract.FailClosed(result, detail);
 

@@ -67,6 +67,15 @@ public sealed record WorkPlanItem
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Model { get; init; }
 
+    /// <summary>
+    /// S2 — whether this item is expected to produce a code diff/branch at all (mirrors
+    /// <see cref="SupervisorDecisionPayloads"/>'s <c>SupervisorPlannedSubtask.ExpectsChanges</c>, the loop-tier
+    /// source this persists). Null (the producer didn't say) is resolved by the same server inference the
+    /// supervisor's per-unit fold applies, never stored pre-resolved here — the plan stays the producer's raw claim.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ExpectsChanges { get; init; }
+
     /// <summary>The graph-tier mapping: a <c>plan.author</c> planner subtask → the unified item shape.</summary>
     public static WorkPlanItem From(PlannedSubtask subtask) => new()
     {
@@ -90,5 +99,6 @@ public sealed record WorkPlanItem
         Instruction = subtask.Instruction,
         DependsOn = subtask.DependsOn,
         Acceptance = subtask.Acceptance,
+        ExpectsChanges = subtask.ExpectsChanges,
     };
 }

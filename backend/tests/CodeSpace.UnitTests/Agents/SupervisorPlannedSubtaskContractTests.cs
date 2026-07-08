@@ -41,7 +41,7 @@ public class SupervisorPlannedSubtaskContractTests
         var json = JsonSerializer.Serialize(new SupervisorPlannedSubtask { Id = "s1", Title = "T", Instruction = "do" }, AgentJson.Options);
 
         json.ShouldBe("""{"id":"s1","title":"T","instruction":"do"}""");
-        foreach (var field in new[] { "dependsOn", "acceptance" })
+        foreach (var field in new[] { "dependsOn", "acceptance", "expectsChanges" })
             json.ShouldNotContain(field, Case.Insensitive, $"a null {field} must be omitted, not emitted as null (byte-identity)");
     }
 
@@ -141,8 +141,37 @@ public class SupervisorPlannedSubtaskContractTests
 
         var props = item.GetProperty("properties");
         props.TryGetProperty("dependsOn", out _).ShouldBeTrue("the subtask exposes its build-graph dependency edges");
+        props.TryGetProperty("expectsChanges", out var expectsChanges).ShouldBeTrue("the subtask exposes whether it expects to produce a diff (S2)");
+        expectsChanges.GetProperty("type").GetString().ShouldBe("boolean");
         props.GetProperty("acceptance").GetProperty("required").EnumerateArray().Select(e => e.GetString())
             .ShouldContain("command", "a subtask's acceptance reuses the command-required acceptance shape");
+    }
+
+    // ── S2: the model MAY declare expectsChanges explicitly through the schema ────────
+
+    [Fact]
+    public void A_model_emitted_subtask_can_declare_expectsChanges_through_the_schema_options()
+    {
+        const string modelJson = """
+            { "kind": "plan", "plan": { "goal": "g", "subtasks": [
+                { "id": "s1", "title": "investigate", "instruction": "look into the root cause", "expectsChanges": false },
+                { "id": "s2", "title": "fix", "instruction": "apply the fix", "expectsChanges": true }
+            ] } }
+            """;
+
+        var model = JsonSerializer.Deserialize<SupervisorModelDecision>(modelJson, SupervisorDecisionSchema.Options)!;
+
+        model.Plan!.Subtasks[0].ExpectsChanges.ShouldBe(false, "the model's explicit declaration binds through the schema options");
+        model.Plan.Subtasks[1].ExpectsChanges.ShouldBe(true);
+    }
+
+    [Fact]
+    public void A_model_emitted_subtask_without_expectsChanges_leaves_it_null()
+    {
+        var model = JsonSerializer.Deserialize<SupervisorModelDecision>(
+            """{ "kind": "plan", "plan": { "goal": "g", "subtasks": [{"id":"s1","title":"T","instruction":"do"}] } }""", SupervisorDecisionSchema.Options)!;
+
+        model.Plan!.Subtasks.Single().ExpectsChanges.ShouldBeNull("absent → the server's verb-based inference applies (SupervisorSubtaskExpectations)");
     }
 
     private static JsonElement SubtaskItem() => SupervisorDecisionSchema.ResponseSchema

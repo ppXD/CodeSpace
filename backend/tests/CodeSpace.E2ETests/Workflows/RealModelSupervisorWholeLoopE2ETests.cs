@@ -395,6 +395,115 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task The_real_model_authors_a_read_only_subtask_acceptance_that_grades_not_applicable()
+    {
+        // S2 READ-ONLY ACCEPTANCE — the model-authored proof that a per-subtask acceptance contract on a subtask
+        // expecting NO changes grades NOT-APPLICABLE (a vacuous pass), never the pre-S2 fail-closed "no-branch-or-repo".
+        // REPORT-ONLY on whether the live model actually exercises the feature (authors a per-subtask 'acceptance' AND
+        // phrases the subtask so the server's verb-based inference — SupervisorSubtaskExpectations.Resolve, the SAME
+        // production call GradeUnitAcceptanceAsync's caller uses — resolves to "no changes expected"): a model may
+        // decline either half, so a miss is a ⚠️, never a red (mirrors the dispatch/phases/dependsOn/stop-DoD authorship
+        // arms above). But WHEN the model DOES exercise it, the MECHANISM is asserted HARD (Shouldly, bypassing the
+        // report-only gate): a live model correctly declaring "no changes expected" on a subtask it also gave an
+        // acceptance contract to must grade not-applicable, not fail-closed — a miss there is a genuine S2 code
+        // regression (SupervisorTurnService.Rehydrate.cs's GradeUnitAcceptanceAsync / NotApplicableOrFailed), not a
+        // model-capability question, so it fails the build outright regardless of this arm's report-only status. The
+        // deterministic mechanism itself (branch / patch-fallback / not-applicable / fail-closed) is already proven
+        // exhaustively by SupervisorUnitAcceptanceFoldFlowTests + SupervisorAcceptanceFoldFlowTests (real Postgres +
+        // real git); this arm's job is ONLY to prove a live brain reaches for the feature at all, and that when it
+        // does, the real substrate behind it does not regress.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new InvestigateOnlyFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        // The RUN-LEVEL operator floor is deliberately UNCONDITIONAL (exit 0) — this arm's subtask makes no changes
+        // by design, so a file-presence floor (as the other arms use) would conflate the run-level stop gate with
+        // the per-subtask grade this test actually verifies.
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string readOnlyGoal =
+            "This task requires ONLY investigation, no code changes at all: analyze the repository and report what "
+          + "you find. Plan this as EXACTLY ONE subtask whose instruction begins with the word 'Investigate', and do "
+          + "not modify any files. On that subtask, author an 'acceptance' definition-of-done that runs this exact "
+          + "command: sh check.sh — so its completion is objectively verified even though it produces no diff.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: readOnlyGoal);
+
+        // REPORT-ONLY on authorship (gating:false) — but the mechanism, when exercised, is asserted hard inside the
+        // evaluator (see above), so a real regression still fails this test regardless of the outer gate.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+
+            var plan = priorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+            var subtasks = plan is null ? Array.Empty<Messages.Agents.SupervisorPlannedSubtask>() : SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson).ToArray();
+
+            // The AUTHORITATIVE compound signal: a subtask that BOTH declared its own acceptance contract AND
+            // resolves — via the SAME production call GradeUnitAcceptanceAsync's caller uses — to "no changes expected".
+            var readOnlyContractSubtask = subtasks.FirstOrDefault(s => s.Acceptance is not null && !SupervisorSubtaskExpectations.Resolve(s));
+            var authored = readOnlyContractSubtask is not null;
+
+            var note = "no subtask authored a read-only acceptance contract";
+
+            if (authored)
+            {
+                var unitResult = priorDecisions
+                    .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+                    .SelectMany(d => UnitSubtaskIdsFor(d).Zip(SupervisorOutcome.ReadAgentResults(d.OutcomeJson), (id, r) => (SubtaskId: id, Result: r)))
+                    .FirstOrDefault(pair => pair.SubtaskId == readOnlyContractSubtask!.Id).Result;
+
+                unitResult.ShouldNotBeNull(
+                    $"{Provider} '{model}' authored a read-only acceptance contract on subtask '{readOnlyContractSubtask!.Id}' but no folded agent result carries that subtask id — check the positional spawn/retry join.");
+
+                unitResult!.AcceptancePassed.ShouldBe(true,
+                    $"{Provider} '{model}' declared subtask '{readOnlyContractSubtask.Id}' expects no changes AND gave it an acceptance contract, but the fold did not grade it a vacuous pass (detail: {unitResult.AcceptanceDetail}) — a genuine S2 regression, not a model-capability gap.");
+                unitResult.AcceptanceDetail.ShouldStartWith("not-applicable:", customMessage:
+                    $"{Provider} '{model}': the S2 no-changes-expected fold must fold a not-applicable detail, never the pre-S2 fail-closed reason.");
+
+                note = $"subtask '{readOnlyContractSubtask.Id}' ({Truncate(readOnlyContractSubtask.Instruction, 60)}) → acceptancePassed={unitResult.AcceptancePassed}, detail={unitResult.AcceptanceDetail}";
+            }
+
+            return (authored,
+                $"{Provider} '{model}' S2 read-only acceptance: {note}. "
+              + (authored ? "DROVE — the live model authored a read-only per-subtask acceptance contract AND the S2 fold graded it not-applicable, never fail-closed."
+                           : "did NOT author a read-only per-subtask acceptance contract for this goal (reported, not gating — the fold mechanism itself is proven deterministically by SupervisorUnitAcceptanceFoldFlowTests)."));
+        }, gating: false);
+    }
+
+    /// <summary>The subtask id(s) a spawn (positional, the fan-out order) or a retry (one) ran — a test-local mirror of <c>SupervisorTurnService.Rehydrate.UnitSubtaskIds</c> built purely off the PUBLIC <see cref="SupervisorOutcome"/> accessors, so the test reads the same authoritative signal production folding does.</summary>
+    private static IReadOnlyList<string> UnitSubtaskIdsFor(SupervisorPriorDecision decision) =>
+        decision.DecisionKind == SupervisorDecisionKinds.Spawn
+            ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
+            : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
+
+    [Fact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to
