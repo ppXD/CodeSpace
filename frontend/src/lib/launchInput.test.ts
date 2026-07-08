@@ -40,6 +40,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   reviewerModel: "",
   reviseRounds: "",
   reviewerAgent: false,
+  tier: "Prototype",
   ...over,
 });
 
@@ -448,5 +449,23 @@ describe("triad launch fields (S4)", () => {
 
     checks.push("mutated");
     expect(auto.acceptanceChecks).toEqual(["sh", "check.sh"]);
+  });
+});
+
+describe("buildLaunchInput — quality tier (P3.2)", () => {
+  it("omits tier at Prototype (the backend default — byte-identical to before this field existed)", () => {
+    expect(buildLaunchInput(form())).not.toHaveProperty("tier");
+    expect(buildLaunchInput(form({ tier: "Prototype" }))).not.toHaveProperty("tier");
+  });
+
+  it("sends Delivery/Unattended verbatim", () => {
+    expect(buildLaunchInput(form({ tier: "Delivery" })).tier).toBe("Delivery");
+    expect(buildLaunchInput(form({ tier: "Unattended" })).tier).toBe("Unattended");
+  });
+
+  it("sends on every effort tier — the quality dial is orthogonal to the effort dial", () => {
+    expect(buildLaunchInput(form({ effort: "quick", tier: "Delivery" })).tier).toBe("Delivery");
+    expect(buildLaunchInput(form({ effort: "standard", tier: "Delivery" })).tier).toBe("Delivery");
+    expect(buildLaunchInput(form({ effort: "deep", tier: "Unattended" })).tier).toBe("Unattended");
   });
 });

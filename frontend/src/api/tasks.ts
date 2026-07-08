@@ -93,6 +93,8 @@ export interface LaunchTaskInput {
   reviseRounds?: number;
   /** S8: review each agent's output with a REAL independent agent (read-only clone of the produced branch, prefers a different harness; the model critic is the fallback). Omitted ⇒ the model critic. */
   reviewerAgent?: boolean;
+  /** P3.2: the QUALITY tier this launch MANDATES (`"Delivery"` / `"Unattended"`) — the backend enforces it server-side (an executable `acceptanceChecks` floor on a Deep launch, an `outputReviewMode` floor), so a caller can't claim Delivery/Unattended while skipping the knobs that actually gate it. Omitted ⇒ Prototype (self-report only, byte-identical to before this field existed). */
+  tier?: string;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

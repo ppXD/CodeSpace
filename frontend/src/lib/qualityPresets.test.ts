@@ -26,6 +26,11 @@ describe("qualityPresets", () => {
     expect(QUALITY_PRESETS.map(p => p.label)).toEqual(["Prototype", "Delivery", "Unattended"]);
   });
 
+  it("each preset's tier matches the backend QualityTier wire name exactly (PascalCase)", () => {
+    // P3.2: sent verbatim as LaunchTaskInput.tier — a typo here would silently misreport the tier to the backend.
+    expect(QUALITY_PRESETS.map(p => p.tier)).toEqual(["Prototype", "Delivery", "Unattended"]);
+  });
+
   it("the ladder of rigor is monotone — Delivery gates for a human, Unattended closes the loop itself", () => {
     const delivery = QUALITY_PRESETS[1].config;
     const unattended = QUALITY_PRESETS[2].config;

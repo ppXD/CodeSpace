@@ -146,3 +146,78 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(screen.getByText("Auto · from model pool")).toBeInTheDocument();
   });
 });
+
+// P3.2: the Quality preset now MANDATES an explicit tier + (on Delivery/Unattended) an executable acceptance
+// check — the backend rejects a Deep launch claiming one of those tiers without a check, so the composer must
+// catch it client-side instead of letting the operator hit a server-side error after submit.
+describe("LaunchTaskModal — quality tier (P3.2)", () => {
+  const addAcceptanceCheck = (cmd: string) => {
+    fireEvent.click(screen.getByText("Evaluation"));
+    fireEvent.click(screen.getByText(/Acceptance checks/));
+    fireEvent.change(screen.getByPlaceholderText(/\+ command/), { target: { value: cmd } });
+    fireEvent.keyDown(screen.getByPlaceholderText(/\+ command/), { key: "Enter" });
+  };
+
+  it("Prototype (the default) sends no tier and needs no acceptance check", () => {
+    renderBox();
+    typeTask("Fix the bug");
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput).not.toHaveProperty("tier");
+  });
+
+  it("picking Delivery blocks Send until an acceptance check is added, then sends tier: Delivery", () => {
+    renderBox();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Delivery"));
+    typeTask("Ship the feature");
+
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute("title", expect.stringContaining("an acceptance check"));
+
+    addAcceptanceCheck("sh check.sh");
+    expect(send).not.toBeDisabled();
+
+    fireEvent.click(send);
+    expect(lastInput).toMatchObject({ tier: "Delivery", acceptanceChecks: ["sh", "check.sh"] });
+  });
+
+  it("picking Unattended blocks Send until an acceptance check is added, then sends tier: Unattended", () => {
+    renderBox();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Unattended"));
+    typeTask("Ship it unattended");
+
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+
+    addAcceptanceCheck("sh check.sh");
+    fireEvent.click(send);
+    expect(lastInput).toMatchObject({ tier: "Unattended" });
+  });
+
+  it("Standard effort never requires the check — it verifies per item via the plan's own contracts", () => {
+    renderBox();
+    fireEvent.click(screen.getByTitle("Model and effort"));
+    fireEvent.click(screen.getByText("Effort"));
+    fireEvent.click(screen.getByText("Standard", { selector: ".lt3-opt-t" }));
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Delivery"));
+    typeTask("Plan and ship");
+
+    expect(screen.getByLabelText("Launch task")).not.toBeDisabled();
+  });
+
+  it("hand-editing a knob away from Delivery's shape keeps the tier — the mandate is not silently dropped", () => {
+    renderBox();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Delivery"));
+    // Turning the plan-confirmation gate off makes the knob mix read "Custom" (presetOf → null) — the tier the
+    // operator explicitly picked must still be enforced.
+    fireEvent.click(screen.getByText("Planning"));
+    fireEvent.click(screen.getByText(/Confirm plan first/));
+    typeTask("Ship it");
+
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+  });
+});
