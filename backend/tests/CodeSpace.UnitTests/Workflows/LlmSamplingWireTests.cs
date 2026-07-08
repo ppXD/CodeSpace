@@ -206,6 +206,53 @@ public class LlmSamplingWireTests
         JsonDocument.Parse(handler.Body!).RootElement.GetProperty("max_tokens").GetInt32().ShouldBe(onWire);
     }
 
+    // ── reasoning_effort: rides ONLY for an OpenAI reasoning model, dropped otherwise, omitted when null ───────────
+
+    [Theory]
+    [InlineData("o3-mini", true)]    // reasoning model → reasoning_effort rides
+    [InlineData("gpt-4o", false)]    // plain chat model → dropped (it 400s on the param)
+    public async Task OpenAi_sends_reasoning_effort_only_for_a_reasoning_model(string model, bool present)
+    {
+        var handler = new CapturingHandler("""{"model":"m","choices":[{"message":{"content":"hi"}}]}""");
+        var client = new OpenAiClient(Factory(handler));
+
+        await client.CompleteAsync(new LLMCompletionRequest { Model = model, SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, ReasoningEffort = "high", Credential = Cred("OpenAI") }, CancellationToken.None);
+
+        var body = JsonDocument.Parse(handler.Body!).RootElement;
+        body.TryGetProperty("reasoning_effort", out var re).ShouldBe(present, present ? "a reasoning model accepts reasoning_effort" : "a plain chat model 400s on reasoning_effort — it must be dropped");
+        if (present) re.GetString().ShouldBe("high", "the effort value rides verbatim");
+    }
+
+    [Fact]
+    public async Task A_null_reasoning_effort_is_omitted_from_the_wire()
+    {
+        var handler = new CapturingHandler("""{"model":"m","choices":[{"message":{"content":"hi"}}]}""");
+        var client = new OpenAiClient(Factory(handler));
+
+        await client.CompleteAsync(new LLMCompletionRequest { Model = "o3-mini", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, ReasoningEffort = null, Credential = Cred("OpenAI") }, CancellationToken.None);
+
+        JsonDocument.Parse(handler.Body!).RootElement.TryGetProperty("reasoning_effort", out _).ShouldBeFalse("null ⇒ omitted (the provider's own default effort)");
+    }
+
+    [Fact]
+    public async Task The_structured_path_also_carries_reasoning_effort_for_a_reasoning_model()
+    {
+        const string response = """
+            { "model": "m", "choices": [ { "message": { "role": "assistant", "content": null,
+              "tool_calls": [ { "id": "c", "type": "function", "function": { "name": "respond", "arguments": "{\"ok\":true}" } } ] }, "finish_reason": "tool_calls" } ] }
+            """;
+        var handler = new CapturingHandler(response);
+        var client = new OpenAiClient(Factory(handler));
+
+        await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "o3-mini", SystemPrompt = "s", UserPrompt = "u", ReasoningEffort = "medium", Credential = Cred("OpenAI"),
+            JsonSchema = JsonDocument.Parse("""{ "type": "object", "properties": { "ok": { "type": "boolean" } } }""").RootElement,
+        }, CancellationToken.None);
+
+        JsonDocument.Parse(handler.Body!).RootElement.GetProperty("reasoning_effort").GetString().ShouldBe("medium", "the structured (forced-function) path carries reasoning_effort too");
+    }
+
     // ── streaming: a large cap streams; the SSE events fold into the completion; a small cap stays buffered ────────
 
     private const string AnthropicSse = """

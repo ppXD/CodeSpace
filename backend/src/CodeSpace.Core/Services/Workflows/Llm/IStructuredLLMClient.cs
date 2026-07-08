@@ -42,6 +42,9 @@ public sealed record StructuredLLMCompletionRequest
     /// <summary>The sampling temperature. NULL (the default) ⇒ the param is omitted so the model/provider uses its own default — the generic "let the model decide" path. A value PINS determinism, but the transport still DROPS it for a reasoning-tier model that rejects the param (see <see cref="LlmModelCapabilities"/>), so a pinned value never 400s.</summary>
     public double? Temperature { get; init; }
 
+    /// <summary>The reasoning depth for a reasoning model — <c>none</c>/<c>minimal</c>/<c>low</c>/<c>medium</c>/<c>high</c>/<c>xhigh</c> (model-dependent). NULL (the default) ⇒ omitted (the provider's own default effort). The OpenAI wire maps it to <c>reasoning_effort</c> and sends it ONLY for a reasoning model (see <see cref="LlmModelCapabilities.SupportsReasoningEffort"/>); a non-reasoning chat model has it DROPPED (it would 400). The value rides verbatim — the API validates it per model.</summary>
+    public string? ReasoningEffort { get; init; }
+
     /// <summary>Optional generation knobs (top_p / penalties / stop) the client maps onto its API's supported params. Null ⇒ none sent.</summary>
     public LlmSamplingOptions? Sampling { get; init; }
 

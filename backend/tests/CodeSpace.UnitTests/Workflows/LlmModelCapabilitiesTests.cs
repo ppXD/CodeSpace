@@ -55,13 +55,32 @@ public class LlmModelCapabilitiesTests
     public void UsesMaxCompletionTokens_flags_only_the_openai_reasoning_series(string model, bool uses) =>
         LlmModelCapabilities.UsesMaxCompletionTokens(model, rawOverride: null).ShouldBe(uses);
 
+    // ── reasoning_effort support ──────────────────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    // OpenAI reasoning series ACCEPT reasoning_effort.
+    [InlineData("o1", true)]
+    [InlineData("o3-mini", true)]
+    [InlineData("o4-mini", true)]
+    [InlineData("gpt-5.1", true)]
+    // A non-reasoning chat model 400s on reasoning_effort → not supported.
+    [InlineData("gpt-4o", false)]
+    [InlineData("gpt-4o-mini", false)]
+    [InlineData("metis-coder-max", false)]
+    // Anthropic ids never take reasoning_effort on the OpenAI wire.
+    [InlineData("claude-opus-4-8", false)]
+    public void SupportsReasoningEffort_flags_only_the_openai_reasoning_series(string model, bool supported) =>
+        LlmModelCapabilities.SupportsReasoningEffort(model, rawOverride: null).ShouldBe(supported);
+
     [Fact]
-    public void A_blank_model_accepts_sampling_and_uses_classic_max_tokens()
+    public void A_blank_model_accepts_sampling_and_uses_classic_max_tokens_and_no_reasoning_effort()
     {
         LlmModelCapabilities.AcceptsSampling(null, null).ShouldBeTrue();
         LlmModelCapabilities.AcceptsSampling("   ", null).ShouldBeTrue();
         LlmModelCapabilities.UsesMaxCompletionTokens(null, null).ShouldBeFalse();
         LlmModelCapabilities.UsesMaxCompletionTokens("   ", null).ShouldBeFalse();
+        LlmModelCapabilities.SupportsReasoningEffort(null, null).ShouldBeFalse();
+        LlmModelCapabilities.SupportsReasoningEffort("   ", null).ShouldBeFalse();
     }
 
     // ── env overrides (Rule 8) ────────────────────────────────────────────────────────────────────────────────────
@@ -77,6 +96,8 @@ public class LlmModelCapabilitiesTests
         LlmModelCapabilities.AcceptsSampling("claude-opus-4-8", "my-reasoner").ShouldBeFalse();
         LlmModelCapabilities.AcceptsSampling("gpt-4o", "my-reasoner").ShouldBeTrue();
         LlmModelCapabilities.UsesMaxCompletionTokens("gpt-4o", "house-thinker").ShouldBeFalse();
+        LlmModelCapabilities.SupportsReasoningEffort("house-reasoner-x", "house-reasoner").ShouldBeTrue();
+        LlmModelCapabilities.SupportsReasoningEffort("gpt-4o", "house-reasoner").ShouldBeFalse();
     }
 
     // ── required-field output-cap default ─────────────────────────────────────────────────────────────────────────
@@ -155,5 +176,6 @@ public class LlmModelCapabilitiesTests
         LlmModelCapabilities.DefaultMaxOutputTokensEnvVar.ShouldBe("CODESPACE_LLM_DEFAULT_MAX_OUTPUT_TOKENS");
         LlmModelCapabilities.StreamingThresholdEnvVar.ShouldBe("CODESPACE_LLM_STREAMING_THRESHOLD_TOKENS");
         LlmModelCapabilities.OutputCeilingsEnvVar.ShouldBe("CODESPACE_LLM_OUTPUT_CEILINGS");
+        LlmModelCapabilities.ReasoningEffortModelsEnvVar.ShouldBe("CODESPACE_LLM_REASONING_EFFORT_MODELS");
     }
 }
