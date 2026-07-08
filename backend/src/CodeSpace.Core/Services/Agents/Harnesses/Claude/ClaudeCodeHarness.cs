@@ -223,7 +223,15 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (type is "assistant" or "user")
             return ReadContentEvents(root);
 
-        if (type is "system") return Array.Empty<AgentEvent>();   // init / setup lines carry no run step
+        // The "init" line is the FIRST reliable carrier of the CLI's session_id (confirmed against real claude
+        // v2.1.x stream-json output) — surface it as a minimal lifecycle event so AgentSessionIdReader finds it
+        // even when the run is killed before reaching its terminal "result" line (AgentRunExecutor's TimedOut /
+        // Stalled forced-terminal paths), mirroring exactly why CodexHarness keeps its thread.started line. Every
+        // OTHER system subtype (hook lifecycle noise) still carries no run step and stays dropped, unchanged.
+        if (type is "system")
+            return ReadString(root, "subtype") == "init"
+                ? new[] { new AgentEvent { Kind = AgentEventKind.Started, Text = "Session started", Data = root } }
+                : Array.Empty<AgentEvent>();
 
         return new[] { new AgentEvent { Kind = AgentEventKind.Warning, Text = type, Data = root } };   // unknown → surfaced, never dropped
     }

@@ -48,8 +48,9 @@ public class RealHarnessExecutionTests
         {"type":"task_complete","message":"completed"}
         """;
 
-    // Representative claude `--print --output-format stream-json` — system/init (skipped), an assistant
-    // text turn, two tool_use blocks (Bash→CommandExecuted, Edit→FileChanged), and the final result.
+    // Representative claude `--print --output-format stream-json` — system/init (surfaces as a minimal
+    // Started event carrying the session id, P2.1), an assistant text turn, two tool_use blocks
+    // (Bash→CommandExecuted, Edit→FileChanged), and the final result.
     private const string ClaudeFixture =
         """
         {"type":"system","subtype":"init","cwd":"/tmp/ws"}
@@ -526,8 +527,8 @@ public class RealHarnessExecutionTests
                 new[] { "Analyzing the failing billing tests", "npm test", "src/billing/Invoice.cs", "Fixed the billing calculation.", "completed" },
                 "Fixed the billing calculation.", new[] { "src/billing/Invoice.cs" }),
             "claude-code" => (ClaudeCodeHarness.CommandEnvVar, ClaudeFixture,
-                new[] { AgentEventKind.AssistantMessage, AgentEventKind.CommandExecuted, AgentEventKind.FileChanged, AgentEventKind.Completed },
-                new[] { "Looking into the billing tests.", "npm test", "src/billing/Invoice.cs", "Fixed the billing tests." },
+                new[] { AgentEventKind.Started, AgentEventKind.AssistantMessage, AgentEventKind.CommandExecuted, AgentEventKind.FileChanged, AgentEventKind.Completed },
+                new[] { "Session started", "Looking into the billing tests.", "npm test", "src/billing/Invoice.cs", "Fixed the billing tests." },
                 "Fixed the billing tests.", new[] { "src/billing/Invoice.cs" }),
             _ => throw new ArgumentOutOfRangeException(nameof(harnessKind)),
         };

@@ -137,13 +137,56 @@ public sealed class AgentBranchPushFlowTests
         (await remote.BranchContainsFileAsync(branchB, "agent-b.txt")).ShouldBeTrue("agent B's branch carries agent B's file");
     }
 
+    [Fact]
+    public async Task P2_2_a_timed_out_run_salvages_its_real_edit_as_a_real_pushed_branch()
+    {
+        // P2.2 end-to-end through the REAL completion pipeline (real Postgres, real git clone + authenticated push
+        // against a real bare remote — only the codex/claude binary is faked): the scripted harness writes a REAL
+        // file to the clone, THEN sleeps past the 1s wall clock. CodeSpace force-kills it, but the write already
+        // reached disk before the kill — git ground truth, independent of the kill signal — so it must land as a
+        // real branch on the remote instead of vanishing with the killed process.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
+
+            var teamId = await SeedTeamAsync();
+            using var remote = new BareRemote();
+            await remote.SeedWithOneCommitAsync();
+
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
+            var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true, timeoutSeconds: 1);
+
+            await ExecuteAsync(runId, new ScriptedHarness("printf 'salvaged edit\\n' > salvaged.txt; sleep 10"));
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.TimedOut);
+
+            var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.ChangedFiles.ShouldContain("salvaged.txt", "the file the agent wrote before the kill is captured as real git ground truth");
+            result.ProducedBranch.ShouldBe(expectedBranch, "the real edit is salvaged as a real pushed branch instead of vanishing with the killed process");
+
+            (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote genuinely carries the salvaged branch, not just result_jsonb");
+            (await remote.BranchContainsFileAsync(expectedBranch, "salvaged.txt")).ShouldBeTrue("the pushed branch tip contains the killed agent's real edit");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
+        }
+    }
+
     // ─── Seeding ─────────────────────────────────────────────────────────────
 
-    private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId, bool? pushProducedBranch)
+    private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId, bool? pushProducedBranch, int? timeoutSeconds = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, PushProducedBranch = pushProducedBranch },
+            new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, PushProducedBranch = pushProducedBranch, TimeoutSeconds = timeoutSeconds },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
