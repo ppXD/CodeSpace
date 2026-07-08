@@ -51,6 +51,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             PlannerReviewMode = request.PlannerReviewMode,
             DecisionReviewMode = request.DecisionReviewMode,
             ReviewerModelId = request.ReviewerModelId,
+            Tier = request.Tier,
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
 
