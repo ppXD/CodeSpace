@@ -161,14 +161,11 @@ public sealed record AgentTask
     public bool? EnableMcpEndpoint { get; init; }
 
     /// <summary>
-    /// Per-run opt-in to pushing the run's diff to a produced branch, layered OVER the deployment-wide
-    /// <c>CODESPACE_AGENT_PUSH_BRANCH_ENABLED</c> env flag (the SAME OR-gate shape as <see cref="EnableMcpEndpoint"/>):
-    /// <c>true</c> pushes a branch for THIS run even when the ambient flag is off; <c>null</c> (default) defers to the
-    /// ambient flag, so an ordinary run is unchanged. The executor's single gate ORs the two
-    /// (<c>AgentRunExecutor.ShouldPushProducedBranch</c>). This is the knob the one-agent-one-branch fan-out sets so each
-    /// branch agent publishes its own branch (the universal multi-agent primitive) WITHOUT flipping the global flag for
-    /// every run. There is no per-run way to force push OFF when the operator enabled it deployment-wide — fail-open
-    /// toward the operator's intent, exactly like the MCP gate.
+    /// Per-run OPT-OUT of pushing the run's diff to a produced branch — push is DEFAULT-ON for a non-empty diff
+    /// (the publish guard chain, <c>IPublishGuard</c>, is the explicit opt-out surface: <c>false</c> trips the
+    /// <c>ProfileOptOutPublishGuard</c>; <c>null</c>/<c>true</c> defer to the rest of the chain — no token, or the
+    /// repo's own <c>PublishMode</c>, may still skip the push). This is the knob the one-agent-one-branch fan-out
+    /// leaves unset so each branch agent publishes its own branch (the universal multi-agent primitive) by default.
     /// </summary>
     public bool? PushProducedBranch { get; init; }
 

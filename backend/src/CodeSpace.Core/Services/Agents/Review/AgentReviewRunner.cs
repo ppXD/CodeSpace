@@ -100,7 +100,11 @@ public sealed class AgentReviewRunner : IScopedDependency
         Autonomy = AgentAutonomyLevel.Confined,
         Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined),
         TimeoutSeconds = ReviewerTimeoutSeconds,
-        PushProducedBranch = null,
+        // Explicit opt-out (not null/deferred): a reviewer's job is to review, never to publish. Push is DEFAULT-ON
+        // for a non-empty diff now (PR-2), so if a misbehaving reviewer model ever dirties its clone, null would
+        // silently push a codespace/agent/{reviewRunId:N} branch to the user's remote — an unintended side effect
+        // this explicit false forecloses regardless of what the reviewer's clone ends up looking like.
+        PushProducedBranch = false,
         OutputReviewMode = ReviewMode.None,
         ReviewerAgent = false,
         MaxReviseRounds = 0,

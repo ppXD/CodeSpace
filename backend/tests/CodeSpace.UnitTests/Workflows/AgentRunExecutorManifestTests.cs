@@ -9,8 +9,9 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// Pins <see cref="AgentRunExecutor.BuildManifestUpsert"/> — the pure mapping from a run's produced-artifact facts
 /// to the publish-manifest row. This IS the I1/I3 invariant's decision logic: whether a repo's work resolves to
-/// <see cref="PublishState.Pushed"/> or <see cref="PublishState.PatchOnly"/>, and whether that PatchOnly was an
-/// intentional skip or a failed attempt (<see cref="PublishManifestUpsert.PublishError"/>).
+/// <see cref="PublishState.Pushed"/> or <see cref="PublishState.PatchOnly"/>, and — when PatchOnly — whether that
+/// was a BY-CHOICE guard skip (<see cref="PublishManifestUpsert.Summary"/>) or a FAILED attempt
+/// (<see cref="PublishManifestUpsert.PublishError"/>).
 /// </summary>
 [Trait("Category", "Unit")]
 public class AgentRunExecutorManifestTests
@@ -20,17 +21,18 @@ public class AgentRunExecutorManifestTests
     [Fact]
     public void A_produced_branch_resolves_to_Pushed_with_the_branch_name_recorded()
     {
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, acceptancePassed: null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, publishSkipReason: null, acceptancePassed: null);
 
         upsert.PublishStateValue.ShouldBe(PublishState.Pushed);
         upsert.Branch.ShouldBe("codespace/agent/deadbeef");
         upsert.PublishError.ShouldBeNull();
+        upsert.Summary.ShouldBeNull();
     }
 
     [Fact]
     public void No_branch_and_no_error_resolves_to_PatchOnly_by_choice()
     {
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: null, acceptancePassed: null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: null, publishSkipReason: null, acceptancePassed: null);
 
         upsert.PublishStateValue.ShouldBe(PublishState.PatchOnly);
         upsert.Branch.ShouldBeNull();
@@ -40,10 +42,20 @@ public class AgentRunExecutorManifestTests
     [Fact]
     public void No_branch_with_an_error_resolves_to_PatchOnly_with_the_failure_recorded()
     {
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: "push failed: connection refused", acceptancePassed: null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: "push failed: connection refused", publishSkipReason: null, acceptancePassed: null);
 
         upsert.PublishStateValue.ShouldBe(PublishState.PatchOnly);
         upsert.PublishError.ShouldBe("push failed: connection refused", "a non-null error is what distinguishes an ATTEMPTED-and-failed push from a policy skip");
+    }
+
+    [Fact]
+    public void A_guard_skip_reason_lands_on_the_manifests_summary()
+    {
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: null, publishSkipReason: "the repository requires patch-only publishing", acceptancePassed: null);
+
+        upsert.PublishStateValue.ShouldBe(PublishState.PatchOnly);
+        upsert.PublishError.ShouldBeNull("a guard skip is a policy CHOICE, not a failed attempt");
+        upsert.Summary.ShouldBe("the repository requires patch-only publishing", "the winning guard's reason must be visible on the manifest row, not silently dropped");
     }
 
     [Theory]
@@ -51,13 +63,13 @@ public class AgentRunExecutorManifestTests
     [InlineData(false, PublishAcceptanceState.Failed)]
     [InlineData(null, PublishAcceptanceState.NotApplicable)]
     public void Acceptance_tristate_mirrors_the_graders_verdict_verbatim(bool? passed, PublishAcceptanceState expected) =>
-        AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, Array.Empty<string>(), null, null, passed)
+        AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, Array.Empty<string>(), null, null, null, passed)
             .AcceptanceState.ShouldBe(expected);
 
     [Fact]
     public void Empty_changed_files_leaves_the_json_column_null_not_an_empty_array()
     {
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, Array.Empty<string>(), null, null, null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, Array.Empty<string>(), null, null, null, null);
 
         upsert.ChangedFileCount.ShouldBe(0);
         upsert.ChangedFilesJson.ShouldBeNull();
@@ -68,7 +80,7 @@ public class AgentRunExecutorManifestTests
     {
         var files = new[] { "src/A.cs", "src/B.cs" };
 
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, files, null, null, null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, null, null, files, null, null, null, null);
 
         upsert.ChangedFileCount.ShouldBe(2);
         JsonSerializer.Deserialize<string[]>(upsert.ChangedFilesJson!).ShouldBe(files);
@@ -81,7 +93,7 @@ public class AgentRunExecutorManifestTests
         var repositoryId = Guid.NewGuid();
         var patchArtifactId = Guid.NewGuid();
 
-        var upsert = AgentRunExecutor.BuildManifestUpsert(run, "web", repositoryId, "base-sha", patchArtifactId, new[] { "x" }, "branch-x", null, true);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(run, "web", repositoryId, "base-sha", patchArtifactId, new[] { "x" }, "branch-x", null, null, true);
 
         upsert.TeamId.ShouldBe(run.TeamId);
         upsert.WorkflowRunId.ShouldBe(run.WorkflowRunId);

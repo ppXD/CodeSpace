@@ -721,12 +721,13 @@ public class AgentCodeNodeTests
     [Fact]
     public async Task No_push_branch_config_leaves_the_task_deferring_to_the_ambient_flag()
     {
-        // Absent → null → the executor's ShouldPushProducedBranch defers entirely to the env flag, so an ordinary
-        // authored node is byte-identical to before this knob existed.
+        // Absent → null → push is DEFAULT-ON for a non-empty diff (the deleted env gate's replacement); this pins
+        // that the node itself stays byte-identical (still emits null when unset) — the meaning of null downstream
+        // is EvaluatePublishGuardsAsync's concern, not this node's.
         var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
 
         JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.PushProducedBranch
-            .ShouldBeNull("no pushBranch config → null = defer to the deployment-wide flag (no behaviour change)");
+            .ShouldBeNull("no pushBranch config → the node emits null (no behaviour change to the node itself)");
     }
 
     // ── mode (the model-authored intent) → base permissions + push, composing under the existing precedence ─────
@@ -795,7 +796,7 @@ public class AgentCodeNodeTests
 
         var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
         task.Permissions.ShouldBe(new AgentPermissions(), "no mode → the tier-derived baseline, byte-identical to before the mode knob existed");
-        task.PushProducedBranch.ShouldBeNull("no mode and no explicit pushBranch → null = defer to the deployment-wide flag");
+        task.PushProducedBranch.ShouldBeNull("no mode and no explicit pushBranch → the node still emits null (push is default-on downstream, not this node's concern)");
     }
 
     [Fact]

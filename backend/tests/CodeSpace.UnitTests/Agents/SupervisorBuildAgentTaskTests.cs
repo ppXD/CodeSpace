@@ -46,7 +46,7 @@ public class SupervisorBuildAgentTaskTests
         task.RepositoryId.ShouldBeNull("no repo → analysis-only");
         task.ApprovalConversationId.ShouldBeNull("no supervisor conversation → no approval surface");
         task.EnableMcpEndpoint.ShouldBeNull("no MCP opt-in → defer to the ambient flag");
-        task.PushProducedBranch.ShouldBeNull("no push opt-in → defer to the ambient flag (a spawn pushes no branch unless the deployment flag is on)");
+        task.PushProducedBranch.ShouldBeNull("no push opt-in → the spawn emits null, which now means push-by-default downstream (a guard is the explicit opt-out, not this)");
 
         // Permissions are DERIVED from the (default Standard) autonomy via AgentAutonomyPolicy — which for
         // Standard is value-equal to the AgentTask record's own default (no network, workspace write), so the

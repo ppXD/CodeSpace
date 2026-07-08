@@ -52,26 +52,17 @@ namespace CodeSpace.E2ETests.Sessions;
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
 [Trait("Surface", "Engine")]
-public sealed class SessionConvergenceWholeLoopE2ETests : IDisposable
+public sealed class SessionConvergenceWholeLoopE2ETests
 {
     private const string AlphaGoal = "Implement " + ConvergenceFeatureFakeCli.AlphaMarker + ": add a.sh that prints A-OK.";
     private const string BetaGoal = "Now implement " + ConvergenceFeatureFakeCli.BetaMarker + ": add b.sh that prints B-OK. Leave a.sh unchanged.";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _pushBefore;
 
-    public SessionConvergenceWholeLoopE2ETests(PostgresFixture fixture)
-    {
-        _fixture = fixture;
-
-        // A task-launch single-agent run pushes its produced branch only when the deployment push flag is on (the launch
-        // projection omits a per-run pushBranch, so ShouldPushProducedBranch defers to this env var). Turn 2 can only
-        // build on turn 1's branch if turn 1 actually PUSHED it to the bound remote.
-        _pushBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, "1");
-    }
-
-    public void Dispose() => Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, _pushBefore);
+    // A task-launch single-agent run pushes its produced branch by default now (push is default-on for a non-empty
+    // diff since PR-2's env-gate deletion) — turn 2 building on turn 1's branch no longer needs the deployment
+    // push flag forced on here.
+    public SessionConvergenceWholeLoopE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
     public async Task Turn2_builds_feature_B_on_turn1s_produced_branch_and_both_features_pass_the_objective_grade()

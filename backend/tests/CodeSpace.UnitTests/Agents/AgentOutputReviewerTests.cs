@@ -70,7 +70,7 @@ public sealed class AgentOutputReviewerTests
         review.ReviewerAgent.ShouldBeFalse("a reviewer never spawns a reviewer");
         review.MaxReviseRounds.ShouldBe(0, "a reviewer never self-revises");
         review.Acceptance.ShouldBeNull("a reviewer carries no oracle of its own");
-        review.PushProducedBranch.ShouldBeNull("nothing to publish");
+        review.PushProducedBranch.ShouldBe(false, "a reviewer never publishes — explicit opt-out, not deferred to the (now default-on) push behavior");
         review.ModelCredentialModelId.ShouldBe(producer.ReviewerModelId, "the operator's reviewer model pin drives the reviewer agent's model");
         review.TimeoutSeconds.ShouldBe(AgentReviewRunner.ReviewerTimeoutSeconds);
         review.Goal.ShouldContain(AgentReviewRunner.VerdictMarker, customMessage: "the goal quotes the exact final-message contract");
