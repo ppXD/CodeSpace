@@ -332,6 +332,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         if (postBound != null) return ForcedStop(postBound);
 
+        // I3 (publish-or-park): a stop that would terminalize accepted-but-unpublished work is rejected and
+        // substituted BEFORE governance — the substitution (a server-authored merge, or an ask_human park) is not
+        // a model choice governance should evaluate, it is the server enforcing a correctness floor.
+        if (SupervisorPublishGate.Validate(context, decision) is { } published) return published;
+
         return GateSideEffectingDecision(context, decision);
     }
 

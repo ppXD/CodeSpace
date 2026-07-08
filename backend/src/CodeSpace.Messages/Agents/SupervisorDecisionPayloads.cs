@@ -116,6 +116,16 @@ public sealed record SupervisorMergePayload
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SynthesisInstruction { get; init; }
+
+    /// <summary>
+    /// I3 (publish-or-park): set ONLY by <c>SupervisorPublishGate</c>'s server-authored substitution of a <c>stop</c>
+    /// that would otherwise terminalize accepted-but-unpublished work — never model-authored. Forces integration to
+    /// run regardless of the operator's on-disk-integration opt-in (I3 is a correctness floor, not a feature the
+    /// operator can leave off) and skips the LLM synthesis facet (the model didn't ask for a combined narrative,
+    /// only the server is trying to publish). Null-omitted so a model's own merge serializes byte-identical to before.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ForcedByPublishGate { get; init; }
 }
 
 /// <summary>

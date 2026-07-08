@@ -322,6 +322,57 @@ public class SupervisorResolverTests
         SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("wave1's clean branch is stale once wave2 is spawned un-integrated");
     }
 
+    // ── PR-5 I3: FindUnpublishedFrontier — mirrors ReadFinalIntegratedBranch's EXACT walk, by construction ──
+
+    [Fact]
+    public void FindUnpublishedFrontier_is_null_on_an_empty_tape() =>
+        SupervisorOutcome.FindUnpublishedFrontier(Array.Empty<SupervisorPriorDecision>()).ShouldBeNull("nothing was ever produced");
+
+    [Fact]
+    public void FindUnpublishedFrontier_is_null_when_the_latest_merge_is_clean()
+    {
+        var tape = new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/x")) };
+
+        SupervisorOutcome.FindUnpublishedFrontier(tape).ShouldBeNull("published — the SAME barrier ReadFinalIntegratedBranch already crosses");
+    }
+
+    [Fact]
+    public void FindUnpublishedFrontier_is_null_when_the_latest_resolve_is_verified()
+    {
+        var tape = new[] { Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")) };
+
+        SupervisorOutcome.FindUnpublishedFrontier(tape).ShouldBeNull("a verified resolution IS a publish");
+    }
+
+    [Fact]
+    public void FindUnpublishedFrontier_names_a_spawn_that_nothing_later_merged()
+    {
+        var spawn = Decision(SupervisorDecisionKinds.Spawn, 1, "{}");
+
+        SupervisorOutcome.FindUnpublishedFrontier(new[] { spawn }).ShouldBe(spawn);
+    }
+
+    [Fact]
+    public void FindUnpublishedFrontier_names_the_frontier_underneath_a_conflicted_merge_not_the_merge_itself()
+    {
+        // A non-clean merge is TRANSPARENT to this walk (mirrors ReadFinalIntegratedBranch): it matches neither the
+        // clean-branch check nor the StagesAgents check, so the walk continues past it to the real frontier — the
+        // caller (SupervisorPublishGate) separately detects "a merge already ran after this frontier" by sequence.
+        var spawn = Decision(SupervisorDecisionKinds.Spawn, 1, "{}");
+        var tape = new[] { spawn, Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)) };
+
+        SupervisorOutcome.FindUnpublishedFrontier(tape).ShouldBe(spawn);
+    }
+
+    [Fact]
+    public void FindUnpublishedFrontier_names_the_latest_staging_decision_when_several_exist()
+    {
+        var latest = Decision(SupervisorDecisionKinds.Retry, 3, "{}");
+        var tape = new[] { Decision(SupervisorDecisionKinds.Spawn, 1, "{}"), Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)), latest };
+
+        SupervisorOutcome.FindUnpublishedFrontier(tape).ShouldBe(latest, "the MOST RECENT unconsolidated staging decision is the frontier, not an earlier one");
+    }
+
     // ── The SHARED verified-resolution-branch predicate (Part A + Part B call this one helper — Rule 7) ──
 
     [Fact]

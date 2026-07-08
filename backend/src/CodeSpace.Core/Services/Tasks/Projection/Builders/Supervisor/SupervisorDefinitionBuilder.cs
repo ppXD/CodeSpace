@@ -168,13 +168,15 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         return map.Count > 0 ? map : null;
     }
 
-    /// <summary>The terminal surfaces the supervisor's outputs as the run's outputs — the SAME output keys agent.supervisor emits (status / decision / reason / turns), wired via {{ref}}.</summary>
+    /// <summary>The terminal surfaces the supervisor's outputs as the run's outputs — the SAME output keys agent.supervisor emits (status / decision / reason / turns / integratedBranch / repositoryBranches), wired via {{ref}}.</summary>
     private static JsonElement TerminalInputs() => JsonSerializer.SerializeToElement(new
     {
         status = "{{nodes.sup.outputs.status}}",
         decision = "{{nodes.sup.outputs.decision}}",
         reason = "{{nodes.sup.outputs.reason}}",
         turns = "{{nodes.sup.outputs.turns}}",
+        integratedBranch = "{{nodes.sup.outputs.integratedBranch}}",
+        repositoryBranches = "{{nodes.sup.outputs.repositoryBranches}}",
     });
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;

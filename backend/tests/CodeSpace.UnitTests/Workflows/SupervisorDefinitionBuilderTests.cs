@@ -293,5 +293,7 @@ public class SupervisorDefinitionBuilderTests
         end.Inputs.GetProperty("decision").GetString().ShouldBe("{{nodes.sup.outputs.decision}}");
         end.Inputs.GetProperty("reason").GetString().ShouldBe("{{nodes.sup.outputs.reason}}");
         end.Inputs.GetProperty("turns").GetString().ShouldBe("{{nodes.sup.outputs.turns}}");
+        end.Inputs.GetProperty("integratedBranch").GetString().ShouldBe("{{nodes.sup.outputs.integratedBranch}}", "PR-5: the terminal must also carry the run's final reviewable branch, not just status/decision/reason/turns");
+        end.Inputs.GetProperty("repositoryBranches").GetString().ShouldBe("{{nodes.sup.outputs.repositoryBranches}}", "PR-5: and the per-repo final heads for a multi-repo run");
     }
 }
