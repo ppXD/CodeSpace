@@ -672,6 +672,46 @@ public class AgentNodeFlowTests
     }
 
     [Fact]
+    public async Task P2_3_a_respawn_warm_resumes_the_prior_attempts_captured_session()
+    {
+        // P2.3: the retiring resume payload — carrying attempt 1's REAL sessionId (persisted via the same
+        // AgentRunService.CompleteAsync/BuildResumePayload production path a live run uses) — rides forward as
+        // PriorAttemptPayload so the respawned agent's OWN TaskJson requests a warm continuation, not a cold start.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "rate limited", SessionId = "sess-rate-limited",
+            });
+
+            await RunEngineAsync(runId);   // resume → attempt 1 fails → the respawn stages a FRESH agent + parks again
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var secondAgent = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync()).Single(a => a.Id != firstAgent);
+            var task = JsonSerializer.Deserialize<AgentTask>(secondAgent.TaskJson, AgentJson.Options)!;
+
+            task.ResumeFromSessionId.ShouldBe("sess-rate-limited", "the respawn continues attempt 1's session instead of starting a brand-new conversation");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task The_respawn_budget_is_durable_so_a_second_transient_failure_exhausts_it()
     {
         // Retry {2}: two transient deaths consume the whole budget — the durable attempt ledger stops the loop at

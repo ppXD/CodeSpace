@@ -48,13 +48,25 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     };
 
-    /// <summary>Operator opt-in for the stall watchdog (Slice C3): seconds of NO streamed output before a run is judged STALLED and terminated early as <see cref="SandboxStatus.Stalled"/> — faster than waiting the full <see cref="SandboxSpec.TimeoutSeconds"/>. Unset / 0 / negative ⇒ disabled (today's behaviour, no false-positive kills). Pinned by a test (Rule 8).</summary>
+    /// <summary>Stall watchdog (Slice C3): seconds of NO streamed output before a run is judged STALLED and terminated early as <see cref="SandboxStatus.Stalled"/> — faster than waiting the full <see cref="SandboxSpec.TimeoutSeconds"/>. Unset ⇒ ON at <see cref="DefaultIdleTimeoutSeconds"/> (P2.4: real production runs get the protection by default — a genuinely-stuck agent no longer silently burns its whole wall-clock budget). Set explicitly to 0 / negative / non-numeric ⇒ the operator's OWN opt-OUT escape hatch (a repo/workload with known long silent tool calls). A positive value picks that window instead. Pinned by a test (Rule 8).</summary>
     public const string StdoutIdleTimeoutEnvVar = "CODESPACE_AGENT_STDOUT_IDLE_TIMEOUT_SECONDS";
 
-    /// <summary>The configured stall-watchdog idle window, or null when disabled (unset / ≤ 0). Read per call so a test (and an operator) can toggle it without a restart.</summary>
+    /// <summary>
+    /// The default idle window (10 minutes) when the operator never touched <see cref="StdoutIdleTimeoutEnvVar"/> at
+    /// all. Sized well above every silent-tool-call scenario this codebase's own test suite already treats as
+    /// legitimate (the longest is a 120s synthetic sleep) and well below the 3600s/7200s overall wall-clock budgets,
+    /// so it fires meaningfully faster than TimedOut for a run genuinely stuck (e.g. blocked on an interactive
+    /// prompt it can't answer unattended) while staying generous enough to survive realistic slow-but-alive
+    /// operations (a cold-cache dependency install, a large test suite, a slow/degraded model API response).
+    /// </summary>
+    public const int DefaultIdleTimeoutSeconds = 600;
+
+    /// <summary>The configured stall-watchdog idle window: <see cref="DefaultIdleTimeoutSeconds"/> when the env var is genuinely unset, the parsed value when it's a positive integer, or null (disabled) when it's explicitly 0 / negative / non-numeric. Read per call so a test (and an operator) can toggle it without a restart.</summary>
     internal static TimeSpan? IdleTimeout()
     {
         var raw = Environment.GetEnvironmentVariable(StdoutIdleTimeoutEnvVar);
+
+        if (raw is null) return TimeSpan.FromSeconds(DefaultIdleTimeoutSeconds);
 
         return int.TryParse(raw, out var seconds) && seconds > 0 ? TimeSpan.FromSeconds(seconds) : null;
     }

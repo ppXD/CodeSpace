@@ -498,14 +498,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// a C3 STALL (no output for the idle window — likely a nested interactive prompt the agent can't answer) is surfaced
     /// for a human as <see cref="AgentRunStatus.NeedsReview"/> / <see cref="CompletionDisposition.Blocked"/>; any other
     /// terminal is folded by the harness from its events. Shared by the live + reattach paths so they can't drift.
+    /// Both forced-terminal branches also capture <see cref="AgentRunResult.SessionId"/> when the events carry one —
+    /// the sole missing input a later RETRY needs to WARM-resume the killed agent's conversation instead of cold-starting.
     /// </summary>
     internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, IReadOnlyList<AgentEvent> events) => sandbox.Status switch
     {
         // A timed-out / stalled agent still BURNED tokens before we killed it — capture the usage from its events
         // (the harness's own fold does this for a clean/non-zero exit; these forced-terminal paths must too) so the
-        // spend shows on the run regardless of outcome.
-        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
-        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events) },
+        // spend shows on the run regardless of outcome. It may ALSO have a resumable session (a harness's early
+        // lifecycle event — Claude's system/init line, Codex's thread.started — carries the id before the kill), so
+        // capture that too: this is what turns a forced-terminal's later RETRY warm (continuing the conversation)
+        // instead of always cold — AgentSessionIdReader.TryRead + the AgentRun.SessionId write + the supervisor's
+        // FindResumableSubtaskAttemptAsync are already generic over every terminal status; this was the missing input.
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
         _ => harness.BuildResult(events, sandbox.ExitCode),
     };
 
@@ -828,12 +834,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// When enabled, push a SUCCESSFUL run's non-empty diff to a deterministically-named remote branch and fold
-    /// the pushed name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a
-    /// downstream git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING
-    /// write to the user's remote, so it is DEFAULT-ON but guarded: the publish guard chain (<see cref="IPublishGuard"/>)
-    /// must clear, the run must have Succeeded with a non-empty diff, and the handle must be push-capable; a guard hit
-    /// stamps <see cref="AgentRunResult.PublishSkipReason"/> and returns without pushing — never a silent no-op.
+    /// When enabled, push a run's non-empty diff to a deterministically-named remote branch and fold the pushed
+    /// name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a downstream
+    /// git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING write to
+    /// the user's remote, so it is DEFAULT-ON but guarded: the publish guard chain (<see cref="IPublishGuard"/>)
+    /// must clear, the run must have a non-empty diff, and the handle must be push-capable; a guard hit stamps
+    /// <see cref="AgentRunResult.PublishSkipReason"/> and returns without pushing — never a silent no-op.
+    ///
+    /// <para>P2.2 (salvage): a FORCED-terminal run (<see cref="AgentRunStatus.TimedOut"/>, or the C3-stalled
+    /// <see cref="AgentRunStatus.NeedsReview"/>) still qualifies — <see cref="EnrichWithWorkspaceChangesAsync"/>
+    /// already captures whatever the agent had ACTUALLY written to disk before it was killed (git ground truth,
+    /// independent of the kill signal), so a genuinely mid-progress kill no longer silently discards that work: it
+    /// lands as a real, reviewable branch instead of vanishing with the process. Every OTHER non-Succeeded status
+    /// (Failed, Cancelled) is unchanged — a run that failed or was cancelled on its own terms is a different
+    /// question from one CodeSpace itself force-terminated mid-flight.</para>
     ///
     /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
     /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
@@ -842,13 +856,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// overwrite (no divergent branch).</para>
     ///
     /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> is
-    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips a Succeeded run to Failed) but is
+    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips the run's own status) but is
     /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
     /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
     /// </summary>
     internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
-        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (result.Status is not (AgentRunStatus.Succeeded or AgentRunStatus.TimedOut or AgentRunStatus.NeedsReview)) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
 
         var multiRepo = workspace.Repositories.Count > 1;

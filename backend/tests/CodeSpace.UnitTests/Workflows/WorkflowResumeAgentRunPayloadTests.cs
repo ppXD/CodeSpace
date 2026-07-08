@@ -88,4 +88,28 @@ public class WorkflowResumeAgentRunPayloadTests
         web.GetProperty("baseBranch").GetString().ShouldBe("main");
         web.GetProperty("patch").GetString().ShouldBe("", "the per-repo patch is present-but-empty (stripped), never the raw diff");
     }
+
+    [Fact]
+    public void BuildResumePayload_carries_the_warm_resume_triple_for_a_respawn_to_read()
+    {
+        // P2.3: the engine forwards THIS exact payload as PriorAttemptPayload on a retry — agent.code's respawn
+        // reads sessionId/sessionTranscript(ArtifactId) from it to warm-continue instead of cold-starting.
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "gateway 429", SessionTranscript = "{\"role\":\"user\"}" };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, SessionId = "sess-abc", ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("sessionId").GetString().ShouldBe("sess-abc");
+        payload.GetProperty("sessionTranscript").GetString().ShouldBe("{\"role\":\"user\"}");
+    }
+
+    [Fact]
+    public void BuildResumePayload_carries_a_null_sessionId_when_the_run_captured_none()
+    {
+        var run = new AgentRun { Status = AgentRunStatus.Failed, SessionId = null, ResultJson = null };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("sessionId").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
 }
