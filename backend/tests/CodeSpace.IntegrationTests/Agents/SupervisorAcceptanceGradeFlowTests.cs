@@ -111,6 +111,55 @@ public sealed class SupervisorAcceptanceGradeFlowTests
     }
 
     [Fact]
+    public async Task P3_1_a_contract_authored_timeout_overrides_the_servers_default_through_the_real_executor()
+    {
+        // P3.1: SupervisorAcceptanceSpec.TimeoutSeconds — a contract author's SHORT window must reach the real
+        // grading call through AgentRunExecutor.GradeAcceptanceIfPresentAsync, not just SupervisorAcceptanceGrader
+        // directly (which always took an explicit timeoutSeconds argument and so already "worked" in isolation).
+        // Here a 1s contract timeout catches a 3s hang that the server's own (now 300s) default would sail past.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithScriptAsync("acc/slow", "#!/bin/sh\nsleep 3\n");
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        using var scope = _fixture.BeginScope();
+        var harness = new NoOpHarness();
+        var executor = new CodeSpace.Core.Services.Agents.AgentRunExecutor(
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunService>(),
+            new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(new CodeSpace.Core.Services.Agents.IAgentHarness[] { harness }),
+            new CodeSpace.Core.Services.Agents.HarnessModelReconciler(new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(new CodeSpace.Core.Services.Agents.IAgentHarness[] { harness }), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Sandbox.ISandboxRunnerRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IAgentWorkspaceResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IModelCredentialResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IWorkspaceProviderRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            Array.Empty<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeSpace.Core.Services.Agents.AgentRunExecutor>.Instance);
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "no-op", Model = "test-model", RepositoryId = repoId,
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" }, TimeoutSeconds = 1 },
+        };
+        var run = new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Status = AgentRunStatus.Succeeded, TaskJson = System.Text.Json.JsonSerializer.Serialize(task, CodeSpace.Core.Services.Agents.AgentJson.Options) };
+        var succeeded = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ProducedBranch = "acc/slow" };
+
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, CancellationToken.None);
+
+        graded.AcceptancePassed.ShouldBe(false);
+        graded.AcceptanceDetail.ShouldBe("tests-timed-out", "the 1s contract-authored timeout fired — the server's 300s default would have let the 3s sleep finish and pass");
+    }
+
+    [Fact]
     public async Task A_branch_that_cannot_be_cloned_fails_closed()
     {
         if (!await GitReadyAsync()) return;
@@ -248,5 +297,17 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         {
             try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
+    }
+
+    /// <summary>A harness that is never actually invoked — GradeAcceptanceIfPresentAsync never touches the harness/workspace machinery, this only satisfies AgentRunExecutor's constructor.</summary>
+    private sealed class NoOpHarness : CodeSpace.Core.Services.Agents.IAgentHarness
+    {
+        public string Kind => "no-op";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
+        public IReadOnlyList<CodeSpace.Messages.Agents.AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
+        public AgentRunResult BuildResult(IReadOnlyList<CodeSpace.Messages.Agents.AgentEvent> events, int exitCode) => throw new NotSupportedException();
     }
 }

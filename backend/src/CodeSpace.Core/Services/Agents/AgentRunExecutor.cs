@@ -1228,10 +1228,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             using var scope = _scopeFactory.CreateScope();
             var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
             var fullSpec = spec with { Command = command };
+            var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
 
             grade = hasBranch
-                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false)
-                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false)
+                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -104,6 +104,10 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // WHY the run ended (e.g. the fail-closed "acceptance-failed" re-grade) — the machine-readable half the
             // node's retry verdict keys on: a deterministic verdict failure must not be respawned as if transient.
             exitReason = result?.ExitReason,
+            // P3.1: the grader's own detail string (e.g. "tests-timed-out" vs "tests-failed-exit-1") — lets the
+            // node's retry verdict tell a grader INFRA fault (AgentAcceptanceContract.IsInfraFailure) from a
+            // genuine failed check even though both share exitReason "acceptance-failed".
+            acceptanceDetail = result?.AcceptanceDetail,
             // Warm-resume triple (P2.3): unused on a Succeeded outcome, but on a RETRYABLE failure this is the exact
             // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.code's fresh respawn
             // can stamp AgentTask.ResumeFromSessionId/RestoredTranscript(ArtifactId) — the same triple

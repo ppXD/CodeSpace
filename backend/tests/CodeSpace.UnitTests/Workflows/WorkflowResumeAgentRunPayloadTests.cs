@@ -55,6 +55,20 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_the_acceptance_detail_for_the_infra_vs_genuine_classification()
+    {
+        // P3.1: the node's retry verdict needs the RICHER detail (not just exitReason) to tell a grader infra
+        // fault ("tests-timed-out") from a genuine failed check ("tests-failed-exit-1") — both share the same
+        // fail-closed exitReason, so dropping this from the payload would collapse the distinction.
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason, AcceptanceDetail = "tests-timed-out" };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("acceptanceDetail").GetString().ShouldBe("tests-timed-out");
+    }
+
+    [Fact]
     public void BuildResumePayload_surfaces_per_repo_branches_WITHOUT_leaking_the_diff()
     {
         // S7-C0 — a multi-repo run's resume payload (the agent.code node output source) carries each repo's branch +

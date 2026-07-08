@@ -469,13 +469,15 @@ public sealed partial class SupervisorTurnService
 
         try
         {
+            var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+
             if (!string.IsNullOrEmpty(result.ProducedBranch))
-                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
             return NotApplicableOrFailed(expectsChanges);
         }
@@ -508,7 +510,7 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             try
             {
-                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -744,7 +746,7 @@ public sealed partial class SupervisorTurnService
                 BenchmarkGrade grade;
                 try
                 {
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

@@ -507,6 +507,37 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task P3_1_a_grader_infra_timeout_is_retryable_despite_the_fail_closed_acceptance_exit_reason()
+    {
+        // The grader's OWN wall-clock firing on a legitimately slow suite ("tests-timed-out") is an environment
+        // fact, not a code defect — unlike a genuine "tests-failed-exit-1" verdict, it must NOT burn the retry
+        // budget as if the agent's code were broken.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","error":"x","exitReason":"acceptance-failed","acceptanceDetail":"tests-timed-out","changedFiles":["src/a.ts"]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeTrue("a grader infra fault is retryable — a fresh respawn deserves the same chance a crash/timeout gets");
+    }
+
+    [Fact]
+    public async Task P3_1_a_genuine_acceptance_failure_stays_non_retryable_even_with_work_present()
+    {
+        // A real "the tests genuinely failed" verdict is UNCHANGED by P3.1 — still deterministic, still non-retryable
+        // — even though work (changedFiles) is present, because "tests-failed-exit-1" is not infra-classified.
+        var resume = JsonDocument.Parse("""
+            {"status":"Failed","error":"x","exitReason":"acceptance-failed","acceptanceDetail":"tests-failed-exit-1","changedFiles":["src/a.ts"]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse("the same code + the same check would fail again — a respawn cannot change a genuine verdict");
+    }
+
+    [Fact]
     public async Task P2_3_a_respawn_carrying_a_prior_sessionId_warm_resumes_instead_of_cold_starting()
     {
         // The engine threads the retiring resume payload forward as PriorAttemptPayload right before a retry

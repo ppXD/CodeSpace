@@ -54,8 +54,18 @@ public static class SupervisorLane
     /// <summary>The hard ceiling an operator's <c>MaxResolveAttempts</c> is clamped to — a conflict the model can't reconcile in a few tries is for a human, not an infinite retry. Pinned (Rule 8).</summary>
     public const int MaxResolveAttemptsCeiling = 5;
 
-    /// <summary>Wall-clock cap (seconds) for the OBJECTIVE acceptance grade — re-cloning a resolver's branch and running the operator's acceptance command (L4 A3). A hung check is a non-accept, not a hang. An operator-tunable field is a follow-up. Pinned (Rule 8).</summary>
-    public const int AcceptanceGradeTimeoutSeconds = 120;
+    /// <summary>
+    /// The DEFAULT wall-clock cap (seconds) for the OBJECTIVE acceptance grade — re-cloning a resolver's branch and
+    /// running the operator's acceptance command (L4 A3) — used when a contract's own
+    /// <see cref="SupervisorAcceptanceSpec.TimeoutSeconds"/> is unset. A hung check is a non-accept, not a hang.
+    /// P3.1: raised from the original 120s, which a real (non-trivial) test suite routinely blows through on a
+    /// cold-cache dependency install alone — 120s made a grader TIMEOUT (an environment/workload fact) as common as
+    /// a genuine test failure, and until P3.1's retry-classification fix, both were treated identically as a
+    /// non-retryable verdict. 300s gives real suites meaningfully more headroom while staying well under the
+    /// agent's own 3600s/7200s run budgets; a contract with a known-slower suite can still author its own longer
+    /// window via <see cref="SupervisorAcceptanceSpec.TimeoutSeconds"/>. Pinned (Rule 8).
+    /// </summary>
+    public const int AcceptanceGradeTimeoutSeconds = 300;
 
     /// <summary>
     /// P1.3 — the heartbeat interval a long SEQUENTIAL multi-target/multi-gate grade emits a ledger record at, so

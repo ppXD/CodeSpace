@@ -712,6 +712,49 @@ public class AgentNodeFlowTests
     }
 
     [Fact]
+    public async Task P3_1_a_grader_infra_timeout_respawns_instead_of_failing_terminally()
+    {
+        // P3.1: a fail-closed "acceptance-failed" re-grade caused by the GRADER'S OWN timeout ("tests-timed-out",
+        // an environment/workload fact, not a code defect) must respawn like a crash/timeout — NOT fail terminally
+        // like a genuine "the tests broke" verdict does (proven by the sibling AgentAcceptanceContract test with
+        // "tests-failed-exit-1", unchanged). AcceptanceFailed mirrors AgentAcceptanceContract.FailClosed exactly.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var firstAgent = await GetAgentRunIdAsync(runId);
+
+            await SimulateAgentExecutorAsync(firstAgent, new AgentRunResult
+            {
+                Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason,
+                Error = "The acceptance check did not pass: tests-timed-out", AcceptancePassed = false, AcceptanceDetail = "tests-timed-out",
+                ChangedFiles = new[] { "src/a.ts" },
+            });
+
+            await RunEngineAsync(runId);   // resume → the grader-infra fault respawns a FRESH agent, not a terminal failure
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the respawned agent parks the run again — a grader infra fault is never terminal");
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(2, "the fresh respawn staged a SECOND agent run");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task The_respawn_budget_is_durable_so_a_second_transient_failure_exhausts_it()
     {
         // Retry {2}: two transient deaths consume the whole budget — the durable attempt ledger stops the loop at
