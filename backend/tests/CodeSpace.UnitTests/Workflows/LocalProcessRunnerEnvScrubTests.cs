@@ -175,15 +175,20 @@ public sealed class LocalProcessRunnerEnvScrubTests
         // A rename silently disables the watchdog for any operator who tuned it. Hard-pin (Rule 8).
         LocalProcessRunner.StdoutIdleTimeoutEnvVar.ShouldBe("CODESPACE_AGENT_STDOUT_IDLE_TIMEOUT_SECONDS");
 
+    [Fact]
+    public void Default_idle_timeout_seconds_is_pinned() =>
+        // A silent change here reshapes false-positive risk for every unconfigured deployment. Hard-pin (Rule 8).
+        LocalProcessRunner.DefaultIdleTimeoutSeconds.ShouldBe(600);
+
     [Theory]
     [InlineData("2", 2)]
     [InlineData("90", 90)]
-    [InlineData("0", -1)]    // disabled
+    [InlineData("0", -1)]    // explicit opt-out
     [InlineData("-5", -1)]
     [InlineData("", -1)]
     [InlineData("nope", -1)]
-    [InlineData(null, -1)]   // unset → disabled (default; no watchdog)
-    public void IdleTimeout_is_opt_in_and_only_a_positive_integer_enables_it(string? raw, int expectedSeconds)
+    [InlineData(null, LocalProcessRunner.DefaultIdleTimeoutSeconds)]   // P2.4: unset → ON at the default window, not disabled
+    public void IdleTimeout_defaults_on_but_any_explicit_non_positive_value_opts_out(string? raw, int expectedSeconds)
     {
         var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
         try
@@ -192,7 +197,7 @@ public sealed class LocalProcessRunnerEnvScrubTests
 
             var idle = LocalProcessRunner.IdleTimeout();
 
-            if (expectedSeconds < 0) idle.ShouldBeNull("an unset / 0 / negative / non-numeric value leaves the watchdog disabled");
+            if (expectedSeconds < 0) idle.ShouldBeNull("an EXPLICIT 0 / negative / non-numeric value is the operator's own opt-out — it must stay disabled");
             else idle.ShouldBe(TimeSpan.FromSeconds(expectedSeconds));
         }
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
