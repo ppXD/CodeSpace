@@ -92,4 +92,15 @@ public sealed record NodeRunContext
     /// vs "resumed → return <c>Success</c>".
     /// </summary>
     public JsonElement? ResumePayload { get; init; }
+
+    /// <summary>
+    /// Set ONLY when this is a RESPAWN attempt (the engine's retry loop is re-running the node fresh after a
+    /// retryable failure delivered by a settled <see cref="ResumePayload"/>) — carries THAT retiring payload, one
+    /// cycle stale, so a node whose prior attempt captured a resumable session can warm-continue it instead of
+    /// cold-starting (e.g. <c>agent.code</c> reading its own <c>sessionId</c>/<c>sessionTranscript</c> keys to stamp
+    /// <c>AgentTask.ResumeFromSessionId</c>). <c>null</c> on a node's first attempt, and on every in-process
+    /// (non-suspending) retry. A node that doesn't recognize its own payload shape simply finds nothing to read —
+    /// byte-identical no-op for every other node type.
+    /// </summary>
+    public JsonElement? PriorAttemptPayload { get; init; }
 }
