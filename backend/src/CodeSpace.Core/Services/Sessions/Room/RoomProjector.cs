@@ -3,11 +3,13 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
@@ -33,9 +35,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IRunActionCapabilityResolver _actions;
     private readonly ISupervisorDecisionLog _decisionLog;
     private readonly IWorkPlanChecklistService _checklists;
+    private readonly IPublishManifestStore _manifests;
     private readonly CodeSpaceDbContext _db;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, CodeSpaceDbContext db)
     {
         _sessions = sessions;
         _phases = phases;
@@ -43,6 +46,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         _actions = actions;
         _decisionLog = decisionLog;
         _checklists = checklists;
+        _manifests = manifests;
         _db = db;
     }
 
@@ -124,6 +128,8 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var narrative = RoomNarrative.Build($"turn-{turn.TurnIndex}", watermark, phases, focus.Status, focus.Error, decisions, facts);
 
+        var publish = await PublishStateAsync(runId, teamId, focus.Status, cancellationToken).ConfigureAwait(false);
+
         return new AssistantTurnBlock
         {
             Id = $"turn-{turn.TurnIndex}",
@@ -135,11 +141,35 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             Summary = narrative.Summary,
             Map = narrative.Map,
             Blocks = narrative.Blocks,
-            Actions = _actions.ResolveTurnActions(runId, focus.Status),
+            Actions = _actions.ResolveTurnActions(runId, focus.Status, publish),
             At = focus.CreatedDate,
             DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
             Attempts = AttemptsOf(turn, runId),
         };
+    }
+
+    /// <summary>
+    /// PR-6's gating signal for <see cref="RoomActionKind.OpenPullRequest"/> — null (button omitted) for a
+    /// non-terminal run, so a running turn pays zero extra reads. Reads the SAME durable facts
+    /// <see cref="IRoomPullRequestService"/> itself opens a PR off (the terminal decision tape via
+    /// <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/> / <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/>),
+    /// so "can I open one" and "what does opening one actually do" can never drift.
+    /// </summary>
+    private async Task<RoomPublishState?> PublishStateAsync(Guid runId, Guid teamId, Messages.Enums.WorkflowRunStatus status, CancellationToken cancellationToken)
+    {
+        if (!WorkflowRunState.IsTerminal(status)) return null;
+
+        var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var hasBranch = !string.IsNullOrEmpty(SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions))
+            || SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count > 0;
+
+        if (!hasBranch) return new RoomPublishState { HasPublishedBranch = false };
+
+        var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var openedUrl = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })?.PullRequestUrl;
+
+        return new RoomPublishState { HasPublishedBranch = true, OpenedPullRequestUrl = openedUrl };
     }
 
     private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, bool IsLatest);

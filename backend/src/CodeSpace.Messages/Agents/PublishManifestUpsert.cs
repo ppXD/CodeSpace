@@ -21,4 +21,6 @@ public sealed record PublishManifestUpsert
     public required PublishState PublishStateValue { get; init; }
     public string? PublishError { get; init; }
     public string? Summary { get; init; }
+    public int? PullRequestNumber { get; init; }
+    public string? PullRequestUrl { get; init; }
 }

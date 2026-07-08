@@ -21,6 +21,13 @@ public sealed record RoomAction
 
     /// <summary>True when this action forks a new ATTEMPT of the turn (rerun / replay) rather than starting a fresh turn.</summary>
     public bool Attempt { get; init; }
+
+    /// <summary>
+    /// <see cref="RoomActionKind.OpenPullRequest"/> ONLY: set when a PR was already opened for this run's published
+    /// branch (a repeat visit after a prior click) — the frontend renders a "View PR" link instead of a button. Null
+    /// for every other action kind, and null when no PR has been opened yet (the button still reads "Open PR").
+    /// </summary>
+    public string? Url { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -40,4 +47,7 @@ public enum RoomActionKind
 
     /// <summary>A typed remediation that deep-links to fix a rejected model credential — surfaced on an auth-failure diagnostic.</summary>
     FixCredentials,
+
+    /// <summary>Open a pull/merge request for a terminal run's published branch(es) (PR-6). Enabled only once the run has a branch to open against; <see cref="RoomAction.Url"/> carries an already-opened PR's link.</summary>
+    OpenPullRequest,
 }

@@ -41,9 +41,9 @@ import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { compactAge } from "@/components/workflows/cockpit";
 import { formatTokens } from "@/components/workflows/runActivity";
 import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
-import { useConfirm } from "@/components/dialog";
+import { useAlert, useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
-import { isRunActive, useCancelRun, useContinueRun, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -1581,7 +1581,9 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
   const replay = useReplayRun();
   const cancel = useCancelRun(turn.runId);
   const cont = useContinueRun(turn.runId);
+  const openPr = useOpenPullRequest(turn.runId);
   const confirm = useConfirm();
+  const alert = useAlert();
   if (actions.length === 0) return null;
 
   const onRerun = async () => {
@@ -1605,6 +1607,18 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     if (ok) cancel.mutate();
   };
 
+  // Opens a real PR/MR for this turn's published branch(es) and jumps straight to it — mirrors PrCard's own
+  // "View PR" external-link behavior, since there's nothing more to confirm here (the branch already exists).
+  // A multi-repo run isolates each repo's failure (a missing credential scope, a rejected branch) into a Failed
+  // disposition rather than throwing — surface it rather than silently doing nothing on click.
+  const onOpenPr = async () => {
+    const result = await openPr.mutateAsync();
+    const url = result.pullRequests.find((p) => p.url)?.url;
+    if (url) { window.open(url, "_blank", "noreferrer"); return; }
+    const failure = result.pullRequests.find((p) => p.error);
+    if (failure) await alert({ title: "Couldn't open the pull request", message: failure.error, variant: "error" });
+  };
+
   // The doing-actions render first; "View trace" is always last (a quiet ghost). Stop / Rerun show ONLY when the
   // capability is enabled — a finished turn shows Rerun (no Stop); a running turn shows Stop (no Rerun).
   const trace = actions.find((a) => a.kind === "OpenTrace");
@@ -1617,6 +1631,10 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
         if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
         if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
         if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
+        if (a.kind === "OpenPullRequest") {
+          if (a.url) return <a key={a.kind} className="room-btn" href={a.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> {a.label}</a>;
+          return <button key={a.kind} className="room-btn" onClick={() => void onOpenPr()} disabled={openPr.isPending}><Sym n="pr" s={13} /> {openPr.isPending ? "Opening…" : a.label}</button>;
+        }
         return null;
       })}
       {trace && <button className="room-btn-ghost" onClick={() => onOpenRoom(turn.runId)}><Sym n="terminal" s={13} /> {trace.label}</button>}

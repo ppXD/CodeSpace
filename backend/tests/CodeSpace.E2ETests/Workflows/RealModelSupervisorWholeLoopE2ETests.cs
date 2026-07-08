@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -553,7 +554,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateI3InvariantAsync(runId, teamId, remote);
+            var (outcome, note) = await EvaluateI3InvariantAsync(runId, teamId, remote, repoId);
             return (outcome, $"{Provider} model '{model}' I3 publish-or-park — {note}");
         });
     }
@@ -564,7 +565,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// or parked short on an unrelated ask_human) — reported as a capability miss the best-of-N floor retries,
     /// never a code fault (I3 can only be violated by a stop that actually happened).
     /// </summary>
-    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateI3InvariantAsync(Guid runId, Guid teamId, BareRemote remote)
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateI3InvariantAsync(Guid runId, Guid teamId, BareRemote remote, Guid repoId)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -602,6 +603,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
             var branchesOnRemote = await remote.ListBranchesAsync();
             branchesOnRemote.ShouldContain(integratedBranch!, "the run's own final branch must genuinely exist on the real remote, not just be a name recorded in the ledger");
+
+            // Check 3 (PR-6): the terminal output's repositoryId — the field the Room's Open-PR action resolves
+            // integratedBranch's OWNING repository from (a bare branch name carries no repository of its own) — must
+            // genuinely flow through the REAL engine's terminal-node binding, not just the hand-seeded tapes the
+            // IRoomPullRequestService integration tests exercise. Riding the SAME already-paid-for real-model run
+            // rather than spinning up a second one purely to re-prove I3's own branch-exists guarantee.
+            var repositoryId = ReadTerminalRepositoryId(run.OutputsJson);
+            repositoryId.ShouldBe(repoId, "the run's terminal output must echo the SAME repository the branch was actually pushed to — PR-6's Open-PR action has no other way to resolve it for a single-repo run");
         }
 
         return (Classify(run.Status, drove: true), $"status={run.Status}, stops={stops.Count}, everProducedWork={everProducedWork}, all I3 checks held");
@@ -915,6 +924,23 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         status == WorkflowRunStatus.Failure ? RealModelOutcome.CodeFault
         : drove ? RealModelOutcome.Drove
         : RealModelOutcome.CapabilityMiss;
+
+    /// <summary>PR-6: the run-level terminal output's <c>repositoryId</c> (echoed from <c>AgentSupervisorNode.Finish</c>'s config, via <c>SupervisorDefinitionBuilder.TerminalInputs</c> → <c>workflow_run.outputs_jsonb</c>). Null on any parse failure or absence — a real regression here reads as a mismatch against the seeded repo id, not a silent pass.</summary>
+    private static Guid? ReadTerminalRepositoryId(string outputsJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(outputsJson);
+
+            return doc.RootElement.TryGetProperty("repositoryId", out var prop) && prop.ValueKind == JsonValueKind.String && Guid.TryParse(prop.GetString(), out var id)
+                ? id
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// A gateway/transport outage DURING a turn is swallowed by the engine into a run Failure (the run-level error is the

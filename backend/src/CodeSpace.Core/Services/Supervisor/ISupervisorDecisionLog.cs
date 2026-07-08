@@ -48,6 +48,14 @@ public interface ISupervisorDecisionLog
     Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The SETTLED half of <see cref="GetForRunAsync"/>'s tape, already mapped to the noun <see cref="SupervisorPriorDecision"/>
+    /// readers like <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/> consume — for a caller that only needs the
+    /// run's durable facts (the Room's Open-PR action, its capability-resolver gating) and not the full live-turn
+    /// rehydrate fold (agent-results / acceptance-grade / ask-human enrichment, which <c>SupervisorTurnService</c> owns).
+    /// </summary>
+    Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Fold a SETTLED-outcome enrichment into a SETTLED decision's recorded outcome — an ask_human answer (PR-E E4)
     /// OR a spawn/retry decision's settled agent results (SOTA #2): rewrite the row's <c>OutcomeJson</c> with
     /// <paramref name="foldedOutcomeJson"/>, team-scoped. A status-AGNOSTIC outcome enrichment — NOT a lifecycle
@@ -197,6 +205,24 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             .Where(d => d.SupervisorRunId == supervisorRunId && d.TeamId == teamId)
             .OrderBy(d => d.Sequence)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = await GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return rows.Where(r => SupervisorDecisionStateMachine.IsTerminal(r.Status)).Select(ToPriorDecision).ToList();
+    }
+
+    private static SupervisorPriorDecision ToPriorDecision(SupervisorDecisionRecord row) => new()
+    {
+        Id = row.Id,
+        Sequence = row.Sequence,
+        DecisionKind = row.DecisionKind,
+        Status = row.Status,
+        PayloadJson = row.PayloadJson,
+        OutcomeJson = row.OutcomeJson,
+        Error = row.Error,
+    };
 
     public async Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
     {

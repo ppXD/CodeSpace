@@ -72,6 +72,11 @@ public class PublishManifest : IEntity<Guid>, IAuditable
     /// <summary>A one-line human-readable description of the artifact, folded into the room result card / decider prompt without a second lookup.</summary>
     public string? Summary { get; set; }
 
+    /// <summary>The pull/merge request opened against <see cref="Branch"/>, once one exists (the Room's Open-PR action, or a workflow's git.open_pr / git.open_change_set node). Null until then — doubles as the idempotency read: a non-null pair means a repeat Open-PR click must reuse this PR, never open a duplicate.</summary>
+    public int? PullRequestNumber { get; set; }
+
+    public string? PullRequestUrl { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

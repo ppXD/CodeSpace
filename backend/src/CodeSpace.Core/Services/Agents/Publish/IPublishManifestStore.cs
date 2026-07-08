@@ -63,6 +63,8 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
                 .SetProperty(m => m.PublishStateValue, input.PublishStateValue)
                 .SetProperty(m => m.PublishError, input.PublishError)
                 .SetProperty(m => m.Summary, input.Summary)
+                .SetProperty(m => m.PullRequestNumber, input.PullRequestNumber)
+                .SetProperty(m => m.PullRequestUrl, input.PullRequestUrl)
                 .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
@@ -87,6 +89,8 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             PublishStateValue = input.PublishStateValue,
             PublishError = input.PublishError,
             Summary = input.Summary,
+            PullRequestNumber = input.PullRequestNumber,
+            PullRequestUrl = input.PullRequestUrl,
         };
 
         _db.PublishManifest.Add(row);
@@ -115,6 +119,8 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
                     .SetProperty(m => m.PublishStateValue, input.PublishStateValue)
                     .SetProperty(m => m.PublishError, input.PublishError)
                     .SetProperty(m => m.Summary, input.Summary)
+                    .SetProperty(m => m.PullRequestNumber, input.PullRequestNumber)
+                    .SetProperty(m => m.PullRequestUrl, input.PullRequestUrl)
                     .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
                 .ConfigureAwait(false);
         }
