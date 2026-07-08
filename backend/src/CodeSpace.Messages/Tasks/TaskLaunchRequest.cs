@@ -76,6 +76,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The credentialed-model ROW the decision critic runs on. Null ⇒ the critic auto-picks the team brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
 
+    /// <summary>The QUALITY tier this launch mandates (<see cref="QualityTier"/>) — Prototype (default, self-report only) / Delivery / Unattended. Null ⇒ Prototype ⇒ byte-identical to before this field existed. <c>TaskLaunchService</c> enforces the tier's mandates (an acceptance floor on a supervisor projection, an output-review floor) server-side.</summary>
+    public QualityTier? Tier { get; init; }
+
     /// <summary>The opaque per-surface payload (the folded <c>LaunchContext.Raw</c>) — ONLY the resolved seed provider reads it; the core never does. Defaults empty.</summary>
     public IReadOnlyDictionary<string, JsonElement> SurfacePayload { get; init; } = new Dictionary<string, JsonElement>();
 }

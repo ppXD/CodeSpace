@@ -67,6 +67,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
+        EnsureAcceptanceMandate(request, route);
+
         var profile = BuildAgentProfile(request, seed, route);
 
         // Resolve the thread this run is a turn of: CONTINUE the named session (the run becomes its next top-level
@@ -320,7 +322,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             EnableMcp = request.Overrides.EnableMcp,
             AllowedTools = request.Overrides.AllowedTools is { Count: > 0 } tools ? tools : null,
             PushBranch = request.Overrides.PushBranch,
-            OutputReviewMode = request.Overrides.OutputReviewMode,
+            OutputReviewMode = EffectiveOutputReviewMode(request),
             ReviewerModelId = request.Overrides.ReviewerModelId,
             ReviseRounds = request.Overrides.ReviseRounds,
             ReviewerAgent = request.Overrides.ReviewerAgent,
@@ -356,4 +358,48 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         return AgentAutonomyPolicy.Clamp(requested, ceiling).ToString();
     }
+
+    /// <summary>
+    /// P3.2: Delivery/Unattended quality on a SUPERVISOR-projected launch (the only projection <c>AcceptanceChecks</c>
+    /// already has any effect on — S4b) MUST carry an executable acceptance floor, so a caller cannot claim
+    /// Delivery-grade verification while skipping the one lever that actually gates the terminal stop. Prototype (or
+    /// an unset tier) is unchanged — self-report stands, byte-identical. Inert on a non-supervisor projection — this
+    /// doesn't invent new acceptance-floor plumbing for single-agent/plan-map launches (AcceptanceChecks has no
+    /// effect there today either); such a launch still gets its output-review floor (<see cref="EffectiveOutputReviewMode"/>)
+    /// even though this specific mandate is inert for it. There is no sensible SERVER-SYNTHESIZED check to default to
+    /// (the argv is domain-specific) — an omission fails LOUD here rather than silently shipping ungated, mirroring
+    /// <see cref="EnsureRepositoriesInTeamAsync"/>'s fail-closed launch-time rejection shape (before the session opens).
+    /// </summary>
+    internal static void EnsureAcceptanceMandate(TaskLaunchRequest request, RoutePlan route)
+    {
+        if (request.Tier is not (QualityTier.Delivery or QualityTier.Unattended)) return;
+        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return;
+        if (request.AcceptanceChecks is { Count: > 0 }) return;
+
+        throw new ArgumentException($"{request.Tier} quality requires an executable acceptance check (acceptanceChecks) — author one, or launch at Prototype quality for a self-reported result.");
+    }
+
+    /// <summary>
+    /// P3.2: the tier-mandated output-review FLOOR — a MINIMUM, not just a fallback: an operator's explicit choice
+    /// only ever RAISES the effective mode above the tier's floor, never lowers it below (Delivery's floor is Gate,
+    /// Unattended's is Improve; <see cref="ReviewMode"/>'s ordinal order — None &lt; Gate &lt; Improve — makes "higher
+    /// wins" a plain comparison). Prototype (or an unset tier) has a None floor, so an unset <see cref="ReviewMode"/>
+    /// stays None — byte-identical to before this field existed. Mirrors the launch composer's own FE preset
+    /// defaults (<c>frontend/src/lib/qualityPresets.ts</c>) as a real server-side floor instead of FE-only sugar.
+    /// Tier-agnostic of projection kind — <c>OutputReviewMode</c> already flows to both the single-agent node and
+    /// every supervisor-spawned agent.
+    /// </summary>
+    private static ReviewMode EffectiveOutputReviewMode(TaskLaunchRequest request)
+    {
+        var floor = MinimumReviewModeFor(request.Tier);
+
+        return request.Overrides.OutputReviewMode > floor ? request.Overrides.OutputReviewMode : floor;
+    }
+
+    private static ReviewMode MinimumReviewModeFor(QualityTier? tier) => tier switch
+    {
+        QualityTier.Delivery => ReviewMode.Gate,
+        QualityTier.Unattended => ReviewMode.Improve,
+        _ => ReviewMode.None,
+    };
 }

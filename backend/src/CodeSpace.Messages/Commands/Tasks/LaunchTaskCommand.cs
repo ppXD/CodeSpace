@@ -184,6 +184,16 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>S8: run each agent's output review as a REAL independent agent (a read-only run cloning the produced branch, preferring a DIFFERENT harness; the in-process model critic is the fallback). Null/false ⇒ the model critic. Only meaningful when <see cref="OutputReviewMode"/> is not None.</summary>
     public bool? ReviewerAgent { get; init; }
 
+    /// <summary>
+    /// P3.2: the QUALITY tier this launch mandates (<see cref="QualityTier"/>) — Prototype (default, self-report
+    /// only) / Delivery (an executable acceptance floor + Gate-level output review are REQUIRED, not just optional
+    /// knobs) / Unattended (the same mandates, output-review floor raised to Improve). Null ⇒ Prototype ⇒
+    /// byte-identical to before this field existed — an operator (or an older client) who never sets it keeps
+    /// today's behavior exactly. Enforced server-side at launch time (<c>TaskLaunchService</c>) so a caller cannot
+    /// claim "Delivery" while skipping the mandates the granular knobs alone never enforced.
+    /// </summary>
+    public QualityTier? Tier { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

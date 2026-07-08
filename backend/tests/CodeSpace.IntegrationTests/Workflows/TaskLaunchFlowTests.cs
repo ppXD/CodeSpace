@@ -871,6 +871,83 @@ public class TaskLaunchFlowTests
         }
     }
 
+    // ── P3.2: the QualityTier mandate — Delivery/Unattended on a Deep (supervisor) launch requires an acceptance floor ──
+
+    [Fact]
+    public async Task A_deep_launch_at_delivery_quality_without_an_acceptance_check_is_rejected_before_any_run_is_created()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+            Tier = QualityTier.Delivery,
+        };
+
+        var ex = await Should.ThrowAsync<ArgumentException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("acceptanceChecks", Case.Insensitive, "the operator needs an actionable name for the missing lever");
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the mandate rejects BEFORE any run/session is created — no orphan");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_at_delivery_quality_with_an_acceptance_check_succeeds_and_floors_output_review_to_gate()
+    {
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                Tier = QualityTier.Delivery, AcceptanceChecks = new[] { "sh", "check.sh" },
+            });
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            // The operator never set OutputReviewMode explicitly — Delivery's floor raises it to Gate through the
+            // real TaskLaunchService pipeline, not just the pure BuildAgentProfile unit already pinned elsewhere.
+            ReadSupervisorOutputReviewMode(run.DefinitionSnapshotJson!).ShouldBe((int)ReviewMode.Gate,
+                "Delivery quality's output-review floor is Gate when the operator set nothing");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_quick_launch_at_delivery_quality_is_never_rejected_for_a_missing_acceptance_check()
+    {
+        // AcceptanceChecks is inert on a non-supervisor projection today — the mandate doesn't invent new
+        // acceptance-floor plumbing for single-agent launches, so it stays inert there too.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new SubtaskAwareFakeCli();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Touch nothing important", RequestedEffort = TaskEffortModes.Quick,
+            Tier = QualityTier.Delivery,
+        });
+
+        result.RunId.ShouldNotBe(Guid.Empty, "a Quick/single-agent Delivery launch is never rejected for the missing acceptance floor — the mandate is inert there");
+    }
+
     [Fact]
     public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
     {
