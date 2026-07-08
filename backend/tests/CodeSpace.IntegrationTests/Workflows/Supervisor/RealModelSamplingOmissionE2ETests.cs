@@ -100,4 +100,45 @@ public sealed class RealModelSamplingOmissionE2ETests
             return (ok, $"large-cap (22000 → streamed) text completion on '{model}' via {provider} → {(ok ? $"streamed {result.Text.Length} chars, finish={result.Usage.FinishReason}" : "EMPTY reply")}");
         }, gating: false);
     }
+
+    /// <summary>
+    /// The live proof that <c>reasoning_effort</c> rides the generic path without breaking a real model: a Custom
+    /// (OpenAI-compatible) completion carrying <c>ReasoningEffort = "low"</c> still returns a non-empty reply. If the
+    /// configured gateway model is an OpenAI reasoning model, the param is honored; if not,
+    /// <see cref="LlmModelCapabilities.SupportsReasoningEffort(string?)"/> DROPS it before the wire so it never 400s —
+    /// either way a successful completion proves the mapping is non-breaking. REPORT-ONLY (gating:false): whether the ONE
+    /// configured model is a reasoning model is unknown, so the outcome must never red the lane; the drop/keep BYTES are
+    /// pinned deterministically by <c>LlmSamplingWireTests</c>. Custom wire only — <c>reasoning_effort</c> is an
+    /// OpenAI-wire concept the Anthropic client never maps.
+    /// </summary>
+    [Fact]
+    public async Task Reasoning_effort_rides_the_generic_path_on_the_live_custom_wire()
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+
+        await RealModelGate.AssessLiveAsync("Custom", async () =>
+        {
+            var credential = RealModelLiveWire.Credential("Custom", baseUrl, apiKey);
+            var client = RealModelLiveWire.Registry().Resolve("Custom");
+
+            var request = new LLMCompletionRequest
+            {
+                Model = model,
+                Credential = credential,
+                SystemPrompt = "Reply in one short sentence.",
+                UserPrompt = "Say hello.",
+                ReasoningEffort = "low",   // rides iff the model is a reasoning model; otherwise dropped before the wire — non-breaking either way
+            };
+
+            var result = await client.CompleteAsync(request, CancellationToken.None);
+            var ok = !string.IsNullOrWhiteSpace(result.Text);
+            var honored = LlmModelCapabilities.SupportsReasoningEffort(model);
+
+            return (ok, $"reasoning_effort=low on '{model}' via Custom → {(ok ? $"completed ({result.Text.Length} chars); param {(honored ? "sent (reasoning model)" : "dropped (non-reasoning model)")}" : "EMPTY reply")}");
+        }, gating: false);
+    }
 }

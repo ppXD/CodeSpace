@@ -74,6 +74,8 @@ jobs:
         #   ~RealModelSampling → the sampling-omission gate (RealModelSamplingOmissionE2ETests): a temperature-OMITTED
         #     structured call drives the live model to schema-conformant JSON over both wires — the live proof of the
         #     generic "let the model decide" path a reasoning-tier brain forces (where sending a temperature would 400).
+        #     Also covers the large-cap streaming smoke and the reasoning_effort live smoke (report-only: honored iff the
+        #     configured model is a reasoning model, else dropped before the wire — non-breaking either way).
         #     DB-free component eval, so this no-Postgres job is its home; blessed Anthropic gates, Custom reports.
         # The DB-backed whole-loop gates live in the E2ETests assembly and run in their own Postgres job below. The planner
         # RealModel test is a separate, DB-backed concern with its own ANTHROPIC-native key, so it is not run here.

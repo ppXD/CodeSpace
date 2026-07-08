@@ -54,6 +54,26 @@ public static class LlmModelCapabilities
     /// <summary>Testable core — PURE. A blank/unknown model ⇒ FALSE (default to the classic, universally-understood <c>max_tokens</c>).</summary>
     internal static bool UsesMaxCompletionTokens(string? model, string? rawOverride) => MatchesAny(model, DefaultMaxCompletionTokensPrefixes, rawOverride);
 
+    // ── reasoning_effort (OpenAI reasoning models only) ───────────────────────────────────────────────────────────
+
+    /// <summary>Comma-separated model-id PREFIXES whose OpenAI-wire request accepts a <c>reasoning_effort</c> param — appended to the built-in reasoning series (Rule 8). Pinned by test.</summary>
+    public const string ReasoningEffortModelsEnvVar = "CODESPACE_LLM_REASONING_EFFORT_MODELS";
+
+    /// <summary>The built-in OpenAI reasoning-series prefixes that ACCEPT <c>reasoning_effort</c> (a NON-reasoning chat model 400s on the param).</summary>
+    private static readonly string[] DefaultReasoningEffortPrefixes = { "o1", "o3", "o4", "gpt-5" };
+
+    /// <summary>
+    /// Whether the OpenAI-wire request may carry a <c>reasoning_effort</c> param (the reasoning-model depth control —
+    /// none/minimal/low/medium/high/xhigh, model-dependent). Consulted ONLY by the OpenAI / Custom client: it SENDS the
+    /// caller's effort for a reasoning model and DROPS it for a non-reasoning chat model (which 400s on the param) — the
+    /// exact mirror of the sampling gate (which drops for reasoning models, keeps for the rest). The VALUE rides verbatim
+    /// (the API validates it per model); this gate only decides whether the param may ride at all.
+    /// </summary>
+    public static bool SupportsReasoningEffort(string? model) => SupportsReasoningEffort(model, Environment.GetEnvironmentVariable(ReasoningEffortModelsEnvVar));
+
+    /// <summary>Testable core — PURE. A blank/unknown model ⇒ FALSE (never send a param a plain gateway model would reject).</summary>
+    internal static bool SupportsReasoningEffort(string? model, string? rawOverride) => MatchesAny(model, DefaultReasoningEffortPrefixes, rawOverride);
+
     // ── output-cap DEFAULT (for a wire that REQUIRES the field, i.e. Anthropic) ────────────────────────────────────
 
     /// <summary>Env var (a positive integer) overriding the fallback output cap sent when a caller leaves it unset on a wire that requires the field. Pinned by test (Rule 8).</summary>

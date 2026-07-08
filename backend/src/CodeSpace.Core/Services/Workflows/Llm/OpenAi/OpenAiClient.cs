@@ -73,6 +73,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
             PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
+            ReasoningEffort = LlmModelCapabilities.SupportsReasoningEffort(request.Model) ? request.ReasoningEffort : null,   // sent ONLY to a reasoning model (a plain chat model 400s on it); the value rides verbatim (the API validates it per model)
             Messages = BuildMessages(request.SystemPrompt, request.UserPrompt),
             Stream = stream ? true : null,                                                    // omitted when false → unchanged non-streaming body
             StreamOptions = stream ? new OpenAiStreamOptions { IncludeUsage = true } : null,  // ask the wire to emit a final usage chunk (LiteLLM/OpenRouter/vLLM honour it; a gateway that ignores it just leaves usage null)
@@ -183,6 +184,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
             PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
+            ReasoningEffort = LlmModelCapabilities.SupportsReasoningEffort(request.Model) ? request.ReasoningEffort : null,   // sent ONLY to a reasoning model (a plain chat model 400s on it); the value rides verbatim (the API validates it per model)
             Messages = BuildMessages(system, request.UserPrompt),
         };
 
@@ -223,6 +225,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
             PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
+            ReasoningEffort = LlmModelCapabilities.SupportsReasoningEffort(request.Model) ? request.ReasoningEffort : null,   // sent ONLY to a reasoning model (a plain chat model 400s on it); the value rides verbatim (the API validates it per model)
             Messages = BuildMessages(system, request.UserPrompt),
             Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
             ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
@@ -322,6 +325,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("model")] public required string Model { get; init; }
         [JsonPropertyName("max_tokens")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? MaxTokens { get; init; }
         [JsonPropertyName("max_completion_tokens")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? MaxCompletionTokens { get; init; }
+        [JsonPropertyName("reasoning_effort")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ReasoningEffort { get; init; }
         [JsonPropertyName("temperature")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? Temperature { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<OpenAiMessage> Messages { get; init; }
         [JsonPropertyName("top_p")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? TopP { get; init; }
