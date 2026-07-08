@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
@@ -50,13 +51,14 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IArtifactOffloader _offloader;
     private readonly IBranchIntegrator _integrator;
     private readonly IAgentWorkspaceResolver _workspaces;
+    private readonly IPublishManifestStore _manifests;
     private readonly ILLMClientRegistry _llm;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly IWorkPlanService _workPlans;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -66,6 +68,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _offloader = offloader;
         _integrator = integrator;
         _workspaces = workspaces;
+        _manifests = manifests;
         _llm = llm;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
