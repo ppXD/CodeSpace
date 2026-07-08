@@ -1,4 +1,6 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -151,6 +153,75 @@ public class SessionProjectionTests
     public void ReadRepositoryResults_is_null_for_absent_malformed_or_empty(string outputs)
     {
         SessionProjection.ReadRepositoryResults(outputs).ShouldBeNull();
+    }
+
+    [Fact]
+    public void The_manifest_branch_wins_over_a_conflicting_raw_OutputsJson_branch()
+    {
+        // I2: nobody ever guesses a branch name off raw OutputsJson once the manifest has an authoritative answer.
+        var id = Guid.NewGuid();
+        var runs = new[] { Run(id, turn: 1, outputs: """{"summary":"did it","branch":"stale-guessed-branch"}""") };
+        var manifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>>
+        {
+            [id] = new[] { new PublishManifest { RepositoryAlias = "primary", Branch = "codespace/agent/real", PublishStateValue = PublishState.Pushed, Kind = PublishManifestKind.Agent } },
+        };
+
+        var t = SessionProjection.BuildTurns(runs, NonePending, manifests).ShouldHaveSingleItem();
+
+        t.ProducedBranch.ShouldBe("codespace/agent/real");
+    }
+
+    [Fact]
+    public void With_no_manifest_row_the_legacy_raw_OutputsJson_branch_is_still_used()
+    {
+        // Older data, or a supervisor fold nobody has opened a PR for yet (RoomPullRequestService is still the only
+        // writer of an Integration row today) — never a silent blank where the raw read would have found something.
+        var id = Guid.NewGuid();
+        var runs = new[] { Run(id, turn: 1, outputs: """{"branch":"cs/legacy"}""") };
+
+        var t = SessionProjection.BuildTurns(runs, NonePending, new Dictionary<Guid, IReadOnlyList<PublishManifest>>()).ShouldHaveSingleItem();
+
+        t.ProducedBranch.ShouldBe("cs/legacy");
+    }
+
+    [Fact]
+    public void The_manifests_multi_repo_rows_win_over_a_conflicting_raw_repositoryResults_array()
+    {
+        var id = Guid.NewGuid();
+        var repoA = Guid.NewGuid(); var repoB = Guid.NewGuid();
+        var staleOutputs = $$"""{"repositoryResults":[{"repositoryId":"{{repoA}}","producedBranch":"stale-a"},{"repositoryId":"{{repoB}}","producedBranch":"stale-b"}]}""";
+        var runs = new[] { Run(id, turn: 1, outputs: staleOutputs) };
+        var manifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>>
+        {
+            [id] = new[]
+            {
+                new PublishManifest { RepositoryAlias = "web", RepositoryId = repoA, Branch = "codespace/agent/real-a", PublishStateValue = PublishState.Pushed, Kind = PublishManifestKind.Agent },
+                new PublishManifest { RepositoryAlias = "api", RepositoryId = repoB, Branch = "codespace/agent/real-b", PublishStateValue = PublishState.Pushed, Kind = PublishManifestKind.Agent },
+            },
+        };
+
+        var t = SessionProjection.BuildTurns(runs, NonePending, manifests).ShouldHaveSingleItem();
+
+        t.ProducedBranch.ShouldBeNull();
+        t.RepositoryResults.ShouldNotBeNull();
+        t.RepositoryResults!.ShouldContain(r => r.RepositoryId == repoA && r.ProducedBranch == "codespace/agent/real-a");
+        t.RepositoryResults.ShouldContain(r => r.RepositoryId == repoB && r.ProducedBranch == "codespace/agent/real-b");
+    }
+
+    [Fact]
+    public void A_manifest_row_that_never_pushed_is_ignored_falling_back_to_the_raw_read()
+    {
+        // A PatchOnly / None manifest row carries no live branch to prefer — the legacy read is the ONLY answer.
+        var id = Guid.NewGuid();
+        var runs = new[] { Run(id, turn: 1, outputs: """{"branch":"cs/legacy"}""") };
+        var manifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>>
+        {
+            [id] = new[] { new PublishManifest { RepositoryAlias = "primary", Branch = null, PublishStateValue = PublishState.PatchOnly, Kind = PublishManifestKind.Agent } },
+        };
+
+        var t = SessionProjection.BuildTurns(runs, NonePending, manifests).ShouldHaveSingleItem();
+
+        t.ProducedBranch.ShouldBe("cs/legacy");
     }
 
     [Fact]

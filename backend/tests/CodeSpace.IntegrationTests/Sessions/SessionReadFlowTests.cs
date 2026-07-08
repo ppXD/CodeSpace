@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -185,6 +186,26 @@ public class SessionReadFlowTests
         detail.Turns[0].AttemptCount.ShouldBe(1);
         detail.Turns[1].UserMessage.ShouldBe("Now add logout");
         detail.Turns[1].RunStatus.ShouldBe(WorkflowRunStatus.Running);
+    }
+
+    [Fact]
+    public async Task Detail_prefers_the_manifests_branch_over_a_conflicting_raw_OutputsJson_branch()
+    {
+        // I2 (real Postgres): a run's OutputsJson.branch could be stale relative to what actually got captured on
+        // PublishManifest (the single source of truth) — the fold must never guess off the raw JSON when the
+        // manifest has an answer.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        var sessionId = await SeedSessionAsync(teamId, userId, "Ship it", lastActivityAt: now, turns: 1);
+
+        var runId = await SeedRunAsync(teamId, sessionId, turnIndex: 1, goal: "Ship the feature", status: WorkflowRunStatus.Success,
+            outputs: """{"summary":"did it","branch":"stale-guessed-branch"}""", createdAt: now);
+
+        await SeedManifestAsync(teamId, runId, "primary", branch: "codespace/agent/real");
+
+        var detail = await DetailAsync(sessionId, teamId);
+
+        detail!.Turns.ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/real");
     }
 
     [Fact]
@@ -381,6 +402,20 @@ public class SessionReadFlowTests
         });
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    private async Task SeedManifestAsync(Guid teamId, Guid workflowRunId, string alias, string branch, Guid? repositoryId = null, PublishManifestKind kind = PublishManifestKind.Agent)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = kind, WorkflowRunId = workflowRunId, RepositoryAlias = alias,
+            RepositoryId = repositoryId, Branch = branch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedPendingDecisionAsync(Guid runId)

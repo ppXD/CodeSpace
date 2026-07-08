@@ -1,4 +1,6 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions;
@@ -6,13 +8,14 @@ namespace CodeSpace.UnitTests.Sessions;
 /// <summary>
 /// Pins <see cref="SessionSummarizer.BuildUserPrompt"/> — the distillation prompt framing — without a live LLM:
 /// the no-summary path asks to summarise the turns; the with-summary path bases the next distillation on the running
-/// summary and folds in only the new turns; each turn renders its clean goal / result / branch via the shared reader.
+/// summary and folds in only the new turns; each turn renders its clean goal / result / branch via the shared reader,
+/// preferring a turn's <see cref="PublishManifest"/> row (I2's single source of truth) over its raw OutputsJson guess.
 /// </summary>
 [Trait("Category", "Unit")]
 public class SessionSummarizerPromptTests
 {
     private static SessionSummarizer.TurnRow Turn(int n, string goal, string result, string? branch = null) =>
-        new(n, "Success",
+        new(Guid.NewGuid(), n, "Success",
             branch is null ? $$"""{"summary":"{{result}}"}""" : $$"""{"summary":"{{result}}","branch":"{{branch}}"}""",
             $$"""{"goal":"{{goal}}"}""");
 
@@ -45,5 +48,20 @@ public class SessionSummarizerPromptTests
         prompt.ShouldContain("Earlier: shipped auth + tests.", Case.Sensitive, "the running summary is the base");
         prompt.ShouldContain("Fold these earlier turns", Case.Sensitive);
         prompt.ShouldContain("Asked: add logout", Case.Sensitive, "the newly scrolled-out turn is folded in");
+    }
+
+    [Fact]
+    public void A_turns_manifest_branch_wins_over_its_own_conflicting_raw_OutputsJson_branch()
+    {
+        var turn = Turn(1, "build login", "added auth", branch: "stale-guessed-branch");
+        var manifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>>
+        {
+            [turn.Id] = new[] { new PublishManifest { RepositoryAlias = "primary", Branch = "codespace/agent/real", PublishStateValue = PublishState.Pushed, Kind = PublishManifestKind.Agent, RepositoryId = Guid.NewGuid() } },
+        };
+
+        var prompt = SessionSummarizer.BuildUserPrompt(existingSummary: null, new[] { turn }, manifests);
+
+        prompt.ShouldContain("Produced branch: codespace/agent/real", Case.Sensitive);
+        prompt.ShouldNotContain("stale-guessed-branch", Case.Sensitive, "the manifest wins — the stale raw guess must never surface in the distillation prompt");
     }
 }

@@ -1,6 +1,7 @@
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Publish;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Sessions;
@@ -8,8 +9,12 @@ namespace CodeSpace.Core.Services.Sessions;
 /// <summary>
 /// Default <see cref="ISessionContextBuilder"/>. Reads the session's prior top-level turns from CLEAN sources only —
 /// each run's launch goal (the request payload's <c>goal</c>) and its declared result (<c>OutputsJson</c>, read
-/// generically across projection shapes via <see cref="SessionTurnText.ReadResult"/>, plus a produced <c>branch</c>)
-/// — so the digest never contains a previously-injected grounding block (no recursion). Renders the most recent
+/// generically across projection shapes via <see cref="SessionTurnText.ReadResult"/>, plus a produced branch —
+/// preferring the run's <see cref="PublishManifest"/> row (I2's single source of truth) over the raw
+/// <c>OutputsJson.branch</c> guess, via the same <see cref="SessionManifestBranches"/> choke point
+/// <see cref="SessionProjection"/>/<see cref="SessionBranchResolver"/> use, so the branch injected into the NEXT
+/// turn's own prompt never disagrees with what the room displays or what a CONTINUE clones from) — so the digest
+/// never contains a previously-injected grounding block (no recursion). Renders the most recent
 /// <see cref="MaxTurns"/> turns VERBATIM (each result clipped); turns OLDER than that window are carried by the
 /// thread's rolling <see cref="WorkSession.Summary"/> (an LLM distillation maintained by <c>SessionSummarizer</c>),
 /// prepended as a distilled prefix. So the injected context stays bounded however long the thread grows, without
@@ -19,13 +24,15 @@ namespace CodeSpace.Core.Services.Sessions;
 public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IPublishManifestStore _manifests;
 
     /// <summary>Cap the VERBATIM window to the most recent N top-level turns — recent work is rendered in full; older turns roll into the distilled <see cref="WorkSession.Summary"/>. The summarizer's watermark uses this same window size, so summary + window are contiguous.</summary>
     internal const int MaxTurns = 8;
 
-    public SessionContextBuilder(CodeSpaceDbContext db)
+    public SessionContextBuilder(CodeSpaceDbContext db, IPublishManifestStore manifests)
     {
         _db = db;
+        _manifests = manifests;
     }
 
     public async Task<string?> BuildAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
@@ -36,10 +43,12 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
             .OrderByDescending(r => r.SessionTurnIndex)
             .Take(MaxTurns)
-            .Select(r => new { Turn = r.SessionTurnIndex, r.Status, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
+            .Select(r => new { r.Id, Turn = r.SessionTurnIndex, r.Status, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (window.Count == 0) return null;
+
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(window.Select(r => r.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
         // The distilled summary of OLDER turns (those scrolled out of the window), if the thread has grown past it.
         // Null for a short thread / when no model was available to distill ⇒ the digest is just the recent window.
@@ -71,7 +80,7 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             var result = SessionTurnText.ReadResult(row.OutputsJson);
             if (result != null) sb.AppendLine($"Result: {SessionTurnText.Clip(result)}");
 
-            var branch = SessionTurnText.ReadString(row.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id)) ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
             if (branch != null) sb.AppendLine($"Produced branch: {branch}");
         }
 

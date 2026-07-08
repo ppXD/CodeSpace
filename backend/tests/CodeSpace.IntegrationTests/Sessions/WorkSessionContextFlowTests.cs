@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Tasks;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -54,6 +55,25 @@ public class WorkSessionContextFlowTests
         context.ShouldContain("run-2/api", customMessage: "the produced branch is surfaced for continuity");
         context.IndexOf("Turn 1", StringComparison.Ordinal)
             .ShouldBeLessThan(context.IndexOf("Turn 2", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Builder_prefers_the_manifest_branch_over_a_conflicting_raw_OutputsJson_branch()
+    {
+        // I2: the digest's "Produced branch" must read the SAME source of truth as the room/continuity paths — a
+        // PublishManifest row wins over a disagreeing raw OutputsJson.branch guess, so the branch the agent is TOLD it
+        // produced never disagrees with the branch it actually cloned from on the next turn.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var repoId = await SeedRepositoryAsync(teamId);
+        await SeedTurnWithManifestAsync(teamId, sessionId, turn: 1, repoId, goal: "Add retry backoff", summary: "Added exponential backoff",
+            outputsBranch: "stale-guessed-branch", manifestBranch: "codespace/agent/real");
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain("Produced branch: codespace/agent/real");
+        context.ShouldNotContain("stale-guessed-branch", customMessage: "the manifest wins — the stale raw guess must never surface");
     }
 
     [Fact]
@@ -285,6 +305,55 @@ public class WorkSessionContextFlowTests
     /// <summary>Stage a finished single-agent-shape turn — a request carrying the goal payload + a run with {summary, branch} on OutputsJson.</summary>
     private Task SeedCompletedTurnAsync(Guid teamId, Guid sessionId, int? turn, string goal, string summary, string? branch) =>
         SeedTurnAsync(teamId, sessionId, turn, goal, JsonSerializer.Serialize(new { summary, branch }));
+
+    /// <summary>Stage a finished turn whose OutputsJson disagrees with its authoritative PublishManifest row — proves I2's "manifest wins" applies to the digest, not just session continuity.</summary>
+    private async Task SeedTurnWithManifestAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string goal, string summary, string outputsBranch, string manifestBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }),
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { summary, branch = outputsBranch }),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, RepositoryAlias = "primary",
+            RepositoryId = repoId, Branch = manifestBranch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var instanceId = Guid.NewGuid();
+        var repoId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{suffix}.local", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Repository.Add(new Repository { Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = $"acme/api-{suffix}", WebUrl = "https://gh.local/acme/api", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return repoId;
+    }
 
     /// <summary>Stage a finished turn with an arbitrary OutputsJson shape (a projection other than single-agent surfaces different result keys).</summary>
     private async Task SeedTurnAsync(Guid teamId, Guid sessionId, int? turn, string goal, string outputsJson)

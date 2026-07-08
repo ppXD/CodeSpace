@@ -1,7 +1,9 @@
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Workflows.Llm;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -18,13 +20,15 @@ namespace CodeSpace.Core.Services.Sessions;
 public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IPublishManifestStore _manifests;
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
     private readonly ILogger<SessionSummarizer> _logger;
 
-    public SessionSummarizer(CodeSpaceDbContext db, ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, ILogger<SessionSummarizer> logger)
+    public SessionSummarizer(CodeSpaceDbContext db, IPublishManifestStore manifests, ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, ILogger<SessionSummarizer> logger)
     {
         _db = db;
+        _manifests = manifests;
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _logger = logger;
@@ -41,7 +45,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
             .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
             .OrderByDescending(r => r.SessionTurnIndex)
             .Skip(SessionContextBuilder.MaxTurns)
-            .Select(r => new TurnRow(r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
+            .Select(r => new TurnRow(r.Id, r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (olderTurns.Count == 0) return;
@@ -62,7 +66,9 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 
         if (newTurns.Count == 0) return;
 
-        var distilled = await TryDistillAsync(teamId, session.Summary, newTurns, cancellationToken).ConfigureAwait(false);
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(newTurns.Select(t => t.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
+
+        var distilled = await TryDistillAsync(teamId, session.Summary, newTurns, manifestsByRunId, cancellationToken).ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(distilled)) return;   // fail-open: no model / LLM error — leave the summary unchanged
 
@@ -71,7 +77,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
     }
 
     /// <summary>Distill the existing summary + the newly scrolled-out turns into an updated summary. Returns null (fail-open) when no provider/model is available or the LLM call fails. Internal so the real-model eval can drive the live distillation directly (DB-free), pinning that the summary actually preserves older turns.</summary>
-    internal async Task<string?> TryDistillAsync(Guid teamId, string? existingSummary, IReadOnlyList<TurnRow> newTurns, CancellationToken cancellationToken)
+    internal async Task<string?> TryDistillAsync(Guid teamId, string? existingSummary, IReadOnlyList<TurnRow> newTurns, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> manifestsByRunId, CancellationToken cancellationToken)
     {
         // The WHOLE resolve → select → complete path is fail-open: model resolution DECRYPTS the credential
         // (SelectAsync can throw CryptographicException on a corrupt / rotated / cross-key-ring key), and the LLM call
@@ -91,7 +97,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
                 Model = pick.ModelId,
                 Credential = pick.Credential,
                 SystemPrompt = SystemPrompt,
-                UserPrompt = BuildUserPrompt(existingSummary, newTurns),
+                UserPrompt = BuildUserPrompt(existingSummary, newTurns, manifestsByRunId),
                 MaxOutputTokens = 1024,
                 Temperature = 0.2,
             }, cancellationToken).ConfigureAwait(false);
@@ -108,7 +114,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
     }
 
     /// <summary>The distillation prompt: the running summary so far + the next older turns to fold in. Internal so a test can pin the framing without a real LLM round-trip.</summary>
-    internal static string BuildUserPrompt(string? existingSummary, IReadOnlyList<TurnRow> newTurns)
+    internal static string BuildUserPrompt(string? existingSummary, IReadOnlyList<TurnRow> newTurns, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>>? manifestsByRunId = null)
     {
         var sb = new StringBuilder();
 
@@ -135,7 +141,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
             var result = SessionTurnText.ReadResult(t.OutputsJson);
             if (result != null) sb.AppendLine($"  Result: {SessionTurnText.Clip(result)}");
 
-            var branch = SessionTurnText.ReadString(t.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId?.GetValueOrDefault(t.Id)) ?? SessionTurnText.ReadString(t.OutputsJson, "branch");
             if (branch != null) sb.AppendLine($"  Produced branch: {branch}");
         }
 
@@ -149,5 +155,5 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         "it. Keep it tight (a few short paragraphs at most). Output ONLY the updated summary prose, no preamble.";
 
     /// <summary>One older turn's clean fields for distillation (the same source-of-truth the digest reads).</summary>
-    internal sealed record TurnRow(int? Turn, string Status, string OutputsJson, string Payload);
+    internal sealed record TurnRow(Guid Id, int? Turn, string Status, string OutputsJson, string Payload);
 }

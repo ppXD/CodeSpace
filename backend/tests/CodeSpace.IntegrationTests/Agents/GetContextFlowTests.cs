@@ -193,6 +193,24 @@ public class GetContextFlowTests
     }
 
     [Fact]
+    public async Task Session_turns_source_prefers_the_manifest_branch_over_a_conflicting_raw_OutputsJson_branch()
+    {
+        // I2: session.turns reads the SAME clean sources the digest does — a PublishManifest row must win over a
+        // disagreeing raw OutputsJson.branch guess here too, so a pulled turn never shows a stale/wrong branch.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var repoId = await SeedRepositoryAsync(teamId);
+        await SeedTurnWithManifestAsync(teamId, sessionId, turn: 1, repoId, goal: "the work", outputsBranch: "stale-guessed-branch", manifestBranch: "codespace/agent/real");
+        var runId = await SeedAgentRunAsync(teamId, sessionId);
+
+        var result = await CallToolAsync(teamId, runId, new { source = "session.turns" });
+
+        var text = StructuredOutput(result).GetProperty("text").GetString()!;
+        text.ShouldContain("Produced branch: codespace/agent/real");
+        text.ShouldNotContain("stale-guessed-branch", customMessage: "the manifest wins — the stale raw guess must never surface");
+    }
+
+    [Fact]
     public async Task Tool_with_no_source_pulls_every_source()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -318,6 +336,53 @@ public class GetContextFlowTests
         });
 
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Stage a finished turn whose OutputsJson disagrees with its authoritative PublishManifest row — proves I2's "manifest wins" applies to the session.turns source, not just the digest.</summary>
+    private async Task SeedTurnWithManifestAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string goal, string outputsBranch, string manifestBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }),
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { branch = outputsBranch }), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, RepositoryAlias = "primary",
+            RepositoryId = repoId, Branch = manifestBranch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var instanceId = Guid.NewGuid();
+        var repoId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{suffix}.local", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Repository.Add(new Repository { Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = $"acme/api-{suffix}", WebUrl = "https://gh.local/acme/api", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return repoId;
     }
 
     /// <summary>Seed an AgentRun bound (soft link) to a fresh WorkflowRun carrying <paramref name="sessionId"/> — the run→session lineage get_context resolves.</summary>
