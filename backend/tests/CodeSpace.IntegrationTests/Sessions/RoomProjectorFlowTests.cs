@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
@@ -832,5 +833,117 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
 
         return await db.WorkflowRunRecord.Where(r => r.RunId == runId).MaxAsync(r => r.Sequence);
+    }
+
+    // ─── PR-6: RoomProjector's new PublishStateAsync gating signal ───────────────────
+
+    [Fact]
+    public async Task A_terminal_run_with_a_published_branch_offers_the_OpenPullRequest_action()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the feature");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the feature", resultSummary: "shipped it");
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        await SeedIntegrationMergeAsync(teamId, run, "codespace/integration/run/turn1");
+        await StampOutputsRepositoryIdAsync(run, repoId);
+
+        var room = await ProjectByRunAsync(run, teamId);
+
+        var action = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.SingleOrDefault(a => a.Kind == RoomActionKind.OpenPullRequest);
+
+        action.ShouldNotBeNull("a terminal run with a genuinely published branch must offer the Open-PR action");
+        action!.Enabled.ShouldBeTrue();
+        action.Url.ShouldBeNull("no PR has been opened yet — the button reads 'Open PR', not 'View PR'");
+    }
+
+    [Fact]
+    public async Task A_run_with_an_already_opened_PR_surfaces_its_link_on_the_action()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the feature");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the feature", resultSummary: "shipped it");
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        await SeedIntegrationMergeAsync(teamId, run, "codespace/integration/run/turn1");
+        await StampOutputsRepositoryIdAsync(run, repoId);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<IPublishManifestStore>().UpsertForIntegrationAsync(new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "primary", RepositoryId = repoId,
+                Branch = "codespace/integration/run/turn1", PublishStateValue = PublishState.Pushed,
+                PullRequestNumber = 42, PullRequestUrl = "https://example.test/org/repo/pull/42",
+            }, CancellationToken.None);
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+
+        var action = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+
+        action.Enabled.ShouldBeTrue();
+        action.Url.ShouldBe("https://example.test/org/repo/pull/42", "an already-opened PR's link must surface on the action so the frontend renders 'View PR', not a second Open-PR button");
+    }
+
+    [Fact]
+    public async Task A_non_terminal_run_never_offers_the_OpenPullRequest_action_even_with_a_published_branch()
+    {
+        // RoomProjector.PublishStateAsync short-circuits on WorkflowRunState.IsTerminal BEFORE reading the ledger or
+        // the manifest — a running/suspended turn must never show the button, matching IRoomPullRequestService's own
+        // hard terminal-status gate (a hidden-dependency sweep finding: a mid-run frontier can still move).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the feature");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the feature", resultSummary: null, status: WorkflowRunStatus.Suspended);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        await SeedIntegrationMergeAsync(teamId, run, "codespace/integration/run/turn1");
+        await StampOutputsRepositoryIdAsync(run, repoId);
+
+        var room = await ProjectByRunAsync(run, teamId);
+
+        room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.ShouldNotContain(a => a.Kind == RoomActionKind.OpenPullRequest);
+    }
+
+    private async Task SeedIntegrationMergeAsync(Guid teamId, Guid runId, string integratedBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var outcome = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch, appliedCount = 1, reason = (string?)null, excludedAgents = Array.Empty<string>() } });
+
+        db.SupervisorDecisionRecord.Add(SupDecision(teamId, runId, 1, SupervisorDecisionKinds.Merge, "{}", outcome));
+        await db.SaveChangesAsync();
+    }
+
+    private async Task StampOutputsRepositoryIdAsync(Guid runId, Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.OutputsJson = JsonSerializer.Serialize(new { repositoryId = repositoryId.ToString() });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var instanceId = Guid.NewGuid();
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "local", BaseUrl = $"https://local-{suffix}" });
+
+        var repoId = Guid.NewGuid();
+        db.Repository.Add(new Repository
+        {
+            Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId,
+            ExternalId = $"ext-{suffix}", NamespacePath = "org", Name = "repo", FullPath = $"org/repo-{suffix}",
+            DefaultBranch = "main", WebUrl = $"https://local-{suffix}/org/repo",
+        });
+
+        await db.SaveChangesAsync();
+        return repoId;
     }
 }

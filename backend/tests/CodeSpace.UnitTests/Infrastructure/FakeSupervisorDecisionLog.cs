@@ -79,6 +79,13 @@ public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog
     public Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<SupervisorDecisionRecord>>(Rows.Where(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId).OrderBy(r => r.Sequence).ToList());
 
+    public Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<SupervisorPriorDecision>>(Rows
+            .Where(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId && SupervisorDecisionStateMachine.IsTerminal(r.Status))
+            .OrderBy(r => r.Sequence)
+            .Select(r => new SupervisorPriorDecision { Id = r.Id, Sequence = r.Sequence, DecisionKind = r.DecisionKind, Status = r.Status, PayloadJson = r.PayloadJson, OutcomeJson = r.OutcomeJson, Error = r.Error })
+            .ToList());
+
     public Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
     {
         var row = Rows.SingleOrDefault(r => r.Id == decisionId && r.TeamId == teamId);

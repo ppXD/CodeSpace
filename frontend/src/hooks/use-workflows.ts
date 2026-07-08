@@ -301,6 +301,17 @@ export function useReplayRun() {
   });
 }
 
+/** The Room's "Open PR" action (PR-6) — opens, or reuses, a PR for a terminal run's published branch(es). */
+export function useOpenPullRequest(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => workflowsApi.openPullRequest(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+    },
+  });
+}
+
 /**
  * Re-run ONE fanned-out item of a top-level flow.map — forks a fresh run that reuses the sibling items. Returns
  * the new run id (the caller navigates to it). The `operationId` makes a double-submit idempotent; a concurrent

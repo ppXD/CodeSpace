@@ -89,7 +89,7 @@ export interface SessionDetail {
 
 export type ExecutionStepStatus = "Pending" | "Queued" | "Running" | "Done" | "Failed" | "Blocked" | "Skipped";
 export type NarrativeTone = "Info" | "Success" | "Error";
-export type RoomActionKind = "RerunTurn" | "RerunFromNode" | "RerunFailedMapItems" | "RetryFailedAgent" | "AnswerDecision" | "Stop" | "Continue" | "OpenTrace" | "FixCredentials";
+export type RoomActionKind = "RerunTurn" | "RerunFromNode" | "RerunFailedMapItems" | "RetryFailedAgent" | "AnswerDecision" | "Stop" | "Continue" | "OpenTrace" | "FixCredentials" | "OpenPullRequest";
 
 /// A capability-aware action on a turn. `enabled` + `disabledReason` come from the backend, so a click never 422s.
 export interface RoomAction {
@@ -99,6 +99,24 @@ export interface RoomAction {
   disabledReason?: string | null;
   target?: string | null;
   attempt?: boolean;
+  /** `OpenPullRequest` only: set once a PR already exists for this run — render a "View PR" link instead of a button. */
+  url?: string | null;
+}
+
+export type RoomPullRequestDisposition = "Opened" | "AlreadyOpened" | "Skipped" | "Failed";
+
+/** One repository's PR-open outcome (PR-6) — a multi-repo run's per-repo failure never sinks the whole set. */
+export interface RoomPullRequestOpened {
+  repositoryId?: string | null;
+  alias: string;
+  disposition: RoomPullRequestDisposition;
+  number?: number | null;
+  url?: string | null;
+  error?: string | null;
+}
+
+export interface RoomPullRequestResult {
+  pullRequests: RoomPullRequestOpened[];
 }
 
 export interface ExecutionMapStep {

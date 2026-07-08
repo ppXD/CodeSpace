@@ -1,4 +1,5 @@
 import { fetchJson } from "./request";
+import type { RoomPullRequestResult } from "./sessions";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
 
@@ -674,6 +675,14 @@ export const workflowsApi = {
    * frozen from snapshot, secrets re-resolved from current variable table).
    */
   replayRun: (runId: string) => fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/replay`, {
+    method: "POST",
+  }),
+
+  /**
+   * The Room's "Open PR" action (PR-6): opens (or, on a repeat call, reuses) a pull/merge request for a terminal
+   * run's published branch(es). One entry per repository the run published to.
+   */
+  openPullRequest: (runId: string) => fetchJson<RoomPullRequestResult>(`/api/workflows/runs/${runId}/open-pull-request`, {
     method: "POST",
   }),
 

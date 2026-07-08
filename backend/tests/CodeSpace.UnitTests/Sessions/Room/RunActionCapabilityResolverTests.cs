@@ -48,4 +48,63 @@ public class RunActionCapabilityResolverTests
         trace.Enabled.ShouldBeTrue("view-trace is always available");
         trace.Target.ShouldBe(runId.ToString());
     }
+
+    [Fact]
+    public void OpenPullRequest_is_omitted_when_no_publish_signal_is_supplied()
+    {
+        // The light collapsed-card path passes no signal (it skips the extra ledger + manifest reads) — the action
+        // must not appear at all, not just render disabled, so a collapsed card's action list stays byte-identical
+        // to pre-PR-6.
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success);
+
+        actions.ShouldNotContain(a => a.Kind == RoomActionKind.OpenPullRequest);
+    }
+
+    [Fact]
+    public void OpenPullRequest_is_disabled_when_the_run_published_no_branch()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState { HasPublishedBranch = false });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeFalse();
+        action.DisabledReason.ShouldNotBeNull();
+        action.Label.ShouldBe("Open PR");
+        action.Url.ShouldBeNull();
+    }
+
+    [Fact]
+    public void OpenPullRequest_is_enabled_and_labelled_Open_when_a_branch_exists_with_no_PR_yet()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState { HasPublishedBranch = true });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeTrue();
+        action.DisabledReason.ShouldBeNull();
+        action.Label.ShouldBe("Open PR");
+        action.Url.ShouldBeNull();
+    }
+
+    [Fact]
+    public void OpenPullRequest_renders_as_View_PR_once_one_is_already_opened()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState { HasPublishedBranch = true, OpenedPullRequestUrl = "https://github.com/o/r/pull/1" });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeTrue();
+        action.Label.ShouldBe("View PR");
+        action.Url.ShouldBe("https://github.com/o/r/pull/1");
+    }
+
+    [Fact]
+    public void OpenPullRequest_stays_a_View_PR_link_even_if_HasPublishedBranch_somehow_reads_false()
+    {
+        // Defensive: an already-opened PR's link must always be actionable regardless of what HasPublishedBranch
+        // says (the manifest recording a PR IS evidence a branch existed) — never strand a user on a disabled button
+        // pointing at a PR that demonstrably already exists.
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState { HasPublishedBranch = false, OpenedPullRequestUrl = "https://github.com/o/r/pull/1" });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeTrue();
+        action.Label.ShouldBe("View PR");
+    }
 }

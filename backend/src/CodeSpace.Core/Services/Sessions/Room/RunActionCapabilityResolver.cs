@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, IScopedDependency
 {
-    public IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status)
+    public IReadOnlyList<RoomAction> ResolveTurnActions(Guid runId, WorkflowRunStatus status, RoomPublishState? publish = null)
     {
         var terminal = WorkflowRunState.IsTerminal(status);
         var target = runId.ToString();
@@ -22,11 +22,11 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
         // first, and a Suspended run resumes via its wait / the stranded-continue control, not the turn footer.
         var continuable = status is WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure;
 
-        return new[]
+        var actions = new List<RoomAction>
         {
-            new RoomAction { Kind = RoomActionKind.OpenTrace, Label = "View trace", Enabled = true, Target = target },
+            new() { Kind = RoomActionKind.OpenTrace, Label = "View trace", Enabled = true, Target = target },
 
-            new RoomAction
+            new()
             {
                 Kind = RoomActionKind.Continue,
                 Label = "Continue",
@@ -35,7 +35,7 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
                 Target = target,
             },
 
-            new RoomAction
+            new()
             {
                 Kind = RoomActionKind.RerunTurn,
                 Label = "Rerun",
@@ -45,7 +45,7 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
                 Attempt = true,
             },
 
-            new RoomAction
+            new()
             {
                 Kind = RoomActionKind.Stop,
                 Label = "Stop",
@@ -54,5 +54,25 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
                 Target = target,
             },
         };
+
+        // Omitted (not just disabled) when the caller didn't supply the signal — the light collapsed-card path skips
+        // the extra ledger + manifest reads needed to compute it (PR-6). A focused turn always supplies it.
+        if (publish is not null)
+        {
+            var hasPr = !string.IsNullOrEmpty(publish.OpenedPullRequestUrl);
+            var canOpen = hasPr || publish.HasPublishedBranch;
+
+            actions.Add(new RoomAction
+            {
+                Kind = RoomActionKind.OpenPullRequest,
+                Label = hasPr ? "View PR" : "Open PR",
+                Enabled = canOpen,
+                DisabledReason = canOpen ? null : "This run has no published branch to open a pull request from.",
+                Target = target,
+                Url = publish.OpenedPullRequestUrl,
+            });
+        }
+
+        return actions;
     }
 }

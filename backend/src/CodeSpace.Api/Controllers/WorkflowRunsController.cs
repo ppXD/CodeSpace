@@ -143,6 +143,14 @@ public class WorkflowRunsController : ControllerBase
         return Ok(new { runId = newRunId });
     }
 
+    /// <summary>The Room's "Open PR" action (PR-6): opens (or, on a repeat call, reuses) a pull/merge request for a terminal run's published branch(es). Team-scoped; foreign → 404. Returns <c>{ pullRequests }</c> — one entry per repository the run published to.</summary>
+    [HttpPost("{runId:guid}/open-pull-request")]
+    public async Task<IActionResult> OpenPullRequest([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new OpenRunPullRequestCommand { WorkflowRunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Re-run an existing run STARTING FROM a chosen node (D7) — forks a run reusing the upstream cells, re-runs the node + downstream. Returns the new run id.</summary>
     [HttpPost("{runId:guid}/rerun-from-node")]
     public async Task<IActionResult> RerunFromNode([FromRoute] Guid runId, [FromBody] RerunRunFromNodeCommand command, CancellationToken cancellationToken)

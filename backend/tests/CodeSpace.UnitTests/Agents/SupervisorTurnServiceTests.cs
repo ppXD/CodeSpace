@@ -282,6 +282,23 @@ public class SupervisorTurnServiceTests
         single["integratedBranch"].GetString().ShouldBe("codespace/integration/x");
     }
 
+    [Fact]
+    public void Finish_echoes_the_configured_repositoryId_so_a_single_repo_run_names_integratedBranchs_owner()
+    {
+        // PR-6: integratedBranch is a bare branch name with no repository of its own — the Room's Open-PR action needs
+        // repositoryId to resolve which repo to open the PR against. It comes from CONFIG (not a computed fact), so
+        // Finish takes it as a parameter rather than deriving it from the turn result.
+        var repositoryId = Guid.NewGuid();
+
+        var withRepo = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: "b"), repositoryId).Outputs;
+
+        withRepo["repositoryId"].GetString().ShouldBe(repositoryId.ToString());
+
+        var analysisOnly = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: null)).Outputs;
+
+        analysisOnly["repositoryId"].GetString().ShouldBe("", "an analysis-only run configured no repository — the key stays present but empty, mirroring integratedBranch's own empty-string-not-omitted convention");
+    }
+
     // ── L4 P1: a terminal stop's MODEL-authored acceptance gates the verdict + branch ──
 
     [Fact]

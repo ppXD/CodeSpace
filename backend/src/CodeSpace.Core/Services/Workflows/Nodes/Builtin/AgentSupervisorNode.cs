@@ -114,6 +114,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "reason":           { "type": "string" },
                 "turns":            { "type": "integer" },
                 "integratedBranch": { "type": "string" },
+                "repositoryId": { "type": "string", "description": "Single-repo only: this run's configured primary repository (echoes the config's repositoryId) — the owner of integratedBranch, which is a bare branch name with no repository of its own." },
                 "repositoryBranches": { "type": "array", "items": { "type": "object" }, "description": "Multi-repo only: per-repo {repositoryId, alias, sourceBranch, targetBranch} reconciled heads + PR bases. Binds VERBATIM into git.open_change_set's repositories input (it reads sourceBranch/targetBranch) — wire agent.supervisor.repositoryBranches → git.open_change_set.repositories to open one PR per repo. Omitted for a single-repo run (which uses integratedBranch)." }
               }
             }
@@ -128,6 +129,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         var goalConfig = ReadGoalConfig(context.Config);
         var goal = ReadString(context.Config, "goal");
         var conversationId = ReadOptionalGuid(context.Config, "conversationId");
+        var repositoryId = ReadOptionalGuid(context.Config, "repositoryId");
 
         // Durable re-entry guard (the spawn/retry async barrier): a PRIOR turn may have staged K AgentRun waits
         // that are still in flight. The spawn decision is already a SETTLED ledger row, so a naive rehydrate
@@ -156,7 +158,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
             // short blips), so the run WAITS OUT the outage on a durable deadline ladder and re-enters the SAME
             // turn on wake, instead of terminalizing hours of work. Only past the whole 24h window does it stop —
             // honestly, as a degraded Stopped.
-            return await ParkForInfraOrStopAsync(context, supervisorRunId, teamId, goal, goalConfig, fault, cancellationToken).ConfigureAwait(false);
+            return await ParkForInfraOrStopAsync(context, supervisorRunId, teamId, goal, goalConfig, repositoryId, fault, cancellationToken).ConfigureAwait(false);
         }
 
         // The node re-runs on EITHER pass identically — the durable ledger (not ResumePayload) is the source
@@ -169,7 +171,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         //    on it and the human's answer (the existing ResumeByActionToken path) resumes the next turn.
         //  - SELF-ADVANCE → a synchronous plan/merge; the node parks on a SupervisorDecision wait that
         //    self-resumes into the next turn (the E2 path).
-        if (result.IsFinished) return Finish(context.Logger, result);
+        if (result.IsFinished) return Finish(context.Logger, result, repositoryId);
 
         if (result.ParkedOnAgentWaits) return ParkOnAgentWaits(context.Logger, result);
 
@@ -184,7 +186,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
     /// resolves it) and whose TimeoutPayload carries the ladder position — or, once the whole window is exhausted,
     /// force an HONEST degraded stop through the ledger (the node then reports <c>Stopped</c> + the reason).
     /// </summary>
-    private async Task<NodeResult> ParkForInfraOrStopAsync(NodeRunContext context, Guid supervisorRunId, Guid teamId, string goal, SupervisorGoalConfig? goalConfig, LlmApiException fault, CancellationToken cancellationToken)
+    private async Task<NodeResult> ParkForInfraOrStopAsync(NodeRunContext context, Guid supervisorRunId, Guid teamId, string goal, SupervisorGoalConfig? goalConfig, Guid? repositoryId, LlmApiException fault, CancellationToken cancellationToken)
     {
         var state = SupervisorInfraPark.Next(context.ResumePayload, DateTimeOffset.UtcNow);
 
@@ -194,7 +196,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
             var stopped = await ForceStopAsync(supervisorRunId, teamId, context.NodeId, goal, goalConfig, SupervisorStopReasons.ModelPlaneUnavailable, cancellationToken).ConfigureAwait(false);
 
-            return Finish(context.Logger, stopped);
+            return Finish(context.Logger, stopped, repositoryId);
         }
 
         var delay = SupervisorInfraPark.DelayFor(state.Parks);
@@ -264,7 +266,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
     }
 
     /// <summary>Terminal turn → the node succeeds; the run completes via the normal walk. Internal so a unit test can pin the output bag (notably the multi-repo `repositoryBranches` emit-only-when-non-empty byte-identity guard).</summary>
-    internal static NodeResult Finish(Microsoft.Extensions.Logging.ILogger logger, SupervisorTurnResult result)
+    internal static NodeResult Finish(Microsoft.Extensions.Logging.ILogger logger, SupervisorTurnResult result, Guid? repositoryId = null)
     {
         logger.LogInformation("agent.supervisor finished: decision={Decision} reason={Reason}", result.DecisionKind, result.TerminalReason);
 
@@ -278,6 +280,10 @@ public sealed class AgentSupervisorNode : INodeRuntime
             ["turns"] = JsonSerializer.SerializeToElement((result.NextTurn?.TurnNumber ?? 0)),
             // The run's final reviewable integrated branch (S5) — "" when none, so a downstream git.open_pr binds it directly.
             ["integratedBranch"] = JsonSerializer.SerializeToElement(result.IntegratedBranch ?? ""),
+            // The single-repo run's PRIMARY repository (config, not a computed fact) — "" when the run has none (an
+            // analysis-only run), so a downstream reader (the Room's Open-PR action) can resolve integratedBranch's
+            // owning repository without re-reading the node's config (which isn't durably stored per run).
+            ["repositoryId"] = JsonSerializer.SerializeToElement(repositoryId?.ToString() ?? ""),
         };
 
         // Multi-repo (S7-D1): the per-repo integrated branches a downstream per-repo PR-open targets. Emitted ONLY when

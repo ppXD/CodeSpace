@@ -92,6 +92,7 @@ public class ExpireStaleSupervisorDecisionsDispatchTests
         public Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<Core.Persistence.Entities.SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<SupervisorPriorDecision>> GetTerminalDecisionsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 }
