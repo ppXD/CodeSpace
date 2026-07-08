@@ -160,6 +160,65 @@ public sealed class SupervisorAcceptanceGradeFlowTests
     }
 
     [Fact]
+    public async Task P3_2_a_setup_command_runs_before_the_check_in_the_same_real_workspace()
+    {
+        // The check only exits 0 if a file the SETUP step creates already exists — proving both that setup runs
+        // (not skipped) and that it runs BEFORE the check, in the same cloned workspace.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithScriptAsync("acc/needs-setup", "#!/bin/sh\ntest -f setup-marker.txt\n");
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var grade = await GradeAsync(repoId, teamId, "acc/needs-setup", setupCommand: new[] { "sh", "-c", "echo ok > setup-marker.txt" });
+
+        grade.Passed.ShouldBeTrue("the setup step created the marker file the check requires, before the check ran");
+        grade.Detail.ShouldBe("tests-passed");
+    }
+
+    [Fact]
+    public async Task P3_2_a_failing_setup_command_fails_closed_and_is_infra_classified()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        // The check would trivially pass if reached — proving the setup failure short-circuits BEFORE the check runs.
+        await remote.AddBranchWithCheckAsync("acc/setup-fails", checkExitCode: 0);
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var grade = await GradeAsync(repoId, teamId, "acc/setup-fails", setupCommand: new[] { "sh", "-c", "exit 1" });
+
+        grade.Passed.ShouldBeFalse("a failing setup means the check never got a chance to run");
+        grade.Detail.ShouldStartWith("setup-failed:");
+        CodeSpace.Core.Services.Agents.AgentAcceptanceContract.IsInfraFailure(grade.Detail, workPresent: true).ShouldBeTrue("the check machinery itself never functioned — infra, not a genuine failing verdict");
+    }
+
+    [Fact]
+    public async Task P3_2_a_setup_command_that_hangs_past_the_timeout_grades_setup_timed_out()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithCheckAsync("acc/setup-hangs", checkExitCode: 0);
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var grade = await GradeAsync(repoId, teamId, "acc/setup-hangs", setupCommand: new[] { "sh", "-c", "sleep 30" }, timeoutSeconds: 1);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldBe("setup-timed-out", "distinct from a plain setup failure — the same distinction the check's own timeout draws");
+        CodeSpace.Core.Services.Agents.AgentAcceptanceContract.IsInfraFailure(grade.Detail, workPresent: true).ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task A_branch_that_cannot_be_cloned_fails_closed()
     {
         if (!await GitReadyAsync()) return;
@@ -178,11 +237,11 @@ public sealed class SupervisorAcceptanceGradeFlowTests
 
     // ─── Helpers ───
 
-    private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch, IReadOnlyList<string>? command = null, int timeoutSeconds = 60)
+    private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch, IReadOnlyList<string>? command = null, int timeoutSeconds = 60, IReadOnlyList<string>? setupCommand = null)
     {
         using var scope = _fixture.BeginScope();   // resolving the grader from DI proves it auto-registers
         return await scope.Resolve<ISupervisorAcceptanceGrader>()
-            .GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = command ?? new[] { "sh", "check.sh" } }, timeoutSeconds, CancellationToken.None);
+            .GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = command ?? new[] { "sh", "check.sh" }, SetupCommand = setupCommand }, timeoutSeconds, CancellationToken.None);
     }
 
     private async Task<Guid> SeedTeamAsync()

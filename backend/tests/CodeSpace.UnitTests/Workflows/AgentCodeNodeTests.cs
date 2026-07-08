@@ -537,6 +537,24 @@ public class AgentCodeNodeTests
         result.Retryable.ShouldBeFalse("the same code + the same check would fail again — a respawn cannot change a genuine verdict");
     }
 
+    [Theory]
+    [InlineData("setup-failed: npm ERR! missing script")]
+    [InlineData("setup-timed-out")]
+    public async Task P3_1_part_2_a_setup_command_infra_fault_is_retryable_despite_the_fail_closed_acceptance_exit_reason(string acceptanceDetail)
+    {
+        // The contract's OWN setup step (installing deps, a build) failing/timing out means the CHECK never ran at
+        // all — the verdict was never reached, so this is infra exactly like a grader clone/timeout fault, not a
+        // genuine "the tests failed" verdict. A fresh respawn deserves the same chance a crash/timeout gets.
+        var resume = JsonDocument.Parse($$"""
+            {"status":"Failed","error":"x","exitReason":"acceptance-failed","acceptanceDetail":"{{acceptanceDetail}}","changedFiles":["src/a.ts"]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeTrue("a setup infra fault is retryable — the check itself never got a chance to run");
+    }
+
     [Fact]
     public async Task P2_3_a_respawn_carrying_a_prior_sessionId_warm_resumes_instead_of_cold_starting()
     {

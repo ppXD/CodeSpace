@@ -157,9 +157,42 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
     private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
     {
+        if (spec.SetupCommand is { Count: > 0 } setupCommand)
+        {
+            var setupFailure = await RunSetupCommandAsync(setupCommand, directory, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            if (setupFailure is not null) return setupFailure;
+        }
+
         var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
 
         return await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P3.1 part 2: run the contract's OPTIONAL setup step in the SAME workspace before the check — a failure here
+    /// means the check itself never got a chance to run, so it is classified alongside <c>grade-error:</c>/
+    /// <c>clone-failed:</c> (infra, not a code verdict) rather than as a genuine failing check. Returns null on
+    /// success (proceed to grading); a non-null grade short-circuits <see cref="GradeWorkspaceAsync"/>.
+    /// </summary>
+    private async Task<BenchmarkGrade?> RunSetupCommandAsync(IReadOnlyList<string> setupCommand, string directory, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        var spec = new SandboxSpec
+        {
+            Command = setupCommand[0],
+            Args = setupCommand.Skip(1).ToList(),
+            WorkingDirectory = directory,
+            TimeoutSeconds = timeoutSeconds,
+        };
+
+        var result = await _runners.Resolve(DefaultRunnerKind).RunAsync(spec, cancellationToken).ConfigureAwait(false);
+
+        if (result.Status == SandboxStatus.Success) return null;
+
+        _logger.LogWarning("Acceptance grading's setup command failed in {Directory}: {Status} (exit {ExitCode}) {Stderr}", directory, result.Status, result.ExitCode, Summarize(result.Stderr));
+
+        return result.Status == SandboxStatus.TimedOut
+            ? Failed("setup-timed-out")
+            : Failed($"setup-failed: {Summarize(result.Stderr)}");
     }
 
     private static BenchmarkGrade Failed(string detail) => new() { Passed = false, Detail = detail };

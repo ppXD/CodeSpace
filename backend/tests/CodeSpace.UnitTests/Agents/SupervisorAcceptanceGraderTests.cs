@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -285,6 +286,66 @@ public class SupervisorAcceptanceGraderTests
     /// <summary>The destination directory argument of the scripted <c>git clone</c> invocation — <c>GradePatchAsync</c> generates this path itself (a fresh GUID under the shared workspaces root), so tests read it back off the runner rather than injecting it.</summary>
     private static string CloneDirectory(ScriptedApplyRunnerRegistry runners) => runners.Invocations.First(i => i.Args.Contains("clone")).Args[^1];
 
+    // ── P3.1 part 2: SetupCommand — an optional workspace-prep step run BEFORE the check ─────────────
+
+    [Fact]
+    public async Task A_present_setup_command_runs_before_the_grade_in_the_same_workspace()
+    {
+        var runners = new ScriptedSetupRunnerRegistry(SandboxStatus.Success);
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: "/tmp/clone-xyz", runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, SetupCommand = new[] { "npm", "install" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("setup succeeded, so the grade proceeds to the oracle's own verdict");
+        runners.Invocation.ShouldNotBeNull("the setup command was actually run");
+        runners.Invocation!.Command.ShouldBe("npm");
+        runners.Invocation.Args.ShouldBe(new[] { "install" });
+        runners.Invocation.WorkingDirectory.ShouldBe("/tmp/clone-xyz", "setup runs in the SAME workspace the check grades");
+        oracle.Context.ShouldNotBeNull("the oracle still ran after a successful setup");
+    }
+
+    [Fact]
+    public async Task A_failing_setup_command_fails_closed_without_reaching_the_oracle()
+    {
+        var runners = new ScriptedSetupRunnerRegistry(SandboxStatus.Failed, exitCode: 1, stderr: "npm ERR! missing script");
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, SetupCommand = new[] { "npm", "install" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse("the check never ran — a failed setup can't be a silent pass");
+        grade.Detail.ShouldStartWith("setup-failed:");
+        grade.Detail.ShouldContain("npm ERR! missing script", Case.Insensitive, "the setup command's own stderr is legible to the operator");
+        oracle.Context.ShouldBeNull("the oracle is never reached when setup fails — the check itself never got a chance to run");
+    }
+
+    [Fact]
+    public async Task A_timed_out_setup_command_fails_closed_as_setup_timed_out()
+    {
+        var runners = new ScriptedSetupRunnerRegistry(SandboxStatus.TimedOut, exitCode: -1);
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, SetupCommand = new[] { "npm", "install" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldBe("setup-timed-out", "distinct from a plain setup exit failure — the SAME distinction TestsPassGrader draws for the check itself");
+        oracle.Context.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Setup_failure_and_timeout_details_are_infra_classified_regardless_of_work_present()
+    {
+        AgentAcceptanceContract.IsInfraFailure("setup-failed: npm ERR!", workPresent: true).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("setup-failed: npm ERR!", workPresent: false).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("setup-timed-out", workPresent: true).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("setup-timed-out", workPresent: false).ShouldBeTrue();
+    }
+
     // ── The corpus-stub factory the adapter reuses ───────────────────────────────────
 
     [Theory]
@@ -477,6 +538,34 @@ public class SupervisorAcceptanceGraderTests
             return Task.FromResult(_applySucceeds
                 ? new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" }
                 : new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = _stderr });
+        }
+    }
+
+    /// <summary>A single-invocation scripted runner for the SetupCommand tests — the branch-based <see cref="SupervisorAcceptanceGrader.GradeAsync"/> path only ever calls the runner directly for the setup step (the check itself is graded by the faked <see cref="FakeGrader"/> oracle, which never touches the runner).</summary>
+    private sealed class ScriptedSetupRunnerRegistry : ISandboxRunnerRegistry
+    {
+        private readonly ScriptedSetupRunner _runner;
+        public ScriptedSetupRunnerRegistry(SandboxStatus status, int exitCode = 0, string stderr = "") => _runner = new ScriptedSetupRunner(status, exitCode, stderr);
+        public ISandboxRunner Resolve(string kind) => _runner;
+        public IReadOnlyList<ISandboxRunner> All => new ISandboxRunner[] { _runner };
+        public SandboxSpec? Invocation => _runner.Invocation;
+    }
+
+    private sealed class ScriptedSetupRunner : ISandboxRunner
+    {
+        private readonly SandboxStatus _status;
+        private readonly int _exitCode;
+        private readonly string _stderr;
+
+        public ScriptedSetupRunner(SandboxStatus status, int exitCode, string stderr) { _status = status; _exitCode = exitCode; _stderr = stderr; }
+
+        public string Kind => "local";
+        public SandboxSpec? Invocation { get; private set; }
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocation = spec;
+            return Task.FromResult(new SandboxResult { Status = _status, ExitCode = _exitCode, Stdout = "", Stderr = _stderr });
         }
     }
 }
