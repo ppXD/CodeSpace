@@ -93,7 +93,7 @@ public sealed class SupervisorChecksBeforeCriticFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         var goalConfig = new SupervisorGoalConfig { Goal = Goal, DecisionReviewMode = ReviewMode.Gate };
 

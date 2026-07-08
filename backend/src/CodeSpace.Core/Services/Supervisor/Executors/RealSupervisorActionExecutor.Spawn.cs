@@ -33,11 +33,79 @@ public sealed partial class RealSupervisorActionExecutor
         // spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
         // The dispatch spec rides ALONGSIDE the task so the async stage can resolve its per-agent persona slug (P3) on a
         // FRESH stage only — a crash-recovery orphan reclaim reuses the already-resolved task and never re-resolves.
-        var tasks = spawn.SubtaskIds
-            .Select(id => { var spec = DispatchFor(spawn, id); return (BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec), spec); })
-            .ToList();
+        //
+        // S1 handoff: a subtask that DEPENDS on a prior producer is staged from that producer's recorded branch/patch
+        // (never a fresh clone of the repository's default branch — the root cause of run 28fec923). Resolving that
+        // staging is async (a manifest read, occasionally a real git integration), so this is a loop, not the prior
+        // LINQ projection. ANY blocked subtask aborts the WHOLE spawn synchronously with zero agents (never a partial
+        // fan-out): the positional subtaskIds[i] ↔ agentResults[i] join every dependency/merge/resolve reader relies on
+        // would otherwise desync the moment one index is silently dropped.
+        var tasks = new List<(AgentTask, SupervisorAgentDispatch?)>();
+        var blocked = new List<DependencyBlock>();
+
+        foreach (var id in spawn.SubtaskIds)
+        {
+            var spec = DispatchFor(spawn, id);
+            var planned = subtasks.GetValueOrDefault(id);
+            var repositoryId = ResolveTargetRepositoryId(spec, context);
+
+            var staging = await ResolveDependencyStagingAsync(DependsOnFor(planned, spec), repositoryId, context, cancellationToken).ConfigureAwait(false);
+
+            if (staging.IsBlocked)
+            {
+                blocked.Add(new DependencyBlock(id, staging.BlockedReason!, staging.ConflictedFiles, staging.PreservedBranches));
+                continue;
+            }
+
+            tasks.Add((BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec, staging), spec));
+        }
+
+        if (blocked.Count > 0)
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(blocked), AgentJson.Options));
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>A subtask's staging dependency: the model-authored <see cref="SupervisorAgentDispatch.BaseSubtaskId"/> override when present (narrows to ONE producer for this specific spawn), else the plan's own <c>DependsOn</c>. Empty when neither names a producer (byte-identical no-override path). Internal + static so the precedence is unit-pinned directly.</summary>
+    internal static IReadOnlyList<string> DependsOnFor(SupervisorPlannedSubtask? planned, SupervisorAgentDispatch? spec) =>
+        !string.IsNullOrWhiteSpace(spec?.BaseSubtaskId) ? new[] { spec!.BaseSubtaskId! } : planned?.DependsOn ?? Array.Empty<string>();
+
+    /// <summary>The subtask's target repository, resolved the SAME way <see cref="BuildTaskWithGoal"/> will resolve it — a pure pre-computation so dependency staging can look up the right repo's manifest before the task itself is built.</summary>
+    private static Guid? ResolveTargetRepositoryId(SupervisorAgentDispatch? spec, SupervisorTurnContext context)
+    {
+        var boundRelated = AgentWorkspaceAuthoring.ParseRelatedRepositories(context.AgentProfile?.RelatedRepositories ?? default);
+
+        return SupervisorRepoClamp.ClampPrimary(spec?.RepositoryId, context.AgentProfile?.RepositoryId, boundRelated);
+    }
+
+    /// <summary>One subtask a dependency-staging block withheld from this turn's spawn, with the loud reason + (when the block was an integration conflict) the conflicted files and the producers' own preserved branches.</summary>
+    internal readonly record struct DependencyBlock(string SubtaskId, string Reason, IReadOnlyList<string> ConflictedFiles, IReadOnlyList<string> PreservedBranches);
+
+    /// <summary>
+    /// The synchronous zero-agent outcome for a spawn withheld by dependency staging — <c>agentRunIds</c>/<c>agentCount</c>
+    /// stay in the SAME shape a no-op spawn already emits (so every existing "did this stage agents" reader is
+    /// unaffected), plus <c>blockedSubtasks</c> naming why. When any block carried conflict detail, an <c>integration</c>
+    /// block is ALSO recorded in the SAME shape <see cref="SupervisorOutcome.ReadIntegration"/> reads off a <c>merge</c> —
+    /// so the EXISTING <c>resolve</c> verb (its widened <see cref="FindMostRecentConflictDecision"/>) can reconcile a
+    /// staging-time conflict exactly as it reconciles a merge-time one, with no new escalation mechanism. Internal +
+    /// static so the shape is unit-pinned against the SAME <see cref="SupervisorOutcome.ReadIntegration"/> reader.
+    /// </summary>
+    internal static object BuildBlockedSpawnOutcome(IReadOnlyList<DependencyBlock> blocked)
+    {
+        var conflicted = blocked.Where(b => b.ConflictedFiles.Count > 0 || b.PreservedBranches.Count > 0).ToList();
+
+        return new
+        {
+            agentRunIds = Array.Empty<Guid>(),
+            agentCount = 0,
+            blockedSubtasks = blocked.Select(b => new { subtaskId = b.SubtaskId, reason = b.Reason }).ToList(),
+            integration = conflicted.Count == 0 ? null : new
+            {
+                status = "Conflicted",
+                outcomes = conflicted.SelectMany(b => b.PreservedBranches.Select(branch => new { label = b.SubtaskId, fallbackBranch = branch, conflictedFiles = b.ConflictedFiles })).ToList(),
+                reason = "a dependent subtask's producers could not be auto-integrated onto one branch",
+            },
+        };
     }
 
     /// <summary>The model-authored per-agent dispatch for a subtask id (the FIRST matching <c>agents[]</c> entry — lenient on duplicates), or null. A spawn with no <c>agents[]</c> returns null for every id → byte-identical homogeneous fan-out.</summary>
@@ -53,10 +121,21 @@ public sealed partial class RealSupervisorActionExecutor
         if (retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId))
             return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)>(), context, cancellationToken).ConfigureAwait(false);
 
+        // S1 handoff applies to a retry exactly as it does to a fresh spawn — a producer may have pushed a NEW branch
+        // since this subtask's original attempt (e.g. it was itself retried), so re-resolving staging here (rather than
+        // reusing whatever the original attempt saw) keeps the retry building on the CURRENT producer state.
+        var planned = subtasks.GetValueOrDefault(retry.SubtaskId);
+        var repositoryId = ResolveTargetRepositoryId(null, context);
+
+        var staging = await ResolveDependencyStagingAsync(DependsOnFor(planned, null), repositoryId, context, cancellationToken).ConfigureAwait(false);
+
+        if (staging.IsBlocked)
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(new[] { new DependencyBlock(retry.SubtaskId, staging.BlockedReason!, staging.ConflictedFiles, staging.PreservedBranches) }), AgentJson.Options));
+
         // D1 (retry-resume): a retry CONTINUES the failed attempt's conversation instead of restarting the subtask cold —
         // find the prior attempt of THIS subtask in THIS run + stamp the resume hint (the executor resolves any ref, the
         // Claude harness restores the transcript at the retry's own cwd). No prior resumable attempt ⇒ byte-identical cold-start.
-        var task = await ApplyRetryResumeHintAsync(BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context), retry.SubtaskId, context, cancellationToken).ConfigureAwait(false);
+        var task = await ApplyRetryResumeHintAsync(BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: staging), retry.SubtaskId, context, cancellationToken).ConfigureAwait(false);
 
         return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken).ConfigureAwait(false);
     }
@@ -339,7 +418,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// (the supervisor's own conversation, null in the bare case) — a stored-only field that nothing reads on the
     /// spawn path, so it doesn't perturb behaviour.</para>
     /// </summary>
-    internal static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, SupervisorTurnContext context, SupervisorAgentDispatch? spec = null)
+    internal static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, SupervisorTurnContext context, SupervisorAgentDispatch? spec = null, DependencyStagingResult? staging = null)
     {
         var planned = subtasks.GetValueOrDefault(subtaskId);
 
@@ -353,7 +432,7 @@ public sealed partial class RealSupervisorActionExecutor
         // contract implies a GRADABLE branch — the fold grades this subtask's oracle on its produced branch, so the
         // publish opt-in is forced ON. Without it a stock profile (push off) fails every contracted unit
         // "no-branch-or-repo" even when the work and the check are both perfect.
-        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, forcePushBranch: planned?.Acceptance is not null, spec: spec) with
+        return BuildTaskWithGoal(WithHandoff(staging?.GoalFoldText, WithRole(spec?.Role, instruction)), context, forcePushBranch: planned?.Acceptance is not null, spec: spec, primaryRef: staging?.Ref) with
         {
             SubtaskId = string.IsNullOrWhiteSpace(subtaskId) ? null : subtaskId,
         };
@@ -363,6 +442,10 @@ public sealed partial class RealSupervisorActionExecutor
     private static string WithRole(string? role, string instruction) =>
         string.IsNullOrWhiteSpace(role) ? instruction : $"As the {role.Trim()}, {instruction}";
 
+    /// <summary>Prepend the S1 handoff block (a producer's branch + summary + file count) to the instruction, so a dependent subtask's prompt names what it inherits. Null/blank fold text → the plain instruction (byte-identical to a subtask with no dependency).</summary>
+    private static string WithHandoff(string? foldText, string instruction) =>
+        string.IsNullOrWhiteSpace(foldText) ? instruction : $"{foldText}\n\n{instruction}";
+
     /// <summary>
     /// Build a spawned agent's task from a GOAL string + the run's profile — the shared field-stamping the spawn,
     /// retry, AND resolve (#379) paths reuse so a supervisor-spawned agent is always a REAL team agent (repo /
@@ -370,9 +453,11 @@ public sealed partial class RealSupervisorActionExecutor
     /// approval surface), regardless of which verb spawned it. <paramref name="forcePushBranch"/> overrides the
     /// profile's push opt-in to TRUE — the resolver MUST push its reconciled branch (a downstream PR-open needs a
     /// head), and a CONTRACT-BEARING subtask must push so its acceptance can grade (F4). A contract-less spawn/retry
-    /// passes false → byte-identical to before (the profile's <c>PushBranch</c> wins).
+    /// passes false → byte-identical to before (the profile's <c>PushBranch</c> wins). <paramref name="primaryRef"/>
+    /// (S1 handoff) overrides the clone ref to a dependency's own branch or a fresh integration branch — null (the
+    /// default, and every non-dependent spawn) keeps the byte-identical repository-default-branch clone.
     /// </summary>
-    internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false, SupervisorAgentDispatch? spec = null)
+    internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false, SupervisorAgentDispatch? spec = null, string? primaryRef = null)
     {
         var profile = context.AgentProfile;
         var boundRelated = AgentWorkspaceAuthoring.ParseRelatedRepositories(profile?.RelatedRepositories ?? default);
@@ -410,8 +495,9 @@ public sealed partial class RealSupervisorActionExecutor
             RepositoryId = repositoryId,
             // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.code node uses —
             // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it). The operator's
-            // multi-repo cwd mode rides the profile (null/Auto → byte-identical).
-            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto),
+            // multi-repo cwd mode rides the profile (null/Auto → byte-identical). primaryRef (S1 handoff) overrides the
+            // clone ref to a dependency's own branch/integration branch; null → the byte-identical default-branch clone.
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryRef),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             // The profile's wall-clock cap, in the agent.code node's vocabulary: positive caps the run, an explicit ≤0

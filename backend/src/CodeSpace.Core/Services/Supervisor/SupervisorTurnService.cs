@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.Messages.Agents;
@@ -30,9 +31,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly Plans.IWorkPlanService _workPlans;
     private readonly Workflows.Lifecycle.IRunRecordLogger _recordLogger;
     private readonly Workflows.Artifacts.IArtifactOffloader _offloader;
+    private readonly IPublishManifestStore _manifests;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
@@ -45,6 +47,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _workPlans = workPlans;
         _recordLogger = recordLogger;
         _offloader = offloader;
+        _manifests = manifests;
         _logger = logger;
     }
 

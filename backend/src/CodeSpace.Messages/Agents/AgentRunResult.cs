@@ -122,6 +122,9 @@ public sealed record AgentRunResult
 
     /// <summary>Set ONLY when a non-empty diff failed to push after retries — the publish-manifest's signal that <see cref="ProducedBranch"/> being null was an ATTEMPT that failed, not a policy choice. Already-redacted (the workspace provider redacts before throwing). Null on success, on a policy skip, and on every non-publish outcome.</summary>
     public string? PublishError { get; init; }
+
+    /// <summary>Set ONLY when the publish guard chain (<c>IPublishGuard</c>) blocked the push — a BY-CHOICE skip (never both this and <see cref="PublishError"/> at once). The winning guard's human-readable reason, folded onto the publish-manifest row's <c>Summary</c> so a by-choice skip explains itself.</summary>
+    public string? PublishSkipReason { get; init; }
 }
 
 /// <summary>One writable repository's outcome in a multi-repo workspace run (multi-repo PR3, Rule 18.1 noun): which repo (by alias), what it changed, the branch it produced, and the base it was rooted at.</summary>
@@ -169,6 +172,9 @@ public sealed record RepositoryRunResult
 
     /// <summary>Mirrors <see cref="AgentRunResult.PublishError"/> for this repo — set ONLY when this repo's non-empty diff failed to push after retries.</summary>
     public string? PublishError { get; init; }
+
+    /// <summary>Mirrors <see cref="AgentRunResult.PublishSkipReason"/> for this repo — set ONLY when the publish guard chain blocked THIS repo's push (a multi-repo run can mix policies across repos).</summary>
+    public string? PublishSkipReason { get; init; }
 
     /// <summary>
     /// The DIFF-FREE projection of this per-repo result — the bounded facts (alias / repository id / changed files /

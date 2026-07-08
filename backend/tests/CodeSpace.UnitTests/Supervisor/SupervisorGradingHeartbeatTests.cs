@@ -24,7 +24,7 @@ public class SupervisorGradingHeartbeatTests
     // (plain field assignment, no eager calls) and never read on this path, so null! is safe here exactly as the
     // existing SupervisorTurnServiceTests already pass null! for db/offloader on paths that don't touch them.
     private static SupervisorTurnService Service(IRunRecordLogger logger) =>
-        new(null!, null!, null!, db: null!, null!, null!, null!, null!, null!, logger, null!, NullLogger<SupervisorTurnService>.Instance);
+        new(null!, null!, null!, db: null!, null!, null!, null!, null!, null!, logger, null!, null!, NullLogger<SupervisorTurnService>.Instance);
 
     [Fact]
     public async Task The_loop_logs_repeatedly_while_uncancelled()

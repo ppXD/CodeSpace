@@ -28,6 +28,9 @@ public class Repository : IEntity<Guid>, IAuditable
     public RepositoryStatus Status { get; set; } = RepositoryStatus.Active;
     public string? LastError { get; set; }
 
+    /// <summary>The publish guard chain's repo-level override — see <see cref="RepositoryPublishMode"/>.</summary>
+    public RepositoryPublishMode PublishMode { get; set; } = RepositoryPublishMode.Branch;
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

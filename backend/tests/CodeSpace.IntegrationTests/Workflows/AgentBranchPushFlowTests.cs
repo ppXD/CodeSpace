@@ -20,18 +20,18 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// HIGH fidelity (Rule 12): drives the REAL <see cref="IAgentRunExecutor"/> (resolved from the fixture scope) all
 /// the way through — real <see cref="LocalProcessRunner"/> spawning real <c>git</c> + a real <c>/bin/sh</c> harness,
-/// real Postgres, and a real local bare-repo "remote" — to prove the PR-A per-run branch-push opt-in
-/// (<see cref="AgentTask.PushProducedBranch"/>) publishes each agent's branch with the deployment-wide env flag
-/// <see cref="AgentRunExecutor.PushEnabledEnvVar"/> OFF. Nothing is mocked: each test inspects the ACTUAL refs on the
-/// bare remote via <c>git --git-dir</c>, the same way <c>AgentWorkspacePushFlowTests</c> does.
+/// real Postgres, and a real local bare-repo "remote" — to prove push is DEFAULT-ON for a non-empty diff (PR-2's
+/// env-gate deletion) and that the publish guard chain's explicit opt-out actually blocks it end-to-end. Nothing is
+/// mocked: each test inspects the ACTUAL refs on the bare remote via <c>git --git-dir</c>.
 ///
-/// <para>Covers: (1) per-run opt-in pushes <c>codespace/agent/{runId:N}</c> end-to-end with the env flag off;
-/// (2) the load-bearing contrast — env off + NO opt-in → the run still Succeeds but no branch appears (byte-identical
-/// to today, proving the opt-in is the trigger, not the mere presence of a token/repo); (3) the fan-out shape — two
-/// runs against the SAME bound repo, each opting in, each producing its OWN run-unique branch (N agents = N distinct
-/// branches, no collision). The env var is unset around each run and restored in a finally; every OS resource is
-/// GUID-suffixed under an IDisposable that best-effort cleans the bare remote + every clone even on the failure path;
-/// skips on Windows / when git is absent so a cross-host <c>dotnet test</c> stays clean.</para>
+/// <para>Covers: (1) an ORDINARY task (no <see cref="AgentTask.PushProducedBranch"/> set at all) pushes
+/// <c>codespace/agent/{runId:N}</c> end-to-end — no opt-in needed, proving the flip; (2) the load-bearing contrast —
+/// an EXPLICIT opt-out (<c>PushProducedBranch = false</c>, the <see cref="Core.Services.Agents.Publish.Guards.ProfileOptOutPublishGuard"/>)
+/// still runs the diff to Succeeded but produces NO branch, proving the guard is a real, working brake, not
+/// decorative; (3) the fan-out shape — two default-push runs against the SAME bound repo each produce their OWN
+/// run-unique branch (N agents = N distinct branches, no collision). Every OS resource is GUID-suffixed under an
+/// IDisposable that best-effort cleans the bare remote + every clone even on the failure path; skips on Windows /
+/// when git is absent so a cross-host <c>dotnet test</c> stays clean.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -42,129 +42,99 @@ public sealed class AgentBranchPushFlowTests
     public AgentBranchPushFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Per_run_opt_in_pushes_the_branch_end_to_end_with_the_env_flag_off()
+    public async Task Default_push_publishes_the_branch_end_to_end_with_no_opt_in()
     {
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            // The deployment-wide flag is OFF — so the ONLY thing that can trigger a push is the task's per-run opt-in.
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);   // no per-run signal at all
 
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-            var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true);
+        // The scripted harness makes a REAL edit in the clone; the executor captures the diff, then — because push
+        // is DEFAULT-ON for a non-empty diff — pushes the produced branch to the bare remote over the authenticated clone.
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
 
-            // The scripted harness makes a REAL edit in the clone; the executor captures the diff, then — because the
-            // per-run opt-in is set — pushes the produced branch to the bare remote over the authenticated clone.
-            await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
 
-            using var scope = _fixture.BeginScope();
-            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-            run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.ProducedBranch.ShouldBe(expectedBranch, "push is default-on — no opt-in needed to publish the produced branch");
 
-            var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
-            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-            result.ProducedBranch.ShouldBe(expectedBranch, "the per-run opt-in pushed the diff and folded the produced branch into the result");
-
-            (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote actually carries the pushed branch");
-            (await remote.BranchContainsFileAsync(expectedBranch, "agent-change.txt")).ShouldBeTrue("the pushed branch tip contains the agent's file");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
+        (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote actually carries the pushed branch");
+        (await remote.BranchContainsFileAsync(expectedBranch, "agent-change.txt")).ShouldBeTrue("the pushed branch tip contains the agent's file");
     }
 
     [Fact]
-    public async Task Env_off_and_no_opt_in_produces_no_branch_byte_identical_to_today()
+    public async Task Explicit_opt_out_produces_no_branch_end_to_end()
     {
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            // Same setup as test 1 — same token, same bound repo, same edit — but the task leaves PushProducedBranch
-            // ABSENT. With the env flag also off, the gate is off, so NO branch must appear. This is the load-bearing
-            // contrast: it proves the opt-in is what triggers the push, not the presence of a token/repo.
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
+        // Same setup as the default-push test — same token, same bound repo, same edit — but the task explicitly
+        // opts OUT. This is the load-bearing contrast: it proves the ProfileOptOutPublishGuard is a REAL, working
+        // brake against a real git clone/push, not merely correct in the unit-level fake.
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: false);
 
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-            var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
 
-            await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the run still runs to success — only the side-effecting push is gated off");
 
-            using var scope = _fixture.BeginScope();
-            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the run still runs to success — only the side-effecting push is gated off");
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.ProducedBranch.ShouldBeNull("the explicit opt-out guard blocks the push");
+        result.PublishSkipReason.ShouldBe("push disabled by the launch profile");
 
-            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-            result.ProducedBranch.ShouldBeNull("no opt-in + env off → the gate is closed → no branch is produced");
-
-            (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("the bare remote gained NO branch");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
+        (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("the bare remote gained NO branch");
     }
 
     [Fact]
-    public async Task Fan_out_two_opted_in_runs_each_push_their_own_distinct_branch()
+    public async Task Fan_out_two_default_push_runs_each_push_their_own_distinct_branch()
     {
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            // The one-agent-one-branch fan-out shape, proven at the executor level (simpler than the full flow.map
-            // engine, and enough to prove the distinct-branch property): two agent runs against the SAME bound repo,
-            // each opting in, each writing its OWN file. The branch name is run-id-derived, so N agents = N distinct
-            // branches with no collision — both must land on the remote with their respective files.
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
+        // The one-agent-one-branch fan-out shape, proven at the executor level (simpler than the full flow.map
+        // engine, and enough to prove the distinct-branch property): two DEFAULT-push agent runs (no opt-in) against
+        // the SAME bound repo, each writing its OWN file. The branch name is run-id-derived, so N agents = N distinct
+        // branches with no collision — both must land on the remote with their respective files.
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
 
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
+        var runIdA = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);
+        var runIdB = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);
 
-            var runIdA = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true);
-            var runIdB = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true);
+        await ExecuteAsync(runIdA, new ScriptedHarness("printf 'agent A\\n' > agent-a.txt; echo edited"));
+        await ExecuteAsync(runIdB, new ScriptedHarness("printf 'agent B\\n' > agent-b.txt; echo edited"));
 
-            await ExecuteAsync(runIdA, new ScriptedHarness("printf 'agent A\\n' > agent-a.txt; echo edited"));
-            await ExecuteAsync(runIdB, new ScriptedHarness("printf 'agent B\\n' > agent-b.txt; echo edited"));
+        var branchA = AgentRunExecutor.BuildBranchName(runIdA);
+        var branchB = AgentRunExecutor.BuildBranchName(runIdB);
 
-            var branchA = AgentRunExecutor.BuildBranchName(runIdA);
-            var branchB = AgentRunExecutor.BuildBranchName(runIdB);
+        branchA.ShouldNotBe(branchB, "each run derives its own run-unique branch — no collision");
 
-            branchA.ShouldNotBe(branchB, "each run derives its own run-unique branch — no collision");
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        (await svc.GetAsync(runIdA, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        (await svc.GetAsync(runIdB, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
 
-            using var scope = _fixture.BeginScope();
-            var svc = scope.Resolve<IAgentRunService>();
-            (await svc.GetAsync(runIdA, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
-            (await svc.GetAsync(runIdB, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
-
-            (await remote.HasBranchAsync(branchA)).ShouldBeTrue("agent A's branch is on the remote");
-            (await remote.HasBranchAsync(branchB)).ShouldBeTrue("agent B's branch is on the remote");
-            (await remote.BranchContainsFileAsync(branchA, "agent-a.txt")).ShouldBeTrue("agent A's branch carries agent A's file");
-            (await remote.BranchContainsFileAsync(branchB, "agent-b.txt")).ShouldBeTrue("agent B's branch carries agent B's file");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
+        (await remote.HasBranchAsync(branchA)).ShouldBeTrue("agent A's branch is on the remote");
+        (await remote.HasBranchAsync(branchB)).ShouldBeTrue("agent B's branch is on the remote");
+        (await remote.BranchContainsFileAsync(branchA, "agent-a.txt")).ShouldBeTrue("agent A's branch carries agent A's file");
+        (await remote.BranchContainsFileAsync(branchB, "agent-b.txt")).ShouldBeTrue("agent B's branch carries agent B's file");
     }
 
     [Fact]
@@ -178,36 +148,26 @@ public sealed class AgentBranchPushFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true, timeoutSeconds: 1);
 
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-            var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true, timeoutSeconds: 1);
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'salvaged edit\\n' > salvaged.txt; sleep 10"));
 
-            await ExecuteAsync(runId, new ScriptedHarness("printf 'salvaged edit\\n' > salvaged.txt; sleep 10"));
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.TimedOut);
 
-            using var scope = _fixture.BeginScope();
-            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-            run.Status.ShouldBe(AgentRunStatus.TimedOut);
+        var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.ChangedFiles.ShouldContain("salvaged.txt", "the file the agent wrote before the kill is captured as real git ground truth");
+        result.ProducedBranch.ShouldBe(expectedBranch, "the real edit is salvaged as a real pushed branch instead of vanishing with the killed process");
 
-            var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
-            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-            result.ChangedFiles.ShouldContain("salvaged.txt", "the file the agent wrote before the kill is captured as real git ground truth");
-            result.ProducedBranch.ShouldBe(expectedBranch, "the real edit is salvaged as a real pushed branch instead of vanishing with the killed process");
-
-            (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote genuinely carries the salvaged branch, not just result_jsonb");
-            (await remote.BranchContainsFileAsync(expectedBranch, "salvaged.txt")).ShouldBeTrue("the pushed branch tip contains the killed agent's real edit");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
+        (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote genuinely carries the salvaged branch, not just result_jsonb");
+        (await remote.BranchContainsFileAsync(expectedBranch, "salvaged.txt")).ShouldBeTrue("the pushed branch tip contains the killed agent's real edit");
     }
 
     // ─── Seeding ─────────────────────────────────────────────────────────────
@@ -294,6 +254,7 @@ public sealed class AgentBranchPushFlowTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);

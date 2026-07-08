@@ -246,7 +246,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var runs = new StubRuns(runId);
         var critic = new RecordingCritic { Verdict = verdict };
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs, critic);
     }
 

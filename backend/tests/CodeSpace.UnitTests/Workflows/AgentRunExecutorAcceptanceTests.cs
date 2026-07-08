@@ -68,7 +68,7 @@ public class AgentRunExecutorAcceptanceTests
     }
 
     [Fact]
-    public async Task A_contract_with_no_branch_fails_closed_without_grading()
+    public async Task A_contract_with_no_branch_and_no_patch_fails_closed_without_grading()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
@@ -80,6 +80,92 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptancePassed.ShouldBe(false);
         result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
         grader.Calls.ShouldBe(0, "there is nothing to clone — fail closed, never a phantom pass");
+        grader.PatchCalls.ShouldBe(0);
+    }
+
+    // ── S2: no branch, but a recorded patch (a PatchOnly-mode producer, or a policy-blocked push) ─────
+
+    [Fact]
+    public async Task A_contract_with_no_branch_but_a_recorded_patch_grades_via_the_patch_not_fail_closed()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var patchOnly = SucceededPatchOnly();
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), patchOnly, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "the patch was gradeable — no reason to fail closed");
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceDetail.ShouldBe("exit 0");
+        grader.Calls.ShouldBe(0, "no branch → the branch-based path is never invoked");
+        grader.PatchCalls.ShouldBe(1);
+        grader.LastPatchBaseSha.ShouldBe(patchOnly.BaseSha);
+    }
+
+    [Fact]
+    public async Task A_patch_based_grade_that_fails_regrades_the_run_to_failed_exactly_like_a_branch_failure()
+    {
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "exit 1" });
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), SucceededPatchOnly(), CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe("acceptance-failed");
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceDetail.ShouldBe("exit 1");
+    }
+
+    [Fact]
+    public async Task An_offloaded_patch_artifact_is_preferred_when_present_alongside_an_inline_patch()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
+        var artifactId = Guid.NewGuid();
+
+        await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")),
+            SucceededPatchOnly() with { Patch = "diff --git a/x b/x", PatchArtifactId = artifactId }, CancellationToken.None);
+
+        grader.PatchCalls.ShouldBe(1, "an inline patch OR an artifact id both count as gradeable — either is threaded to GradePatchAsync, which resolves whichever the offloader needs");
+    }
+
+    // ── S2: no branch, no patch, expectsChanges decides the outcome ─────────────────────
+
+    [Fact]
+    public async Task No_branch_no_patch_and_expects_changes_false_is_a_vacuous_pass_not_a_failure()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var noWork = Succeeded() with { ProducedBranch = null };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), noWork, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "nothing about the run itself went wrong — the STATUS is untouched");
+        result.AcceptancePassed.ShouldBe(true, "the correctly-predicted no-diff outcome is a PASS, never a failure");
+        result.AcceptanceDetail.ShouldStartWith("not-applicable");
+        grader.Calls.ShouldBe(0);
+        grader.PatchCalls.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task No_branch_no_patch_and_expects_changes_true_explicitly_fails_closed_exactly_like_the_default()
+    {
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var noWork = Succeeded() with { ProducedBranch = null };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: true), noWork, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
+    }
+
+    [Fact]
+    public async Task Expects_changes_false_is_ignored_when_a_branch_or_patch_actually_exists()
+    {
+        // false only excuses an ABSENCE — it never suppresses grading real, present work.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), Succeeded(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceDetail.ShouldBe("exit 0", "the branch was graded for real — not waved through as not-applicable");
+        grader.Calls.ShouldBe(1);
     }
 
     [Fact]
@@ -138,8 +224,8 @@ public class AgentRunExecutorAcceptanceTests
 
     private static AgentRun Run() => new() { Id = Guid.NewGuid(), TeamId = Guid.NewGuid() };
 
-    private static AgentTask TaskWith(SupervisorAcceptanceSpec? acceptance) =>
-        new() { Goal = "g", Harness = "codex-cli", RepositoryId = Guid.NewGuid(), Acceptance = acceptance };
+    private static AgentTask TaskWith(SupervisorAcceptanceSpec? acceptance, bool? expectsChanges = null) =>
+        new() { Goal = "g", Harness = "codex-cli", RepositoryId = Guid.NewGuid(), Acceptance = acceptance, ExpectsChanges = expectsChanges };
 
     private static SupervisorAcceptanceSpec Spec(params string[] command) => new() { Command = command };
 
@@ -151,10 +237,21 @@ public class AgentRunExecutorAcceptanceTests
         ChangedFiles = new[] { "a.cs" },
     };
 
+    /// <summary>A patch-only producer (PR-2 policy, or a guard-blocked push): no pushed branch, but a real recorded diff a patch-based grade can act on.</summary>
+    private static AgentRunResult SucceededPatchOnly() => new()
+    {
+        Status = AgentRunStatus.Succeeded,
+        ExitReason = "completed",
+        ProducedBranch = null,
+        ChangedFiles = new[] { "a.cs" },
+        BaseSha = "deadbeef",
+        Patch = "diff --git a/a.cs b/a.cs\n",
+    };
+
     private static (AgentRunExecutor Executor, FakeGrader Grader) NewExecutor(BenchmarkGrade grade)
     {
         var grader = new FakeGrader { Grade = grade };
-        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
         return (executor, grader);
     }
 
@@ -165,9 +262,23 @@ public class AgentRunExecutorAcceptanceTests
         public int Calls { get; private set; }
         public IReadOnlyList<string>? LastCommand { get; private set; }
 
+        public int PatchCalls { get; private set; }
+        public string? LastPatchBaseSha { get; private set; }
+
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             Calls++;
+            LastCommand = spec.Command;
+
+            if (Throw is { } ex) throw ex;
+
+            return System.Threading.Tasks.Task.FromResult(Grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            PatchCalls++;
+            LastPatchBaseSha = baseSha;
             LastCommand = spec.Command;
 
             if (Throw is { } ex) throw ex;

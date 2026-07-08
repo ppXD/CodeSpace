@@ -59,4 +59,13 @@ public sealed record SupervisorAgentDispatch
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AgentDefinition { get; init; }
+
+    /// <summary>
+    /// A per-agent OVERRIDE of which planned subtask's output this agent builds from (S1 handoff) — takes precedence
+    /// over the plan's static <c>DependsOn</c> for staging purposes, so the model can hand this specific spawn a base
+    /// even when the plan declared none, or narrow a multi-dependency subtask to ONE producer for this attempt. Null
+    /// → the planned subtask's own <c>DependsOn</c> (byte-identical to a homogeneous spawn).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BaseSubtaskId { get; init; }
 }

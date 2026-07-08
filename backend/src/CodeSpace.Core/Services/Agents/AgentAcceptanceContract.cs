@@ -18,6 +18,9 @@ public static class AgentAcceptanceContract
     public static bool RequiresGrade(AgentTask task) =>
         task.Acceptance is { } spec && spec.Command.Any(c => !string.IsNullOrWhiteSpace(c));
 
+    /// <summary>Whether the task is expected to produce a diff/branch at all (S2). Null (the caller didn't say) defaults to <c>true</c> — byte-identical to before this field existed, so an unmarked contract still fails closed on a missing branch/repo.</summary>
+    public static bool ExpectsChanges(AgentTask task) => task.ExpectsChanges ?? true;
+
     /// <summary>The <see cref="AgentRunResult.ExitReason"/> a fail-closed acceptance re-grade stamps — the machine-readable marker consumers (the agent.code node's retry verdict) key on to tell a DETERMINISTIC verdict failure from a transient death. Pinned by a unit test (Rule 8) so producer + consumer can't drift.</summary>
     public const string FailClosedExitReason = "acceptance-failed";
 
@@ -29,6 +32,18 @@ public static class AgentAcceptanceContract
         ExitReason = FailClosedExitReason,
         Error = $"The acceptance check did not pass: {detail}",
         AcceptancePassed = false,
+        AcceptanceDetail = detail,
+    };
+
+    /// <summary>
+    /// S2's vacuous pass: the contract's own OWNER declared no diff was expected, and none was produced — so the
+    /// missing branch/repo is NOT a failure, it is the correctly-predicted outcome. Unlike <see cref="FailClosed"/>
+    /// this touches ONLY the acceptance fields — the run's own terminal Status/ExitReason/Error are untouched (a
+    /// Succeeded run stays Succeeded), because nothing about the run itself went wrong.
+    /// </summary>
+    public static AgentRunResult NotApplicable(AgentRunResult result, string detail) => result with
+    {
+        AcceptancePassed = true,
         AcceptanceDetail = detail,
     };
 
