@@ -38,12 +38,14 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
+            MaxTokens = request.MaxOutputTokens ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // Anthropic REQUIRES max_tokens — a null "let the model decide" resolves to the generous non-streaming-safe default (OpenAI can omit; this wire can't)
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
             StopSequences = request.Sampling?.Stop,
             System = request.SystemPrompt,
             Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } }
@@ -92,6 +94,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         if (toolJson is { } viaTool)
             return BuildCompletion(viaTool, toolParsed!, request.Model);
 
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+
         // Attempt 2 — prompt-only floor: no tools. The SAFEST request — never 400s on a gateway that rejects forced
         // tool-use, and forces nothing that could suppress the reply (some gateways return EMPTY content when a tool is
         // forced). The model answers in text; recover the JSON object from it. The returned usage TOTALS the (billed but
@@ -99,9 +103,9 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
+            MaxTokens = request.MaxOutputTokens ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // Anthropic REQUIRES max_tokens — a null "let the model decide" resolves to the generous non-streaming-safe default (OpenAI can omit; this wire can't)
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
             StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages
@@ -125,12 +129,14 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
     /// </summary>
     private async Task<(JsonElement? Json, AnthropicMessageResponse? Parsed)> TryStructuredViaToolAsync(StructuredLLMCompletionRequest request, string system, AnthropicMessage[] messages, CancellationToken cancellationToken)
     {
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
+            MaxTokens = request.MaxOutputTokens ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // Anthropic REQUIRES max_tokens — a null "let the model decide" resolves to the generous non-streaming-safe default (OpenAI can omit; this wire can't)
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
             StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages,
@@ -205,7 +211,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
     {
         [JsonPropertyName("model")] public required string Model { get; init; }
         [JsonPropertyName("max_tokens")] public required int MaxTokens { get; init; }
-        [JsonPropertyName("temperature")] public required double Temperature { get; init; }
+        [JsonPropertyName("temperature")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? Temperature { get; init; }
         [JsonPropertyName("system")] public required string System { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<AnthropicMessage> Messages { get; init; }
         [JsonPropertyName("top_p")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? TopP { get; init; }

@@ -30,8 +30,11 @@ public sealed record LLMCompletionRequest
     public required string Model { get; init; }
     public required string SystemPrompt { get; init; }
     public required string UserPrompt { get; init; }
-    public int MaxOutputTokens { get; init; } = 2048;
-    public double Temperature { get; init; } = 0.2;
+    /// <summary>The output-token cap. NULL (the default) ⇒ "let the model decide its ceiling": the OpenAI wire OMITS the param (the model runs to its context limit); the Anthropic wire — where <c>max_tokens</c> is REQUIRED — sends <see cref="LlmModelCapabilities.DefaultMaxOutputTokens"/>. A value pins an explicit cap (control-plane callers scope their output this way). The OpenAI wire renames it to <c>max_completion_tokens</c> for a reasoning model (see <see cref="LlmModelCapabilities.UsesMaxCompletionTokens"/>).</summary>
+    public int? MaxOutputTokens { get; init; }
+
+    /// <summary>The sampling temperature. NULL (the default) ⇒ the param is omitted so the model/provider uses its own default — the generic "let the model decide" path. A value PINS determinism, but the transport still DROPS it for a reasoning-tier model that rejects the param (see <see cref="LlmModelCapabilities"/>), so a pinned value never 400s.</summary>
+    public double? Temperature { get; init; }
 
     /// <summary>Optional generation knobs (top_p / penalties / stop) the client maps onto its API's supported params. Null ⇒ none sent (byte-identical to the prior behaviour).</summary>
     public LlmSamplingOptions? Sampling { get; init; }
