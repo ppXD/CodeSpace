@@ -39,28 +39,77 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
         var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+        var (cap, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: true);
 
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // Anthropic REQUIRES max_tokens — a null "let the model decide" resolves to the generous non-streaming-safe default (OpenAI can omit; this wire can't)
+            MaxTokens = cap ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // requiresField ⇒ cap is non-null; the ?? is a defensive floor
             Temperature = accepts ? request.Temperature : null,
             TopP = accepts ? request.Sampling?.TopP : null,
             StopSequences = request.Sampling?.Stop,
             System = request.SystemPrompt,
-            Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } }
+            Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } },
+            Stream = stream ? true : null,   // omitted when false → the non-streaming body is BYTE-IDENTICAL to before (every small-cap caller unchanged)
         };
 
-        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        return stream
+            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
+            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
+    }
 
-        var text = string.Join("\n", parsed.Content?.Where(c => c.Type == "text").Select(c => c.Text ?? "") ?? Array.Empty<string>());
+    /// <summary>The non-streaming path (small / bounded output) — one buffered POST, unchanged from the pre-streaming client.</summary>
+    private async Task<LLMCompletion> CompleteBufferedAsync(AnthropicMessageRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+    {
+        var parsed = await PostMessagesAsync(body, credential, cancellationToken).ConfigureAwait(false);
 
-        return new LLMCompletion
+        return new LLMCompletion { Text = TextContent(parsed), Model = parsed.Model ?? fallbackModel, Usage = UsageFrom(parsed) };
+    }
+
+    /// <summary>
+    /// The streaming path (large / unbounded output — the model can emit up to its true ceiling without an idle-connection
+    /// timeout): accumulate the SSE event stream into the SAME <see cref="LLMCompletion"/> the caller expects. Anthropic's
+    /// events — <c>message_start</c> (input tokens + model), <c>content_block_delta</c>/<c>text_delta</c> (the text), and
+    /// <c>message_delta</c> (final output tokens + stop_reason) — are folded here; a caller sees no difference from the
+    /// buffered path except that the output is no longer capped for fear of a timeout.
+    /// </summary>
+    private async Task<LLMCompletion> CompleteStreamingAsync(AnthropicMessageRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+    {
+        var (http, message) = BuildRequest(body, credential);
+
+        using (message)
         {
-            Text = text,
-            Model = parsed.Model ?? request.Model,
-            Usage = UsageFrom(parsed)
-        };
+            var text = new System.Text.StringBuilder();
+            string? model = null, stopReason = null;
+            int? inputTokens = null, outputTokens = null;
+
+            await foreach (var evt in LlmHttpTransport.StreamSseAsync(http, message, Provider, cancellationToken).ConfigureAwait(false))
+            {
+                switch (evt.TryGetProperty("type", out var t) ? t.GetString() : null)
+                {
+                    case "message_start" when evt.TryGetProperty("message", out var msg):
+                        if (msg.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String) model = m.GetString();
+                        if (msg.TryGetProperty("usage", out var u) && u.TryGetProperty("input_tokens", out var it) && it.TryGetInt32(out var iv)) inputTokens = iv;
+                        break;
+
+                    case "content_block_delta" when evt.TryGetProperty("delta", out var d) && d.TryGetProperty("type", out var dt) && dt.GetString() == "text_delta":
+                        if (d.TryGetProperty("text", out var txt) && txt.ValueKind == JsonValueKind.String) text.Append(txt.GetString());
+                        break;
+
+                    case "message_delta":
+                        if (evt.TryGetProperty("delta", out var md) && md.TryGetProperty("stop_reason", out var sr) && sr.ValueKind == JsonValueKind.String) stopReason = sr.GetString();
+                        if (evt.TryGetProperty("usage", out var mu) && mu.TryGetProperty("output_tokens", out var ot) && ot.TryGetInt32(out var ov)) outputTokens = ov;
+                        break;
+                }
+            }
+
+            return new LLMCompletion
+            {
+                Text = text.ToString(),
+                Model = model ?? fallbackModel,
+                Usage = new LlmUsage { InputTokens = inputTokens, OutputTokens = outputTokens, FinishReason = stopReason },
+            };
+        }
     }
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
@@ -177,24 +226,30 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
-        // Pure pool-driven (S6b): the credential is the ONLY key source — the in-process plane resolves it from the
-        // team's credentialed-model pool and passes it here. There is NO ambient env-key backstop: a caller without a
-        // credential fails closed rather than silently borrowing an operator-global key. (The env var const survives
-        // for the AGENT plane's operator-global fallback + the cassette record-mode gate, which read it independently.)
+        var (http, message) = BuildRequest(body, credential);
+
+        using (message)
+            return await LlmHttpTransport.SendForJsonAsync<AnthropicMessageResponse>(http, message, Provider, options: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Build the per-call POST to <c>/v1/messages</c> — the ONE place the credential + headers + body are assembled, so the
+    /// buffered and streaming send paths can never drift on the wire setup. Pure pool-driven (S6b): the credential is the
+    /// ONLY key source (no ambient env-key backstop — a caller without one fails closed). The key is OPTIONAL (a keyless
+    /// Anthropic-compatible gateway sends no <c>x-api-key</c>). Per-call headers on the REQUEST message (never the
+    /// singleton client's DefaultRequestHeaders) so concurrent branches can't bleed one team's key onto another's call;
+    /// buffered StringContent so a transient retry can re-send the body. The CALLER owns the returned message's lifetime.
+    /// </summary>
+    private (HttpClient Http, HttpRequestMessage Message) BuildRequest(AnthropicMessageRequest body, ResolvedModelCredential? credential)
+    {
         if (credential is null)
             throw new InvalidOperationException("Anthropic model credential not configured. The in-process plane must pass a model credential resolved from the team's pool.");
 
-        // The KEY is OPTIONAL: a keyless Anthropic-compatible gateway sends NO x-api-key header — the same way the agent
-        // CLI harness omits the key env var. The endpoint decides; the public API without a key returns a clean 401.
         var apiKey = NullIfBlank(credential.ApiKey);
-
         var baseUrl = NullIfBlank(credential.BaseUrl) ?? DefaultApiBaseUrl;
         var http = _httpClientFactory.CreateClient(nameof(AnthropicClient));
 
-        // Per-call headers on the REQUEST message (never mutate the singleton-resolved client's DefaultRequestHeaders) so
-        // concurrent flow.map branches can never bleed one team's key onto another's call. Buffered StringContent (not a
-        // streaming JsonContent) so the resilience handler can re-send the body on a transient retry.
-        using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(baseUrl), "/v1/messages"))
+        var message = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(baseUrl), "/v1/messages"))
         {
             Content = LlmHttpTransport.JsonBody(body),
         };
@@ -202,7 +257,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         if (apiKey is not null) message.Headers.Add("x-api-key", apiKey);
         message.Headers.Add("anthropic-version", AnthropicVersion);
 
-        return await LlmHttpTransport.SendForJsonAsync<AnthropicMessageResponse>(http, message, Provider, options: null, cancellationToken).ConfigureAwait(false);
+        return (http, message);
     }
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
@@ -211,6 +266,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
     {
         [JsonPropertyName("model")] public required string Model { get; init; }
         [JsonPropertyName("max_tokens")] public required int MaxTokens { get; init; }
+        [JsonPropertyName("stream")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Stream { get; init; }
         [JsonPropertyName("temperature")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? Temperature { get; init; }
         [JsonPropertyName("system")] public required string System { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<AnthropicMessage> Messages { get; init; }

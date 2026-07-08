@@ -74,6 +74,99 @@ public static class LlmModelCapabilities
     /// <summary>Pure resolver (testable without env mutation): a positive integer wins, anything else falls to the default.</summary>
     internal static int ResolvePositive(string? raw, int fallback) => int.TryParse(raw, out var n) && n > 0 ? n : fallback;
 
+    // ── per-model output CEILING + streaming decision ─────────────────────────────────────────────────────────────
+
+    /// <summary>Env var (a positive integer) overriding the token budget above which a completion is STREAMED. Pinned by test (Rule 8).</summary>
+    public const string StreamingThresholdEnvVar = "CODESPACE_LLM_STREAMING_THRESHOLD_TOKENS";
+
+    /// <summary>The output-token budget above which a completion streams: a non-streaming request whose output can exceed this risks an idle-connection HTTP timeout (Anthropic's guidance flags ~21K). At or below it, the request stays non-streaming — byte-identical to the pre-streaming path. Operator-tunable.</summary>
+    public const int StreamingThresholdDefault = 21000;
+
+    /// <summary>The resolved streaming threshold: the env override when a positive integer, else <see cref="StreamingThresholdDefault"/>.</summary>
+    public static int StreamingThreshold => ResolvePositive(Environment.GetEnvironmentVariable(StreamingThresholdEnvVar), StreamingThresholdDefault);
+
+    /// <summary>Env var extending/overriding the per-model output ceilings — comma-separated <c>prefix=tokens</c> pairs (e.g. <c>my-model=32000,house-lm=8000</c>), matched before the built-ins so an operator pins a gateway model's real max with no code change (Rule 8). Pinned by test.</summary>
+    public const string OutputCeilingsEnvVar = "CODESPACE_LLM_OUTPUT_CEILINGS";
+
+    /// <summary>The built-in per-model TRUE max output tokens — used to (a) resolve a null "let the model decide" cap to the model's real ceiling (the capability unlock), and (b) clamp an over-large explicit ask away from a 400. Only confirmed values; an unknown model returns null (no clamp / conservative default).</summary>
+    private static readonly (string Prefix, int Ceiling)[] DefaultOutputCeilings =
+    {
+        // Anthropic 128K-output tier (Fable 5 / Mythos / Opus 4.5-4.8 / Sonnet 4.6 / Sonnet 5).
+        ("claude-opus-4-8", 128_000), ("claude-opus-4-7", 128_000), ("claude-opus-4-6", 128_000), ("claude-opus-4-5", 128_000),
+        ("claude-sonnet-5", 128_000), ("claude-sonnet-4-6", 128_000), ("claude-fable-5", 128_000), ("claude-mythos", 128_000),
+        // Anthropic 64K-output tier (Haiku 4.5).
+        ("claude-haiku-4-5", 64_000), ("claude-haiku", 64_000),
+    };
+
+    /// <summary>The model's TRUE maximum output tokens, or null when unknown. Reads the operator override from process env.</summary>
+    public static int? MaxOutputCeiling(string? model) => MaxOutputCeiling(model, Environment.GetEnvironmentVariable(OutputCeilingsEnvVar));
+
+    /// <summary>Testable core — operator override wins, then the built-ins, else null (unknown). PURE.</summary>
+    internal static int? MaxOutputCeiling(string? model, string? rawOverride)
+    {
+        if (string.IsNullOrWhiteSpace(model)) return null;
+
+        var id = model.Trim();
+
+        foreach (var (prefix, ceiling) in ParseCeilings(rawOverride))
+            if (Matches(id, prefix)) return ceiling;
+
+        foreach (var (prefix, ceiling) in DefaultOutputCeilings)
+            if (Matches(id, prefix)) return ceiling;
+
+        return null;
+    }
+
+    /// <summary>
+    /// Resolve the output-token budget a text completion should carry PLUS whether the transport should STREAM it — the
+    /// rule that unlocks the model's full output capability while staying strictly non-breaking:
+    /// <list type="bullet">
+    ///   <item>An EXPLICIT cap rides verbatim, CLAMPED to the model's ceiling (never 400 on an over-large ask), and STREAMS
+    ///   when it exceeds the non-streaming-safe <see cref="StreamingThreshold"/> — so a caller UNLOCKS a large output simply
+    ///   by asking for it, and it can't idle-timeout. A small explicit cap stays non-streaming, byte-identical to before.</item>
+    ///   <item>A NULL cap ("let the model decide") resolves CONSERVATIVELY and NON-streaming, so every existing null-cap
+    ///   caller is unchanged: the Anthropic wire (<paramref name="requiresField"/> true) sends the safe default; the OpenAI
+    ///   wire omits the field (the chat model self-limits to a natural length). Push a model to its full ceiling with an
+    ///   explicit large cap — that is the streamed path.</item>
+    /// </list>
+    /// </summary>
+    public static (int? Cap, bool Stream) ResolveOutputBudget(string? model, int? requested, bool requiresField)
+    {
+        if (requested is { } v)
+        {
+            var ceiling = MaxOutputCeiling(model);
+            var clamped = ceiling is { } c && v > c ? c : v;
+            return (clamped, clamped > StreamingThreshold);
+        }
+
+        return (requiresField ? DefaultMaxOutputTokens : (int?)null, false);
+    }
+
+    /// <summary>The non-streaming bounded output cap for a STRUCTURED completion (small by nature — kept off the streaming path). Anthropic requires the field, so null resolves to the default; an explicit ask is clamped to the model ceiling. Returns null only for a wire that can omit it (OpenAI) when the caller left it null.</summary>
+    public static int? StructuredOutputCap(string? model, int? requested, bool requiresField)
+    {
+        var ceiling = MaxOutputCeiling(model);
+
+        if (requested is { } v) return ceiling is { } c && v > c ? c : v;
+
+        return requiresField ? DefaultMaxOutputTokens : (int?)null;
+    }
+
+    private static IEnumerable<(string Prefix, int Ceiling)> ParseCeilings(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) yield break;
+
+        foreach (var entry in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var eq = entry.IndexOf('=');
+            if (eq <= 0) continue;
+
+            var prefix = entry[..eq].Trim();
+            if (prefix.Length > 0 && int.TryParse(entry[(eq + 1)..].Trim(), out var ceiling) && ceiling > 0)
+                yield return (prefix, ceiling);
+        }
+    }
+
     // ── matching ──────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Whether <paramref name="model"/> matches any built-in OR operator-added prefix. Blank ⇒ no match (default-allow / classic). PURE.</summary>

@@ -61,4 +61,43 @@ public sealed class RealModelSamplingOmissionE2ETests
             return (conformant, $"temperature-omitted structured call on '{model}' via {provider} → {(conformant ? "schema-conformant JSON (answer present)" : $"NON-conformant reply: {result.Json.GetRawText()}")}");
         });
     }
+
+    /// <summary>
+    /// The live proof that the STREAMING path drives a real model end to end: a large output cap (above the streaming
+    /// threshold) makes the transport stream the completion, and the SSE events fold back into a non-empty reply. A short
+    /// prompt keeps it fast + cheap while still forcing the streamed path. REPORT-ONLY (gating:false) on both wires — an
+    /// arbitrary gateway model's true ceiling is unknown, so a rare max_tokens-too-large 400 must never red the lane; the
+    /// SSE-accumulation correctness is GATED by the deterministic <c>LlmSamplingWireTests</c>, and this is the live smoke.
+    /// </summary>
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("Custom")]
+    public async Task A_large_cap_streams_a_live_text_completion(string provider)
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+
+        await RealModelGate.AssessLiveAsync(provider, async () =>
+        {
+            var credential = RealModelLiveWire.Credential(provider, baseUrl, apiKey);
+            var client = RealModelLiveWire.Registry().Resolve(provider);
+
+            var request = new LLMCompletionRequest
+            {
+                Model = model,
+                Credential = credential,
+                SystemPrompt = "Reply in one short sentence.",
+                UserPrompt = "Say hello.",
+                MaxOutputTokens = 22_000,   // > the 21K streaming threshold → the transport STREAMS; the short prompt keeps it fast + cheap
+            };
+
+            var result = await client.CompleteAsync(request, CancellationToken.None);
+            var ok = !string.IsNullOrWhiteSpace(result.Text);
+
+            return (ok, $"large-cap (22000 → streamed) text completion on '{model}' via {provider} → {(ok ? $"streamed {result.Text.Length} chars, finish={result.Usage.FinishReason}" : "EMPTY reply")}");
+        }, gating: false);
+    }
 }

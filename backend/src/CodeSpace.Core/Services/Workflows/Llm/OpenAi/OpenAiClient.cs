@@ -57,33 +57,82 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     {
         var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
         var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
+        var (cap, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: false);
 
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
-            // Null cap ⇒ OMIT both (the model runs to its context limit — OpenAI allows this, unlike Anthropic). A set cap
-            // rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`) and as the
-            // classic, universally-understood `max_tokens` otherwise (an older OpenAI-compatible gateway may not know the new name).
-            MaxTokens = useCompletionTokens ? null : request.MaxOutputTokens,
-            MaxCompletionTokens = useCompletionTokens ? request.MaxOutputTokens : null,
+            // A set cap rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`)
+            // and as the classic, universally-understood `max_tokens` otherwise; a NULL cap OMITS both (the model runs to
+            // its context limit — OpenAI allows this). Streaming is chosen when the output is large / unbounded so a slow
+            // generation can't idle-timeout; a small explicit cap stays non-streaming, byte-identical to before.
+            MaxTokens = useCompletionTokens ? null : cap,
+            MaxCompletionTokens = useCompletionTokens ? cap : null,
             Temperature = accepts ? request.Temperature : null,
             TopP = accepts ? request.Sampling?.TopP : null,
             FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
             PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
             Messages = BuildMessages(request.SystemPrompt, request.UserPrompt),
+            Stream = stream ? true : null,                                                    // omitted when false → unchanged non-streaming body
+            StreamOptions = stream ? new OpenAiStreamOptions { IncludeUsage = true } : null,  // ask the wire to emit a final usage chunk (LiteLLM/OpenRouter/vLLM honour it; a gateway that ignores it just leaves usage null)
         };
 
-        var parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        return stream
+            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
+            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>The non-streaming path (small / bounded output) — one buffered POST, unchanged from the pre-streaming client.</summary>
+    private async Task<LLMCompletion> CompleteBufferedAsync(OpenAiChatRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+    {
+        var parsed = await PostChatAsync(body, credential, cancellationToken).ConfigureAwait(false);
         var message = parsed.Choices?.FirstOrDefault()?.Message;
 
-        return new LLMCompletion
+        return new LLMCompletion { Text = message?.Content ?? "", Model = parsed.Model ?? fallbackModel, Usage = UsageFrom(parsed) };
+    }
+
+    /// <summary>
+    /// The streaming path (large / unbounded output): accumulate the SSE chunk stream into the SAME <see cref="LLMCompletion"/>.
+    /// OpenAI's chunks carry incremental <c>choices[0].delta.content</c> (the text), a terminal <c>finish_reason</c>, and —
+    /// with <c>stream_options.include_usage</c> — a final usage chunk (<c>prompt_tokens</c>/<c>completion_tokens</c>); all are
+    /// folded here so the caller sees no difference from the buffered path except the output is no longer capped for fear of a timeout.
+    /// </summary>
+    private async Task<LLMCompletion> CompleteStreamingAsync(OpenAiChatRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+    {
+        var (http, message) = BuildRequest(body, credential);
+
+        using (message)
         {
-            Text = message?.Content ?? "",
-            Model = parsed.Model ?? request.Model,
-            Usage = UsageFrom(parsed)
-        };
+            var text = new System.Text.StringBuilder();
+            string? model = null, finishReason = null;
+            int? inputTokens = null, outputTokens = null;
+
+            await foreach (var evt in LlmHttpTransport.StreamSseAsync(http, message, Provider, cancellationToken).ConfigureAwait(false))
+            {
+                if (evt.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String) model = m.GetString();
+
+                if (evt.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0)
+                {
+                    var choice = choices[0];
+                    if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String) text.Append(c.GetString());
+                    if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String) finishReason = fr.GetString();
+                }
+
+                if (evt.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object)
+                {
+                    if (u.TryGetProperty("prompt_tokens", out var pt) && pt.TryGetInt32(out var pv)) inputTokens = pv;
+                    if (u.TryGetProperty("completion_tokens", out var ct) && ct.TryGetInt32(out var cv)) outputTokens = cv;
+                }
+            }
+
+            return new LLMCompletion
+            {
+                Text = text.ToString(),
+                Model = model ?? fallbackModel,
+                Usage = new LlmUsage { InputTokens = inputTokens, OutputTokens = outputTokens, FinishReason = finishReason },
+            };
+        }
     }
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
@@ -229,31 +278,36 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     private async Task<OpenAiChatResponse> PostChatAsync(OpenAiChatRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
-        // Pure pool-driven (mirrors AnthropicClient post-S6b): the credential is the ONLY key source — no ambient
-        // env-key backstop. A caller without a credential fails closed rather than silently borrowing a global key.
+        var (http, message) = BuildRequest(body, credential);
+
+        using (message)
+            return await LlmHttpTransport.SendForJsonAsync<OpenAiChatResponse>(http, message, Provider, ResponseJsonOptions, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Build the per-call POST to <c>{base}/chat/completions</c> — the ONE place credential + auth + body are assembled, so
+    /// the buffered and streaming send paths never drift. Pure pool-driven (the credential is the ONLY key source; a caller
+    /// without one fails closed). The key is OPTIONAL (a keyless local gateway — vLLM / a self-hosted relay — sends no
+    /// Authorization). Per-call auth on the REQUEST message (never the singleton client's DefaultRequestHeaders) so
+    /// concurrent branches can't bleed one team's Bearer onto another's call. The CALLER owns the returned message's lifetime.
+    /// </summary>
+    private (HttpClient Http, HttpRequestMessage Message) BuildRequest(OpenAiChatRequest body, ResolvedModelCredential? credential)
+    {
         if (credential is null)
             throw new InvalidOperationException("OpenAI model credential not configured. The in-process plane must pass a model credential resolved from the team's pool.");
 
-        // The KEY is OPTIONAL: a keyless local / no-auth gateway (vLLM, a self-hosted relay) sends NO Authorization header
-        // — the same way the agent CLI harness omits the key env var. The endpoint decides; a public API without a key
-        // returns a clean 401. So a keyless Custom endpoint runs the in-process plane, not just the agent harness.
         var apiKey = NullIfBlank(credential.ApiKey);
-
         var baseUrl = NullIfBlank(credential.BaseUrl) ?? DefaultApiBaseUrl;
         var url = baseUrl.TrimEnd('/') + "/chat/completions";
-
         var http = _httpClientFactory.CreateClient(nameof(OpenAiClient));
 
-        // Per-call Authorization on the REQUEST message (never the singleton client's DefaultRequestHeaders) so two
-        // concurrent flow.map branches can't bleed one team's Bearer onto another's call. Buffered body so the resilience
-        // handler can re-send it on a transient retry.
-        using var message = new HttpRequestMessage(HttpMethod.Post, url)
+        var message = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = LlmHttpTransport.JsonBody(body),
         };
         if (apiKey is not null) message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-        return await LlmHttpTransport.SendForJsonAsync<OpenAiChatResponse>(http, message, Provider, ResponseJsonOptions, cancellationToken).ConfigureAwait(false);
+        return (http, message);
     }
 
     /// <summary>Case-insensitive so a non-conformant gateway that capitalises response keys (e.g. <c>Choices</c>) still deserializes.</summary>
@@ -276,6 +330,13 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("stop")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<string>? Stop { get; init; }
         [JsonPropertyName("tools")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<OpenAiTool>? Tools { get; init; }
         [JsonPropertyName("tool_choice")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiToolChoice? ToolChoice { get; init; }
+        [JsonPropertyName("stream")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Stream { get; init; }
+        [JsonPropertyName("stream_options")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiStreamOptions? StreamOptions { get; init; }
+    }
+
+    private sealed class OpenAiStreamOptions
+    {
+        [JsonPropertyName("include_usage")] public required bool IncludeUsage { get; init; }
     }
 
     private sealed class OpenAiMessage

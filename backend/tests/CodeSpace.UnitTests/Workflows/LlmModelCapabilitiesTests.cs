@@ -90,6 +90,62 @@ public class LlmModelCapabilitiesTests
     public void ResolvePositive_picks_the_env_override_or_the_default(string? raw, int expected) =>
         LlmModelCapabilities.ResolvePositive(raw, LlmModelCapabilities.DefaultMaxOutputTokensFallback).ShouldBe(expected);
 
+    // ── per-model output ceiling ──────────────────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("claude-opus-4-8", 128_000)]
+    [InlineData("claude-sonnet-5", 128_000)]
+    [InlineData("claude-fable-5", 128_000)]
+    [InlineData("anthropic.claude-opus-4-8", 128_000)]   // Bedrock-qualified id — matched after the provider dot
+    [InlineData("claude-haiku-4-5", 64_000)]
+    public void MaxOutputCeiling_returns_the_true_max_for_known_models(string model, int ceiling) =>
+        LlmModelCapabilities.MaxOutputCeiling(model, rawOverride: null).ShouldBe(ceiling);
+
+    [Theory]
+    [InlineData("gpt-4o")]          // OpenAI models aren't in the ceiling map (the OpenAI wire omits / self-limits) → unknown
+    [InlineData("metis-coder-max")] // a custom-gateway model → unknown
+    [InlineData(null)]
+    public void MaxOutputCeiling_is_null_for_an_unknown_model(string? model) =>
+        LlmModelCapabilities.MaxOutputCeiling(model, rawOverride: null).ShouldBeNull();
+
+    [Fact]
+    public void The_output_ceiling_env_override_pins_a_gateway_models_max()
+    {
+        LlmModelCapabilities.MaxOutputCeiling("house-lm-7b", "house-lm=8000, other=4096").ShouldBe(8000);
+        LlmModelCapabilities.MaxOutputCeiling("gpt-4o", "house-lm=8000").ShouldBeNull("an override doesn't invent a ceiling for an unrelated model");
+        LlmModelCapabilities.MaxOutputCeiling("claude-opus-4-8", "claude-opus-4-8=200000").ShouldBe(200_000, "an operator override wins over the built-in");
+    }
+
+    // ── output budget + streaming decision ────────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    // A small explicit cap: sent verbatim, NON-streaming (byte-identical to the pre-streaming path).
+    [InlineData("claude-opus-4-8", 1024, true, 1024, false)]
+    [InlineData("gpt-4o", 4096, false, 4096, false)]
+    // A large explicit cap: streams so a slow generation can't idle-timeout.
+    [InlineData("claude-opus-4-8", 32000, true, 32000, true)]
+    [InlineData("gpt-4o", 60000, false, 60000, true)]
+    // An over-large ask on Anthropic: CLAMPED to the model ceiling (never 400) — and streams.
+    [InlineData("claude-opus-4-8", 500000, true, 128000, true)]
+    [InlineData("claude-haiku-4-5", 100000, true, 64000, true)]
+    // A null cap ("let the model decide"): conservative + non-streaming. Anthropic sends the default; OpenAI omits.
+    [InlineData("claude-opus-4-8", null, true, 8192, false)]
+    [InlineData("gpt-4o", null, false, null, false)]
+    public void ResolveOutputBudget_clamps_and_decides_streaming(string model, int? requested, bool requiresField, int? expectedCap, bool expectedStream)
+    {
+        var (cap, stream) = LlmModelCapabilities.ResolveOutputBudget(model, requested, requiresField);
+
+        cap.ShouldBe(expectedCap);
+        stream.ShouldBe(expectedStream);
+    }
+
+    [Fact]
+    public void The_streaming_threshold_default_and_resolver_are_pinned()
+    {
+        LlmModelCapabilities.ResolvePositive(null, LlmModelCapabilities.StreamingThresholdDefault).ShouldBe(21000);
+        LlmModelCapabilities.ResolvePositive("8000", LlmModelCapabilities.StreamingThresholdDefault).ShouldBe(8000);   // env-tunable: a lower threshold streams a mid-size cap
+    }
+
     [Fact]
     public void The_env_var_constant_names_are_pinned()
     {
@@ -97,5 +153,7 @@ public class LlmModelCapabilitiesTests
         LlmModelCapabilities.NoSamplingModelsEnvVar.ShouldBe("CODESPACE_LLM_NO_SAMPLING_MODELS");
         LlmModelCapabilities.MaxCompletionTokensModelsEnvVar.ShouldBe("CODESPACE_LLM_MAX_COMPLETION_TOKENS_MODELS");
         LlmModelCapabilities.DefaultMaxOutputTokensEnvVar.ShouldBe("CODESPACE_LLM_DEFAULT_MAX_OUTPUT_TOKENS");
+        LlmModelCapabilities.StreamingThresholdEnvVar.ShouldBe("CODESPACE_LLM_STREAMING_THRESHOLD_TOKENS");
+        LlmModelCapabilities.OutputCeilingsEnvVar.ShouldBe("CODESPACE_LLM_OUTPUT_CEILINGS");
     }
 }
