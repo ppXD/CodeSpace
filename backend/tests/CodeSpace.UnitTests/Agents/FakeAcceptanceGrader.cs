@@ -20,10 +20,21 @@ internal sealed class FakeAcceptanceGrader : ISupervisorAcceptanceGrader
     public int CallCount { get; private set; }
     public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
+    public int PatchCallCount { get; private set; }
+    public (Guid RepositoryId, Guid TeamId, string BaseSha, Guid? PatchArtifactId)? LastPatchCall { get; private set; }
+
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
     {
         CallCount++;
         LastCall = (repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass);
+        if (_throw != null) throw _throw;
+        return Task.FromResult(_grade);
+    }
+
+    public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        PatchCallCount++;
+        LastPatchCall = (repositoryId, teamId, baseSha, patchArtifactId);
         if (_throw != null) throw _throw;
         return Task.FromResult(_grade);
     }

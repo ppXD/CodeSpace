@@ -25,4 +25,17 @@ public interface ISupervisorAcceptanceGrader
     /// can't be run, yields a failed grade with a legible detail (fail-closed); only a genuine cancellation propagates.
     /// </summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// S2 — the BRANCH-LESS twin of <see cref="GradeAsync"/>: clone <paramref name="repositoryId"/> at
+    /// <paramref name="baseSha"/> (team-scoped, agent-independent — the SAME clone-fresh guarantee, just anchored on
+    /// a commit instead of a pushed ref), apply the unit's own recorded patch (<paramref name="inlinePatch"/> or,
+    /// when offloaded, <paramref name="patchArtifactId"/> resolved team-scoped) with NO commit and NO push (this
+    /// grade is read-only by construction), then grade the resulting working tree with the same oracle
+    /// <see cref="GradeAsync"/> uses. For a unit whose producer never pushed a branch (patch-only publish policy, or
+    /// a repository-policy guard) — the exact gap a branch-only grader cannot close. A patch that resolves to nothing
+    /// (missing/cross-team artifact) or that fails to apply onto its own recorded base is a failed grade with a
+    /// legible detail (fail-closed), mirroring <see cref="GradeAsync"/>'s contract exactly.
+    /// </summary>
+    Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 }

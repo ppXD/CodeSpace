@@ -192,6 +192,17 @@ public sealed record AgentTask
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 
+    /// <summary>
+    /// S2 — whether THIS task is expected to produce a code diff/branch at all. Meaningless without
+    /// <see cref="Acceptance"/> (a task with no contract is never graded regardless). Null defaults to <c>true</c>
+    /// (<c>AgentAcceptanceContract.ExpectsChanges</c>, Core) — byte-identical fail-closed on a missing branch/repo.
+    /// Set <c>false</c> for a check that verifies something OTHER than a diff (e.g. an investigation report), so a
+    /// legitimately branch-less run is graded against its recorded patch (if one exists) or treated as
+    /// not-applicable (never penalized) instead of unconditionally failing closed.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ExpectsChanges { get; init; }
+
     /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? ReviewerModelId { get; init; }

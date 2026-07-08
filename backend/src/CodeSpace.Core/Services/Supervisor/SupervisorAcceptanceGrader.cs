@@ -2,6 +2,8 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Agents.Workspace.Providers;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using Microsoft.Extensions.Logging;
@@ -19,19 +21,22 @@ namespace CodeSpace.Core.Services.Supervisor;
 public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IScopedDependency
 {
     private const string DefaultRunnerKind = "local";
+    private const int CloneTimeoutSeconds = 300;
 
     private readonly IAgentWorkspaceResolver _workspaceResolver;
     private readonly IWorkspaceProviderRegistry _providers;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
+    private readonly IArtifactOffloader _offloader;
     private readonly ILogger<SupervisorAcceptanceGrader> _logger;
 
-    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, ILogger<SupervisorAcceptanceGrader> logger)
+    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IArtifactOffloader offloader, ILogger<SupervisorAcceptanceGrader> logger)
     {
         _workspaceResolver = workspaceResolver;
         _providers = providers;
         _runners = runners;
         _graders = graders;
+        _offloader = offloader;
         _logger = logger;
     }
 
@@ -62,6 +67,94 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
+    public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            // A base SHA is not a branch/tag name, so it cannot go through IWorkspaceProviderRegistry — the shared
+            // provider clones via `git clone --branch <ref>`, which git refuses for a raw commit SHA. This clones
+            // full + checks the base out detached instead, mirroring LocalGitBranchIntegrator's own base-anchored
+            // clone (the other caller that needs an arbitrary base SHA rather than a named ref).
+            var clone = await _workspaceResolver.ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false)
+                ?? throw new WorkspaceException($"Repository {repositoryId} resolved to no clone request for acceptance grading.");
+
+            await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
+
+            var patch = await _offloader.ResolveAsync(teamId, inlinePatch, patchArtifactId, cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(patch))
+            {
+                _logger.LogWarning("Acceptance grading found no resolvable patch for {RepositoryId} at base {BaseSha}; failing closed to not-accepted", repositoryId, baseSha);
+                return Failed("no-branch-or-repo");
+            }
+
+            var applyError = await ApplyPatchAsync(directory, patch, cancellationToken).ConfigureAwait(false);
+
+            if (applyError is not null)
+            {
+                _logger.LogWarning("Acceptance grading could not apply the recorded patch for {RepositoryId} onto base {BaseSha}: {Error}", repositoryId, baseSha, applyError);
+                return Failed($"patch-apply-failed: {applyError}");
+            }
+
+            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Acceptance grading could not clone {RepositoryId} at base {BaseSha}; failing closed to not-accepted", repositoryId, baseSha);
+            return Failed($"clone-failed: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Acceptance grading could not run the check for {RepositoryId} at base {BaseSha}; failing closed to not-accepted", repositoryId, baseSha);
+            return Failed($"grade-error: {ex.Message}");
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>Full clone (no <c>--branch</c> — a base SHA is not a ref name the shared provider's clone can accept) then a detached checkout of the exact base. Throws <see cref="WorkspaceException"/> (redacted) on either git failure.</summary>
+    private async Task CloneAtBaseAsync(WorkspaceRequest clone, string baseSha, string directory, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(LocalGitWorkspaceProvider.WorkspacesRoot);
+
+        var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
+
+        var cloneResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+            new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+
+        if (cloneResult.Status != SandboxStatus.Success)
+            throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
+
+        var checkoutResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+
+        if (checkoutResult.Status != SandboxStatus.Success)
+            throw new WorkspaceException($"base revision {baseSha} not found in the repository: {LocalGitWorkspaceProvider.Redact(Summarize(checkoutResult.Stderr), clone.Token)}");
+    }
+
+    /// <summary>Apply <paramref name="patch"/> onto the already-checked-out <paramref name="directory"/> — NO stage, NO commit, NO push (this grade is read-only by construction; the clone is discarded after grading either way). Mirrors <c>LocalGitBranchIntegrator</c>'s own apply step (<c>git apply --3way</c>) minus <c>--index</c>, since nothing here is ever committed. Returns null on success, else <c>git</c>'s stderr.</summary>
+    private async Task<string?> ApplyPatchAsync(string directory, string patch, CancellationToken cancellationToken)
+    {
+        var patchFile = Path.Combine(directory, $".codespace-acceptance-{Guid.NewGuid():N}.patch");
+        await File.WriteAllTextAsync(patchFile, patch, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var result = await _runners.Resolve(DefaultRunnerKind).RunAsync(
+                new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60 }, cancellationToken).ConfigureAwait(false);
+
+            return result.Status == SandboxStatus.Success ? null : result.Stderr;
+        }
+        finally
+        {
+            try { File.Delete(patchFile); } catch { /* best-effort — the whole clone is discarded regardless */ }
+        }
+    }
+
     private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
     {
         var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
@@ -70,4 +163,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     }
 
     private static BenchmarkGrade Failed(string detail) => new() { Passed = false, Detail = detail };
+
+    private static string Summarize(string stderr) => string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); } catch { /* best-effort — the workspace janitor reclaims an orphaned clone */ }
+    }
 }

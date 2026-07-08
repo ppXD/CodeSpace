@@ -54,6 +54,19 @@ public sealed record SupervisorPlannedSubtask
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
+    /// <summary>
+    /// S2 — whether this unit is expected to produce a code diff/branch at all. A subtask can legitimately carry an
+    /// <see cref="Acceptance"/> contract that verifies something OTHER than a diff (e.g. "the investigation report
+    /// names the root cause") without ever being expected to push a branch; without this signal the per-unit fold
+    /// unconditionally fails such a unit closed as "no-branch-or-repo" the moment it produces none. Model-declared;
+    /// null (the model didn't say) falls back to a server inference off the instruction's leading verb
+    /// (<c>SupervisorSubtaskExpectations</c>, Core) — a small, defensive heuristic, never authoritative over an
+    /// explicit declaration. Null-omitted (<c>[JsonIgnore(WhenWritingNull)]</c>) so a subtask that doesn't address it
+    /// serializes byte-identical to before.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ExpectsChanges { get; init; }
 }
 
 /// <summary>The <c>spawn</c> payload: prior-plan subtask ids to fan out as parallel agent runs (K = the list length), plus an optional per-agent dispatch override per subtask (L4 arc B).</summary>

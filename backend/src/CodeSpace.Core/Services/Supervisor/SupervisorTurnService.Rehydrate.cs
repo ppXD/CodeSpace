@@ -335,19 +335,36 @@ public sealed partial class SupervisorTurnService
         return decision with { OutcomeJson = SupervisorOutcome.FoldAcceptanceGrade(decision.OutcomeJson, grade.Passed, grade.Detail) };
     }
 
-    /// <summary>Grade one resolve decision's branch against the operator command, fail-closed: no branch/repo → not-accepted; the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never crash and strand the row.</summary>
+    /// <summary>
+    /// Grade one resolve decision's branch against the operator command, fail-closed: no repo → not-accepted; the
+    /// grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal
+    /// fold can never crash and strand the row. S2: a resolver that never pushed (a policy-blocked push — its
+    /// <c>forcePushBranch=true</c> doesn't exempt it from a repo-level PatchOnly policy) is graded against its own
+    /// recorded patch instead, before falling back to fail-closed — a resolver always expects to reconcile SOMETHING,
+    /// so there is no <c>expectsChanges</c> concept on this path, unlike the per-unit fold below.
+    /// </summary>
     private async Task<BenchmarkGrade> GradeResolveAcceptanceAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string> command, Guid teamId, CancellationToken cancellationToken)
     {
-        var branch = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.ProducedBranch;
+        var resolver = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).FirstOrDefault();
         var repositoryId = goalConfig?.AgentProfile?.RepositoryId;
 
-        if (string.IsNullOrEmpty(branch) || repositoryId is null)
+        if (repositoryId is null)
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
         try
         {
             // The operator floor is always the TestsPass oracle (kind never model-authored on this path).
-            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, branch, new SupervisorAcceptanceSpec { Command = command }, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var spec = new SupervisorAcceptanceSpec { Command = command };
+
+            if (!string.IsNullOrEmpty(resolver?.ProducedBranch))
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, resolver.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            var manifest = resolver is not null ? await ResolveUnitManifestAsync(resolver.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false) : null;
+
+            if (manifest is { PatchArtifactId: not null, BaseSha: not null })
+                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -387,6 +404,7 @@ public sealed partial class SupervisorTurnService
 
         if (acceptanceBySubtask.Count == 0) return decision;   // no subtask authored a contract → byte-identical (the dominant case)
 
+        var expectsChangesBySubtask = ResolvePlannedExpectsChanges(priorDecisions);
         var unitSubtaskIds = UnitSubtaskIds(decision);
         var repoOverrides = DispatchRepoOverrides(decision);
 
@@ -411,17 +429,21 @@ public sealed partial class SupervisorTurnService
             // The subtask authored its OWN oracle — the FULL spec rides (kind + rubric/schema payloads, triad S7).
             var fullSpec = spec! with { Command = command };
 
+            // S2: the subtask's OWN declaration, else the server's verb inference — defaults true (byte-identical
+            // fail-closed) when the subtask is unresolvable (shouldn't happen; acceptanceBySubtask already found it).
+            var expectsChanges = subtaskId is not null && expectsChangesBySubtask.TryGetValue(subtaskId, out var declared) ? declared : true;
+
             BenchmarkGrade grade;
             if (results[i].RepositoryResults.Count > 0)
             {
-                grade = await GradeUnitAcceptanceMultiRepoAsync(results[i], fullSpec, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+                grade = await GradeUnitAcceptanceMultiRepoAsync(results[i], fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                    ?? goalConfig?.AgentProfile?.RepositoryId;
 
-                grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+                grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
 
             graded.Add(results[i] with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail });
@@ -433,15 +455,29 @@ public sealed partial class SupervisorTurnService
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, graded) };
     }
 
-    /// <summary>Grade ONE unit's produced branch against its subtask acceptance SPEC, fail-closed: no branch/repo → not-accepted; the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never crash + strand the row. Only a genuine cancellation propagates.</summary>
-    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, SupervisorAcceptanceSpec spec, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Grade ONE unit against its subtask acceptance SPEC, fail-closed: no repo → not-accepted; the grader is itself
+    /// fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never
+    /// crash + strand the row. S2: a unit with no pushed branch is graded against its own recorded patch (via the
+    /// manifest, the single source of truth — I2) before falling back to <paramref name="expectsChanges"/>'s
+    /// verdict — <c>true</c> (the default) fails closed exactly as before this field existed; <c>false</c> means the
+    /// subtask never declared/implied a diff, so the absence is the CORRECTLY predicted outcome, not a failure.
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, SupervisorAcceptanceSpec spec, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(result.ProducedBranch) || repositoryId is null)
-            return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
+        if (repositoryId is null) return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
         try
         {
-            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(result.ProducedBranch))
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (manifest is { PatchArtifactId: not null, BaseSha: not null })
+                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            return NotApplicableOrFailed(expectsChanges);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -454,17 +490,18 @@ public sealed partial class SupervisorTurnService
     /// Grade a MULTI-repo unit's subtask acceptance SPEC against EVERY repo it actually changed — mirroring
     /// <see cref="GradeStopTargetsAsync"/>'s run-level multi-target grade at the per-unit grain (a subtask's
     /// contract binds its WHOLE change, not just its primary repo). A repo with no produced branch had nothing to
-    /// verify there, so it is not a target (same filter as <see cref="ResolveAcceptanceTargets"/>); a unit that
-    /// produced NO branch across every repo still fails closed — the single-repo floor's exact "no-branch-or-repo"
-    /// semantic, just evaluated over the repo set instead of one field. All targets must pass, short-circuiting on
-    /// the first failure (the detail names the failing repo); any unexpected non-cancellation grader escape
-    /// degrades to not-accepted so the terminal fold can never crash + strand the row.
+    /// verify there, so it is not a target (same filter as <see cref="ResolveAcceptanceTargets"/>) — S2's per-repo
+    /// patch fallback is deliberately NOT extended here (scope trim; the single-repo path above is the one this
+    /// slice's design targets) — a unit that produced NO branch across every repo falls back to
+    /// <paramref name="expectsChanges"/>'s verdict, same as the single-repo path. All targets must pass,
+    /// short-circuiting on the first failure (the detail names the failing repo); any unexpected non-cancellation
+    /// grader escape degrades to not-accepted so the terminal fold can never crash + strand the row.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeUnitAcceptanceMultiRepoAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceMultiRepoAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
         var targets = result.RepositoryResults.Where(r => !string.IsNullOrEmpty(r.ProducedBranch) && r.RepositoryId is not null).ToList();
 
-        if (targets.Count == 0) return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
+        if (targets.Count == 0) return NotApplicableOrFailed(expectsChanges);
 
         foreach (var target in targets)
         {
@@ -506,6 +543,41 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>The shared empty acceptance map for the common no-contract plan — keeps that path allocation-light.</summary>
     private static readonly IReadOnlyDictionary<string, SupervisorAcceptanceSpec> EmptyAcceptance = new Dictionary<string, SupervisorAcceptanceSpec>();
+
+    /// <summary>S2 — whether EACH planned subtask expects to produce a diff (the model's declaration, else the server's verb inference), keyed by subtask id — read off the SAME most-recent <c>plan</c> decision <see cref="ResolvePlannedAcceptance"/> reads. Covers every subtask (not just contract-bearing ones), since the caller only consults it for a unit that already has a contract.</summary>
+    private static IReadOnlyDictionary<string, bool> ResolvePlannedExpectsChanges(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            if (priorDecisions[i].DecisionKind != SupervisorDecisionKinds.Plan) continue;
+
+            var map = new Dictionary<string, bool>();
+
+            foreach (var subtask in SupervisorOutcome.ReadPlanSubtasks(priorDecisions[i].PayloadJson))
+                if (!map.ContainsKey(subtask.Id))
+                    map[subtask.Id] = SupervisorSubtaskExpectations.Resolve(subtask);
+
+            return map;
+        }
+
+        return EmptyExpectsChanges;
+    }
+
+    private static readonly IReadOnlyDictionary<string, bool> EmptyExpectsChanges = new Dictionary<string, bool>();
+
+    /// <summary>S2's shared verdict for "nothing to grade" — <paramref name="expectsChanges"/> true (the default) fails closed exactly as before this field existed; false is the correctly-predicted no-diff outcome, a vacuous pass, never a failure.</summary>
+    private static BenchmarkGrade NotApplicableOrFailed(bool expectsChanges) =>
+        expectsChanges
+            ? new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" }
+            : new BenchmarkGrade { Passed = true, Detail = "not-applicable: no changes were expected and none were produced" };
+
+    /// <summary>The unit's manifest row for THIS repository (I2 — the single source of truth; never re-derived from the decision's own outcome snapshot), or null when none exists (the unit made no changes here, or hasn't been recorded yet). Mirrors <c>RealSupervisorActionExecutor.DependencyStaging.cs</c>'s per-repo manifest lookup.</summary>
+    private async Task<Core.Persistence.Entities.PublishManifest?> ResolveUnitManifestAsync(Guid agentRunId, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return manifests.FirstOrDefault(m => m.RepositoryId == repositoryId) ?? (manifests.Count == 1 ? manifests[0] : null);
+    }
 
     /// <summary>The subtask id each unit of a spawn (positional, the fan-out order) or a retry (one) ran — the positional join to the folded agentResults (<c>results[i]</c> ran <c>subtaskIds[i]</c>, the SAME order the executor staged them in).</summary>
     private static IReadOnlyList<string> UnitSubtaskIds(SupervisorPriorDecision decision) =>

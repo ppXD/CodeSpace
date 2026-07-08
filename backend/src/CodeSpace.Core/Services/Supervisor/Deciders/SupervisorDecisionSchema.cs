@@ -60,6 +60,7 @@ public static class SupervisorDecisionSchema
                       "title": { "type": "string", "description": "Short human title." },
                       "instruction": { "type": "string", "description": "The concrete instruction a spawned agent executes." },
                       "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional plan-local subtask ids this subtask depends on — the build-graph edges the server validates as a DAG (absent → an independent unit)." },
+                      "expectsChanges": { "type": "boolean", "description": "Whether this subtask is expected to produce a code change (a diff). Set to false for a genuinely READ-ONLY subtask (investigation, analysis, review, a report — no file edits), so its acceptance check, if any, grades a vacuous PASS instead of failing for having no diff to verify. Omit (or true) for any subtask that should produce a change — the default." },
                       "acceptance": {
                         "type": "object",
                         "additionalProperties": false,

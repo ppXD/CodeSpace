@@ -66,6 +66,48 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     [Fact]
+    public async Task A_resolver_that_never_pushed_grades_via_its_own_recorded_patch_not_fail_closed()
+    {
+        // S2: forcePushBranch=true doesn't exempt a resolver from a repo-level PatchOnly policy (PR-2) — its push can
+        // still be guard-blocked, leaving only a recorded patch. The grade must still run, not fail closed.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(agentId, producedBranch: null, markerPresent: true));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: null, baseSha: "deadbeef", patchArtifactId: Guid.NewGuid());
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, Command), grader);
+
+        grader.CallCount.ShouldBe(0, "no branch → the branch-based path is never invoked");
+        grader.PatchCallCount.ShouldBe(1, "the resolver's own recorded patch is graded instead of failing closed");
+
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        SupervisorOutcome.ReadAcceptanceGradePassed(resolve.OutcomeJson).ShouldBe(true);
+    }
+
+    [Fact]
+    public async Task A_resolver_with_no_branch_and_no_patch_still_fails_closed_resolve_has_no_expects_changes_concept()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(Guid.NewGuid(), producedBranch: null, markerPresent: true));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, Command), grader);
+
+        grader.CallCount.ShouldBe(0);
+        grader.PatchCallCount.ShouldBe(0);
+
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        SupervisorOutcome.ReadAcceptanceGradePassed(resolve.OutcomeJson).ShouldBe(false, "a resolver always expects to reconcile SOMETHING — nothing to grade is a real failure, never vacuous");
+    }
+
+    [Fact]
     public async Task A_failed_grade_overrides_the_resolvers_self_report_and_withholds_the_branch()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -423,6 +465,51 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             SupervisorOutcome.ResolvedBranch(resolve).ShouldBe("resolve/head", "a really-passing check accepts the resolved branch");
     }
 
+    [Fact]
+    public async Task The_real_grade_applies_a_real_recorded_patch_onto_a_real_base_when_the_resolver_never_pushed()
+    {
+        // S2 crown jewel: NO fake at ANY seam — real Postgres, real git clone, a REAL offloaded artifact (the same
+        // IArtifactOffloader a genuine producer uses), and the REAL SupervisorAcceptanceGrader.GradePatchAsync
+        // applying the recorded diff onto a FRESH independent clone. check.sh only exits 0 if marker.txt exists —
+        // it can ONLY pass if the patch was genuinely applied, proving the whole S2 mechanism end to end.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        var baseSha = await remote.SeedMarkerCheckAsync("marker.txt");
+        // Padded well over the 8KB inline-offload threshold, so IArtifactOffloader genuinely stores this as an
+        // artifact (a small diff would stay inline and never exercise the SAME offload path a real producer uses).
+        var patch = await remote.MakePatchAsync(baseSha, dir => File.WriteAllText(Path.Combine(dir, "marker.txt"), new string('m', 9000)));
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var agentId = Guid.NewGuid();
+
+        // Offload the patch through the REAL team-scoped artifact store — the same primitive a genuine producer's
+        // capture uses — so PatchArtifactId resolves to real content, never a hand-faked reference.
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var offloaded = await scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>()
+                .OffloadIfLargeAsync(teamId, patch, "text/x-diff", CancellationToken.None);
+            artifactId = offloaded.ArtifactId ?? throw new InvalidOperationException("expected the offloader to actually store this artifact for the resolve step below");
+        }
+
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(agentId, producedBranch: null, markerPresent: true));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: null, baseSha: baseSha, patchArtifactId: artifactId);
+
+        // Resolve the REAL SupervisorTurnService (real SupervisorAcceptanceGrader) — no fake at any seam.
+        SupervisorTurnContext ctx;
+        using (var scope = _fixture.BeginScope())
+            ctx = await scope.Resolve<ISupervisorTurnService>()
+                .RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, GoalConfig(repoId, Command), CancellationToken.None);
+
+        var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
+        SupervisorOutcome.ReadResolutionVerdict(resolve.OutcomeJson).ShouldBe(SupervisorResolutionVerdict.Verified,
+            "the real grader really cloned the base, really applied the recorded patch, and check.sh really found marker.txt — the whole S2 mechanism, no fakes");
+    }
+
     [Theory]
     [InlineData(0, "Completed")]            // the model definition-of-done really passes → the run completes
     [InlineData(1, "AcceptanceFailed")]     // it really fails → AcceptanceFailed end-to-end, the head is withheld
@@ -456,7 +543,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionArbiter>(),
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: null), CancellationToken.None);
         }
@@ -499,7 +586,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionArbiter>(),
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
         }
@@ -546,7 +633,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionArbiter>(),
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+                scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoA, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
         }
@@ -634,6 +721,36 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             await Git(_seed, "checkout", "main");
         }
 
+        /// <summary>Push a check.sh onto <c>main</c> whose exit code depends on whether <paramref name="markerFile"/> exists in the working tree — the S2 real-patch proof's oracle: passes ONLY when a later-applied patch genuinely added the file. Returns the resulting commit SHA — the base a patch is rooted at.</summary>
+        public async Task<string> SeedMarkerCheckAsync(string markerFile)
+        {
+            await File.WriteAllTextAsync(Path.Combine(_seed, "check.sh"), $"#!/bin/sh\nif [ -f {markerFile} ]; then exit 0; else exit 1; fi\n");
+            await Git(_seed, "add", "-A");
+            await Git(_seed, "commit", "-m", "add marker check");
+            await Git(_seed, "push", "origin", "main");
+
+            var rev = await new Core.Services.Agents.Sandbox.Runners.LocalProcessRunner().RunAsync(
+                new SandboxSpec { Command = "git", Args = new[] { "-C", _seed, "rev-parse", "HEAD" }, TimeoutSeconds = 30 }, CancellationToken.None);
+            return rev.Stdout.Trim();
+        }
+
+        /// <summary>A real unified diff rooted at <paramref name="baseSha"/> — a fresh clone, <paramref name="mutate"/>, then <c>git diff --cached</c> against the base — the same mechanism a real agent's own capture uses. Never touches <c>_seed</c>'s own state.</summary>
+        public async Task<string> MakePatchAsync(string baseSha, Action<string> mutate)
+        {
+            var work = Path.Combine(_root, "patch-" + Guid.NewGuid().ToString("N"));
+            await Git(_root, "clone", _bare, work);
+            await Config(work);
+            await Git(work, "checkout", "--detach", baseSha);
+            mutate(work);
+            await Git(work, "add", "-A");
+
+            var diff = await new Core.Services.Agents.Sandbox.Runners.LocalProcessRunner().RunAsync(
+                new SandboxSpec { Command = "git", Args = new[] { "-C", work, "diff", "--cached", "--no-color", baseSha }, TimeoutSeconds = 30 }, CancellationToken.None);
+
+            Directory.Delete(work, recursive: true);
+            return diff.Stdout;
+        }
+
         private static async Task Config(string dir)
         {
             await Git(dir, "config", "user.email", "test@codespace.dev");
@@ -666,7 +783,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }
@@ -692,7 +809,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
     }
@@ -779,6 +896,30 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         var agentResults = new[] { new { agentRunId = Guid.NewGuid(), status = "Succeeded", summary = markerPresent ? $"reconciled {Marker}" : "reconciled", producedBranch } };
 
         return JsonSerializer.Serialize(new { agentRunIds = new[] { Guid.NewGuid() }, agentCount = 1, agentResults }, AgentJson.Options);
+    }
+
+    /// <summary>Like <see cref="ResolveOutcome"/> but with a CALLER-CONTROLLED agent run id (so a matching manifest can be seeded) and an optional (nullable) produced branch — S2's branch-less resolver scenarios.</summary>
+    private static string ResolveOutcomeWithAgentId(Guid agentRunId, string? producedBranch, bool markerPresent)
+    {
+        var agentResults = new[] { new { agentRunId, status = "Succeeded", summary = markerPresent ? $"reconciled {Marker}" : "reconciled", producedBranch } };
+
+        return JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults }, AgentJson.Options);
+    }
+
+    /// <summary>Seed a manifest row directly (bypassing IPublishManifestStore) — the durable source S2's patch fallback reads for a branch-less resolver, mirroring SupervisorUnitAcceptanceFoldFlowTests' own helper.</summary>
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, Guid repositoryId, string? branch, string? baseSha, Guid? patchArtifactId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
+            RepositoryAlias = "primary", Branch = branch, BaseSha = baseSha, PatchArtifactId = patchArtifactId,
+            PublishStateValue = branch is not null ? PublishState.Pushed : PublishState.PatchOnly,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private static string MultiRepoResolveOutcome()
@@ -879,10 +1020,19 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         public int CallCount { get; private set; }
         public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
+        public int PatchCallCount { get; private set; }
+
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             CallCount++;
             LastCall = (repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass);
+            if (_throw != null) throw _throw;
+            return Task.FromResult(_grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            PatchCallCount++;
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
         }
@@ -899,6 +1049,14 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         public List<BenchmarkGradingKind> Kinds { get; } = new();
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            Commands.Add(spec.Command);
+            Kinds.Add(spec.Kind ?? BenchmarkGradingKind.TestsPass);
+            return Task.FromResult(_grades.Count > 0 ? _grades.Dequeue() : new BenchmarkGrade { Passed = true, Detail = "default" });
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             CallCount++;
             Commands.Add(spec.Command);
