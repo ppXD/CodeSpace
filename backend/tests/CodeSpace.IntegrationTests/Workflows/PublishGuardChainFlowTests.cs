@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -12,37 +13,29 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// HIGH fidelity (Rule 12): drives the REAL <see cref="IAgentRunExecutor"/> (resolved from the fixture scope) all
-/// the way through — real <see cref="LocalProcessRunner"/> spawning real <c>git</c> + a real <c>/bin/sh</c> harness,
-/// real Postgres, and a real local bare-repo "remote" — to prove push is DEFAULT-ON for a non-empty diff (PR-2's
-/// env-gate deletion) and that the publish guard chain's explicit opt-out actually blocks it end-to-end. Nothing is
-/// mocked: each test inspects the ACTUAL refs on the bare remote via <c>git --git-dir</c>.
-///
-/// <para>Covers: (1) an ORDINARY task (no <see cref="AgentTask.PushProducedBranch"/> set at all) pushes
-/// <c>codespace/agent/{runId:N}</c> end-to-end — no opt-in needed, proving the flip; (2) the load-bearing contrast —
-/// an EXPLICIT opt-out (<c>PushProducedBranch = false</c>, the <see cref="Core.Services.Agents.Publish.Guards.ProfileOptOutPublishGuard"/>)
-/// still runs the diff to Succeeded but produces NO branch, proving the guard is a real, working brake, not
-/// decorative; (3) the fan-out shape — two default-push runs against the SAME bound repo each produce their OWN
-/// run-unique branch (N agents = N distinct branches, no collision). Every OS resource is GUID-suffixed under an
-/// IDisposable that best-effort cleans the bare remote + every clone even on the failure path; skips on Windows /
-/// when git is absent so a cross-host <c>dotnet test</c> stays clean.</para>
+/// HIGH fidelity (Rule 12): the two policy guards <see cref="AgentBranchPushFlowTests"/> doesn't cover — driven
+/// through the REAL <see cref="IAgentRunExecutor"/> against real Postgres, real git, and a real local bare-repo
+/// remote. Both prove the SAME shape: the diff still gets captured + recorded in the <see cref="PublishManifest"/>
+/// (I1 holds), only the PUSH is skipped, and the winning guard's reason is readable back off the manifest row's
+/// <c>Summary</c> — never a silent drop.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class AgentBranchPushFlowTests
+public sealed class PublishGuardChainFlowTests
 {
     private readonly PostgresFixture _fixture;
 
-    public AgentBranchPushFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+    public PublishGuardChainFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Default_push_publishes_the_branch_end_to_end_with_no_opt_in()
+    public async Task A_repository_with_no_bound_credential_captures_the_diff_but_never_pushes()
     {
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
@@ -51,120 +44,121 @@ public sealed class AgentBranchPushFlowTests
         using var remote = new BareRemote();
         await remote.SeedWithOneCommitAsync();
 
-        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);   // no per-run signal at all
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, defaultBranch: "main", credentialId: null, publishMode: RepositoryPublishMode.Branch);
+        var runId = await CreateRepoRunAsync(teamId, repoId);
 
-        // The scripted harness makes a REAL edit in the clone; the executor captures the diff, then — because push
-        // is DEFAULT-ON for a non-empty diff — pushes the produced branch to the bare remote over the authenticated clone.
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "a missing credential is a publish POLICY decision, never a run failure");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.ChangedFiles.ShouldContain("agent-change.txt", "I1 holds regardless of the guard — the diff is captured either way");
+        result.ProducedBranch.ShouldBeNull();
+        result.PublishSkipReason.ShouldBe("the repository has no bound push credential");
+
+        (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("no credential → no push attempt at all, so no branch on the remote");
+
+        var manifest = (await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
+        manifest.PublishStateValue.ShouldBe(PublishState.PatchOnly);
+        manifest.ChangedFileCount.ShouldBe(1, "the manifest records the captured diff even though nothing was pushed");
+        manifest.Summary.ShouldBe("the repository has no bound push credential", "the guard's reason is readable straight off the manifest row — never a silent skip");
+    }
+
+    [Fact]
+    public async Task A_repository_with_publish_mode_patch_only_captures_the_diff_but_never_pushes()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+
+        // A bound credential (so NoCredentialPublishGuard clears) with the repo-level policy override set — isolates
+        // RepositoryPolicyPublishGuard as the ONE guard that fires.
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, defaultBranch: "main", credentialId: await SeedCredentialAsync(teamId), publishMode: RepositoryPublishMode.PatchOnly);
+        var runId = await CreateRepoRunAsync(teamId, repoId);
+
         await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
 
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Succeeded);
 
-        var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-        result.ProducedBranch.ShouldBe(expectedBranch, "push is default-on — no opt-in needed to publish the produced branch");
+        result.ChangedFiles.ShouldContain("agent-change.txt", "I1 holds regardless of the guard — the diff is captured either way");
+        result.ProducedBranch.ShouldBeNull();
+        result.PublishSkipReason.ShouldBe("the repository requires patch-only publishing");
 
-        (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote actually carries the pushed branch");
-        (await remote.BranchContainsFileAsync(expectedBranch, "agent-change.txt")).ShouldBeTrue("the pushed branch tip contains the agent's file");
+        (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("the repo-level policy blocks the push even though a valid credential exists");
+
+        var manifest = (await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
+        manifest.PublishStateValue.ShouldBe(PublishState.PatchOnly);
+        manifest.Summary.ShouldBe("the repository requires patch-only publishing");
     }
 
     [Fact]
-    public async Task Explicit_opt_out_produces_no_branch_end_to_end()
+    public async Task Changing_publish_mode_back_to_branch_lets_a_later_run_push_normally()
     {
+        // Proves the policy is read FRESH per run (not cached/sticky) — a repo flipped back to Branch afterwards
+        // publishes normally, exactly like AgentBranchPushFlowTests' default-push case.
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        // Same setup as the default-push test — same token, same bound repo, same edit — but the task explicitly
-        // opts OUT. This is the load-bearing contrast: it proves the ProfileOptOutPublishGuard is a REAL, working
-        // brake against a real git clone/push, not merely correct in the unit-level fake.
         var teamId = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedWithOneCommitAsync();
 
-        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: false);
+        var credentialId = await SeedCredentialAsync(teamId);
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, defaultBranch: "main", credentialId: credentialId, publishMode: RepositoryPublishMode.PatchOnly);
 
-        await ExecuteAsync(runId, new ScriptedHarness("printf 'by the agent\\n' > agent-change.txt; echo edited"));
+        var blockedRunId = await CreateRepoRunAsync(teamId, repoId);
+        await ExecuteAsync(blockedRunId, new ScriptedHarness("printf 'blocked\\n' > blocked.txt; echo edited"));
 
-        using var scope = _fixture.BeginScope();
-        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the run still runs to success — only the side-effecting push is gated off");
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var repo = await db.Repository.SingleAsync(r => r.Id == repoId);
+            repo.PublishMode = RepositoryPublishMode.Branch;
+            await db.SaveChangesAsync();
+        }
 
-        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
-        result.ProducedBranch.ShouldBeNull("the explicit opt-out guard blocks the push");
-        result.PublishSkipReason.ShouldBe("push disabled by the launch profile");
+        var allowedRunId = await CreateRepoRunAsync(teamId, repoId);
+        await ExecuteAsync(allowedRunId, new ScriptedHarness("printf 'allowed\\n' > allowed.txt; echo edited"));
 
-        (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("the bare remote gained NO branch");
-    }
+        using var read = _fixture.BeginScope();
+        var blockedResult = JsonSerializer.Deserialize<AgentRunResult>((await read.Resolve<IAgentRunService>().GetAsync(blockedRunId, CancellationToken.None)).ResultJson!, AgentJson.Options)!;
+        var allowedResult = JsonSerializer.Deserialize<AgentRunResult>((await read.Resolve<IAgentRunService>().GetAsync(allowedRunId, CancellationToken.None)).ResultJson!, AgentJson.Options)!;
 
-    [Fact]
-    public async Task Fan_out_two_default_push_runs_each_push_their_own_distinct_branch()
-    {
-        if (OperatingSystem.IsWindows()) return;
-        if (!await GitAvailableAsync()) return;
+        blockedResult.ProducedBranch.ShouldBeNull();
+        allowedResult.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(allowedRunId), "the policy flip took effect for the NEXT run — the guard reads Repository fresh, not a cached snapshot");
 
-        // The one-agent-one-branch fan-out shape, proven at the executor level (simpler than the full flow.map
-        // engine, and enough to prove the distinct-branch property): two DEFAULT-push agent runs (no opt-in) against
-        // the SAME bound repo, each writing its OWN file. The branch name is run-id-derived, so N agents = N distinct
-        // branches with no collision — both must land on the remote with their respective files.
-        var teamId = await SeedTeamAsync();
-        using var remote = new BareRemote();
-        await remote.SeedWithOneCommitAsync();
-
-        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-
-        var runIdA = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);
-        var runIdB = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: null);
-
-        await ExecuteAsync(runIdA, new ScriptedHarness("printf 'agent A\\n' > agent-a.txt; echo edited"));
-        await ExecuteAsync(runIdB, new ScriptedHarness("printf 'agent B\\n' > agent-b.txt; echo edited"));
-
-        var branchA = AgentRunExecutor.BuildBranchName(runIdA);
-        var branchB = AgentRunExecutor.BuildBranchName(runIdB);
-
-        branchA.ShouldNotBe(branchB, "each run derives its own run-unique branch — no collision");
-
-        using var scope = _fixture.BeginScope();
-        var svc = scope.Resolve<IAgentRunService>();
-        (await svc.GetAsync(runIdA, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
-        (await svc.GetAsync(runIdB, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
-
-        (await remote.HasBranchAsync(branchA)).ShouldBeTrue("agent A's branch is on the remote");
-        (await remote.HasBranchAsync(branchB)).ShouldBeTrue("agent B's branch is on the remote");
-        (await remote.BranchContainsFileAsync(branchA, "agent-a.txt")).ShouldBeTrue("agent A's branch carries agent A's file");
-        (await remote.BranchContainsFileAsync(branchB, "agent-b.txt")).ShouldBeTrue("agent B's branch carries agent B's file");
+        (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(allowedRunId))).ShouldBeTrue();
     }
 
     // ─── Seeding ─────────────────────────────────────────────────────────────
 
-    private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId, bool? pushProducedBranch)
+    private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, PushProducedBranch = pushProducedBranch },
+            new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 
-    /// <summary>
-    /// Seed a Repository bound to a GitHub PAT Credential whose decrypted token the auth resolver returns — so the
-    /// executor's clone CARRIES a token and <c>LocalGitWorkspaceProvider</c> takes the authenticated push path
-    /// (a token-less clone short-circuits the push to null by design). Provider = GitHub so TokenUsernameFor is
-    /// "x-access-token"; the Credential, ProviderInstance, and Repository all share the team.
-    /// </summary>
-    private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps, string defaultBranch)
+    private async Task<Guid> SeedCredentialAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var instanceId = Guid.NewGuid();
-        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = "https://local" });
+        var instanceId = await FindOrCreateProviderInstanceAsync(db, teamId);
 
         var serializer = scope.Resolve<ICredentialPayloadSerializer>();
         var encryptor = scope.Resolve<IPayloadEncryptor>();
-        var payloadJson = serializer.Serialize(new PatPayload { Token = "agent-clone-token" });
+        var payloadJson = serializer.Serialize(new PatPayload { Token = "guard-chain-e2e-token" });
 
         var credentialId = Guid.NewGuid();
         db.Credential.Add(new Credential
@@ -174,12 +168,35 @@ public sealed class AgentBranchPushFlowTests
             EncryptedPayload = encryptor.Encrypt(payloadJson), Status = CredentialStatus.Active,
         });
 
+        await db.SaveChangesAsync();
+        return credentialId;
+    }
+
+    private async Task<Guid> FindOrCreateProviderInstanceAsync(CodeSpaceDbContext db, Guid teamId)
+    {
+        var existing = await db.ProviderInstance.Where(p => p.TeamId == teamId).Select(p => p.Id).FirstOrDefaultAsync();
+        if (existing != Guid.Empty) return existing;
+
+        var instanceId = Guid.NewGuid();
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = "https://local" });
+        await db.SaveChangesAsync();
+        return instanceId;
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId, string cloneUrl, string defaultBranch, Guid? credentialId, RepositoryPublishMode publishMode)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var instanceId = await FindOrCreateProviderInstanceAsync(db, teamId);
+
         var repoId = Guid.NewGuid();
         db.Repository.Add(new Repository
         {
             Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, CredentialId = credentialId,
             ExternalId = repoId.ToString(), NamespacePath = "org", Name = "repo", FullPath = "org/repo",
-            DefaultBranch = defaultBranch, CloneUrlHttps = cloneUrlHttps, WebUrl = "https://local/org/repo",
+            DefaultBranch = defaultBranch, CloneUrlHttps = cloneUrl, WebUrl = "https://local/org/repo",
+            PublishMode = publishMode,
         });
 
         await db.SaveChangesAsync();
@@ -192,10 +209,10 @@ public sealed class AgentBranchPushFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var userId = Guid.NewGuid();
-        db.User.Add(new User { Id = userId, Email = $"agent-{userId:N}@test.local", Name = $"agent-{userId:N}" });
+        db.User.Add(new User { Id = userId, Email = $"guard-{userId:N}@test.local", Name = $"guard-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"agent-{teamId:N}", Name = "Agent Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"guard-{teamId:N}", Name = "Guard Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
@@ -220,8 +237,8 @@ public sealed class AgentBranchPushFlowTests
             scope.Resolve<CodeSpaceDbContext>(),
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
-            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
-            scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
+            scope.Resolve<IPublishManifestStore>(),
+            scope.Resolve<IEnumerable<IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
@@ -235,10 +252,10 @@ public sealed class AgentBranchPushFlowTests
         catch { return false; }
     }
 
-    /// <summary>A bare local repo standing in for the agent's remote, plus ref inspection via <c>git --git-dir</c> — the real-git ground truth the push lands on. GUID-suffixed; IDisposable best-effort cleans every dir even on the failure path.</summary>
+    /// <summary>A bare local repo standing in for the agent's remote, plus ref inspection via <c>git --git-dir</c> — real-git ground truth. GUID-suffixed; IDisposable best-effort cleans every dir even on the failure path. Mirrors <see cref="AgentBranchPushFlowTests.BareRemote"/>.</summary>
     private sealed class BareRemote : IDisposable
     {
-        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-agent-push-" + Guid.NewGuid().ToString("N"));
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-guard-chain-" + Guid.NewGuid().ToString("N"));
         private readonly string _bare;
 
         public BareRemote()
@@ -247,7 +264,6 @@ public sealed class AgentBranchPushFlowTests
             _bare = Path.Combine(_root, "remote.git");
         }
 
-        /// <summary>The file:// URL the bound Repository's CloneUrlHttps points at — git ignores file:// userinfo, so a token-carrying clone still pushes here.</summary>
         public string Url => new Uri(_bare).AbsoluteUri;
 
         public async Task SeedWithOneCommitAsync()
@@ -269,9 +285,6 @@ public sealed class AgentBranchPushFlowTests
         public async Task<bool> HasBranchAsync(string branch) =>
             (await RunGitAsync(_root, "--git-dir", _bare, "branch", "--list", branch)).Trim().Length > 0;
 
-        public async Task<bool> BranchContainsFileAsync(string branch, string file) =>
-            (await RunGitAsync(_root, "--git-dir", _bare, "ls-tree", "-r", "--name-only", branch)).Split('\n').Any(l => l.Trim() == file);
-
         private static async Task<string> RunGitAsync(string workdir, params string[] args)
         {
             var result = await new LocalProcessRunner().RunAsync(
@@ -289,7 +302,7 @@ public sealed class AgentBranchPushFlowTests
         }
     }
 
-    /// <summary>A CLI-less test harness: builds a /bin/sh invocation from a fixed script, wraps each stdout line as an assistant message, and folds the exit code. Mirrors AgentRunExecutorTests' ScriptedHarness so the push path runs through the real executor exactly as a production harness would.</summary>
+    /// <summary>A CLI-less test harness: builds a /bin/sh invocation from a fixed script, wraps each stdout line as an assistant message, and folds the exit code. Mirrors <see cref="AgentBranchPushFlowTests.ScriptedHarness"/>.</summary>
     private sealed class ScriptedHarness : IAgentHarness
     {
         private readonly string _script;

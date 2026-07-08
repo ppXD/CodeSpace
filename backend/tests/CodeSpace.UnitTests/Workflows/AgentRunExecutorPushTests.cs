@@ -1,5 +1,7 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Agents.Publish.Guards;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
@@ -11,11 +13,13 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the flag-gated branch-push behaviour on <see cref="AgentRunExecutor"/>: the env-flag reader, the
-/// deterministic branch name, and the <c>PushProducedBranchIfEnabledAsync</c> step's guards + best-effort
-/// failure handling — driven with a recording fake <see cref="IWorkspacePushHandle"/> and a minimal
-/// <see cref="IAgentRunService"/> stub (the only deps the step touches: the epoch re-read + the warning
-/// append). With the flag OFF every run is byte-identical (no push, no handle interaction).
+/// Pins the branch-push behaviour on <see cref="AgentRunExecutor"/>: push is DEFAULT-ON for a non-empty diff (the
+/// deleted env gate's replacement — see <see cref="IPublishGuard"/>), the deterministic branch name, and the
+/// <c>PushProducedBranchIfEnabledAsync</c> step's guards + best-effort failure handling — driven with a recording
+/// fake <see cref="IWorkspacePushHandle"/> and a minimal <see cref="IAgentRunService"/> stub (the only deps the
+/// step touches: the epoch re-read + the warning append). <see cref="NewExecutor"/> wires the REAL 3 guards
+/// (DB-free for every existing test here, since <see cref="DefaultTask"/> carries no <c>RepositoryId</c> — only
+/// <see cref="ProfileOptOutPublishGuard"/> can ever fire without a resolved <c>Repository</c> row).
 /// </summary>
 [Trait("Category", "Unit")]
 [Collection("McpEndpointEnvMutation")]   // serialize with McpCatalogModeTests — both mutate CODESPACE_AGENT_MCP_ENDPOINT_ENABLED
@@ -23,67 +27,7 @@ public sealed class AgentRunExecutorPushTests
 {
     private const long ClaimedEpoch = 7;
 
-    // ─── Env flag (Rule 8) ───────────────────────────────────────────────────
-
-    [Fact]
-    public void PushEnabledEnvVar_name_is_pinned() =>
-        // Renaming this silently turns the feature OFF for any operator who enabled it via env (Rule 8).
-        AgentRunExecutor.PushEnabledEnvVar.ShouldBe("CODESPACE_AGENT_PUSH_BRANCH_ENABLED");
-
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" true ", true)]   // trimmed
-    [InlineData(null, false)]
-    [InlineData("", false)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("garbage", false)]
-    public void IsPushEnabled_is_true_only_for_explicit_enable_values(string? value, bool expected)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, value);
-
-            AgentRunExecutor.IsPushEnabled().ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
-    }
-
-    // ─── Branch-push gate (per-run opt-in OR ambient flag) ───────────────────
-
-    [Theory]
-    // ambient flag value × per-run opt-in → resolved gate. The gate is the OR of the two: a per-run opt-in turns
-    // push ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it deployment-wide.
-    [InlineData(null, null, false)]    // neither → off (byte-identical to today: an ordinary run pushes nothing)
-    [InlineData(null, false, false)]   // explicit per-run false ≠ on (still defers to ambient)
-    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off — the fan-out branch-agent case
-    [InlineData("1", null, true)]      // ambient on → on regardless of the per-run signal
-    [InlineData("1", false, true)]     // ambient wins (no per-run OFF override)
-    [InlineData("1", true, true)]
-    public void ShouldPushProducedBranch_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool? perRunOptIn, bool expected)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, envValue);
-
-            var task = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = perRunOptIn };
-
-            AgentRunExecutor.ShouldPushProducedBranch(task).ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
-    }
-
-    // ─── Branch-integration gate (per-run opt-in OR ambient flag) ────────────
+    // ─── Branch-integration gate (per-run opt-in OR ambient flag — unlike push, integration stays env-gated) ──
 
     [Fact]
     public void IntegrateBranchEnabledEnvVar_name_is_pinned() =>
@@ -317,127 +261,119 @@ public sealed class AgentRunExecutorPushTests
     // ─── PushProducedBranchIfEnabledAsync guards ─────────────────────────────
 
     [Fact]
-    public async Task Flag_off_returns_unchanged_and_never_touches_the_handle()
+    public async Task Explicit_opt_out_returns_unchanged_and_never_touches_the_handle()
     {
-        await WithFlagAsync(null, async () =>
-        {
-            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle();
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
+        var optedOut = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = false };
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, optedOut, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
-            result.ProducedBranch.ShouldBeNull();
-            handle.PushCalled.ShouldBeFalse("flag OFF → no side effect");
-            runs.GetCalled.ShouldBeFalse("flag OFF short-circuits before the epoch re-read");
-        });
+        result.ProducedBranch.ShouldBeNull();
+        result.PublishSkipReason.ShouldBe("push disabled by the launch profile", "the ProfileOptOutPublishGuard's verdict is folded into the result, never a silent no-op");
+        handle.PushCalled.ShouldBeFalse("an explicit opt-out → no side effect");
+        runs.GetCalled.ShouldBeFalse("a guard hit short-circuits before the epoch re-read");
     }
 
     [Fact]
-    public async Task Non_succeeded_status_returns_unchanged_and_never_pushes() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle();
+    public async Task Default_with_no_flag_set_pushes_push_is_the_default_now()
+    {
+        // The env-gate deletion's core behavior change: an ORDINARY task (no PushProducedBranch set at all) now
+        // pushes by default — no per-run opt-in, no ambient flag, needed. This is the load-bearing regression test
+        // for the flip: DefaultTask carries PushProducedBranch = null, and the push still happens.
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
 
-            var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, failed, handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
-            result.ProducedBranch.ShouldBeNull();
-            handle.PushCalled.ShouldBeFalse("a non-Succeeded run never pushes");
-        });
-
-    [Fact]
-    public async Task Empty_changes_return_unchanged_and_never_push() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle();
-
-            var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, noChanges, handle, ClaimedEpoch, CancellationToken.None);
-
-            result.ProducedBranch.ShouldBeNull();
-            handle.PushCalled.ShouldBeFalse("nothing changed → nothing to push");
-        });
+        handle.PushCalled.ShouldBeTrue("push is DEFAULT-ON for a non-empty diff — no opt-in required");
+        result.ProducedBranch.ShouldBe(handle.BranchPushed);
+        result.PublishSkipReason.ShouldBeNull();
+    }
 
     [Fact]
-    public async Task A_non_push_capable_handle_returns_unchanged() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+    public async Task Non_succeeded_status_returns_unchanged_and_never_pushes()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), new ReadOnlyHandle(), ClaimedEpoch, CancellationToken.None);
+        var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, failed, handle, ClaimedEpoch, CancellationToken.None);
 
-            result.ProducedBranch.ShouldBeNull("a handle that doesn't implement IWorkspacePushHandle is skipped");
-        });
-
-    [Fact]
-    public async Task A_null_workspace_returns_unchanged() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), workspace: null, ClaimedEpoch, CancellationToken.None);
-
-            result.ProducedBranch.ShouldBeNull();
-        });
+        result.ProducedBranch.ShouldBeNull();
+        handle.PushCalled.ShouldBeFalse("a non-Succeeded run never pushes");
+    }
 
     [Fact]
-    public async Task All_guards_pass_folds_the_pushed_branch_into_the_result() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle();
+    public async Task Empty_changes_return_unchanged_and_never_push()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, noChanges, handle, ClaimedEpoch, CancellationToken.None);
 
-            handle.PushCalled.ShouldBeTrue();
-            handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the deterministic run-derived branch name is pushed");
-            result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result so the node's branch output carries it");
-        });
-
-    [Fact]
-    public async Task Per_run_opt_in_pushes_with_the_ambient_flag_off() =>
-        // The one-agent-one-branch fan-out case: the env flag is OFF, but the task opted in per-run → the branch
-        // is pushed for THIS run without flipping the global flag (every other run stays byte-identical).
-        await WithFlagAsync(null, async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle();
-
-            var optedIn = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = true };
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, optedIn, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
-
-            handle.PushCalled.ShouldBeTrue("the per-run opt-in pushes even with the ambient flag off");
-            result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result");
-        });
+        result.ProducedBranch.ShouldBeNull();
+        handle.PushCalled.ShouldBeFalse("nothing changed → nothing to push");
+    }
 
     [Fact]
-    public async Task A_null_push_result_leaves_the_result_unchanged() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle { ReturnBranch = null };   // e.g. no changes to commit / anonymous clone
+    public async Task A_non_push_capable_handle_returns_unchanged()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), new ReadOnlyHandle(), ClaimedEpoch, CancellationToken.None);
 
-            handle.PushCalled.ShouldBeTrue();
-            result.ProducedBranch.ShouldBeNull("a null push result means no branch — the result is unchanged");
-        });
+        result.ProducedBranch.ShouldBeNull("a handle that doesn't implement IWorkspacePushHandle is skipped");
+    }
 
     [Fact]
-    public async Task A_reclaimed_run_skips_the_push() =>
-        await WithFlagAsync("1", async () =>
-        {
-            // The run was reclaimed after this executor claimed it: the persisted epoch no longer matches.
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch + 1);
-            var handle = new RecordingPushHandle();
+    public async Task A_null_workspace_returns_unchanged()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), workspace: null, ClaimedEpoch, CancellationToken.None);
 
-            handle.PushCalled.ShouldBeFalse("a reclaimed run (epoch bumped) skips the side effect — its completion loses the CAS anyway");
-            result.ProducedBranch.ShouldBeNull();
-        });
+        result.ProducedBranch.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task All_guards_pass_folds_the_pushed_branch_into_the_result()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle();
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+
+        handle.PushCalled.ShouldBeTrue();
+        handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the deterministic run-derived branch name is pushed");
+        result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result so the node's branch output carries it");
+    }
+
+    [Fact]
+    public async Task A_null_push_result_leaves_the_result_unchanged()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle { ReturnBranch = null };   // e.g. no changes to commit / anonymous clone
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+
+        handle.PushCalled.ShouldBeTrue();
+        result.ProducedBranch.ShouldBeNull("a null push result means no branch — the result is unchanged");
+    }
+
+    [Fact]
+    public async Task A_reclaimed_run_skips_the_push()
+    {
+        // The run was reclaimed after this executor claimed it: the persisted epoch no longer matches.
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch + 1);
+        var handle = new RecordingPushHandle();
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+
+        handle.PushCalled.ShouldBeFalse("a reclaimed run (epoch bumped) skips the side effect — its completion loses the CAS anyway");
+        result.ProducedBranch.ShouldBeNull();
+    }
 
     // ─── Multi-repo per-repo push (multi-repo PR3) ───────────────────────────
 
@@ -448,81 +384,77 @@ public sealed class AgentRunExecutorPushTests
             .ShouldBe("cs-11111111111111111111111111111111");
 
     [Fact]
-    public async Task A_multi_repo_run_pushes_each_writable_repo_and_folds_per_repo_branches() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new MultiRepoRecordingPushHandle();
+    public async Task A_multi_repo_run_pushes_each_writable_repo_and_folds_per_repo_branches()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-            var expected = AgentRunExecutor.BuildBranchName(runId);
-            handle.PushedByAlias.Keys.ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "every writable repo is pushed, each to its own remote");
-            handle.PushedByAlias["web"].ShouldBe(expected, "each repo pushes under the same run-derived branch name (distinct remotes)");
-            handle.PushedByAlias["api"].ShouldBe(expected);
+        var expected = AgentRunExecutor.BuildBranchName(runId);
+        handle.PushedByAlias.Keys.ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "every writable repo is pushed, each to its own remote");
+        handle.PushedByAlias["web"].ShouldBe(expected, "each repo pushes under the same run-derived branch name (distinct remotes)");
+        handle.PushedByAlias["api"].ShouldBe(expected);
 
-            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
-            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(expected);
-            result.ProducedBranch.ShouldBe(expected, "the top-level ProducedBranch mirrors the PRIMARY (web) repo's branch");
-        });
-
-    [Fact]
-    public async Task A_multi_repo_run_records_null_for_a_secondary_repo_that_did_not_change() =>
-        await WithFlagAsync("1", async () =>
-        {
-            // The agent touched only the primary; the secondary's push self-gates to null. The change set records
-            // the per-repo truth (web a branch, api none) and the top-level still mirrors the primary.
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new MultiRepoRecordingPushHandle { NullForAliases = { "api" } };
-
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
-
-            var expected = AgentRunExecutor.BuildBranchName(runId);
-            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
-            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the unchanged secondary repo produced no branch");
-            result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
-        });
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(expected);
+        result.ProducedBranch.ShouldBe(expected, "the top-level ProducedBranch mirrors the PRIMARY (web) repo's branch");
+    }
 
     [Fact]
-    public async Task A_multi_repo_run_pushes_even_when_the_primary_top_level_shows_no_change() =>
-        await WithFlagAsync("1", async () =>
-        {
-            // Multi-repo skips the single-repo "top-level empty → return" gate: a secondary repo may carry changes
-            // the primary's top-level fields don't reflect. Each per-repo push self-gates instead.
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new MultiRepoRecordingPushHandle();
+    public async Task A_multi_repo_run_records_null_for_a_secondary_repo_that_did_not_change()
+    {
+        // The agent touched only the primary; the secondary's push self-gates to null. The change set records
+        // the per-repo truth (web a branch, api none) and the top-level still mirrors the primary.
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle { NullForAliases = { "api" } };
 
-            // Top-level ChangedFiles + Patch are EMPTY (primary unchanged) but RepositoryResults still lists both repos.
-            var input = MultiRepoSucceeded(runId) with { ChangedFiles = Array.Empty<string>(), Patch = "" };
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, input, handle, ClaimedEpoch, CancellationToken.None);
-
-            handle.PushedByAlias.Count.ShouldBe(2, "the empty top-level gate does not short-circuit a multi-repo push");
-            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
-        });
+        var expected = AgentRunExecutor.BuildBranchName(runId);
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the unchanged secondary repo produced no branch");
+        result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
+    }
 
     [Fact]
-    public async Task A_multi_repo_per_repo_push_failure_is_isolated_keeping_the_others() =>
-        await WithFlagAsync("1", async () =>
-        {
-            // The core push-isolation fix: 'web' pushes successfully, then 'api' throws. 'api''s failure must NOT
-            // discard 'web''s already-pushed branch (the orphaned-litter bug); 'api' gets a per-repo warning + null
-            // branch; the run stays Succeeded.
-            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new MultiRepoRecordingPushHandle { ThrowForAliases = { "api" } };
+    public async Task A_multi_repo_run_pushes_even_when_the_primary_top_level_shows_no_change()
+    {
+        // Multi-repo skips the single-repo "top-level empty → return" gate: a secondary repo may carry changes
+        // the primary's top-level fields don't reflect. Each per-repo push self-gates instead.
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        // Top-level ChangedFiles + Patch are EMPTY (primary unchanged) but RepositoryResults still lists both repos.
+        var input = MultiRepoSucceeded(runId) with { ChangedFiles = Array.Empty<string>(), Patch = "" };
 
-            var expected = AgentRunExecutor.BuildBranchName(runId);
-            result.Status.ShouldBe(AgentRunStatus.Succeeded, "one repo's push failure never fails the run");
-            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected, "the repo that pushed BEFORE the failure keeps its branch — never discarded");
-            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the failed repo has no branch");
-            result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, input, handle, ClaimedEpoch, CancellationToken.None);
 
-            runs.AppendedEvents.Count.ShouldBe(1, "the operator gets a per-repo warning naming the failed repo");
-            runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
-            runs.AppendedEvents[0].Text.ShouldContain("[api]", customMessage: "the warning names the failed repo");
-        });
+        handle.PushedByAlias.Count.ShouldBe(2, "the empty top-level gate does not short-circuit a multi-repo push");
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
+    }
+
+    [Fact]
+    public async Task A_multi_repo_per_repo_push_failure_is_isolated_keeping_the_others()
+    {
+        // The core push-isolation fix: 'web' pushes successfully, then 'api' throws. 'api''s failure must NOT
+        // discard 'web''s already-pushed branch (the orphaned-litter bug); 'api' gets a per-repo warning + null
+        // branch; the run stays Succeeded.
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle { ThrowForAliases = { "api" } };
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+
+        var expected = AgentRunExecutor.BuildBranchName(runId);
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "one repo's push failure never fails the run");
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected, "the repo that pushed BEFORE the failure keeps its branch — never discarded");
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the failed repo has no branch");
+        result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
+
+        runs.AppendedEvents.Count.ShouldBe(1, "the operator gets a per-repo warning naming the failed repo");
+        runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
+        runs.AppendedEvents[0].Text.ShouldContain("[api]", customMessage: "the warning names the failed repo");
+    }
 
     // ─── P1.5-B: bounded retry before giving up (F4 made push mandatory for a contract — a single transient ──
     // ─── failure must not convert a correct run into AcceptanceFailed) ──────────────────────────────────────
@@ -538,82 +470,64 @@ public sealed class AgentRunExecutorPushTests
     }
 
     [Fact]
-    public async Task A_single_repo_push_that_fails_twice_then_succeeds_is_retried_to_success() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle { FailFirstNCalls = 2 };   // under PushMaxAttempts=3 → recovers
+    public async Task A_single_repo_push_that_fails_twice_then_succeeds_is_retried_to_success()
+    {
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle { FailFirstNCalls = 2 };   // under PushMaxAttempts=3 → recovers
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
-            result.Status.ShouldBe(AgentRunStatus.Succeeded);
-            result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
-            handle.PushCallCount.ShouldBe(3, "exactly two failed attempts + the one that succeeded — never more, never fewer");
-            runs.AppendedEvents.ShouldBeEmpty("a recovered push is invisible to the operator — no warning for a transient blip that resolved itself");
-        });
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
+        handle.PushCallCount.ShouldBe(3, "exactly two failed attempts + the one that succeeded — never more, never fewer");
+        runs.AppendedEvents.ShouldBeEmpty("a recovered push is invisible to the operator — no warning for a transient blip that resolved itself");
+    }
 
     [Fact]
-    public async Task A_multi_repo_push_that_fails_once_then_succeeds_is_retried_in_isolation_per_repo() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new MultiRepoRecordingPushHandle { FailFirstNCallsByAlias = { ["api"] = 1 } };   // web never fails; api fails once then recovers
+    public async Task A_multi_repo_push_that_fails_once_then_succeeds_is_retried_in_isolation_per_repo()
+    {
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle { FailFirstNCallsByAlias = { ["api"] = 1 } };   // web never fails; api fails once then recovers
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-            result.Status.ShouldBe(AgentRunStatus.Succeeded);
-            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
-            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "api's transient first failure recovered on retry — no branch lost");
-            handle.CallCountByAlias["web"].ShouldBe(1, "web never failed — one call, no wasted retries");
-            handle.CallCountByAlias["api"].ShouldBe(2, "api's one failure + the retry that succeeded");
-            runs.AppendedEvents.ShouldBeEmpty("both repos recovered — no operator-facing warning for a resolved transient blip");
-        });
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "api's transient first failure recovered on retry — no branch lost");
+        handle.CallCountByAlias["web"].ShouldBe(1, "web never failed — one call, no wasted retries");
+        handle.CallCountByAlias["api"].ShouldBe(2, "api's one failure + the retry that succeeded");
+        runs.AppendedEvents.ShouldBeEmpty("both repos recovered — no operator-facing warning for a resolved transient blip");
+    }
 
     // ─── Best-effort failure handling (retries EXHAUSTED — the deterministic-failure / persistent-outage floor) ──
 
     [Fact]
-    public async Task A_thrown_workspace_exception_is_swallowed_and_recorded_as_a_warning() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle { ThrowOnPush = new WorkspaceException("git push failed: token *** rejected") };
+    public async Task A_thrown_workspace_exception_is_swallowed_and_recorded_as_a_warning()
+    {
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle { ThrowOnPush = new WorkspaceException("git push failed: token *** rejected") };
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
-            result.Status.ShouldBe(AgentRunStatus.Succeeded, "a push failure NEVER flips a Succeeded run to Failed");
-            result.ProducedBranch.ShouldBeNull();
-            handle.PushCallCount.ShouldBe(AgentRunExecutor.PushMaxAttempts, "a persisting (non-transient) failure burns the WHOLE retry budget before giving up");
-            runs.AppendedEvents.Count.ShouldBe(1, "the operator sees a timeline warning explaining why no branch appeared");
-            runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
-            runs.AppendedEvents[0].Text.ShouldContain("***", customMessage: "the redacted exception message is carried onto the warning");
-        });
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "a push failure NEVER flips a Succeeded run to Failed");
+        result.ProducedBranch.ShouldBeNull();
+        handle.PushCallCount.ShouldBe(AgentRunExecutor.PushMaxAttempts, "a persisting (non-transient) failure burns the WHOLE retry budget before giving up");
+        runs.AppendedEvents.Count.ShouldBe(1, "the operator sees a timeline warning explaining why no branch appeared");
+        runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
+        runs.AppendedEvents[0].Text.ShouldContain("***", customMessage: "the redacted exception message is carried onto the warning");
+    }
 
     [Fact]
-    public async Task A_cancellation_propagates() =>
-        await WithFlagAsync("1", async () =>
-        {
-            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
-            var handle = new RecordingPushHandle { ThrowOnPush = new OperationCanceledException() };
+    public async Task A_cancellation_propagates()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle { ThrowOnPush = new OperationCanceledException() };
 
-            await Should.ThrowAsync<OperationCanceledException>(async () =>
-                await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None));
-        });
+        await Should.ThrowAsync<OperationCanceledException>(async () =>
+            await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None));
+    }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
-
-    private static async Task WithFlagAsync(string? value, Func<Task> body)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, value);
-            await body();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
-        }
-    }
 
     private static AgentRunResult SucceededWithChanges() =>
         new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/foo.cs" }, Patch = "diff --git ..." };
@@ -634,15 +548,16 @@ public sealed class AgentRunExecutorPushTests
         },
     };
 
-    /// <summary>A task with NO per-run push opt-in — so the push decision in these tests is driven purely by the env flag (the gate's OR is exercised separately by the per-run tests). Mirrors how an ordinary run looks.</summary>
+    /// <summary>An ordinary task: no explicit push opt-out, no bound repository. Push is DEFAULT-ON for a non-empty diff, so this task pushes with no per-run signal needed.</summary>
     private static AgentTask DefaultTask => new() { Goal = "g", Harness = "codex-cli" };
 
-    /// <summary>Build an executor whose only live dependency is a stub run service (the epoch re-read + the warning append); every other ctor dep is null because the push step never touches it.</summary>
+    /// <summary>Build an executor whose only live dependency is a stub run service (the epoch re-read + the warning append); every other ctor dep is null because the push step never touches it — EXCEPT the guard chain, wired with the REAL 3 production guards (cheap, dependency-free POCOs) so a test can exercise ProfileOptOutPublishGuard without a fake. The other two guards need a resolved Repository row (null here, since DefaultTask carries no RepositoryId) so they never fire in this DB-free suite.</summary>
     private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs) NewExecutor(long epoch)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId, epoch);
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        IPublishGuard[] guards = { new ProfileOptOutPublishGuard(), new NoCredentialPublishGuard(), new RepositoryPolicyPublishGuard() };
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, guards, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs);
     }
 

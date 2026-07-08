@@ -130,13 +130,16 @@ public sealed class AgentReviewerLoopFlowTests
             await remote.SeedBaseAsync();
             var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-            // NO push → no produced branch → nothing for an agent to clone → the ladder must fall to the model critic.
+            // Explicit opt-out → no produced branch → nothing for an agent to clone → the ladder must fall to the
+            // model critic. Push is default-ON now (PR-2), so this must be an explicit PushProducedBranch = false,
+            // not an absent flag — the test's premise ("no produced branch") no longer holds by default.
             var task = new AgentTask
             {
                 Goal = "make feature.txt clean",
                 Harness = "scripted",
                 Model = "test-model",
                 RepositoryId = repoId,
+                PushProducedBranch = false,
                 OutputReviewMode = ReviewMode.Gate,
                 ReviewerAgent = true,
                 ReviewerModelId = criticRowId,
@@ -251,6 +254,7 @@ public sealed class AgentReviewerLoopFlowTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);

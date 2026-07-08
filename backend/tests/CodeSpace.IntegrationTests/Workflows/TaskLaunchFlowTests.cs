@@ -763,8 +763,8 @@ public class TaskLaunchFlowTests
     public async Task A_single_agent_launch_bakes_the_operator_publish_branch_opt_in_into_the_agent_config()
     {
         // The operator's "Publish branch" opt-in must bind through the command → ResolvedAgentProfile.PushBranch → the
-        // projected agent.code node's pushBranch config, where ResolvePushBranch / ShouldPushProducedBranch reads it.
-        // Unset ⇒ omitted ⇒ the mode-derived default / ambient flag (byte-identical).
+        // projected agent.code node's pushBranch config, where the publish guard chain reads it as an explicit
+        // opt-out signal when false. Unset ⇒ omitted ⇒ push is default-on downstream (byte-identical node projection).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
 
@@ -786,7 +786,8 @@ public class TaskLaunchFlowTests
     public async Task A_deep_launch_bakes_the_operator_publish_branch_opt_in_into_the_supervisor_snapshot()
     {
         // The same opt-in on a Deep launch binds into the supervisor agentProfile's pushBranch, where each spawned agent
-        // reads it (Spawn → PushProducedBranch). Unset ⇒ omitted ⇒ defer to the ambient flag (byte-identical).
+        // reads it (Spawn → PushProducedBranch, false = an explicit opt-out via the guard chain). Unset ⇒ omitted ⇒
+        // push is default-on downstream (byte-identical node projection).
         var jobClient = ResolveJobClient();
         jobClient.Clear();
         jobClient.AutoExecute = false;

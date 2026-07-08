@@ -54,7 +54,7 @@ namespace CodeSpace.E2ETests.Sessions;
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
 [Trait("Surface", "Engine")]
-public sealed class RealModelSessionConvergenceWholeLoopE2ETests : IDisposable
+public sealed class RealModelSessionConvergenceWholeLoopE2ETests
 {
     private const string Provider = "Anthropic";   // the blessed brain wire
 
@@ -67,18 +67,11 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests : IDisposable
     private const string WrongStub = "#!/bin/sh\necho 0\n";   // the agent must FIX these; absent a fix the oracle fails
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _pushBefore;
 
-    public RealModelSessionConvergenceWholeLoopE2ETests(PostgresFixture fixture)
-    {
-        _fixture = fixture;
-        // A task-launch single-agent run pushes its produced branch only when the deployment push flag is on (the launch
-        // projection omits a per-run pushBranch). Turn 2 can only build on turn 1's branch if turn 1 actually PUSHED it.
-        _pushBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, "1");
-    }
-
-    public void Dispose() => Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, _pushBefore);
+    // A task-launch single-agent run pushes its produced branch by default now (push is default-on for a non-empty
+    // diff since PR-2's env-gate deletion) — turn 2 building on turn 1's branch no longer needs the deployment
+    // push flag forced on here.
+    public RealModelSessionConvergenceWholeLoopE2ETests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
     public async Task A_live_model_continues_a_thread_and_builds_feature_B_on_turn1s_real_code()

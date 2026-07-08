@@ -1033,6 +1033,7 @@ public class AgentMcpEndpointFlowTests
         scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
         scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+        scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
         NullLogger<AgentRunExecutor>.Instance);
 
     /// <summary>A real existing executable to satisfy the proxy-path File.Exists fail-closed guard — /bin/sh always exists on POSIX (the proxy is never actually exec'd; the scripted harness runs /bin/sh and the declaration is only read, not spawned).</summary>

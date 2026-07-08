@@ -12,6 +12,7 @@ public class RepositoryConfiguration : IEntityTypeConfiguration<Repository>
 
         builder.Property(r => r.Visibility).HasConversion<string>();
         builder.Property(r => r.Status).HasConversion<string>();
+        builder.Property(r => r.PublishMode).HasConversion<string>();
 
         builder.HasOne(r => r.Team).WithMany().HasForeignKey(r => r.TeamId);
         builder.HasOne(r => r.ProviderInstance).WithMany().HasForeignKey(r => r.ProviderInstanceId);

@@ -68,13 +68,9 @@ public class PlanMapDynamicFanoutFlowTests
 
         // The asserted PushProducedBranch is written by the NODE's mode→push mapping at suspend time (into the
         // persisted AgentRun.TaskJson this test reads), and the dynamic builder binds NO explicit pushBranch config
-        // — so a branch's MODE is the SOLE driver of that persisted value (code→true, research→false). The
-        // deployment push flag governs only whether a REAL push FIRES (not asserted here — the profile has no repo,
-        // so no push handle exists); keep it OFF purely as defense-in-depth, so nothing about a real push could be
-        // mistaken for the model's mode decision. (It is NOT what enforces this assertion.)
-        var originalPushFlag = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, null);
-
+        // — so a branch's MODE is the SOLE driver of that persisted value (code→true, research→false). Whether a
+        // REAL push would fire is irrelevant here (the profile has no repo, so no push handle exists regardless);
+        // this test only asserts the persisted TaskJson value, never a live push.
         try
         {
             // The CLI's intelligence is faked at the binary; everything the executor/runner/harness does is real.
@@ -122,8 +118,6 @@ public class PlanMapDynamicFanoutFlowTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, originalPushFlag);
-
             using var reset = _fixture.BeginScope();
             reset.Resolve<WorkPlanPlanScript>().Reset();   // the fixture-singleton knob is shared across the collection
         }

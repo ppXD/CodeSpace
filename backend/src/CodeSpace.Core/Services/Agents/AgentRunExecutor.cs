@@ -79,14 +79,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const long DefaultMaxSessionTranscriptBytes = 32L * 1024 * 1024;
 
     /// <summary>
-    /// Operators opt INTO pushing a successful run's diff to a remote branch (a side-effecting write to the
-    /// user's remote) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything
-    /// else → no push), so every existing run is byte-identical until an operator flips it. Pinned by a test
-    /// (Rule 8) — renaming it silently turns the feature off for an operator who enabled it.
-    /// </summary>
-    public const string PushEnabledEnvVar = "CODESPACE_AGENT_PUSH_BRANCH_ENABLED";
-
-    /// <summary>
     /// Operators opt INTO on-disk integration of K parallel agent contributions into ONE branch (a side-effecting
     /// write to the user's remote — SOTA #3) by setting this to "1"/"true". Fail-closed default-OFF
     /// (absent/""/"0"/"false"/anything else → no clone, no integration, no LLM synthesis call, byte-identical to
@@ -127,9 +119,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IArtifactOffloader _offloader;
     // The publish-or-park ledger: upserted at the end of every verification pass, regardless of the run's status.
     private readonly IPublishManifestStore _manifests;
+    // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
+    // production reads a stable sequence regardless of DI registration order.
+    private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, IPublishManifestStore manifests, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, IPublishManifestStore manifests, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -144,6 +139,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _critic = critic;
         _offloader = offloader;
         _manifests = manifests;
+        // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
+        // registered is a legitimate state (every push clears), not a constructor-time crash.
+        _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
         _logger = logger;
     }
 
@@ -833,8 +831,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// When enabled, push a SUCCESSFUL run's non-empty diff to a deterministically-named remote branch and fold
     /// the pushed name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a
     /// downstream git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING
-    /// write to the user's remote, so it is gated hard: the flag must be on, the run must have Succeeded with a
-    /// non-empty diff, and the handle must be push-capable; ANY guard failing returns the result UNCHANGED.
+    /// write to the user's remote, so it is DEFAULT-ON but guarded: the publish guard chain (<see cref="IPublishGuard"/>)
+    /// must clear, the run must have Succeeded with a non-empty diff, and the handle must be push-capable; a guard hit
+    /// stamps <see cref="AgentRunResult.PublishSkipReason"/> and returns without pushing — never a silent no-op.
     ///
     /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
     /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
@@ -849,7 +848,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
-        if (!ShouldPushProducedBranch(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
 
@@ -858,6 +856,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Single-repo: skip the push when nothing changed (byte-identical gate). Multi-repo skips this global gate —
         // a secondary repo may have changes the primary's top-level fields don't reflect; each per-repo push self-gates.
         if (!multiRepo && result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
+
+        if (!multiRepo && await EvaluatePublishGuardsAsync(task, task.RepositoryId, cancellationToken).ConfigureAwait(false) is { } verdict)
+            return result with { PublishSkipReason = verdict.Reason };
 
         // No-replay: a reclaimed run (epoch bumped) would lose the completion CAS anyway — don't fire the side
         // effect. Read FRESH + untracked (GetAsync is AsNoTracking) so we see the reclaimer's bumped epoch.
@@ -871,7 +872,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            if (multiRepo) return await PushRepositoryResultsAsync(runId, result, workspace, pushHandle, cancellationToken).ConfigureAwait(false);
+            if (multiRepo) return await PushRepositoryResultsAsync(runId, task, result, workspace, pushHandle, cancellationToken).ConfigureAwait(false);
 
             var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId), ct), cancellationToken).ConfigureAwait(false);
 
@@ -921,7 +922,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// catch returns the UNMODIFIED result, which would orphan already-pushed remote branches (live on the remote but
     /// recorded as no-branch). Cancellation still propagates (worker torn down).</para>
     /// </summary>
-    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
         var branchName = BuildBranchName(runId);
         var updated = new List<RepositoryRunResult>(result.RepositoryResults.Count);
@@ -930,6 +931,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         foreach (var repo in result.RepositoryResults)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Per-repo guard eval: a multi-repo run can mix policies (e.g. one repo PatchOnly, a sibling Branch) —
+            // each repo's own row decides its own fate, isolated exactly like a per-repo push failure already is.
+            if (await EvaluatePublishGuardsAsync(task, repo.RepositoryId, cancellationToken).ConfigureAwait(false) is { } verdict)
+            {
+                updated.Add(repo with { PublishSkipReason = verdict.Reason });
+                continue;
+            }
 
             var (pushed, error) = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
@@ -1002,14 +1011,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (result.RepositoryResults.Count > 0)
             {
                 foreach (var repo in result.RepositoryResults)
-                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, acceptancePassed: null), cancellationToken).ConfigureAwait(false);
+                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, acceptancePassed: null), cancellationToken).ConfigureAwait(false);
 
                 return;
             }
 
             if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null) return;   // nothing changed — no artifact to record
 
-            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
+            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1017,8 +1026,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: a produced branch means Pushed, its absence means PatchOnly (PublishError distinguishes an intentional skip from a failed attempt); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
-    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, bool? acceptancePassed) => new()
+    /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: a produced branch means Pushed, its absence means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
+    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed) => new()
     {
         TeamId = run.TeamId,
         WorkflowRunId = run.WorkflowRunId,
@@ -1032,6 +1041,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         PublishStateValue = producedBranch is { Length: > 0 } ? PublishState.Pushed : PublishState.PatchOnly,
         PublishError = publishError,
         Branch = producedBranch,
+        Summary = publishSkipReason,
     };
 
     /// <summary>Hard cap on S6 revise rounds — a runaway budget is clamped here, so a task can never buy more than this many billed re-runs inside one agent run.</summary>
@@ -1337,25 +1347,27 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Deterministic, run-unique remote branch name for a produced diff. Pure + private so it's unit-pinned. Run-id-derived, so a workflow retry (new run id) → a new branch; a re-push of the same run → the same branch (plain --force overwrite).</summary>
     internal static string BuildBranchName(Guid runId) => $"codespace/agent/{runId:N}";
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else. Mirrors the env-flag pattern (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
-    internal static bool IsPushEnabled()
+    /// <summary>
+    /// Evaluate the publish guard chain (see <see cref="IPublishGuard"/>), in ascending <see cref="IPublishGuard.Order"/>
+    /// — the first guard whose verdict is non-null wins. Push is the DEFAULT for a non-empty diff now (the deleted
+    /// env gate's replacement): a guard is an explicit, inspectable OPT-OUT, never an opt-in gate an operator has to
+    /// flip. <paramref name="repositoryId"/> is resolved to its <see cref="Repository"/> row once so every guard sees
+    /// the same snapshot; null when the task carries none (every guard then clears, since there is nothing to gate).
+    /// </summary>
+    private async Task<PublishGuardVerdict?> EvaluatePublishGuardsAsync(AgentTask task, Guid? repositoryId, CancellationToken cancellationToken)
     {
-        var raw = Environment.GetEnvironmentVariable(PushEnabledEnvVar)?.Trim();
+        var repository = repositoryId is { } id
+            ? await _db.Repository.AsNoTracking().SingleOrDefaultAsync(r => r.Id == id, cancellationToken).ConfigureAwait(false)
+            : null;
 
-        return raw is "1" or "true" or "TRUE";
+        foreach (var guard in _publishGuards)
+            if (guard.Evaluate(task, repository) is { } verdict)
+                return verdict;
+
+        return null;
     }
 
-    /// <summary>
-    /// The single per-run gate deciding whether THIS run pushes a produced branch: the deployment-wide env flag
-    /// (<see cref="IsPushEnabled"/>) OR the task's explicit per-run opt-in (<see cref="AgentTask.PushProducedBranch"/>).
-    /// Fail-open toward the operator (a per-run opt-in turns push ON for one run without flipping the ambient flag, but
-    /// cannot turn it OFF when the operator enabled it deployment-wide) — the SAME shape as
-    /// <see cref="ShouldOpenMcpEndpoint"/>. This is the gate the one-agent-one-branch fan-out trips per branch agent.
-    /// Pure + internal so it's unit-pinned and production reads it through this single gate.
-    /// </summary>
-    internal static bool ShouldPushProducedBranch(AgentTask task) => IsPushEnabled() || task.PushProducedBranch == true;
-
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
     internal static bool IsIntegrateEnabled()
     {
         var raw = Environment.GetEnvironmentVariable(IntegrateBranchEnabledEnvVar)?.Trim();
@@ -1366,13 +1378,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>
     /// The single gate deciding whether a run INTEGRATES its parallel agent contributions on disk: the
     /// deployment-wide env flag (<see cref="IsIntegrateEnabled"/>) OR an explicit per-run/profile opt-in. Fail-open
-    /// toward the operator (a per-run opt-in turns integration ON for one run without flipping the ambient flag) —
-    /// the SAME shape as <see cref="ShouldPushProducedBranch"/>. Pure + internal so it's unit-pinned and production
-    /// reads it through this single gate.
+    /// toward the operator (a per-run opt-in turns integration ON for one run without flipping the ambient flag).
+    /// Unlike the per-agent branch push (<see cref="EvaluatePublishGuardsAsync"/>), on-disk integration stays
+    /// env-gated for now — it is a heavier, need-driven structural step (multi-producer staging / stop-time
+    /// consolidation), owned by a later slice of this arc, not the per-agent publish spine. Pure + internal so it's
+    /// unit-pinned and production reads it through this single gate.
     /// </summary>
     internal static bool ShouldIntegrate(bool perRunOptIn) => IsIntegrateEnabled() || perRunOptIn;
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
     internal static bool IsMcpEndpointEnabled()
     {
         var raw = Environment.GetEnvironmentVariable(McpEndpointEnabledEnvVar)?.Trim();
