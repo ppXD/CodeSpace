@@ -1,4 +1,5 @@
 import type { LaunchTaskInput, TaskSurfaceKind } from "@/api/tasks";
+import type { QualityTier } from "./qualityPresets";
 
 /** One repo in the launch workspace. `isPrimary` marks the repo whose id+branch become the run's
  *  primary `repositoryId` / `baseBranch`; every other repo becomes a related-repository entry. */
@@ -71,6 +72,11 @@ export interface LaunchFormState {
   reviseRounds: string;
   /** Evaluation "Reviewer" (S8) — run the output review as a REAL independent agent (read-only clone of the produced branch, distinct-harness-first, model-critic fallback): `false` (default, the in-process model critic) / `true`. Sent only when true AND a review mode is active. */
   reviewerAgent: boolean;
+  /** P3.2: the QUALITY tier the operator explicitly picked (the Quality preset bar) — tracked independently of the
+   *  knob values below, NOT re-derived from them: hand-editing a knob after picking Delivery must NOT quietly drop
+   *  the tier back to Prototype (the mandate is a FLOOR the operator declared, not an inference from the current
+   *  mix). Sent only when not Prototype (⇒ omitted, byte-identical to before this field existed). */
+  tier: QualityTier;
 }
 
 /** The canonical default acceptance chips — shared by the modal seed/reset and the omit-check, so an UNMODIFIED set is
@@ -195,6 +201,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
     const rounds = Number.parseInt(state.reviseRounds, 10);
     if (Number.isFinite(rounds) && rounds >= 0) input.reviseRounds = rounds;
   }
+
+  // P3.2: the quality-tier mandate. Prototype is the backend default ⇒ omitted, byte-identical.
+  if (state.tier !== "Prototype") input.tier = state.tier;
 
   return input;
 }

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import type { TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
-import { presetOf, QUALITY_PRESETS } from "@/lib/qualityPresets";
+import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
 import { usePopover } from "@/components/common/usePopover";
@@ -113,6 +113,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     decisionReview: "None", outputReview: "None", reviewerModel: "", reviseRounds: "", reviewerAgent: false,
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
+  // P3.2: the picked Quality tier — tracked independently of `cfg`'s knob values, NOT re-derived via `presetOf`.
+  // Hand-editing a knob after picking Delivery must not quietly drop the mandate back to Prototype.
+  const [tier, setTier] = useState<QualityTier>("Prototype");
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ pushBranch: false, tools: [], enableMcp: false, cwdMode: "auto" }); }
     else if (customizeTab === "planning") setC({ requirePlanConfirmation: false, plannerReview: "None", reviewerModel: "" });
@@ -189,6 +192,11 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // goal IS the task text — the backend runs it repo-less (a research / answer task, or an agent launched from the
   // roster) — so requiring a repo there would dead-end the launch on a workspace the run never needs.
   if (surface === "repo" && !primary?.repositoryId) missing.push("a repository");
+  // P3.2: Delivery/Unattended MANDATES an executable acceptance check — the backend rejects a Deep launch that
+  // claims this tier without one, so catch it here instead of letting the operator hit a server-side error after
+  // submit. Standard is excluded: it verifies per item via the plan's own contracts and never sends this field for
+  // ANY tier (the same `effort !== "standard"` gate the Acceptance-checks row itself is already shown/sent under).
+  if (tier !== "Prototype" && effort !== "standard" && cfg.acceptanceChecks.length === 0) missing.push("an acceptance check");
   const canLaunch = missing.length === 0 && !launch.isPending;
 
   const toggleRepo = (id: string) => {
@@ -216,6 +224,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
       integrateBranches: cfg.integrateBranches, acceptanceCriteria: cfg.acceptance, acceptanceChecks: cfg.acceptanceChecks,
       requirePlanConfirmation: cfg.requirePlanConfirmation, plannerReview: cfg.plannerReview,
       decisionReview: cfg.decisionReview, outputReview: cfg.outputReview, reviewerModel: cfg.reviewerModel, reviseRounds: cfg.reviseRounds, reviewerAgent: cfg.reviewerAgent,
+      tier,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
@@ -400,7 +409,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
             <div className="lt3-presets" role="radiogroup" aria-label="Quality preset">
               <span className="lt3-presets-l">Quality</span>
               {QUALITY_PRESETS.map(p => (
-                <button key={p.id} type="button" className="lt3-preset" data-on={presetOf(cfg) === p.id} title={p.hint} onClick={() => setC(p.config)}>{p.label}</button>
+                <button key={p.id} type="button" className="lt3-preset" data-on={presetOf(cfg) === p.id} title={p.hint} onClick={() => { setC(p.config); setTier(p.tier); }}>{p.label}</button>
               ))}
               {presetOf(cfg) === null && <span className="lt3-preset-custom">Custom mix</span>}
             </div>
@@ -533,7 +542,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                       }} />
                   </div>
                 </RowPop>
-                {effort !== "standard" && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : "None"}>
+                {effort !== "standard" && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : (tier !== "Prototype" ? "Required — add a check" : "None")}>
                   <div className="lt3-chips2">
                     {cfg.acceptanceChecks.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptanceChecks: cfg.acceptanceChecks.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
                     <input className="lt3-chip2-add" placeholder="+ command, e.g. sh check.sh" value={checksDraft} onChange={e => setChecksDraft(e.target.value)}

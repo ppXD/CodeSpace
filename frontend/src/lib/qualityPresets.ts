@@ -11,12 +11,19 @@ export interface QualityConfig {
   decisionReview: string;
 }
 
+/** The QUALITY tier identity (P3.2) — a real backend concept (`QualityTier`), not just an FE-local label: sent
+ *  verbatim as `LaunchTaskInput.tier` so the server can MANDATE what the knobs above only ever offered as opt-in
+ *  (an executable acceptance check on Delivery/Unattended, an output-review floor). PascalCase to match the
+ *  backend enum's wire name exactly (the same convention as `outputReview`/`plannerReview`'s "None"/"Gate"/"Improve"). */
+export type QualityTier = "Prototype" | "Delivery" | "Unattended";
+
 export interface QualityPreset {
   id: string;
   label: string;
   /** One-sentence "when to pick this" — the pill's tooltip. */
   hint: string;
   config: QualityConfig;
+  tier: QualityTier;
 }
 
 export const QUALITY_PRESETS: QualityPreset[] = [
@@ -25,18 +32,21 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Prototype",
     hint: "No reviews — fastest and cheapest. You eyeball the result yourself.",
     config: { requirePlanConfirmation: false, plannerReview: "None", outputReview: "None", reviewerAgent: false, reviseRounds: "", decisionReview: "None" },
+    tier: "Prototype",
   },
   {
     id: "delivery",
     label: "Delivery",
     hint: "You stay in the loop: the plan parks for your approval, and a weak result is flagged for you — never silently consumed.",
     config: { requirePlanConfirmation: true, plannerReview: "Gate", outputReview: "Gate", reviewerAgent: false, reviseRounds: "", decisionReview: "None" },
+    tier: "Delivery",
   },
   {
     id: "unattended",
     label: "Unattended",
     hint: "No human in the loop: critiques feed back and the work revises itself, an independent agent re-checks the result, and only a hard block escalates to you.",
     config: { requirePlanConfirmation: false, plannerReview: "Improve", outputReview: "Improve", reviewerAgent: true, reviseRounds: "2", decisionReview: "Gate" },
+    tier: "Unattended",
   },
 ];
 
