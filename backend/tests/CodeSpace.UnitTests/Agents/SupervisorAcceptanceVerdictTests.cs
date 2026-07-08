@@ -97,7 +97,10 @@ public class SupervisorAcceptanceVerdictTests
     [Fact]
     public void The_acceptance_grade_timeout_is_pinned()
     {
-        SupervisorLane.AcceptanceGradeTimeoutSeconds.ShouldBe(120);
+        // P3.1: raised from 120s — a real (non-trivial) test suite routinely blew through the old ceiling on a
+        // cold-cache dependency install alone, false-failing runs for an environment reason. Still overridable
+        // per-contract via SupervisorAcceptanceSpec.TimeoutSeconds.
+        SupervisorLane.AcceptanceGradeTimeoutSeconds.ShouldBe(300);
     }
 
     // ── AppendAcceptanceGrade: the GENERIC additive fold for a terminal STOP (preserves the stop shape) ──

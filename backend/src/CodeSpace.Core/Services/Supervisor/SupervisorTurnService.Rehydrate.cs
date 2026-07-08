@@ -441,7 +441,7 @@ public sealed partial class SupervisorTurnService
 
         try
         {
-            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -471,7 +471,7 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             try
             {
-                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -672,7 +672,7 @@ public sealed partial class SupervisorTurnService
                 BenchmarkGrade grade;
                 try
                 {
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

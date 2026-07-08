@@ -1195,7 +1195,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             using var scope = _scopeFactory.CreateScope();
             grade = await scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>()
-                .GradeAsync(repositoryId, run.TeamId, result.ProducedBranch, spec with { Command = command }, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                .GradeAsync(repositoryId, run.TeamId, result.ProducedBranch, spec with { Command = command }, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

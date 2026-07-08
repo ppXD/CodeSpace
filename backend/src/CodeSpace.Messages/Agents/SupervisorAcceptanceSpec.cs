@@ -51,4 +51,13 @@ public sealed record SupervisorAcceptanceSpec
     /// <summary>The JSON schema an <c>ArtifactSchema</c> acceptance validates the deliverable(s) against (triad S7). Required when <see cref="Kind"/> is <c>ArtifactSchema</c>; meaningless (and omitted) otherwise. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Text.Json.JsonElement? Schema { get; init; }
+
+    /// <summary>
+    /// P3.1: wall-clock cap (seconds) for THIS contract's grade, overriding the server's default (a plain compiled-in
+    /// constant — see the grading service). Absent ⇒ the default. A real test suite (a cold-cache dependency
+    /// install, a large monorepo) can author a longer window here instead of the check racing a one-size-fits-all
+    /// ceiling; a lightweight lint/artifact check can leave this unset.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? TimeoutSeconds { get; init; }
 }

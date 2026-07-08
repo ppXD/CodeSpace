@@ -79,6 +79,8 @@ public sealed class LlmRubricJudgeTests
     [InlineData("no-schema", true, true)]
     [InlineData("no-branch-or-repo", true, true)]               // work EXISTS but publish failed — another agent pass changes nothing
     [InlineData("no-branch-or-repo", false, false)]             // NO work — the fix is to DO the work, which an agent pass CAN
+    [InlineData("tests-timed-out", false, true)]                // P3.1: the grader's OWN wall-clock firing — an environment/workload fact, not a code defect
+    [InlineData("tests-timed-out", true, true)]
     [InlineData("tests-failed-exit-1", true, false)]            // a real check verdict — the work is wrong; a retry can fix it
     [InlineData(null, true, false)]
     public void The_infra_classification_separates_unrunnable_checks_from_failed_work(string? detail, bool workPresent, bool expectInfra) =>

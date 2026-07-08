@@ -273,8 +273,16 @@ public sealed class AgentCodeNode : INodeRuntime
             // revise loop's job, plan-level revision the supervisor's) — respawning the agent can change none of
             // them, so all three fail non-retryable. Everything else (a crashed / timed-out / abandoned run) is a
             // candidate transient death a fresh agent may survive; the node's retry policy decides whether one is bought.
-            var deterministic = status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled)
-                || ReadString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason;
+            //
+            // P3.1: an acceptance re-grade is deterministic ONLY when the check itself genuinely ran and failed —
+            // a grader INFRA fault (e.g. "tests-timed-out", the grader's OWN wall-clock firing on a legitimately
+            // slow suite) is an environment/workload fact, not a code defect, so it gets the SAME fresh-respawn
+            // chance a crash/timeout does (mirrors AgentAcceptanceContract.IsInfraFailure, the same classification
+            // the executor's revise loop / supervisor decider / recitation already apply elsewhere).
+            var acceptanceFailed = ReadString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason;
+            var acceptanceInfraFault = acceptanceFailed && AgentAcceptanceContract.IsInfraFailure(ReadOptionalString(payload, "acceptanceDetail"), WorkPresent(payload));
+
+            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed) && !acceptanceInfraFault;
 
             return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }
@@ -312,6 +320,13 @@ public sealed class AgentCodeNode : INodeRuntime
             RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
         };
     }
+
+    /// <summary>Whether the resumed payload shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — mirrors <c>SupervisorOutcome.ResultShowsWork</c>'s definition (the one "work exists" read every infra classification shares) over the flat resume payload's own fields.</summary>
+    private static bool WorkPresent(JsonElement payload) =>
+        (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("changedFiles", out var files) && files.ValueKind == JsonValueKind.Array && files.GetArrayLength() > 0)
+        || ReadOptionalString(payload, "branch") is not null
+        || (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("repositoryResults", out var repos) && repos.ValueKind == JsonValueKind.Array
+            && repos.EnumerateArray().Any(r => ReadOptionalString(r, "producedBranch") is not null || (r.TryGetProperty("changedFiles", out var rf) && rf.ValueKind == JsonValueKind.Array && rf.GetArrayLength() > 0)));
 
     private static Task<NodeResult> Fail(string message) => Task.FromResult(NodeResult.Fail(message));
 
