@@ -20,7 +20,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// credential, or any other reason — the NEXT stop attempt is substituted to <c>ask_human</c> instead of retrying
 /// merge forever, naming what is missing. A stop with NO accepted work at all (nothing was ever produced) is
 /// entirely out of I3's scope — a legitimately empty-handed stop (e.g. every subtask was investigate-only) is never
-/// touched by this gate.</para>
+/// touched by this gate. An UNVERIFIED resolve is likewise out of scope: its work was never accepted (the resolver
+/// loop's own withhold contract already excludes it from any merge), so I3 lets that stop through as-is rather than
+/// auto-merging a recovery attempt that already failed its own verification.</para>
 /// </summary>
 public static class SupervisorPublishGate
 {
@@ -42,6 +44,13 @@ public static class SupervisorPublishGate
         var frontier = SupervisorOutcome.FindUnpublishedFrontier(priorDecisions);
 
         if (frontier is null) return null;   // nothing was ever produced — I3 does not apply to an empty-handed stop
+
+        // A frontier that IS a resolve is, by construction, an UNVERIFIED one — a verified resolve would already have
+        // satisfied `published` above (SupervisorOutcome.ResolvedBranch). An unverified resolution's work was never
+        // ACCEPTED in the first place (the resolver loop's own "局部綠≠整合綠" withhold contract, ResolveAgentRunIdsToMerge)
+        // — auto-merging it would either re-conflict for nothing or silently integrate code that failed its own
+        // verification. I3 governs PUBLISHING accepted work, not rescuing a recovery attempt that already failed.
+        if (frontier.DecisionKind == SupervisorDecisionKinds.Resolve) return null;
 
         if (!SupervisorOutcome.ReadAgentResults(frontier.OutcomeJson).Any(SupervisorOutcome.ResultShowsWork))
             return null;   // the frontier unit produced no real work (e.g. a read-only/investigate-only subtask) — I3 does not apply

@@ -159,6 +159,36 @@ public class SupervisorPublishGateTests
         SupervisorPublishGate.Validate(context, StopDecision("reconciled")).ShouldBeNull("a verified resolver's own tested branch IS a publish — the SAME reader the stop-acceptance grade already trusts");
     }
 
+    // ── Regression: an UNVERIFIED resolve must NEVER be treated as accepted-unpublished work ──
+
+    [Fact]
+    public void A_stop_after_an_unverified_resolution_is_untouched_never_auto_merged()
+    {
+        // Real bug caught by the whole-loop E2E: an unverified resolve (the resolver wrote real changes, but its OWN
+        // tests still failed) was being read as "accepted work nothing later merged" and getting auto-substituted to
+        // a forced merge — silently overriding the model's own correct "stop, this couldn't be verified" report and
+        // re-merging conflicting branches that would just conflict again. The resolver loop's own "局部綠≠整合綠"
+        // withhold contract already excludes an unverified resolve's work from ANY merge — I3 must respect that,
+        // not fight it.
+        var context = Context(
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", integratedBranch: null, reason: "conflict")),
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("tests still red", "codespace/resolve/r")));
+
+        SupervisorPublishGate.Validate(context, StopDecision("the resolution did not pass its own tests")).ShouldBeNull(
+            "an unverified resolution's work was never ACCEPTED in the first place — I3 must never auto-merge it or park on it, the model's own stop stands");
+    }
+
+    [Fact]
+    public void A_stop_after_an_unverified_resolution_with_no_summary_is_still_untouched()
+    {
+        // Distinct from the "published but no summary" ask_human case (5): an unverified resolve is NOT published,
+        // but it's ALSO not in-scope accepted work — so the summary requirement (scoped to accepted work) never fires.
+        var context = Context(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("tests still red", "codespace/resolve/r")));
+
+        SupervisorPublishGate.Validate(context, StopDecision("")).ShouldBeNull("an unverified resolution is out of I3's scope entirely — including its summary requirement");
+    }
+
     // ── (7): every non-stop decision is always untouched ───────────────────────────────
 
     [Theory]
