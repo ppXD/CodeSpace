@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CodeSpace.Core.Services.Tasks.Projection.Builders;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;

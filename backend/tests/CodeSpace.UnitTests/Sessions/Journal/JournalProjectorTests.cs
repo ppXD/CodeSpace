@@ -3,7 +3,6 @@ using CodeSpace.Core.Services.Sessions.Journal;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
-using CodeSpace.Messages.Tasks.Timeline;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Journal;

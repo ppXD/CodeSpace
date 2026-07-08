@@ -1,4 +1,3 @@
-using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 
 namespace CodeSpace.Core.Services.Sessions.Journal;

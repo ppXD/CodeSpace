@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Autofac;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;

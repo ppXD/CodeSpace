@@ -1,6 +1,5 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Auth;
 using CodeSpace.Messages.Constants;

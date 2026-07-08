@@ -3,7 +3,6 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
-using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Decisions;

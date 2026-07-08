@@ -9,7 +9,6 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
-using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 

@@ -6,7 +6,6 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
-using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;

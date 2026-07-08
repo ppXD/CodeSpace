@@ -8,7 +8,6 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Webhooks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
-using CodeSpace.Messages.Events.Issue;
 using CodeSpace.Messages.Events.PullRequest;
 using CodeSpace.Messages.Events.Push;
 using MediatR;

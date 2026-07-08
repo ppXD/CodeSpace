@@ -3,8 +3,6 @@ using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Jobs;
 using Hangfire;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Serilog;
 
 namespace CodeSpace.Api.Extensions.Hangfire;

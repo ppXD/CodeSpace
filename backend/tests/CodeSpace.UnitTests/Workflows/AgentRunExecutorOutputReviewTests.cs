@@ -8,7 +8,6 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
-using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
 using Microsoft.Extensions.DependencyInjection;

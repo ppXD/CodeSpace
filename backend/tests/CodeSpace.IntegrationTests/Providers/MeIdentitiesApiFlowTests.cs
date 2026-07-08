@@ -9,7 +9,6 @@ using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Identity;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Providers;

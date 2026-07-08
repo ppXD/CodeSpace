@@ -2,9 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Room;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Dtos.Sessions.Room;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;

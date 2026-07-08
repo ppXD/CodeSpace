@@ -1,4 +1,3 @@
-using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Messages.Enums;
 

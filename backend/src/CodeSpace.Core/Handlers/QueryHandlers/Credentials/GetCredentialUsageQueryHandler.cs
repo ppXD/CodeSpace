@@ -1,5 +1,4 @@
 using CodeSpace.Core.Services.Credentials;
-using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Queries.Credentials;
 using MediatR;
 

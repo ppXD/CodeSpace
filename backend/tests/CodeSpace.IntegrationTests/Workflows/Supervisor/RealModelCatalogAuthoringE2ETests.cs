@@ -1,9 +1,7 @@
-using System.Linq;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Constants;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 

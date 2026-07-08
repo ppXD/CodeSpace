@@ -1,6 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
-using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;

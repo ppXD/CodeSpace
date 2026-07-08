@@ -1,6 +1,5 @@
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Messages.Commands.Credentials;
-using CodeSpace.Messages.Credentials;
 using MediatR;
 
 namespace CodeSpace.Core.Handlers.CommandHandlers.Credentials;

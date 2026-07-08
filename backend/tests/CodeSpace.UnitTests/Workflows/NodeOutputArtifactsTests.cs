@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using Shouldly;

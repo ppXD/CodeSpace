@@ -1,6 +1,5 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;

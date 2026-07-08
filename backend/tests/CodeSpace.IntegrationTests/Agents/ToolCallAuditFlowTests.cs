@@ -4,7 +4,6 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
-using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;

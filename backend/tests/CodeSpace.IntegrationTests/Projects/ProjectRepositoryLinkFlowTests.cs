@@ -1,11 +1,8 @@
-using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
-using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Projects;
-using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Projects;

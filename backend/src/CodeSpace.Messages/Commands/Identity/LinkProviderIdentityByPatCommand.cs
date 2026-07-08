@@ -1,7 +1,6 @@
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Mediation;
-using MediatR;
 
 namespace CodeSpace.Messages.Commands.Identity;
 

@@ -2,7 +2,6 @@ using System.Linq.Expressions;
 using Autofac;
 using CodeSpace.Core.Constants;
 using CodeSpace.Core.Services.Jobs;
-using Hangfire.States;
 using Hangfire.Storage;
 
 namespace CodeSpace.E2ETests.Infrastructure;

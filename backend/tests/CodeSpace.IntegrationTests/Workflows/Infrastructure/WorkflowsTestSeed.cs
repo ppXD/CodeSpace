@@ -6,7 +6,6 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 

@@ -3,7 +3,6 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;

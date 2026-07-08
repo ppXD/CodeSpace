@@ -8,7 +8,6 @@ using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;

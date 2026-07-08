@@ -8,7 +8,6 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Credentials;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;

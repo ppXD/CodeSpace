@@ -1,4 +1,3 @@
-using System.Net.Http;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 
 namespace CodeSpace.Core.Services.Workflows.Llm.Custom;

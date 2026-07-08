@@ -2,7 +2,6 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
-using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;

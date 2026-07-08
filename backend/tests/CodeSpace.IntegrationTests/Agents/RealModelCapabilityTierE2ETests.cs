@@ -3,14 +3,12 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
-using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
-using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
 

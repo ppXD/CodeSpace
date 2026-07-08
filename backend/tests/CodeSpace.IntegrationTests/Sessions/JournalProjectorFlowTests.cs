@@ -10,7 +10,6 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Sessions;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;

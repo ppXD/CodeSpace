@@ -3,7 +3,6 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
-using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Projects;
 using CodeSpace.Messages.Commands.Variables;
 using CodeSpace.Messages.Constants;

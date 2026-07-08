@@ -1,4 +1,3 @@
-using System.Net.Http;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;

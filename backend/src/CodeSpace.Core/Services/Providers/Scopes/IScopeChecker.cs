@@ -1,5 +1,4 @@
 using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Providers.Scopes;

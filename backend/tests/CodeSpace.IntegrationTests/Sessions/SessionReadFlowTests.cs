@@ -6,7 +6,6 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Sessions;

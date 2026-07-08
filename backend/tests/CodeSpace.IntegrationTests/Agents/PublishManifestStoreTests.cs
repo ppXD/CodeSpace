@@ -5,7 +5,6 @@ using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;

@@ -4,11 +4,9 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Chat;
 using CodeSpace.Messages.Constants;
-using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Chat;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Chat;

@@ -8,7 +8,6 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
-using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;

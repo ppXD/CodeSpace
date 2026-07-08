@@ -1,5 +1,4 @@
 using System.Text;
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;

@@ -1,5 +1,4 @@
 using CodeSpace.Core.Services.Sessions.Room;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 

@@ -9,7 +9,6 @@ using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-using Microsoft.Extensions.Hosting;
 using Serilog;
 
 namespace CodeSpace.Api;

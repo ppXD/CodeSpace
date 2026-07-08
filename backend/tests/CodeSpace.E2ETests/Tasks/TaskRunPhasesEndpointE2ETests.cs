@@ -10,7 +10,6 @@ using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
 using Shouldly;
