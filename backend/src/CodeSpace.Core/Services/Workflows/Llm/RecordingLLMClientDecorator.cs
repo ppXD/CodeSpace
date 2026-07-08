@@ -70,7 +70,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         }
     }
 
-    protected static async Task<JsonElement> StartedPayloadAsync(LlmCallScope scope, string provider, string model, string system, string user, double temperature, int maxOutputTokens, CancellationToken cancellationToken)
+    protected static async Task<JsonElement> StartedPayloadAsync(LlmCallScope scope, string provider, string model, string system, string user, double? temperature, int? maxOutputTokens, CancellationToken cancellationToken)
     {
         var sys = await OffloadTextAsync(scope, system, cancellationToken).ConfigureAwait(false);
         var usr = await OffloadTextAsync(scope, user, cancellationToken).ConfigureAwait(false);

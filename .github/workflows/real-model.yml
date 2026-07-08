@@ -71,6 +71,10 @@ jobs:
         #     These carry Category=RealModel but their class token is "RealModelSession", NOT "RealModelSupervisor", so the
         #     old single-clause filter silently de-selected them — they ran on NO lane. The OR-clause re-includes them; both
         #     are DB-free component evals, so the no-Postgres job is the correct home.
+        #   ~RealModelSampling → the sampling-omission gate (RealModelSamplingOmissionE2ETests): a temperature-OMITTED
+        #     structured call drives the live model to schema-conformant JSON over both wires — the live proof of the
+        #     generic "let the model decide" path a reasoning-tier brain forces (where sending a temperature would 400).
+        #     DB-free component eval, so this no-Postgres job is its home; blessed Anthropic gates, Custom reports.
         # The DB-backed whole-loop gates live in the E2ETests assembly and run in their own Postgres job below. The planner
         # RealModel test is a separate, DB-backed concern with its own ANTHROPIC-native key, so it is not run here.
         #
@@ -80,7 +84,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession"
+          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelSampling"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
           --results-directory backend/TestResults

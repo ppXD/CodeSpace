@@ -32,11 +32,13 @@ namespace CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 /// hit so a missing <c>/v1</c> is diagnosable. Keep ONLY wire-shape concerns here — prompt assembly / retry belong
 /// in the node.</para>
 ///
-/// <para><b>Parameter compatibility (v1)</b>: emits <c>max_tokens</c> + <c>temperature</c> — accepted by
-/// <c>gpt-4o</c>-class models and the common gateways (LiteLLM/OpenRouter/vLLM, which translate). OpenAI's DIRECT
-/// reasoning models (o1/o3/GPT-5-reasoning) reject <c>max_tokens</c> (want <c>max_completion_tokens</c>) and a
-/// non-default <c>temperature</c>; a custom endpoint is almost always a translating gateway, so this is v1-safe —
-/// a dedicated reasoning-model parameter slice follows if needed.</para>
+/// <para><b>Parameter compatibility</b>: the body is RECONCILED against the target model via <see cref="LlmModelCapabilities"/>
+/// (the in-process <c>get_supported_openai_params</c>/<c>drop_params</c> analogue): the output cap rides as
+/// <c>max_completion_tokens</c> for a reasoning model (o1/o3/o4/gpt-5, which 400 on the deprecated <c>max_tokens</c>) and as
+/// the classic, universally-understood <c>max_tokens</c> otherwise; <c>temperature</c> + <c>top_p</c> + penalties are DROPPED
+/// for a reasoning model that only accepts the defaults. A null output cap is omitted entirely (the model runs to its
+/// context limit). So a pinned param never 400s a reasoning endpoint, and a plain gateway model is sent the widely-supported
+/// shape.</para>
 /// </summary>
 public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 {
@@ -53,14 +55,21 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+        var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
+
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
-            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
-            PresencePenalty = request.Sampling?.PresencePenalty,
+            // Null cap ⇒ OMIT both (the model runs to its context limit — OpenAI allows this, unlike Anthropic). A set cap
+            // rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`) and as the
+            // classic, universally-understood `max_tokens` otherwise (an older OpenAI-compatible gateway may not know the new name).
+            MaxTokens = useCompletionTokens ? null : request.MaxOutputTokens,
+            MaxCompletionTokens = useCompletionTokens ? request.MaxOutputTokens : null,
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
+            FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
+            PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
             Messages = BuildMessages(request.SystemPrompt, request.UserPrompt),
         };
@@ -106,17 +115,24 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         if (funcJson is { } viaFunction)
             return BuildCompletion(viaFunction, funcParsed!, request.Model);
 
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+        var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
+
         // Attempt 2 — prompt-only floor: no tools, no response_format. The SAFEST request — never 400s on a gateway that
         // rejects forced functions or json_object. The model answers in text; recover the JSON from it. The returned
         // usage TOTALS the (billed but degraded) forced attempt + this floor, so the caller sees what was actually billed.
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
-            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
-            PresencePenalty = request.Sampling?.PresencePenalty,
+            // Null cap ⇒ OMIT both (the model runs to its context limit — OpenAI allows this, unlike Anthropic). A set cap
+            // rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`) and as the
+            // classic, universally-understood `max_tokens` otherwise (an older OpenAI-compatible gateway may not know the new name).
+            MaxTokens = useCompletionTokens ? null : request.MaxOutputTokens,
+            MaxCompletionTokens = useCompletionTokens ? request.MaxOutputTokens : null,
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
+            FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
+            PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
             Messages = BuildMessages(system, request.UserPrompt),
         };
@@ -142,14 +158,21 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     /// </summary>
     private async Task<(JsonElement? Json, OpenAiChatResponse? Parsed)> TryStructuredViaFunctionAsync(StructuredLLMCompletionRequest request, string system, CancellationToken cancellationToken)
     {
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+        var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
+
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
-            MaxTokens = request.MaxOutputTokens,
-            Temperature = request.Temperature,
-            TopP = request.Sampling?.TopP,
-            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
-            PresencePenalty = request.Sampling?.PresencePenalty,
+            // Null cap ⇒ OMIT both (the model runs to its context limit — OpenAI allows this, unlike Anthropic). A set cap
+            // rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`) and as the
+            // classic, universally-understood `max_tokens` otherwise (an older OpenAI-compatible gateway may not know the new name).
+            MaxTokens = useCompletionTokens ? null : request.MaxOutputTokens,
+            MaxCompletionTokens = useCompletionTokens ? request.MaxOutputTokens : null,
+            Temperature = accepts ? request.Temperature : null,
+            TopP = accepts ? request.Sampling?.TopP : null,
+            FrequencyPenalty = accepts ? request.Sampling?.FrequencyPenalty : null,
+            PresencePenalty = accepts ? request.Sampling?.PresencePenalty : null,
             Stop = request.Sampling?.Stop,
             Messages = BuildMessages(system, request.UserPrompt),
             Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
@@ -243,8 +266,9 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     private sealed class OpenAiChatRequest
     {
         [JsonPropertyName("model")] public required string Model { get; init; }
-        [JsonPropertyName("max_tokens")] public required int MaxTokens { get; init; }
-        [JsonPropertyName("temperature")] public required double Temperature { get; init; }
+        [JsonPropertyName("max_tokens")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? MaxTokens { get; init; }
+        [JsonPropertyName("max_completion_tokens")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? MaxCompletionTokens { get; init; }
+        [JsonPropertyName("temperature")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? Temperature { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<OpenAiMessage> Messages { get; init; }
         [JsonPropertyName("top_p")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? TopP { get; init; }
         [JsonPropertyName("frequency_penalty")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? FrequencyPenalty { get; init; }

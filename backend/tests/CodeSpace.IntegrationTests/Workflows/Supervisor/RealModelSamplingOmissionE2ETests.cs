@@ -1,0 +1,64 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Workflows.Llm;
+
+namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
+
+/// <summary>
+/// The real-model proof that the GENERIC "let the model decide" path drives a LIVE model end to end: a structured
+/// completion with BOTH <c>Temperature = null</c> AND <c>MaxOutputTokens = null</c> — so the transport sends NO
+/// <c>temperature</c> and NO output cap on the wire (the OpenAI wire omits it entirely; the Anthropic wire sends only its
+/// required default) — still returns schema-conformant JSON from the real gateway. This is the live counterpart of the
+/// deterministic <c>LlmSamplingWireTests</c> (which pins the omission bytes) + <c>LlmModelCapabilitiesTests</c> (which pins
+/// the reasoning-tier drop + the max_tokens⇄max_completion_tokens rename): those prove the BYTES; this proves a real model
+/// on the configured endpoint actually completes with the fully-generic, un-pinned request — the exact path a reasoning-tier
+/// brain (Opus 4.8 / Sonnet 5 / an o-series model) forces, where a pinned temperature or a bare max_tokens would 400.
+///
+/// <para>A <c>[Theory]</c> over the Anthropic + Custom (OpenAI-compatible) wires from the ONE configured gateway.
+/// HONESTLY GATED on the <c>CODESPACE_LLM_*</c> secrets (absent ⇒ skip, so CI/forks stay green at zero cost); the
+/// blessed Anthropic wire GATES (a non-conformant reply fails the job) while Custom is INFORMATIONAL, and a gateway
+/// timeout is non-gating infra — all via <see cref="RealModelGate.AssessLiveAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, bool)"/>.
+/// Constructs the real client directly (no Postgres), so each run is a fresh live measurement.</para>
+/// </summary>
+[Trait("Category", "RealModel")]
+public sealed class RealModelSamplingOmissionE2ETests
+{
+    private static readonly JsonElement AnswerSchema = JsonDocument.Parse(
+        """{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}""").RootElement;
+
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("Custom")]
+    public async Task A_temperature_omitted_structured_call_drives_the_live_model(string provider)
+    {
+        var baseUrl = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = RealModelLiveWire.Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → honest skip (green CI/fork)
+
+        await RealModelGate.AssessLiveAsync(provider, async () =>
+        {
+            var credential = RealModelLiveWire.Credential(provider, baseUrl, apiKey);
+            var client = (IStructuredLLMClient)RealModelLiveWire.Registry().Resolve(provider);
+
+            var request = new StructuredLLMCompletionRequest
+            {
+                Model = model,
+                Credential = credential,
+                SystemPrompt = "You output only the requested JSON object, nothing else.",
+                UserPrompt = "Reply with a JSON object whose \"answer\" field is exactly the word ok.",
+                Temperature = null,     // the generic path: NO temperature on the wire — the model/provider decides
+                MaxOutputTokens = null, // and NO output cap — OpenAI omits it, Anthropic sends only its required default (the schema bounds the reply)
+                JsonSchema = AnswerSchema,
+            };
+
+            var result = await client.CompleteStructuredAsync(request, CancellationToken.None);
+
+            var conformant = result.Json.ValueKind == JsonValueKind.Object
+                && result.Json.TryGetProperty("answer", out var answer)
+                && answer.ValueKind == JsonValueKind.String;
+
+            return (conformant, $"temperature-omitted structured call on '{model}' via {provider} → {(conformant ? "schema-conformant JSON (answer present)" : $"NON-conformant reply: {result.Json.GetRawText()}")}");
+        });
+    }
+}
