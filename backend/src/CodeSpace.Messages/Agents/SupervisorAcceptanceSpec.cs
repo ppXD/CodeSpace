@@ -60,4 +60,17 @@ public sealed record SupervisorAcceptanceSpec
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? TimeoutSeconds { get; init; }
+
+    /// <summary>
+    /// P3.1 part 2: an OPTIONAL argv the server runs in the freshly-prepared workspace BEFORE <see cref="Command"/> —
+    /// installing dependencies, running a build — kind-agnostic (unlike <see cref="Command"/>, whose meaning depends
+    /// on <see cref="Kind"/>). Absent ⇒ no setup step, byte-identical to before this field existed. A non-zero exit
+    /// or timeout here means the CHECK ITSELF never got a chance to run — the verdict was never reached, so it fails
+    /// closed as an infrastructure fault (<c>AgentAcceptanceContract.IsInfraFailure</c>'s <c>setup-failed:</c>/
+    /// <c>setup-timed-out</c> details), never a statement about the code's correctness. Capped by the same
+    /// <see cref="TimeoutSeconds"/> window as the check itself (a separate budget was deliberately not added — the
+    /// contract author who needs a longer window for a cold-cache install already has one lever to pull).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? SetupCommand { get; init; }
 }

@@ -55,17 +55,22 @@ public static class AgentAcceptanceContract
     /// / <c>no-schema</c> mean the SPEC was authored incomplete (an agent cannot author the missing rubric/schema);
     /// <c>tests-timed-out</c> (P3.1) is the grader's OWN wall-clock firing — a legitimately slow suite / cold-cache
     /// install hitting the timeout ceiling is an environment/workload fact, not a code defect, so it is infra
-    /// regardless of <paramref name="workPresent"/> (same reasoning as the other grader-side prefixes); <c>no-branch-
-    /// or-repo</c> is infra only when work EXISTS (the publish failed — with NO work the fix is to do the work, which
-    /// an agent pass CAN do). The ONE classification the executor's revise loop, the supervisor's decider prompt, the
-    /// recitation, the no-progress evidence fold, and the workflow node's respawn verdict all share — so "retry the
-    /// agent" is never spent on a failure class a retry cannot fix, at any tier.
+    /// regardless of <paramref name="workPresent"/> (same reasoning as the other grader-side prefixes); <c>setup-
+    /// failed:</c> / <c>setup-timed-out</c> (P3.1 part 2) mean the contract's OWN setup step (installing deps, a
+    /// build) never let the check run at all — the verdict was never reached, so it is infra by the same
+    /// "the check machinery itself didn't function" reasoning as <c>grade-error:</c>/<c>clone-failed:</c>, not a
+    /// genuine "the check ran and failed" verdict like <c>tests-failed-exit-N</c>; <c>no-branch-or-repo</c> is infra
+    /// only when work EXISTS (the publish failed — with NO work the fix is to do the work, which an agent pass CAN
+    /// do). The ONE classification the executor's revise loop, the supervisor's decider prompt, the recitation, the
+    /// no-progress evidence fold, and the workflow node's respawn verdict all share — so "retry the agent" is never
+    /// spent on a failure class a retry cannot fix, at any tier.
     /// </summary>
     public static bool IsInfraFailure(string? detail, bool workPresent) =>
         detail is not null
         && (detail.StartsWith("grade-error:", StringComparison.Ordinal)
             || detail.StartsWith("clone-failed:", StringComparison.Ordinal)
-            || detail is "no-rubric" or "no-schema" or "tests-timed-out"
+            || detail.StartsWith("setup-failed:", StringComparison.Ordinal)
+            || detail is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
             || (detail == "no-branch-or-repo" && workPresent));
 
     /// <summary>
