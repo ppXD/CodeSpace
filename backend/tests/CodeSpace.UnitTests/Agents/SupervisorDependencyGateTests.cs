@@ -101,6 +101,57 @@ public class SupervisorDependencyGateTests
         SupervisorDependencyGate.Partition(ctx, new[] { "c", "b", "a" }).Ready.ShouldBe(new[] { "c", "b", "a" }, "all ready (a done) → request order preserved");
     }
 
+    // ── LatestSucceededAgentRunIds: the S1 handoff's producer lookup ────────────────────
+
+    [Fact]
+    public void No_declared_dependency_resolves_no_producers()
+    {
+        var ctx = Context(Plan(("a", null), ("b", null)), Spawn(("a", "Succeeded", null)));
+
+        SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, Array.Empty<string>()).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("Succeeded", null, true)]   // ungraded success → a usable producer
+    [InlineData("Succeeded", true, true)]   // accepted success → a usable producer
+    [InlineData("Succeeded", false, false)] // objectively REJECTED → not usable, contributes nothing
+    [InlineData("Failed", null, false)]     // failed → not usable, contributes nothing
+    public void A_producer_contributes_its_agent_run_id_only_when_satisfied(string status, bool? accepted, bool expectContribution)
+    {
+        var ctx = Context(Plan(("a", null), ("b", new[] { "a" })), Spawn((("a", status, accepted))));
+        var aRunId = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[1].OutcomeJson).Single().AgentRunId;
+
+        var producers = SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, new[] { "a" });
+
+        if (expectContribution) producers.ShouldBe(new[] { aRunId }, "a satisfied dependency's agent run id is the handoff's producer");
+        else producers.ShouldBeEmpty("an unsatisfied dependency contributes no producer — defensive; Partition should already have deferred this subtask");
+    }
+
+    [Fact]
+    public void A_later_retry_supersedes_the_original_producer()
+    {
+        var ctx = Context(Plan(("a", null), ("b", new[] { "a" })),
+            Spawn(("a", "Failed", null)),
+            Retry(("a", "Succeeded", null)));
+
+        var retryRunId = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[2].OutcomeJson).Single().AgentRunId;
+
+        SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, new[] { "a" }).ShouldBe(new[] { retryRunId }, "the LATEST attempt (the retry) is the producer, not the original failed one");
+    }
+
+    [Fact]
+    public void Multiple_dependencies_resolve_order_preserving_skipping_unsatisfied_ones()
+    {
+        var ctx = Context(Plan(("a", null), ("b", null), ("c", null)),
+            Spawn(("a", "Succeeded", null), ("b", "Failed", null), ("c", "Succeeded", null)));
+
+        var results = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[1].OutcomeJson);
+        var aRunId = results[0].AgentRunId;
+        var cRunId = results[2].AgentRunId;
+
+        SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, new[] { "a", "b", "c" }).ShouldBe(new[] { aRunId, cRunId }, "request order preserved, b (failed) dropped");
+    }
+
     // ── Frontier: the decider's guidance ───────────────────────────────────────────────
 
     [Fact]

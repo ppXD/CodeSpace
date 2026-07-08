@@ -85,9 +85,38 @@ public static class SupervisorDependencyGate
     /// every prior spawn/retry positionally (<c>subtaskIds[i] ↔ agentResults[i]</c>, the ordering-safe join), LAST attempt
     /// wins (a retry supersedes the original), and a unit counts only when <c>Succeeded</c> AND not acceptance-rejected.
     /// </summary>
-    private static IReadOnlySet<string> SatisfiedSubtaskIds(SupervisorTurnContext context)
+    private static IReadOnlySet<string> SatisfiedSubtaskIds(SupervisorTurnContext context) =>
+        LatestResultsBySubtask(context)
+            .Where(kv => IsSatisfied(kv.Value))
+            .Select(kv => kv.Key)
+            .ToHashSet();
+
+    /// <summary>
+    /// The AgentRunIds of a dependent subtask's PRODUCERS (S1 handoff) — each requested dependency id's LATEST
+    /// attempt, but ONLY when that attempt is a non-rejected success (the SAME "satisfied" test <see cref="SatisfiedSubtaskIds"/>
+    /// uses, so a handoff never reads from a dependency the spawn clamp itself would not have admitted on). A dependency
+    /// with no recorded result, or whose latest attempt did not succeed, contributes nothing — defensive; <see cref="Partition"/>
+    /// should already have deferred such a subtask before it reaches staging. Order-preserving over <paramref name="dependsOn"/>.
+    /// </summary>
+    public static IReadOnlyList<Guid> LatestSucceededAgentRunIds(SupervisorTurnContext context, IReadOnlyList<string> dependsOn)
     {
-        var latest = new Dictionary<string, bool>();
+        var latest = LatestResultsBySubtask(context);
+
+        return dependsOn
+            .Select(dep => latest.TryGetValue(dep, out var result) && IsSatisfied(result) ? result.AgentRunId : (Guid?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .ToList();
+    }
+
+    /// <summary>A dependency counts as satisfied iff its latest attempt SUCCEEDED and was not objectively acceptance-rejected — the single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
+    private static bool IsSatisfied(SupervisorAgentResult result) =>
+        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false;
+
+    /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
+    private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
+    {
+        var latest = new Dictionary<string, SupervisorAgentResult>();
 
         foreach (var prior in context.PriorDecisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)))
         {
@@ -95,10 +124,10 @@ public static class SupervisorDependencyGate
             var results = SupervisorOutcome.ReadAgentResults(prior.OutcomeJson);
 
             for (var i = 0; i < ids.Count && i < results.Count; i++)
-                latest[ids[i]] = string.Equals(results[i].Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && results[i].AcceptancePassed != false;
+                latest[ids[i]] = results[i];
         }
 
-        return latest.Where(kv => kv.Value).Select(kv => kv.Key).ToHashSet();
+        return latest;
     }
 
     /// <summary>The plan-local subtask ids a spawn (positional fan-out) or retry (one) ran — the positional join key to its folded <c>agentResults</c>.</summary>

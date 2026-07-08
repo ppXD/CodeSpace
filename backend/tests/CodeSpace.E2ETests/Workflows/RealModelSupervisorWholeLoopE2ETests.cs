@@ -301,6 +301,100 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task The_real_model_authors_a_dependent_subtask_whose_agent_actually_sees_its_producers_work()
+    {
+        // S1 HANDOFF — re-enacting run 28fec923 (a dependent subtask's fresh clone of the repository DEFAULT branch
+        // never saw its producer's committed work) against a LIVE brain. Does a live model, told the dependsOn field
+        // exists, actually AUTHOR it for a genuinely sequential two-step task? REPORT-ONLY on authorship (a model may
+        // decline the field — reported, never gating, mirroring the dispatch/phases/DoD authorship arms above). But
+        // WHEN the model DOES author a dependency, the handoff MECHANISM is asserted HARD (Shouldly, bypassing the
+        // soft report-only gate): a live model correctly declaring the dependency while the dependent's clone still
+        // misses the producer's work would be a genuine CODE regression in the S1 staging resolver
+        // (RealSupervisorActionExecutor.DependencyStaging.cs), not a model-capability question, so it fails the build
+        // outright regardless of this arm's report-only status. The deterministic mechanism itself (0/1/≥2 producers,
+        // fail-closed, conflict→resolve) is already proven exhaustively by SupervisorDependencyStagingFlowTests
+        // (real Postgres + real git); this arm's job is ONLY to prove a live brain reaches for the feature at all,
+        // and that when it does, the real substrate behind it does not regress.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new DependencyHandoffFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string handoffGoal =
+            "Implement a small feature in exactly TWO STRICTLY SEQUENTIAL subtasks: the second subtask BUILDS DIRECTLY "
+          + "on the first subtask's committed code and must not start until the first has actually completed. When you "
+          + "PLAN, author the second subtask's dependsOn as the first subtask's id, so the platform stages the second "
+          + "agent from the first agent's actual produced branch instead of a fresh clone.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: handoffGoal);
+
+        // REPORT-ONLY on authorship (gating:false) — but the mechanism, when exercised, is asserted hard inside the
+        // evaluator (see above), so a real regression still fails this test regardless of the outer gate.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // The AUTHORITATIVE signal — the model's own PLAN decision payload: did it declare a dependsOn edge at all?
+            var planPayloads = await db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Plan)
+                .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+
+            var authoredDependency = planPayloads
+                .SelectMany(p => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.SupervisorPlanPayload>(p, AgentJson.Options)?.Subtasks
+                                  ?? Enumerable.Empty<Messages.Agents.SupervisorPlannedSubtask>())
+                .Any(s => s.DependsOn is { Count: > 0 });
+
+            // The MECHANISM signal: did ANY agent's captured diff include the dependent marker — only ever written by
+            // a clone whose workspace ALREADY contained the producer's marker (DependencyHandoffFakeCli's own contract).
+            var resultJsons = await db.AgentRun.AsNoTracking()
+                .Where(r => r.WorkflowRunId == runId && r.ResultJson != null)
+                .Select(r => r.ResultJson!)
+                .ToListAsync();
+
+            var handoffWorked = resultJsons
+                .Select(j => System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(j, AgentJson.Options))
+                .Any(r => r?.ChangedFiles.Contains(DependencyHandoffFakeCli.DependentMarker) == true);
+
+            if (authoredDependency)
+                handoffWorked.ShouldBeTrue(
+                    $"{Provider} '{model}' authored a dependsOn edge in its plan, but no agent's captured diff shows the S1 handoff marker "
+                  + $"('{DependencyHandoffFakeCli.DependentMarker}') — the dependent's clone did not actually see its producer's committed work. "
+                  + "This is a CODE regression in the dependency-staging resolver, not a model-capability gap.");
+
+            return (authoredDependency,
+                $"{Provider} '{model}' S1 handoff: authored-dependsOn={authoredDependency}, handoff-marker-seen={handoffWorked}. "
+              + (authoredDependency ? "DROVE — the live model declared the dependency AND the dependent agent's clone genuinely carried the producer's work."
+                                     : "did NOT author a dependsOn edge for this goal (reported, not gating — the staging mechanism itself is proven deterministically by SupervisorDependencyStagingFlowTests)."));
+        }, gating: false);
+    }
+
+    [Fact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to

@@ -378,6 +378,50 @@ public class SupervisorBuildAgentTaskTests
             .ShouldBeNull("a contract-less subtask keeps the profile/ambient behavior — byte-identical");
     }
 
+    // ── S1 handoff: a dependency-staging override threads a clone ref + goal fold ──────
+
+    [Fact]
+    public void A_staging_ref_becomes_the_pinned_single_repo_clone_ref()
+    {
+        var repoId = Guid.NewGuid();
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId } };
+        var staging = new DependencyStagingResult { Ref = "codespace/agent/producer" };
+
+        var task = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx, staging: staging);
+
+        task.Workspace.ShouldNotBeNull("a pinned ref needs an explicit single-repo Workspace spec — the executor no longer derives the default branch from bare RepositoryId");
+        var primary = task.Workspace!.Repositories.Single();
+        primary.RepositoryId.ShouldBe(repoId);
+        primary.IsPrimary.ShouldBeTrue();
+        primary.Ref.ShouldBe("codespace/agent/producer", "the dependent clones the producer's own branch, never the repository default");
+    }
+
+    [Fact]
+    public void A_staging_goal_fold_is_prepended_before_the_instruction_and_role()
+    {
+        var subtasks = new Dictionary<string, SupervisorPlannedSubtask> { [SubtaskId] = new() { Id = SubtaskId, Title = "T", Instruction = "finish the feature" } };
+        var staging = new DependencyStagingResult { Ref = "b", GoalFoldText = "You are building on prior work already on branch `b`." };
+
+        var task = RealSupervisorActionExecutor.BuildAgentTask(subtasks, SubtaskId, revisedInstruction: null, new SupervisorTurnContext { Goal = "g" }, spec: new SupervisorAgentDispatch { SubtaskId = SubtaskId, Role = "implementer" }, staging: staging);
+
+        task.Goal.ShouldBe("You are building on prior work already on branch `b`.\n\nAs the implementer, finish the feature", "the handoff block precedes the role-wrapped instruction");
+    }
+
+    [Fact]
+    public void No_staging_leaves_the_workspace_and_goal_byte_identical()
+    {
+        var repoId = Guid.NewGuid();
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId } };
+
+        var withNullStaging = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx, staging: null);
+        var withNoOverride = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx, staging: DependencyStagingResult.NoOverride);
+        var withoutParam = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx);
+
+        withNullStaging.Workspace.ShouldBeNull("no staging override → the byte-identical default-branch derivation from bare RepositoryId");
+        JsonSerializer.Serialize(withNullStaging, AgentJson.Options).ShouldBe(JsonSerializer.Serialize(withNoOverride, AgentJson.Options), "an explicit NoOverride is byte-identical to omitting staging entirely");
+        JsonSerializer.Serialize(withNullStaging, AgentJson.Options).ShouldBe(JsonSerializer.Serialize(withoutParam, AgentJson.Options));
+    }
+
     private static AgentTask Build(SupervisorTurnContext context) =>
         RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, context);
 
