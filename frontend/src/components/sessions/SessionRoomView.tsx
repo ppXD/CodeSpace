@@ -394,7 +394,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
           <div className="room-turn-head">
             <span className="room-av"><Sym n="terminal" s={13} /></span>
             <span className="room-av-name">CodeSpace</span>
-            <span className={`room-pill room-pill-${tone}`}>
+            <span className={`room-pill room-pill-${tone}${open && live ? " room-pill-steady" : ""}`}>
               {tone === "run" ? <i className="room-pill-dot" /> : <Sym n={pillIcon(tone)} s={11} />}
               {pillLabel(turn.status, live)}
             </span>
@@ -428,7 +428,6 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // — the same component the room shows, not a re-implemented plain list.
                 const planCard = turn.blocks.find((b): b is PlanChecklistBlock => b.type === "plan_checklist");
                 const topPlan = hasInlinePlan ? undefined : (planCard ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
-                const liveBlocks = turn.blocks.filter((b) => b.type === "live_activity");
                 const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
                 // A plain run with NO agent-carrying beat (a single agent, or a linear agent chain — no supervisor
                 // spawn, no map dispatch) has no beat to hang its agent cards on, so the ③ skeleton would show only
@@ -451,7 +450,6 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                     {topPlan && <InnerBlock key={topPlan.id} block={topPlan} pdById={pdById} onOpenRoom={onOpenRoom} />}
                     <JournalNarrative turn={journalTurn} planCard={hasInlinePlan ? planCard : undefined} />
                     {agentGroupBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
-                    {liveBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {resultBlocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)}
                     {statBlocks.length > 0 && (
                       <div className="room-jsupport">
@@ -462,12 +460,16 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                   </PlanAgentCardsContext.Provider>
                 );
               })() : (
-                turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
+                // The live ticker is suppressed here — its "working…" line + the run's Stop button are unified into the
+                // pinned LiveRunBar below, so the running signal + the Stop action live together in ONE place.
+                turn.blocks.filter((b) => b.type !== "live_activity").map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
               )}
 
               {live && <TurnLiveStream runId={turn.runId} />}
 
               <TurnActions actions={turn.actions} turn={turn} onOpenRoom={onOpenRoom} onOpenRun={onOpenRun} />
+
+              {live && <LiveRunBar turn={turn} />}
             </div>
           )}
         </div>
@@ -1098,12 +1100,56 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
   );
 }
 
-/** The live "working…" indicator pinned at the bottom of an active turn — a pulsing dot + the streaming activity line. */
+/** The live "working…" indicator — a pulsing dot + the streaming activity line. Kept for any live_activity block that
+ *  reaches InnerBlock directly; the running turn now unifies it into {@link LiveRunBar}. */
 function LiveTicker({ live }: { live: LiveActivityBlock }) {
   return (
     <div className="room-live">
       <span className="room-live-dot" />
       <span className="room-live-text">{live.text}</span>
+    </div>
+  );
+}
+
+/** The destructive Stop control for a running turn — confirms before firing, then cancels the run + kills in-flight
+ *  agents. Steady red (no pulse): the kill switch stays stable to click while the LiveRunBar's dot carries the live
+ *  signal. Rendered inside {@link LiveRunBar}, not the footer, so Stop always sits with the progress it stops. */
+function StopButton({ runId }: { runId: string }) {
+  const cancel = useCancelRun(runId);
+  const confirm = useConfirm();
+
+  const onStop = async () => {
+    const ok = await confirm({ title: "Stop this run?", message: "Cancels the run and kills any in-flight agents. You can Continue it later to resume where it stopped, or Re-run a fresh copy.", confirmLabel: "Stop run", cancelLabel: "Keep running", destructive: true });
+    if (ok) cancel.mutate();
+  };
+
+  return <button className="room-btn-stop" onClick={() => void onStop()} disabled={cancel.isPending}><i className="room-stop-sq" /> {cancel.isPending ? "Stopping…" : "Stop"}</button>;
+}
+
+/** The running turn's ONE live control — a bar pinned (position: sticky) to the bottom of the scroll while the turn runs,
+ *  so the live progress and the Stop button travel together and stay one click away no matter how far the content scrolls.
+ *  Carries the single running pulse (dot), the latest activity line, the ticking elapsed, and the Stop button. Unmounts
+ *  when the turn goes terminal — the footer's Continue/Re-run/View trace/Open PR take over. */
+/** The running turn's live summary — the LATEST activity line (a run emits several live_activity blocks over its life)
+ *  and whether an enabled Stop action is available. Pure, so the latest-wins + Stop-gating contract is unit-tested
+ *  without standing up the Room's query/dialog providers. */
+export function liveRunSummary(turn: Pick<AssistantTurnBlock, "blocks" | "actions">): { activity: string; canStop: boolean } {
+  const activity = turn.blocks.filter((b): b is LiveActivityBlock => b.type === "live_activity").at(-1)?.text ?? "";
+  const canStop = turn.actions.some((a) => a.kind === "Stop" && a.enabled);
+  return { activity, canStop };
+}
+
+function LiveRunBar({ turn }: { turn: AssistantTurnBlock }) {
+  const { activity, canStop } = liveRunSummary(turn);
+
+  return (
+    <div className="room-livebar">
+      <span className="room-livebar-dot" />
+      <div className="room-livebar-body">
+        <div className="room-livebar-head"><span className="room-livebar-label">Working</span>{activity && <> · <span className="room-livebar-text">{activity}</span></>}</div>
+        {turn.durationMs != null && <div className="room-livebar-meta">running {formatDurationMs(turn.durationMs)}</div>}
+      </div>
+      {canStop && <StopButton runId={turn.runId} />}
     </div>
   );
 }
@@ -1593,11 +1639,11 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
   );
 }
 
-/** The turn footer actions — the doing-actions first (Stop / Re-run / Retry), then "View trace" LAST. Re-run and Stop
- *  both confirm before firing; Stop is destructive-red with a live pulse. Capability-gated by the backend (never 422s). */
+/** The turn footer actions — the doing-actions first (Continue / Re-run / Open PR), then "View trace" LAST. Re-run
+ *  confirms before firing. Stop is NOT here: while running it lives in the pinned LiveRunBar with the progress it stops.
+ *  Capability-gated by the backend (never 422s). */
 function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenRoom: (runId?: string) => void; onOpenRun: (runId: string) => void }) {
   const replay = useReplayRun();
-  const cancel = useCancelRun(turn.runId);
   const cont = useContinueRun(turn.runId);
   const openPr = useOpenPullRequest(turn.runId);
   const confirm = useConfirm();
@@ -1620,11 +1666,6 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     if (rerun) { const result = await replay.mutateAsync(turn.runId); onOpenRun(result.runId); }
   };
 
-  const onStop = async () => {
-    const ok = await confirm({ title: "Stop this run?", message: "Cancels the run and kills any in-flight agents. You can Continue it later to resume where it stopped, or Re-run a fresh copy.", confirmLabel: "Stop run", cancelLabel: "Keep running", destructive: true });
-    if (ok) cancel.mutate();
-  };
-
   // Opens a real PR/MR for this turn's published branch(es) and jumps straight to it — mirrors PrCard's own
   // "View PR" external-link behavior, since there's nothing more to confirm here (the branch already exists).
   // A multi-repo run isolates each repo's failure (a missing credential scope, a rejected branch) into a Failed
@@ -1637,15 +1678,14 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     if (failure) await alert({ title: "Couldn't open the pull request", message: failure.error, variant: "error" });
   };
 
-  // The doing-actions render first; "View trace" is always last (a quiet ghost). Stop / Rerun show ONLY when the
-  // capability is enabled — a finished turn shows Rerun (no Stop); a running turn shows Stop (no Rerun).
+  // The doing-actions render first; "View trace" is always last (a quiet ghost). Stop is excluded — the LiveRunBar owns
+  // it while running. Rerun shows ONLY when its capability is enabled (a finished turn shows Rerun).
   const trace = actions.find((a) => a.kind === "OpenTrace");
-  const doing = actions.filter((a) => a.kind !== "OpenTrace" && a.enabled);
+  const doing = actions.filter((a) => a.kind !== "OpenTrace" && a.kind !== "Stop" && a.enabled);
 
   return (
     <div className="room-foot">
       {doing.map((a) => {
-        if (a.kind === "Stop") return <button key={a.kind} className="room-btn-stop" onClick={() => void onStop()} disabled={cancel.isPending}><i className="room-stop-pulse" /> {cancel.isPending ? "Stopping…" : "Stop"}</button>;
         if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
         if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
         if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
