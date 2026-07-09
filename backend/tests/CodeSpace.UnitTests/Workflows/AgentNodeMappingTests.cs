@@ -46,6 +46,27 @@ public class AgentNodeMappingTests
         config.GetProperty("mode").GetString().ShouldBe(mode, "a present mode is emitted as the agent.code config key the node reads");
     }
 
+    // ── displayTitle: the CLEAN pre-grounding goal, so a CONTINUE's card title never shows the digest heading ──
+
+    [Fact]
+    public void BuildAgentConfig_emits_displayTitle_as_the_clean_goal_even_when_grounding_is_prepended_to_goal()
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("Add retry logic", new ResolvedAgentProfile { Harness = "codex-cli" }, grounding: "# Earlier turns in this work thread\nsome digest text");
+
+        config.GetProperty("goal").GetString().ShouldStartWith("# Earlier turns", customMessage: "the MODEL still sees the grounding, prepended as before");
+        config.GetProperty("displayTitle").GetString().ShouldBe("Add retry logic", "the CARD title is the clean task text, never the grounding heading");
+    }
+
+    [Fact]
+    public void BuildAgentConfig_emits_displayTitle_even_with_no_grounding_at_all()
+    {
+        // A fresh (non-CONTINUE) launch: goal and displayTitle are the SAME text — the field is always present,
+        // never special-cased to "only when it would differ from goal".
+        var config = AgentNodeMapping.BuildAgentConfig("Add retry logic", new ResolvedAgentProfile { Harness = "codex-cli" });
+
+        config.GetProperty("displayTitle").GetString().ShouldBe("Add retry logic");
+    }
+
     // ── timeoutSeconds: the operator's per-agent wall-clock mapped onto the agent.code config key the node reads. ──
 
     [Fact]

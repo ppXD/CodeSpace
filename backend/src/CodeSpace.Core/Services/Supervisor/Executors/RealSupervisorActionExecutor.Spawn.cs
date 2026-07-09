@@ -456,6 +456,9 @@ public sealed partial class RealSupervisorActionExecutor
         return BuildTaskWithGoal(WithHandoff(staging?.GoalFoldText, WithRole(spec?.Role, instruction)), context, forcePushBranch: planned?.Acceptance is not null, spec: spec, primaryRef: staging?.Ref) with
         {
             SubtaskId = string.IsNullOrWhiteSpace(subtaskId) ? null : subtaskId,
+            // The CLEAN instruction — before WithRole/WithHandoff prepend role framing or a producer/prior-attempt fold
+            // block — so a subtask's card title reads as its own work, never a role prefix or handoff paragraph.
+            DisplayTitle = instruction,
         };
     }
 

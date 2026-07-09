@@ -63,6 +63,26 @@ public class AgentMetricsReaderTests
     }
 
     [Fact]
+    public void A_CONTINUEs_display_title_wins_over_its_grounding_prefixed_goal()
+    {
+        // The session digest is PREPENDED to Goal before it reaches the model — DisplayTitle carries the CLEAN task
+        // text separately, so the card never shows the grounding heading instead of what the user actually asked.
+        var task = new AgentTask { Goal = "# Earlier turns in this work thread\nsome digest text\n\n---\nAdd retry logic", DisplayTitle = "Add retry logic", Harness = "claude-code" };
+        var taskJson = JsonSerializer.Serialize(task, AgentJson.Options);
+
+        Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, taskJson, 0, Now)
+            .Goal.ShouldBe("Add retry logic");
+    }
+
+    [Fact]
+    public void With_no_display_title_the_legacy_goal_first_line_fallback_still_applies()
+    {
+        // A pre-DisplayTitle task envelope (older persisted task_json) has no such field — byte-identical to before.
+        Build(Guid.NewGuid(), AgentRunStatus.Running, Now.AddSeconds(-1), null, null, Task(null, "Legacy goal\nsecond line"), 0, Now)
+            .Goal.ShouldBe("Legacy goal");
+    }
+
+    [Fact]
     public void A_failed_agent_surfaces_the_results_error_preferring_it_over_the_row_error()
     {
         var m = Build(Guid.NewGuid(), AgentRunStatus.Failed, Now.AddSeconds(-9), Now, FailedResult("litellm.BadRequestError: Unexpected message role. Model Group=metis-coder"), Task("metis-coder"), toolCount: 0, Now, rowError: "generic row error");

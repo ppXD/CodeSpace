@@ -46,6 +46,9 @@ internal static class AgentNodeMapping
         var config = new Dictionary<string, object?>
         {
             ["goal"] = ComposeGoalWithCriteria(ComposeGoal(goal, grounding), criteria),
+            // The CLEAN pre-grounding/pre-criteria task text — AgentTask.DisplayTitle's source, so a CONTINUE's card
+            // title never shows the grounding digest's heading instead of what the user actually asked.
+            ["displayTitle"] = goal,
             ["harness"] = Harness(profile),
         };
 
