@@ -52,7 +52,7 @@ public sealed class LlmCompleteNode : INodeRuntime
               "properties": {
                 "provider": { "type": "string", "enum": ["Anthropic", "OpenAI"], "default": "Anthropic", "description": "The wire to use. 'OpenAI' covers any OpenAI-compatible gateway (LiteLLM/OpenRouter/vLLM/…) configured as a model credential." },
                 "model": { "type": "string", "description": "Optional. Pins ONE model from the team's credentialed-model pool for this provider; it must be an enabled pool model. Omit to let the pool pick (its recommended model)." },
-                "maxTokens": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 2048 },
+                "maxTokens": { "type": "integer", "minimum": 1, "default": 2048, "description": "Output-token cap. No artificial ceiling — the transport clamps it to the MODEL's real output ceiling, so pinning a high value never limits a model below its true limit. A value above the streaming threshold (~21k) is STREAMED on the wire so a long generation can't idle-timeout. The default stays small so an ordinary output remains a single buffered call." },
                 "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
                 "topP": { "type": "number", "minimum": 0, "maximum": 1, "description": "Optional nucleus sampling. Omit to leave it at the provider default." },
                 "frequencyPenalty": { "type": "number", "minimum": -2, "maximum": 2, "description": "Optional. OpenAI-wire only (ignored on Anthropic, whose API has no equivalent)." },
