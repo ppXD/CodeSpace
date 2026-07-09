@@ -195,6 +195,46 @@ public class OpenAiClientStructuredTests
     }
 
     [Fact]
+    public async Task Re_asks_once_on_a_PARSE_failure_then_recovers()
+    {
+        // Attempt 1: forced function 400 → floor returns prose with NO recoverable JSON (a corruption repair can't fix)
+        // → a parse-failure Malformed. Instead of hard-failing, the client RE-ASKS with "your output wasn't valid JSON"
+        // feedback; attempt 2's floor returns clean JSON → recovered. A transient malformation gets the same second
+        // chance a schema violation already does.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice unsupported" } }"""),                         // 1: forced function rejected
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "I cannot produce that." } } ] }"""), // 2: floor — no JSON at all
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice unsupported" } }"""),                         // 3: re-ask forced function rejected
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "{\"kind\":\"stop\"}" } } ] }"""));   // 4: re-ask floor — clean JSON
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("stop", "a transient parse failure is re-asked, not hard-failed");
+        handler.RequestBodies.Count.ShouldBe(4, "attempt 1 (tool+floor, no JSON) then a re-ask (tool+floor) recovered");
+    }
+
+    [Fact]
+    public async Task A_second_parse_failure_after_the_re_ask_still_faults_Malformed()
+    {
+        // The model produces NO parseable JSON twice — the re-ask is bounded to once, so a persistent malformation is
+        // still a clean, typed Malformed fault (the run fails fast rather than looping).
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "unsupported" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "no json here" } } ] }"""),
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "unsupported" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "still no json" } } ] }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
+
+        ex.Category.ShouldBe(LlmErrorCategory.Malformed, "a persistent parse failure is still a typed Malformed fault after the bounded re-ask");
+        handler.RequestBodies.Count.ShouldBe(4, "exactly one re-ask — no unbounded retry loop");
+    }
+
+    [Fact]
     public async Task Usage_totals_the_billed_forced_attempt_plus_the_floor_when_it_degrades()
     {
         // The forced-function attempt is a 200 with usage (BILLED) but yields no usable output → degrades to the floor,
