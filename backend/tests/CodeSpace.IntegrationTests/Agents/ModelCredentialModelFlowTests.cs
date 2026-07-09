@@ -138,14 +138,17 @@ public class ModelCredentialModelFlowTests
 
         if (withModels)
         {
-            await AddModelAsync(credId, "claude-opus-4-8");
-            await AddModelAsync(credId, "claude-haiku-4-5");
+            // P3.4 — explicit, DIFFERING tiers (never relying on alphabetical model-id order for the expected winner):
+            // claude-opus-4-8 (Strong) outranks claude-haiku-4-5 (Basic) despite sorting AFTER it alphabetically.
+            await AddModelAsync(credId, "claude-opus-4-8", tier: ModelCapabilityTier.Strong);
+            await AddModelAsync(credId, "claude-haiku-4-5", tier: ModelCapabilityTier.Basic);
         }
 
         // The catalog NEVER changes WHICH credential resolves or its decrypted key/base URL — but it DOES drive the
         // auto-default MODEL an unpinned run falls back to (so an "auto" run uses a team model, not the CLI default).
-        // First enabled by model id: claude-haiku-4-5 < claude-opus-4-8. Both DB resolver paths covered.
-        var expectedDefaultModel = withModels ? "claude-haiku-4-5" : null;
+        // Tier-aware, not alphabetical: claude-opus-4-8 (Strong) wins over claude-haiku-4-5 (Basic). Both DB resolver
+        // paths covered (the pinned-credential path and the no-pin full-pool path).
+        var expectedDefaultModel = withModels ? "claude-opus-4-8" : null;
 
         foreach (var task in new[] { new AgentTask { Goal = "g", Harness = "h", ModelCredentialId = credId }, new AgentTask { Goal = "g", Harness = "h" } })
         {
@@ -160,7 +163,7 @@ public class ModelCredentialModelFlowTests
 
     // ─── Seeding helpers (mirror ModelCredentialResolverFlowTests) ───
 
-    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual)
+    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual, ModelCapabilityTier? tier = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -171,6 +174,7 @@ public class ModelCredentialModelFlowTests
             ModelId = modelId,
             DisplayName = displayName,
             Source = source,
+            CapabilityTier = tier,
         });
         await db.SaveChangesAsync();
     }
