@@ -45,6 +45,7 @@ import { useAlert, useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
+import { liveRunSummary } from "./live-run-summary";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -1130,15 +1131,6 @@ function StopButton({ runId }: { runId: string }) {
  *  so the live progress and the Stop button travel together and stay one click away no matter how far the content scrolls.
  *  Carries the single running pulse (dot), the latest activity line, the ticking elapsed, and the Stop button. Unmounts
  *  when the turn goes terminal — the footer's Continue/Re-run/View trace/Open PR take over. */
-/** The running turn's live summary — the LATEST activity line (a run emits several live_activity blocks over its life)
- *  and whether an enabled Stop action is available. Pure, so the latest-wins + Stop-gating contract is unit-tested
- *  without standing up the Room's query/dialog providers. */
-export function liveRunSummary(turn: Pick<AssistantTurnBlock, "blocks" | "actions">): { activity: string; canStop: boolean } {
-  const activity = turn.blocks.filter((b): b is LiveActivityBlock => b.type === "live_activity").at(-1)?.text ?? "";
-  const canStop = turn.actions.some((a) => a.kind === "Stop" && a.enabled);
-  return { activity, canStop };
-}
-
 function LiveRunBar({ turn }: { turn: AssistantTurnBlock }) {
   const { activity, canStop } = liveRunSummary(turn);
 
