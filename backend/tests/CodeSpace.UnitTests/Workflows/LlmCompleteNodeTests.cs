@@ -55,6 +55,32 @@ public class LlmCompleteNodeTests
             Task.FromResult(new LLMCompletion { Text = "text", Model = "m", Usage = new() { InputTokens = 1, OutputTokens = 1 } });
     }
 
+    /// <summary>A streaming-capable stub that records WHICH surface the node called — the buffered CompleteAsync or the streaming StreamAsync — so a test can prove the large-output gate.</summary>
+    private sealed class StreamingStubClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public string Provider => "Anthropic";
+        public LLMCompletionRequest? BufferedRequest;
+        public LLMCompletionRequest? StreamedRequest;
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct)
+        {
+            BufferedRequest = request;
+            return Task.FromResult(new LLMCompletion { Text = "buffered", Model = "m", Usage = new() { InputTokens = 1, OutputTokens = 1 } });
+        }
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = JsonDocument.Parse("{}").RootElement, Model = "m" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            StreamedRequest = request;
+            yield return new LlmStreamEvent.Meta(Model: "m", InputTokens: 2);
+            yield return new LlmStreamEvent.TextDelta("streamed");
+            yield return new LlmStreamEvent.Meta(OutputTokens: 3, FinishReason: "stop");
+            await Task.CompletedTask;
+        }
+    }
+
     private sealed class StubRegistry : ILLMClientRegistry
     {
         private readonly ILLMClient _client;
@@ -119,6 +145,33 @@ public class LlmCompleteNodeTests
         stub.TextRequest.ShouldNotBeNull();
         stub.TextRequest!.MaxOutputTokens.ShouldBe(60000,
             "the node passes a large cap straight through — the transport (not the node) clamps per-model and decides to stream (60000 > the 21000 streaming threshold)");
+    }
+
+    [Fact]
+    public async Task A_large_output_streams_through_the_streaming_sibling_while_a_small_output_stays_buffered()
+    {
+        // Large maxTokens (above the streaming gate) → the node consumes the streaming sibling (so deltas flow through
+        // the recording decorator) and folds the stream into its text output. A small output stays on the buffered
+        // CompleteAsync path — small calls are NOT forced onto the streaming path (the L2 mid-stream-reset anti-pattern).
+        var large = new StreamingStubClient();
+        var largeResult = await Node(large, StubPoolSelector.WithModel())
+            .RunAsync(Context(new Dictionary<string, JsonElement> { ["maxTokens"] = JsonSerializer.SerializeToElement(60000) }, "big"), CancellationToken.None);
+
+        largeResult.Status.ShouldBe(NodeStatus.Success);
+        large.StreamedRequest.ShouldNotBeNull("a large output streams");
+        large.BufferedRequest.ShouldBeNull("a large output does NOT also take the buffered path");
+        large.StreamedRequest!.MaxOutputTokens.ShouldBe(60000);
+        largeResult.Outputs["text"].GetString().ShouldBe("streamed", "the streamed deltas fold into the node's text output");
+        largeResult.Outputs["json"].ValueKind.ShouldBe(JsonValueKind.Null, "still text mode — no structured output");
+
+        var small = new StreamingStubClient();
+        var smallResult = await Node(small, StubPoolSelector.WithModel())
+            .RunAsync(Context(new Dictionary<string, JsonElement> { ["maxTokens"] = JsonSerializer.SerializeToElement(2048) }, "small"), CancellationToken.None);
+
+        smallResult.Status.ShouldBe(NodeStatus.Success);
+        small.BufferedRequest.ShouldNotBeNull("a small output stays buffered");
+        small.StreamedRequest.ShouldBeNull("a small output does NOT stream — small calls aren't forced onto the streaming path");
+        smallResult.Outputs["text"].GetString().ShouldBe("buffered");
     }
 
     [Fact]
