@@ -5708,6 +5708,13 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rm-blue); animation: rm-pulse 1.2s ease-in-out infinite; }
 .room-live-text { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 560px; }
 
+/* live model output — a progressive text block fed by the SSE ledger tail (interaction.delta) */
+.room-stream { align-self: flex-start; max-width: 720px; border: 1px solid #C5D9F5; border-radius: 12px; background: #F5F9FE; padding: 10px 13px; }
+.room-stream-head { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--rm-blue); margin-bottom: 7px; }
+.room-stream-text { margin: 0; font-size: 13px; line-height: 1.65; color: var(--ink); white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.room-stream-caret { display: inline-block; width: 6px; height: 1.05em; vertical-align: text-bottom; margin-left: 2px; background: var(--rm-blue); border-radius: 1px; animation: rm-blink 1s step-end infinite; }
+@keyframes rm-blink { 50% { opacity: 0; } }
+
 .room-decision { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 11px 13px; }
 .room-decision-preview { font-size: 13px; color: var(--ink-2); }
 .room-decision-q { font-weight: 500; margin-bottom: 6px; }

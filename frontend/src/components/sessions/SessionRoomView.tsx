@@ -44,6 +44,7 @@ import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planState
 import { useAlert, useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -463,6 +464,8 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
               })() : (
                 turn.blocks.map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
               )}
+
+              {live && <TurnLiveStream runId={turn.runId} />}
 
               <TurnActions actions={turn.actions} turn={turn} onOpenRoom={onOpenRoom} onOpenRun={onOpenRun} />
             </div>
@@ -1101,6 +1104,21 @@ function LiveTicker({ live }: { live: LiveActivityBlock }) {
     <div className="room-live">
       <span className="room-live-dot" />
       <span className="room-live-text">{live.text}</span>
+    </div>
+  );
+}
+
+/** The live model output as it streams — a progressive text block fed by the run's SSE ledger tail (interaction.delta),
+ *  shown only while the turn is live. Renders nothing until the first token lands; the finished call settles into its
+ *  model-call row when the poll catches up. */
+function TurnLiveStream({ runId }: { runId: string }) {
+  const text = useRunRoomStream(runId);
+  if (!text) return null;
+
+  return (
+    <div className="room-stream">
+      <span className="room-stream-head"><span className="room-live-dot" />Streaming</span>
+      <p className="room-stream-text">{text}<span className="room-stream-caret" /></p>
     </div>
   );
 }
