@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Enums;
@@ -23,9 +25,16 @@ namespace CodeSpace.Api.Controllers;
 [Route("api/workflows/runs")]
 public class WorkflowRunsController : ControllerBase
 {
-    private readonly IMediator _mediator;
+    private static readonly JsonSerializerOptions SseJson = new(JsonSerializerDefaults.Web);
 
-    public WorkflowRunsController(IMediator mediator) { _mediator = mediator; }
+    private readonly IMediator _mediator;
+    private readonly IRunRecordStreamer _recordStreamer;
+
+    public WorkflowRunsController(IMediator mediator, IRunRecordStreamer recordStreamer)
+    {
+        _mediator = mediator;
+        _recordStreamer = recordStreamer;
+    }
 
     /// <summary>The team's runs index — every top-level run the team owns (any source), newest first. Team-scoped.</summary>
     [HttpGet]
@@ -133,6 +142,22 @@ public class WorkflowRunsController : ControllerBase
     {
         var result = await _mediator.Send(new GetRunRecordsQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Live SSE tail of the run's ledger — every workflow_run_record row beyond <c>?after={sequence}</c> as it lands (interaction.delta + lifecycle), so the Room streams live instead of re-polling. <c>id:</c> = Sequence (for Last-Event-ID / <c>?after=</c> gapless resume), <c>event:</c> = the record type. Ends at a terminal run record or on client disconnect. Team-scoped; a foreign run streams nothing. The 2s poll (GET /records) stays the fallback.</summary>
+    [HttpGet("{runId:guid}/records/stream")]
+    public async Task StreamRecords([FromRoute] Guid runId, [FromQuery] long after, CancellationToken cancellationToken)
+    {
+        Response.Headers.ContentType = "text/event-stream";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers["X-Accel-Buffering"] = "no";   // ask an nginx-style proxy not to buffer the stream
+
+        await foreach (var record in _recordStreamer.TailAsync(runId, after, cancellationToken).ConfigureAwait(false))
+        {
+            var data = JsonSerializer.Serialize(record, SseJson);
+            await Response.WriteAsync($"id: {record.Sequence}\nevent: {record.RecordType}\ndata: {data}\n\n", cancellationToken).ConfigureAwait(false);
+            await Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Replay an existing run onto a fresh run id (plain values frozen from snapshot, secrets re-resolved). Returns the new run id.</summary>
