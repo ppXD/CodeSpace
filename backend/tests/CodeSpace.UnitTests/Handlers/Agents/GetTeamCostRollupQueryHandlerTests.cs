@@ -61,6 +61,9 @@ public class GetTeamCostRollupQueryHandlerTests
 
         public Task<RunCostSummary> ComputeRunAsync(Guid teamId, Guid workflowRunId, CancellationToken cancellationToken) =>
             Task.FromResult(new RunCostSummary { WorkflowRunId = workflowRunId });
+
+        public Task<IReadOnlyDictionary<Guid, RunCostSummary>> ComputeRunsAsync(Guid teamId, IReadOnlyCollection<Guid> workflowRunIds, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<Guid, RunCostSummary>>(new Dictionary<Guid, RunCostSummary>());
     }
 
     private sealed class StubCurrentTeam : ICurrentTeam

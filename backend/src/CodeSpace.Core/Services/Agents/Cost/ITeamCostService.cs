@@ -16,4 +16,12 @@ public interface ITeamCostService
 
     /// <summary>The token + estimated-USD spend of ONE run (team-scoped, fail-closed), summed over its terminal agent runs.</summary>
     Task<RunCostSummary> ComputeRunAsync(Guid teamId, Guid workflowRunId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The bulk sibling of <see cref="ComputeRunAsync"/> — every requested run's cost summary in ONE query
+    /// (team-scoped, fail-closed), mirroring <c>IPublishManifestStore.ListForWorkflowRunsAsync</c>. For a
+    /// cross-run scorecard that needs "cost for N runs" (e.g. the unattended-delivery scorecard), never one
+    /// query per run. A run with no terminal agent runs is simply absent from the result (never a zeroed entry).
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, RunCostSummary>> ComputeRunsAsync(Guid teamId, IReadOnlyCollection<Guid> workflowRunIds, CancellationToken cancellationToken);
 }

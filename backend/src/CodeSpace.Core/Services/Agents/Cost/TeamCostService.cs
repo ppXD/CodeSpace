@@ -60,6 +60,22 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
         return SummarizeRun(workflowRunId, rows.Select(Price));
     }
 
+    public async Task<IReadOnlyDictionary<Guid, RunCostSummary>> ComputeRunsAsync(Guid teamId, IReadOnlyCollection<Guid> workflowRunIds, CancellationToken cancellationToken)
+    {
+        if (workflowRunIds.Count == 0) return EmptySummaries;
+
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.ResultJson != null && workflowRunIds.Contains(r.WorkflowRunId ?? r.Id))
+            .Select(r => new CostRow { WorkflowRunId = r.WorkflowRunId ?? r.Id, ResultJson = r.ResultJson!, TaskJson = r.TaskJson, CreatedAt = r.CreatedDate })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return rows
+            .Select(Price)
+            .GroupBy(p => p.WorkflowRunId)
+            .ToDictionary(g => g.Key, g => SummarizeRun(g.Key, g));
+    }
+
     /// <summary>Team-scoped terminal agent rows (non-null ResultJson), projecting BOTH jsonb blobs + the timestamp for recency. The query is NOT try/caught — a load fault propagates (fail-closed).</summary>
     private async Task<IReadOnlyList<CostRow>> TerminalRowsAsync(Guid teamId, Guid? runId, DateTimeOffset? since, CancellationToken cancellationToken)
     {
@@ -119,4 +135,6 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
 
     private sealed record CostRow { public required Guid WorkflowRunId { get; init; } public required string ResultJson { get; init; } public required string TaskJson { get; init; } public DateTimeOffset CreatedAt { get; init; } }
     private sealed record PricedRow { public required Guid WorkflowRunId { get; init; } public DateTimeOffset CreatedAt { get; init; } public int InputTokens { get; init; } public int OutputTokens { get; init; } public decimal? Cost { get; init; } }
+
+    private static readonly IReadOnlyDictionary<Guid, RunCostSummary> EmptySummaries = new Dictionary<Guid, RunCostSummary>();
 }
