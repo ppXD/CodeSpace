@@ -122,6 +122,9 @@ public static class WorkflowRunRecordTypes
     /// <summary>A model call threw. Payload: {"kind":"...","provider":"...","error":"...","category"?:"..."}.</summary>
     public const string InteractionFailed = "interaction.failed";
 
+    /// <summary>An incremental slice of a STREAMED model call's output as it arrives — COALESCED (not per-token) and correlated to the enclosing interaction.started/completed by the same correlation id. Payload: {"ordinal":N,"text":...} — the text fragment inline-or-$artifact_id. A progressive VIEW only: interaction.completed carries the whole authoritative output, and replay ignores deltas.</summary>
+    public const string InteractionDelta = "interaction.delta";
+
     // ─── Wait control (operator overrides) ────────────────────────────────────
 
     /// <summary>An operator force-resolved a STRANDED signal-driven wait — a Timer whose scheduled wake was dropped, or a Callback whose external system never posted — to un-strand the run. The audit trail for the override. Payload: {"wait_kind":"Timer|Callback","wait_id":"...","by":"<userId>"}.</summary>
