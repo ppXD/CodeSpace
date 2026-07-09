@@ -30,9 +30,14 @@ public sealed record SupervisorStopClassification
     /// <summary>Why the run stopped short — a forced stop's bound reason (e.g. "no progress"), or a give-up's non-success outcome label. Null for a genuine success.</summary>
     public string? Reason { get; init; }
 
+    /// <summary>P3.5 — a DYNAMIC elaboration of <see cref="Reason"/> for the bounds that carry one (currently the cost cap: "$X.XX spent of $Y.YY cap ($Z.ZZ OVER) — agent execution $A, ..."). Null for every reason that has no per-run figure to cite (no-progress, governance-denied, etc.) and for a give-up/success stop.</summary>
+    public string? Detail { get; init; }
+
     /// <summary>True when the run did NOT finish well — anything but <see cref="SupervisorStopKind.Succeeded"/>. The RESULT card renders neutral/degraded (never a green success) on this.</summary>
     public bool Degraded => Kind != SupervisorStopKind.Succeeded;
 
-    /// <summary>The best human-facing line for the RESULT card / step summary: the model's closing summary when it wrote one, else the short reason. Null when neither exists.</summary>
-    public string? DisplayText => string.IsNullOrWhiteSpace(Summary) ? (string.IsNullOrWhiteSpace(Reason) ? null : Reason) : Summary;
+    /// <summary>The best human-facing line for the RESULT card / step summary: the model's closing summary when it wrote one, else the short reason (with its dynamic detail appended when present). Null when neither a summary nor a reason exists.</summary>
+    public string? DisplayText => string.IsNullOrWhiteSpace(Summary) ? ReasonWithDetail : Summary;
+
+    private string? ReasonWithDetail => string.IsNullOrWhiteSpace(Reason) ? null : string.IsNullOrWhiteSpace(Detail) ? Reason : $"{Reason} — {Detail}";
 }

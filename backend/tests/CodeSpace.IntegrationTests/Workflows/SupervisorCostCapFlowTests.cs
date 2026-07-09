@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -165,7 +166,120 @@ public class SupervisorCostCapFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Realized_brain_plane_spend_alone_force_stops_the_run_before_any_agent_is_spawned()
+    {
+        SetScript(s => s.PlanThenSpawnForever());
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        // No agent-execution spend at all — the BRAIN-PLANE spend (the supervisor's own decision calls, a decision
+        // critic's review) alone crosses the $1.00 cap, proving P3.5's widened fold without any spawned agent.
+        var config = """{"goal":"ship it","maxCostUsd":1.00,"maxTotalSpawns":50}""";
+        var workflowId = await CreateWorkflowAsync(teamId, userId, config);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Turn 0: plan → self-advance wait.
+            await RunEngineAsync(runId);
+
+            // Simulate the REAL ledger rows a live RecordingLLMClientDecorator would have written for turn 0's
+            // decision + a decision-critic review — $0.40 + $0.80 = $1.20, over the $1.00 cap.
+            await SeedInteractionCompletedAsync(runId, kind: "supervisor.decision", model: "claude-opus-4-8", inputTokens: 80_000, outputTokens: 0);   // $0.40
+            await SeedInteractionCompletedAsync(runId, kind: "critic.review", model: "claude-opus-4-8", inputTokens: 160_000, outputTokens: 0);        // $0.80
+
+            await ResolveSelfAdvanceAsync(runId);
+
+            // Turn 1: rehydrate folds the seeded brain-plane spend ($1.20) — over the $1.00 cap BEFORE the spawn
+            // decision's own bound check even considers agent-execution spend (there is none yet).
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(0, "the cost cap trips on brain-plane spend ALONE — no agent was ever spawned");
+
+            var stop = (await Ledger(db, runId, teamId)).Single(r => r.DecisionKind == SupervisorDecisionKinds.Stop);
+            stop.PayloadJson.ShouldContain(SupervisorStopReasons.CostCapReached);
+            stop.PayloadJson.ShouldContain("$1.20 spent of $1.00 cap ($0.20 OVER)", Case.Sensitive, "the stop detail cites the ACTIVE cap and how far over it the run went");
+            stop.PayloadJson.ShouldContain("supervisor.decision $0.40", Case.Sensitive, "the detail breaks spend down PER LANE — the brain's own decision calls");
+            stop.PayloadJson.ShouldContain("critic.review $0.80", Case.Sensitive, "the detail breaks spend down PER LANE — the decision critic's review calls");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task Brain_plane_spend_never_affects_an_uncapped_run()
+    {
+        SetScript(s => s.PlanThenSpawnForever());
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        // NO maxCostUsd at all — P3.5's widened fold must stay fully inert (byte-identical to pre-P3.5) when the
+        // operator never opted into a cost cap, however much brain-plane spend the ledger records.
+        var config = """{"goal":"ship it","maxTotalSpawns":50}""";
+        var workflowId = await CreateWorkflowAsync(teamId, userId, config);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            // An absurd amount of brain-plane spend — irrelevant with no cap set.
+            await SeedInteractionCompletedAsync(runId, kind: "supervisor.decision", model: "claude-opus-4-8", inputTokens: 9_000_000, outputTokens: 9_000_000);
+
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(2, "the spawn proceeded normally — an uncapped run is never force-stopped by brain-plane spend");
+
+            (await Ledger(db, runId, teamId)).ShouldNotContain(r => r.DecisionKind == SupervisorDecisionKinds.Stop, "no cap → no forced stop at all yet");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    /// <summary>Directly inserts an <c>interaction.completed</c> ledger row in the EXACT shape <c>RecordingLLMClientDecorator.CompletedPayload</c> would have written for a real in-process model call — the seam <see cref="SupervisorTurnService"/>'s brain-plane spend fold reads.</summary>
+    private async Task SeedInteractionCompletedAsync(Guid runId, string kind, string model, int inputTokens, int outputTokens)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            RecordType = WorkflowRunRecordTypes.InteractionCompleted,
+            PayloadJson = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                kind,
+                provider = "Anthropic",
+                model,
+                usage = new { inputTokens, outputTokens, finishReason = "stop" },
+            }),
+        });
+
+        await db.SaveChangesAsync();
+    }
 
     private void SetScript(Action<SupervisorDecisionScript> configure)
     {

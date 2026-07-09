@@ -122,6 +122,43 @@ public class RunRecordInteractionFlowTests
         completed.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("end_turn");
     }
 
+    [Fact]
+    public async Task A_large_recorded_STREAMING_call_persists_COALESCED_interaction_delta_rows_on_the_real_ledger()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var logger = scope.Resolve<IRunRecordLogger>();
+            var offloader = scope.Resolve<IArtifactOffloader>();
+            var decorator = new RecordingStreamingStructuredLLMClientDecorator(new LargeStreamingClient());
+
+            using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "sup", "sup#turn1", "supervisor.decision", logger, offloader)))
+            {
+                await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "claude-x", SystemPrompt = "SYS", UserPrompt = "USR" }, CancellationToken.None)) { }
+            }
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var rows = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType.StartsWith("interaction."))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        rows[0].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionStarted);
+        rows[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionCompleted);
+
+        var deltas = rows.Where(r => r.RecordType == WorkflowRunRecordTypes.InteractionDelta).ToList();
+        deltas.Count.ShouldBeGreaterThanOrEqualTo(2, "a large streamed output persists coalesced delta rows between started and completed on the real ledger");
+        deltas.Select(d => JsonDocument.Parse(d.PayloadJson).RootElement.GetProperty("ordinal").GetInt32())
+            .ShouldBe(Enumerable.Range(0, deltas.Count), "delta ordinals are monotonic from 0, in ledger Sequence order");
+        deltas.ShouldAllBe(d => d.CorrelationId == rows[0].CorrelationId, "every delta shares the started/completed correlation id");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static StructuredLLMCompletionRequest BuildRequest() => new()
@@ -169,6 +206,21 @@ public class RunRecordInteractionFlowTests
             yield return new LlmStreamEvent.Meta(Model: "claude-x", InputTokens: 7);
             yield return new LlmStreamEvent.TextDelta("hello ");
             yield return new LlmStreamEvent.TextDelta("there");
+            yield return new LlmStreamEvent.Meta(OutputTokens: 4, FinishReason: "end_turn");
+            await Task.CompletedTask;
+        }
+    }
+
+    private sealed class LargeStreamingClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public string Provider => "anthropic";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = new string('x', 600), Model = "claude-x" });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { }), Model = "claude-x" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            yield return new LlmStreamEvent.Meta(Model: "claude-x", InputTokens: 7);
+            for (var i = 0; i < 600; i++) yield return new LlmStreamEvent.TextDelta("x");   // 600 chars > 2× the 256-char coalesce threshold → 2 delta rows
             yield return new LlmStreamEvent.Meta(OutputTokens: 4, FinishReason: "end_turn");
             await Task.CompletedTask;
         }

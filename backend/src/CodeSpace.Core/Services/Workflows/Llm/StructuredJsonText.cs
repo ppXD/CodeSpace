@@ -31,6 +31,16 @@ internal static class StructuredJsonText
         return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
     }
 
+    /// <summary>Augment the base system prompt after a PARSE failure (the previous reply wasn't valid JSON at all — not merely schema-invalid) so the RE-ASK names the fault + shows what was returned. The correction is precise: a single complete, valid, fully-closed JSON object and nothing else.</summary>
+    public static string WithMalformedFeedback(string systemPrompt, string? previousError)
+    {
+        var feedback =
+            "Your previous response was NOT valid JSON and could not be parsed. Respond AGAIN with a SINGLE, COMPLETE, valid JSON object and NOTHING else — no prose, no markdown fences, no trailing text. Make sure every string and every bracket is properly closed." +
+            (string.IsNullOrWhiteSpace(previousError) ? "" : "\n\nThe parser reported:\n" + previousError);
+
+        return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
+    }
+
     /// <summary>
     /// Recover a JSON object from a model's free-text reply — the fallback when it returned the JSON as content
     /// instead of a tool/function call. Strips a leading <c>```json</c> / trailing <c>```</c> fence, then takes the
@@ -41,11 +51,118 @@ internal static class StructuredJsonText
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
 
-        var span = ExtractFirstBalancedObject(StripFences(content));
-        if (span is null) return null;
+        var text = StripFences(content);
 
-        try { return JsonDocument.Parse(span).RootElement.Clone(); }
+        // Strict: the first COMPLETE balanced { … }, parsed verbatim. The common, happy path.
+        var span = ExtractFirstBalancedObject(text);
+        if (span is not null)
+        {
+            try { return JsonDocument.Parse(span).RootElement.Clone(); }
+            catch (JsonException) { /* malformed even though balanced — fall through to repair */ }
+        }
+
+        // Repair: recover a TRUNCATED / trailing-broken object (a long output cut at the token cap is the #1 cause).
+        // Runs ONLY when the strict path failed, and the recovered object still faces schema validation downstream —
+        // so repair can never turn a working case bad; it only rescues a near-valid object from a hard Malformed fault.
+        return TryRepair(text);
+    }
+
+    /// <summary>
+    /// Best-effort recovery of a truncated / trailing-broken JSON object: scan from the first <c>{</c> tracking the
+    /// open-bracket stack + string state, close an unterminated string, trim a dangling trailing tail (a stray comma or
+    /// a <c>"key":</c> with no value), then close every still-open <c>[</c>/<c>{</c>. Parses the repaired candidate;
+    /// null when it still doesn't parse (repair never invents data — an unrecoverable reply stays a clean failure).
+    /// </summary>
+    private static JsonElement? TryRepair(string text)
+    {
+        var start = text.IndexOf('{');
+        if (start < 0) return null;
+
+        var chars = new List<char>();
+        var stack = new List<char>();   // the still-open '{' / '[', outermost first
+        var inString = false;
+        var escaped = false;
+
+        for (var i = start; i < text.Length; i++)
+        {
+            var c = text[i];
+            chars.Add(c);
+
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+
+            if (c == '"') inString = true;
+            else if (c == '{' || c == '[') stack.Add(c);
+            else if (c == '}' || c == ']')
+            {
+                if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+                if (stack.Count == 0) break;   // a complete top-level object closed (strict already tried it; harmless)
+            }
+        }
+
+        if (inString) chars.Add('"');   // close an unterminated (truncated) string
+
+        TrimDanglingTail(chars);
+
+        for (var j = stack.Count - 1; j >= 0; j--)
+            chars.Add(stack[j] == '{' ? '}' : ']');   // close still-open structures, innermost first
+
+        try { return JsonDocument.Parse(new string(chars.ToArray())).RootElement.Clone(); }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>Drop a dangling trailing tail that would break the close: whitespace, a trailing comma, and a <c>"key":</c> with no value (colon → drop the key string → drop the preceding comma) — repeatedly, until a complete token / opening bracket remains.</summary>
+    private static void TrimDanglingTail(List<char> chars)
+    {
+        while (true)
+        {
+            TrimTrailingWhitespace(chars);
+            if (chars.Count == 0) return;
+
+            var last = chars[^1];
+
+            if (last == ',') { chars.RemoveAt(chars.Count - 1); continue; }   // a trailing comma before the close
+
+            if (last == ':')                                                 // a dangling `"key":` with no value
+            {
+                chars.RemoveAt(chars.Count - 1);   // drop ':'
+                TrimTrailingWhitespace(chars);
+                DropTrailingStringToken(chars);    // drop the "key"
+                continue;                          // loop to shed the now-trailing comma
+            }
+
+            return;   // a complete value / opening brace — nothing to trim
+        }
+    }
+
+    private static void TrimTrailingWhitespace(List<char> chars)
+    {
+        while (chars.Count > 0 && char.IsWhiteSpace(chars[^1])) chars.RemoveAt(chars.Count - 1);
+    }
+
+    /// <summary>Drop a complete trailing <c>"…"</c> string token (the closing quote back to its unescaped opening quote). No-op when the tail isn't a closed string.</summary>
+    private static void DropTrailingStringToken(List<char> chars)
+    {
+        if (chars.Count == 0 || chars[^1] != '"') return;
+
+        chars.RemoveAt(chars.Count - 1);   // drop the closing "
+
+        while (chars.Count > 0)
+        {
+            var c = chars[^1];
+            chars.RemoveAt(chars.Count - 1);
+
+            if (c != '"') continue;
+
+            var backslashes = 0;
+            for (var k = chars.Count - 1; k >= 0 && chars[k] == '\\'; k--) backslashes++;
+            if (backslashes % 2 == 0) return;   // an UNescaped quote → the opening quote → done
+        }
     }
 
     /// <summary>The first complete top-level <c>{ … }</c> by brace depth — ignoring braces inside strings (with escapes) and any prose / second object after it. Null when there is no opening brace or the object is unterminated (truncated output).</summary>

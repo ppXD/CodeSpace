@@ -63,13 +63,27 @@ public sealed record SupervisorTurnContext
     public int TotalSpawnedAgents { get; init; }
 
     /// <summary>
-    /// The run's REALIZED USD spend so far (SOTA #4), SUMMED from the durable ledger — every prior spawn/retry
-    /// decision's folded agent token usage, priced. A LEDGER FACT folded on rehydrate (like <see cref="TotalSpawnedAgents"/>),
-    /// so it survives replay + re-entry deterministically. The turn loop force-STOPs when this EXCEEDS the run's
-    /// <c>MaxCostUsd</c> (realized-spend backpressure — exactly-at-budget proceeds, like the total-spawn cap). 0 when
-    /// no spend is known yet (fail-open — cost never blocks the first spawn).
+    /// The run's TOTAL REALIZED USD spend so far (SOTA #4 + P3.5) — <see cref="AgentExecutionSpendUsd"/> PLUS
+    /// <see cref="BrainPlaneSpendUsd"/>, summed from the durable ledger. A LEDGER FACT folded on rehydrate (like
+    /// <see cref="TotalSpawnedAgents"/>), so it survives replay + re-entry deterministically. The turn loop force-STOPs
+    /// when this EXCEEDS the run's <c>MaxCostUsd</c> (realized-spend backpressure — exactly-at-budget proceeds, like
+    /// the total-spawn cap). 0 when no spend is known yet (fail-open — cost never blocks the first spawn).
     /// </summary>
     public decimal RunSpendUsd { get; init; }
+
+    /// <summary>P3.5 — the SPAWNED-AGENT (coding harness) share of <see cref="RunSpendUsd"/> — every prior spawn/retry decision's folded agent token usage, priced. Broken out from the brain-plane share so the recitation/stop-detail can show a real breakdown, not just one merged figure.</summary>
+    public decimal AgentExecutionSpendUsd { get; init; }
+
+    /// <summary>P3.5 — the IN-PROCESS MODEL-CALL share of <see cref="RunSpendUsd"/>: the supervisor's own decision calls, a decision critic's review, a plan-authoring call, an acceptance-grading judge — every <c>interaction.completed</c> ledger row this run recorded, priced. 0 when no cost cap is set (the fold is skipped entirely — zero DB cost for the common uncapped run).</summary>
+    public decimal BrainPlaneSpendUsd { get; init; }
+
+    /// <summary>P3.5 — <see cref="BrainPlaneSpendUsd"/> broken out by its open <c>kind</c> label (e.g. <c>"supervisor.decision"</c>, <c>"critic.review"</c>, <c>"grader.acceptance"</c>) — the per-lane figures the budget recitation and the cost-cap stop detail both render. Empty when no cost cap is set.</summary>
+    public IReadOnlyDictionary<string, decimal> BrainPlaneSpendByKind { get; init; } = EmptySpendByKind;
+
+    /// <summary>P3.5 — the run's realized-spend cap in USD (carried from <c>SupervisorGoalPlan.MaxCostUsd</c> so the DECIDER can recite it — <c>DecideAsync</c> receives only this context, never the plan). Null = no cost cap; the budget recitation renders nothing.</summary>
+    public decimal? MaxCostUsd { get; init; }
+
+    private static readonly IReadOnlyDictionary<string, decimal> EmptySpendByKind = new Dictionary<string, decimal>();
 
     /// <summary>
     /// How many of the MOST RECENT consecutive decisions produced NO new SETTLED agent result, folded from the

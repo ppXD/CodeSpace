@@ -126,7 +126,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
         // is missing a required field / has a wrong-typed value / an invalid enum is NOT success (the old path returned
         // it blindly, so {} or a "no kind" object slipped through). On a validation miss, RE-ASK ONCE with the exact
         // violations named, then re-validate. A second miss is a typed Malformed fault (the engine fails it fast).
-        var first = await CompleteStructuredOnceAsync(request, request.SystemPrompt, cancellationToken).ConfigureAwait(false);
+        var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
         var errors = JsonSchemaValidator.Validate(first.Json, request.JsonSchema);
         if (errors.Count == 0) return first;
 
@@ -137,6 +137,20 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
+    }
+
+    /// <summary>The first structured attempt, with ONE re-ask when it produces NO parseable JSON at all — a transient malformation the repair pass can't recover. A parse failure gets the same second chance a schema violation does, with explicit "your output was not valid JSON" feedback, before it becomes a hard Malformed fault; a SECOND parse failure propagates as Malformed (the re-ask is bounded to once).</summary>
+    private async Task<StructuredLLMCompletion> FirstOrReaskOnParseFailureAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await CompleteStructuredOnceAsync(request, request.SystemPrompt, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.Malformed)
+        {
+            var feedbackSystem = StructuredJsonText.WithMalformedFeedback(request.SystemPrompt, ex.ProviderMessage);
+            return await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>One progressive structured attempt (forced tool-use → prompt-only floor) against the given base system prompt — the re-ask passes a feedback-augmented base so the SAME path retries with the validation errors named. The schema rides in the system prompt for both sub-attempts.</summary>

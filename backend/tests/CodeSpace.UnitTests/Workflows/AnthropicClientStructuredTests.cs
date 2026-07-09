@@ -123,6 +123,29 @@ public class AnthropicClientStructuredTests
     }
 
     [Fact]
+    public async Task Re_asks_once_on_a_PARSE_failure_then_recovers()
+    {
+        // A parse failure (no recoverable JSON on attempt 1's tool + floor) gets ONE re-ask with "your output was not
+        // valid JSON" feedback — the same second chance a schema violation gets — before it becomes a hard Malformed
+        // fault. Attempt 2's floor returns clean JSON → recovered. Mirrors the OpenAI wire (identical shared logic).
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool not supported" } }"""),                          // 1: forced tool rejected
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "I cannot comply." } ] }"""),    // 2: floor — no JSON
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool not supported" } }"""),                          // 3: re-ask forced tool rejected
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "{\"kind\":\"stop\"}" } ] }"""));  // 4: re-ask floor — clean JSON
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("stop", "a transient parse failure is re-asked, not hard-failed");
+        handler.RequestBodies.Count.ShouldBe(4, "attempt 1 (tool+floor, no JSON) then a re-ask (tool+floor) recovered");
+    }
+
+    [Fact]
     public async Task Degrades_to_a_prompt_only_request_when_the_forced_tool_returns_empty_content()
     {
         // The real-gateway case the content-preview diagnosis surfaced: forcing the tool yields an EMPTY reply. The

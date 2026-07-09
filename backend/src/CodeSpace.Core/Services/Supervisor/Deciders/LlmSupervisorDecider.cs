@@ -505,6 +505,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(recitation);
         }
 
+        // P3.5 — the BUDGET recitation, the same prompt-tail position: the model sees its own realized spend vs. the
+        // cap + a per-lane breakdown, so it can self-moderate BEFORE the server ever has to force-stop it. Null when
+        // no cost cap is set ⇒ byte-identical prompt for the common uncapped run.
+        if (SupervisorBudgetRecitation.Render(context.MaxCostUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind) is { } budget)
+        {
+            builder.AppendLine();
+            builder.AppendLine(budget);
+        }
+
         builder.AppendLine();
         builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 
