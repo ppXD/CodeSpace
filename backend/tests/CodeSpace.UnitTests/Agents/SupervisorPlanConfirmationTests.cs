@@ -24,7 +24,7 @@ public class SupervisorPlanConfirmationTests
     [Fact]
     public void IntoAskHuman_authors_a_marker_carrying_question_naming_the_version_and_size()
     {
-        var decision = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 2, itemCount: 3);
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 2, itemCount: 3, delivery: null);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
 
@@ -39,11 +39,60 @@ public class SupervisorPlanConfirmationTests
     [InlineData(true)]
     public void IntoAskHuman_is_deterministic_for_a_replayed_turn(bool viaCard)
     {
-        var a = SupervisorPlanConfirmation.IntoAskHuman(1, 2);
-        var b = SupervisorPlanConfirmation.IntoAskHuman(1, 2);
+        var a = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
+        var b = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
 
         (viaCard ? a.PayloadJson : a.Kind).ShouldBe(viaCard ? b.PayloadJson : b.Kind, "a crash-replay must re-derive byte-identical card bytes → the same idempotency key");
     }
+
+    // ── DC-1: the card names any side-effecting delivery contract before the operator approves ──
+
+    [Fact]
+    public void IntoAskHuman_names_an_auto_opened_pull_request_and_its_target_branch()
+    {
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true, TargetBranch = "release" });
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldContain("automatically open a pull request against release", customMessage: "the operator must see the side-effecting behaviour BEFORE approving the plan");
+    }
+
+    [Fact]
+    public void IntoAskHuman_names_the_default_branch_when_none_was_specified()
+    {
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true });
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldContain("the repository's default branch");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public void IntoAskHuman_names_nothing_extra_when_no_pr_would_open(bool? openPullRequest)
+    {
+        var delivery = openPullRequest is null ? null : new DeliverySpec { OpenPullRequest = openPullRequest };
+
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, delivery);
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldNotContain("pull request", customMessage: "no contract, or an explicit don't-open, is the safe default — it needs no extra confirmation attention");
+        question.ShouldContain(SupervisorPlanConfirmation.ConfirmationMarker, customMessage: "the marker must still be intact regardless of the delivery summary");
+    }
+
+    // ── LatestPlanDecision ──
+
+    [Fact]
+    public void LatestPlanDecision_returns_the_newest_plan_when_a_re_plan_exists()
+    {
+        var v1 = Decision(SupervisorDecisionKinds.Plan, """{"goal":"g","subtasks":[]}""", outcomeJson: "{}");
+        var v2 = Decision(SupervisorDecisionKinds.Plan, """{"goal":"g2","subtasks":[]}""", outcomeJson: "{}");
+
+        SupervisorPlanConfirmation.LatestPlanDecision(new[] { v1, Spawn(), v2 }).ShouldBe(v2);
+    }
+
+    [Fact]
+    public void LatestPlanDecision_returns_null_when_no_plan_exists() =>
+        SupervisorPlanConfirmation.LatestPlanDecision(new[] { Spawn() }).ShouldBeNull();
 
     // ── NeedsConfirmation: anchored on the LATEST plan, looking for this gate's own card after it ──
 
@@ -192,14 +241,14 @@ public class SupervisorPlanConfirmationTests
 
     private static SupervisorPriorDecision ConfirmationCard(string? answer = null)
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
         return Decision(card.Kind, card.PayloadJson, AskOutcome(answer));
     }
 
     /// <summary>The DEGRADED no-surface card: marker-carrying payload, but the outcome recorded neither a wait token nor an answer (RealSupervisorActionExecutor's no-conversation self-advance).</summary>
     private static SupervisorPriorDecision DegradedConfirmationCard()
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
         return Decision(card.Kind, card.PayloadJson, JsonSerializer.Serialize(new { question = "q", askHuman = "no-conversation", answer = (string?)null }));
     }
 

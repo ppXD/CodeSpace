@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Agents;
@@ -49,6 +50,14 @@ public sealed record SupervisorGoalConfig
 
     /// <summary>When true, an AUTHORED plan must be confirmed by a human before any agent runs (triad S3): the turn loop parks an ask_human confirmation card right after each new plan version — an approving answer releases execution (plan → Confirmed); any other answer is revision feedback the decider folds into a revised plan version (→ Rejected + re-gate). Null / false ⇒ no gate (byte-identical pre-S3 behaviour).</summary>
     public bool? RequirePlanConfirmation { get; init; }
+
+    /// <summary>
+    /// DC-1 (Universal Delivery Contract) — the operator's OWN pre-declared delivery preference, PER FIELD
+    /// authoritative over anything the model proposes on its plan (<see cref="Supervisor.SupervisorDeliveryClamp"/>
+    /// enforces this at plan-persist time). Null (the default) ⇒ the model's own plan-time proposal (if any)
+    /// stands untouched — byte-identical to pre-DC-1 behaviour for every run that never mentions delivery at all.
+    /// </summary>
+    public DeliverySpec? DeliverySpec { get; init; }
 
     /// <summary>
     /// Which decisions require a human in the loop before their side effect fires (PR-E E5 governance). Parsed

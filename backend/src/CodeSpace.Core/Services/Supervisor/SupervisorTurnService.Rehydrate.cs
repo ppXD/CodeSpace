@@ -141,6 +141,7 @@ public sealed partial class SupervisorTurnService
             AllowedAgentDefinitionIds = NormalizeModelIds(goalConfig?.AllowedAgentDefinitionIds),
             AcceptanceCriteria = NormalizeTools(goalConfig?.AcceptanceCriteria),
             RequirePlanConfirmation = goalConfig?.RequirePlanConfirmation == true,
+            DeliverySpec = goalConfig?.DeliverySpec,
             SupervisorModelId = goalConfig?.SupervisorModelId,
             DecisionReviewMode = goalConfig?.DecisionReviewMode ?? ReviewMode.None,
             PlanReviewMode = goalConfig?.PlanReviewMode ?? ReviewMode.None,

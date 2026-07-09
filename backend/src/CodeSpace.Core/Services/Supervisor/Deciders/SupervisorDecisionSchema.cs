@@ -103,6 +103,15 @@ public static class SupervisorDecisionSchema
                     "required": ["id", "title"]
                   },
                   "description": "Optional semantic phases (L4) grouping subtasks into named, accepting stages — for a legible plan. Absent → the flat subtask plan."
+                },
+                "delivery": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "openPullRequest": { "type": "boolean", "description": "Whether this run should automatically open a pull request once its accepted work is published. Propose true ONLY when the goal or the user's own instructions actually ask for it; omit otherwise." },
+                    "targetBranch": { "type": "string", "description": "The branch a requested pull request should target. Omit to use the repository's own default branch." }
+                  },
+                  "description": "Optional delivery contract for what this run should produce beyond the code change itself. The operator's own configuration always overrides this per field when it names one."
                 }
               },
               "required": ["goal", "subtasks"],

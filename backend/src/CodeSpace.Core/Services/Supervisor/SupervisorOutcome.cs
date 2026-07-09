@@ -1056,6 +1056,25 @@ public static class SupervisorOutcome
         }
     }
 
+    /// <summary>
+    /// DC-1 — read the EFFECTIVE (already server-clamped, see <see cref="SupervisorDeliveryClamp"/>) delivery
+    /// contract off a <c>plan</c> decision's PAYLOAD. Null when absent/malformed — the common pre-DC-1 case, and
+    /// any run whose plan never named a delivery preference on either side (model or operator).
+    /// </summary>
+    public static DeliverySpec? ReadPlanDelivery(string? planPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(planPayloadJson)) return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<SupervisorPlanPayload>(planPayloadJson, AgentJson.Options)?.Delivery;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Read the plan-local subtask ids off a <c>spawn</c> decision's PAYLOAD (the fan-out order) — empty when absent/malformed. The spawn outcome's <c>agentRunIds[i]</c> corresponds to this payload's <c>subtaskIds[i]</c> (same staging order), so a phase's grouped subtasks map to the agents that ran them (C2).</summary>
     public static IReadOnlyList<string> ReadSpawnSubtaskIds(string? spawnPayloadJson)
     {

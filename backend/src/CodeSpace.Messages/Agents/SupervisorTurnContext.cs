@@ -134,6 +134,14 @@ public sealed record SupervisorTurnContext
     /// <summary>Whether an AUTHORED plan must be confirmed by a human before any agent runs (triad S3 gate) — the turn loop parks an ask_human confirmation card after each unconfirmed plan version. False (the default) ⇒ no gate.</summary>
     public bool RequirePlanConfirmation { get; init; }
 
+    /// <summary>
+    /// DC-1 (Universal Delivery Contract) — the operator's OWN pre-declared delivery preference (carried from
+    /// <c>SupervisorGoalConfig.DeliverySpec</c>), PER FIELD authoritative over the model's own plan-time proposal
+    /// (<see cref="Supervisor.SupervisorDeliveryClamp"/> enforces this at plan-persist time). Null (the default,
+    /// and every pre-DC-1 run) ⇒ the model's own proposal, if any, stands untouched.
+    /// </summary>
+    public DeliverySpec? DeliverySpec { get; init; }
+
     /// <summary>The PLAN-scoped critic (S4e): a <c>plan</c> decision reviews under THIS mode when set (else under <c>DecisionReviewMode</c>); non-plan decisions never use it. None (default) ⇒ byte-identical.</summary>
     public ReviewMode PlanReviewMode { get; init; } = ReviewMode.None;
 

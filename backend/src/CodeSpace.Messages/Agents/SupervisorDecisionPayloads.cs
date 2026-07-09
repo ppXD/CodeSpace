@@ -26,6 +26,18 @@ public sealed record SupervisorPlanPayload
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<SupervisorPlanPhase>? Phases { get; init; }
+
+    /// <summary>
+    /// DC-1 — the model's OWN proposed delivery contract (e.g. "open a pull request against main"), clamped
+    /// against the operator's pre-declared <c>SupervisorTurnContext.DeliverySpec</c> at plan-persist time
+    /// (<c>SupervisorDeliveryClamp</c>, Core — Messages can't reference it, Rule 18.1) before this payload is
+    /// frozen — so what round-trips here is always the EFFECTIVE contract, never the model's raw unclamped
+    /// proposal. Null-omitted, so a plan
+    /// that names no delivery preference at all serializes byte-identical to before DC-1 (idempotency-key bytes
+    /// unchanged).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DeliverySpec? Delivery { get; init; }
 }
 
 /// <summary>One planned subtask the supervisor can later spawn / retry by <see cref="Id"/>.</summary>
