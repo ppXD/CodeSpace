@@ -635,6 +635,125 @@ public class StuckRunReconcilerFlowTests
     }
 
     [Fact]
+    public async Task A_stranded_supervisor_infra_park_wait_past_its_deadline_is_re_fired_by_the_reconciler()
+    {
+        // P4.3 — the last un-backstopped bounded wait, closed: a SupervisorInfraPark deadline (the P1.1
+        // model-plane-outage park ladder) overdue past the grace, on a Suspended run, means the scheduled
+        // ResumeByDeadlineAsync job was lost — the same dropped-schedule signature the Timer sweep already covers.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 2);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(1, "a SupervisorInfraPark deadline overdue past the grace on a Suspended run is re-fired — closing the last un-backstopped bounded wait");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued, exactly as the scheduled deadline job would");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.SupervisorInfraPark);
+
+        wait.Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+        var payload = JsonDocument.Parse(wait.PayloadJson!).RootElement;
+        payload.GetProperty("infraPark").GetBoolean().ShouldBeTrue("the resume payload is the SAME marker the deadline job would have injected — the ladder position rides to the re-entered turn intact");
+        payload.GetProperty("parks").GetInt32().ShouldBe(2, "the ladder position is preserved verbatim, not reset — a re-fire must never look like a fresh outage");
+    }
+
+    [Fact]
+    public async Task A_supervisor_infra_park_wait_whose_deadline_has_not_come_due_is_left_alone()
+    {
+        // A healthy park — its deadline is still in the future, so the real scheduled job will fire it. The sweep
+        // must never wake a run early (that would collapse the whole exponential backoff ladder to fire-now).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow.AddMinutes(30), parks: 1);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "a park deadline that hasn't come due is healthy — never re-fired early");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the healthy park's run stays parked until its real deadline");
+    }
+
+    [Fact]
+    public async Task A_stranded_supervisor_infra_park_wait_with_no_stored_payload_is_left_alone()
+    {
+        // Defensive: ResumeByDeadlineAsync requires the TimeoutPayload to resume with. A row with a null payload
+        // (which production code never actually writes for this wait kind) must never be re-fired with a
+        // fabricated marker — better to leave a malformed row alone than invent ladder state.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1, payloadJson: null);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "a payload-less infra-park wait is never re-fired — there is no marker to resume with, so fabricating one would corrupt the ladder position");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "left parked rather than guessed at");
+    }
+
+    [Fact]
+    public async Task A_stranded_supervisor_infra_park_wait_still_resolves_correctly_after_the_window_would_have_exhausted()
+    {
+        // Even when the FIRST park anchors past the 24h window (the run's own re-entry would force-stop honestly
+        // per P1.1), the reconciler's job is only to re-fire the deadline resume — the node itself decides to
+        // force-stop on re-entry. The sweep must still resolve the wait + dispatch, never silently drop it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        var firstParkedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromHours(25);
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 4, firstParkedAtUtc: firstParkedAtUtc);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(1, "the reconciler re-fires regardless of how old the outage is — the force-stop decision belongs to the node's own re-entry logic, not this sweep");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "dispatched so the node can re-enter and force-stop honestly on its own");
+    }
+
+    [Fact]
+    public async Task A_stranded_supervisor_infra_park_wait_on_a_non_suspended_run_is_left_alone()
+    {
+        // Defensive: the sweep only touches Suspended runs, mirroring every other bounded-wait backstop — a run
+        // that already advanced (e.g. a fast concurrent resume) must never be re-dispatched a second time.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Running, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(0, "the wait's run is no longer Suspended — a concurrent resume already moved it, so re-firing would double-dispatch");
+    }
+
+    [Fact]
+    public async Task A_stranded_supervisor_infra_park_parent_run_with_two_stale_waits_ready_at_once_is_bounded_by_the_batch_size()
+    {
+        // Sanity: the sweep is per-WAIT-ROW (each run parks at most one InfraPark wait at a time in production, since
+        // a new park REPLACES the prior one — see WorkflowEngine.SuspendNodeAsync's existing-wait cleanup), so two
+        // independently-parked runs each get recovered once, proving the sweep doesn't accidentally skip or double-count.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runA = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+        var runB = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedSupervisorInfraParkWaitAsync(runA, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
+        await SeedSupervisorInfraParkWaitAsync(runB, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 3);
+
+        var summary = await ReconcileAsync();
+
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBe(2, "both independently-parked runs are recovered in the same tick");
+        (await ReadStatusAsync(runA)).ShouldBe(WorkflowRunStatus.Enqueued);
+        (await ReadStatusAsync(runB)).ShouldBe(WorkflowRunStatus.Enqueued);
+    }
+
+    [Fact]
     public async Task A_stranded_subworkflow_parent_with_a_terminal_child_is_recovered_carrying_the_childs_real_outputs()
     {
         // The last un-backstopped strand: a parent parked (Suspended) on a Pending Subworkflow wait whose child is
@@ -728,6 +847,39 @@ public class StuckRunReconcilerFlowTests
             WakeAt = wakeAt,
             Status = WorkflowWaitStatuses.Pending,
             PayloadJson = null,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a SupervisorInfraPark wait carrying the SAME marker shape <c>SupervisorInfraPark.Marker</c> produces (both the suspend Payload and the deadline's TimeoutPayload, per <c>AgentSupervisorNode.ParkForInfraOrStopAsync</c>), so the reconciler's re-fire round-trips a real ladder position. <paramref name="payloadJson"/> overrides the marker entirely (e.g. null, to test the defensive no-payload case).</summary>
+    private async Task SeedSupervisorInfraParkWaitAsync(Guid runId, DateTimeOffset wakeAt, int parks, DateTimeOffset? firstParkedAtUtc = null, string? payloadJson = "__default__")
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var marker = payloadJson == "__default__"
+            ? JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["infraPark"] = true,
+                ["parks"] = parks,
+                ["firstParkedAtUtc"] = (firstParkedAtUtc ?? DateTimeOffset.UtcNow.AddMinutes(-30)).ToString("o"),
+                ["error"] = "gateway 429 (seeded)",
+            })
+            : payloadJson;
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = "supervisor",
+            IterationKey = $"supervisor#infra{parks}",
+            WaitKind = WorkflowWaitKinds.SupervisorInfraPark,
+            Token = Guid.NewGuid().ToString("N"),
+            WakeAt = wakeAt,
+            Status = WorkflowWaitStatuses.Pending,
+            PayloadJson = marker,
             CreatedAt = DateTimeOffset.UtcNow,
         });
 

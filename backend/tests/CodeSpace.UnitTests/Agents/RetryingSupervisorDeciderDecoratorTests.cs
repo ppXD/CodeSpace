@@ -57,6 +57,28 @@ public class RetryingSupervisorDeciderDecoratorTests
         inner.Calls.ShouldBe(3, "all three attempts run, then the last transient propagates unchanged");
     }
 
+    [Fact]
+    public async Task Many_consecutive_exhaustions_across_simulated_wakes_never_fabricate_a_decision()
+    {
+        // P4.3 — a sustained 429 storm is many independent "wake, retry-exhaust, park again" cycles (the node
+        // re-enters the SAME turn on each SupervisorInfraPark deadline wake — see SupervisorInfraParkStormTests for
+        // the park-ladder half). Simulate 10 such cycles here, an order of magnitude past the single-cycle retry
+        // budget: every cycle must re-throw the SAME category unchanged — NEVER silently return a fabricated
+        // decision — so the caller (AgentSupervisorNode) always sees a real fault to park on, never a false Stop.
+        for (var wake = 0; wake < 10; wake++)
+        {
+            var inner = new ScriptedInner(
+                _ => throw Fault(LlmErrorCategory.RateLimited),
+                _ => throw Fault(LlmErrorCategory.RateLimited),
+                _ => throw Fault(LlmErrorCategory.RateLimited));
+
+            var ex = await Should.ThrowAsync<LlmApiException>(() => Decorator(inner, Options(maxAttempts: 3)).DecideAsync(Ctx, CancellationToken.None));
+
+            ex.Category.ShouldBe(LlmErrorCategory.RateLimited, $"wake {wake}: the storm hasn't cleared — the fault must still propagate unchanged");
+            inner.Calls.ShouldBe(3, $"wake {wake}: every attempt in this cycle ran and the exhausted fault escaped unchanged — never a fabricated decision");
+        }
+    }
+
     // ── The decorator's OWN per-attempt timeout is a retryable transient ──────────────
 
     [Fact]
