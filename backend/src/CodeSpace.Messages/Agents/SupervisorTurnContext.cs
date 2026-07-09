@@ -179,6 +179,28 @@ public sealed record SupervisorTurnContext
     /// A pure data noun (Rule 18.1) — the projected <see cref="PendingDecision"/>, never the Core entity.
     /// </summary>
     public IReadOnlyList<PendingDecision> PendingChildDecisions { get; init; } = Array.Empty<PendingDecision>();
+
+    /// <summary>
+    /// The AgentRunIds this run has a GENUINELY published <c>PublishManifest</c> row for — <c>Pushed</c>, or with an
+    /// opened PR/MR — read once at rehydrate from the canonical publish-or-park ledger. <see cref="Supervisor.SupervisorPublishGate"/>
+    /// (I3) checks this DIRECTLY against the unpublished frontier's own contributors, so a single already-pushed
+    /// agent satisfies "published" without needing a SEPARATE Integration-kind manifest a merge step may never have
+    /// written (e.g. because the auto-integrate-at-stop augmentation is opt-in-gated, or a model-authored ordinary
+    /// merge already consumed the gate's one server-authored-merge retry before any stop was ever attempted). Empty
+    /// when the run has published nothing yet (the common in-flight case) — byte-identical fold, DB-gated the same
+    /// way the other ledger facts above are (a run with no unpublished frontier never needs this).
+    ///
+    /// <para>NOT (yet) the single source of truth every "is this run published" reader shares: the Room UI
+    /// (<c>RoomProjector.PublishStateAsync</c>), <c>RoomPullRequestService.ResolveTargetsAsync</c>, and
+    /// <c>AgentSupervisorNode.Finish</c>'s <c>integratedBranch</c> output still read ONLY the merge-derived
+    /// <c>SupervisorOutcome.ReadFinalIntegratedBranch</c>/<c>ReadFinalRepositoryBranches</c> — so a run I3 lets
+    /// complete via this ledger-direct path can still show a disabled Open-PR affordance, or an empty
+    /// <c>integratedBranch</c> a downstream <c>git.open_pr</c> node requires. Unifying those readers onto this same
+    /// ledger fact is tracked as a follow-up, not yet done.</para>
+    /// </summary>
+    public IReadOnlySet<Guid> PublishedAgentRunIds { get; init; } = EmptyGuidSet;
+
+    private static readonly IReadOnlySet<Guid> EmptyGuidSet = new HashSet<Guid>();
 }
 
 /// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>

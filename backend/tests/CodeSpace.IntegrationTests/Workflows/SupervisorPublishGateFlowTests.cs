@@ -80,6 +80,121 @@ public sealed class SupervisorPublishGateFlowTests
     }
 
     [Fact]
+    public async Task A_stop_whose_frontier_is_already_published_via_its_own_manifest_completes_with_no_merge_attempt()
+    {
+        // Real-incident regression (run 96695645-2555-453b-9208-4e1df5114770): a single accepted unit's OWN
+        // AgentRunId already had a Pushed PublishManifest row, but no SEPARATE Integration-kind manifest ever
+        // existed for a later merge (the auto-integrate-at-stop augmentation is opt-in-gated, and this scenario's
+        // model-authored merge never triggers it). Before this fix, I3 saw "not published" and repeatedly rewrote
+        // every stop attempt into the SAME templated ask_human, forever — even though the work was already on a
+        // real, pushed branch. This test proves the gate now reads the canonical PublishManifest ledger directly
+        // and lets the run complete WITHOUT ever needing a merge at all.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, agentRunId);
+        await SeedPushedManifestAsync(runId, teamId, agentRunId, "codespace/agent/already-pushed");
+
+        var stop = await RunStopTurnAsync(runId, teamId, repoId);
+
+        stop.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "the frontier's own contributor is already published on the ledger — I3 must let the summarized stop through directly, no merge and no ask_human");
+    }
+
+    [Fact]
+    public async Task A_stop_whose_frontier_is_already_published_but_carries_no_summary_still_parks_to_ask_human()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, agentRunId);
+        await SeedPushedManifestAsync(runId, teamId, agentRunId, "codespace/agent/already-pushed");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var service = NewTurnService(scope, new AlwaysStopWithNoSummaryDecider());
+            await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId), CancellationToken.None);
+        }
+
+        using var verify = _fixture.BeginScope();
+        var latest = await verify.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId).OrderByDescending(d => d.Sequence).FirstAsync();
+
+        latest.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "published work still needs a summary before the run can complete — the same rule I3 already applies to an integration-published run");
+    }
+
+    [Fact]
+    public async Task A_pushed_but_acceptance_rejected_contributor_never_satisfies_i3_via_the_published_shortcut()
+    {
+        // Finding 1 (adversarial sweep on the P0-5 fix): a raw push happens BEFORE the per-unit acceptance grade
+        // folds (AgentRunExecutor pushes at agent-completion time; FoldUnitAcceptanceGradeAsync grades later) — so a
+        // REJECTED unit can still show up as Pushed on the canonical ledger. I3's published shortcut must exclude
+        // it, the same "局部綠≠整合綠" bar the merge + resolver doors already enforce — otherwise I3 would let a run
+        // complete with ONLY rejected work.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        var agentRunId = Guid.NewGuid();
+        await SeedRejectedSpawnAsync(runId, agentRunId);
+        await SeedPushedManifestAsync(runId, teamId, agentRunId, "codespace/agent/rejected-but-pushed");
+
+        var merge = await RunStopTurnAsync(runId, teamId, repoId);
+
+        merge.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "the contributor's push does not count as published once its own acceptance grade rejected it — I3 falls through to the ordinary ladder, never a silent complete");
+    }
+
+    [Fact]
+    public async Task A_frontiers_published_manifest_never_overrides_a_prior_diagnosed_merge_conflict()
+    {
+        // Finding 2 (adversarial sweep on the P0-5 fix): "pushed" and "cleanly integrates" are INDEPENDENT facts
+        // about the SAME branch — a contributor's own raw push happens at agent-completion time, strictly BEFORE any
+        // later merge/integrate attempt over that branch. A prior merge that ran a real integrate step and genuinely
+        // conflicted must outrank the raw-push shortcut, never be silently overridden by it — proven through the
+        // REAL rehydrate-from-Postgres path (not a synthetic in-memory context), the exact production seam the P0-5
+        // fix touched. The Conflicted outcome is seeded directly (mirrors what the real integrator writes — see the
+        // real-git equivalent below) for a deterministic, DB-only proof of the ordering fix.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, agentRunId);
+        await SeedPushedManifestAsync(runId, teamId, agentRunId, "codespace/agent/already-pushed");
+        await SeedConflictedMergeAsync(runId, "base SHA mismatch");
+
+        var park = await RunStopTurnAsync(runId, teamId, repoId);
+
+        park.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a prior diagnosed integration conflict outranks the raw-push shortcut — the run must park, not silently complete");
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(park.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("base SHA mismatch", Case.Insensitive, "the park names the diagnosed reason, not a generic message");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_agent_with_only_one_repo_pushed_is_not_recognized_as_published()
+    {
+        // The all-or-nothing multi-repo posture: TWO manifest rows share the SAME AgentRunId (one per repo it
+        // wrote to) — only ONE repo actually pushed. A lone pushed repo must never mask an unpublished sibling,
+        // so this agent must NOT be in the published set, and I3 must still fall through to its ordinary ladder.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, agentRunId);
+        await SeedPushedManifestAsync(runId, teamId, agentRunId, "codespace/agent/web-pushed", alias: "web");
+        await SeedPatchOnlyManifestAsync(runId, teamId, agentRunId, alias: "api");
+
+        var merge = await RunStopTurnAsync(runId, teamId, repoId);
+
+        merge.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "one published repo out of two must never satisfy I3 for the whole agent — it falls through to the ordinary forced-merge ladder exactly as if nothing were published");
+    }
+
+    [Fact]
     public async Task A_stop_after_a_conflicting_auto_merge_parks_to_ask_human()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -154,21 +269,7 @@ public sealed class SupervisorPublishGateFlowTests
     {
         using (var scope = _fixture.BeginScope())
         {
-            var service = new SupervisorTurnService(
-                scope.Resolve<ISupervisorDecisionLog>(),
-                new AlwaysStopDecider(),
-                scope.Resolve<ISupervisorActionExecutor>(),
-                scope.Resolve<CodeSpaceDbContext>(),
-                scope.Resolve<ISupervisorAcceptanceGrader>(),
-                scope.Resolve<IDecisionQueueService>(),
-                scope.Resolve<IDecisionArbiter>(),
-                scope.Resolve<IDecisionAnswerService>(),
-                scope.Resolve<Core.Services.Plans.IWorkPlanService>(),
-                scope.Resolve<Core.Services.Workflows.Lifecycle.IRunRecordLogger>(),
-                scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
-                scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(),
-                scope.Resolve<ILogger<SupervisorTurnService>>());
-
+            var service = NewTurnService(scope, new AlwaysStopDecider());
             await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId), CancellationToken.None);
         }
 
@@ -181,6 +282,22 @@ public sealed class SupervisorPublishGateFlowTests
         return new SupervisorDecisionRecordSnapshot(latest.DecisionKind, latest.PayloadJson, latest.OutcomeJson);
     }
 
+    /// <summary>The REAL <see cref="SupervisorTurnService"/>, every dependency resolved from the scope except the decider (scripted per test) — the shared construction every turn driver in this file reuses.</summary>
+    private static SupervisorTurnService NewTurnService(ILifetimeScope scope, ISupervisorDecider decider) => new(
+        scope.Resolve<ISupervisorDecisionLog>(),
+        decider,
+        scope.Resolve<ISupervisorActionExecutor>(),
+        scope.Resolve<CodeSpaceDbContext>(),
+        scope.Resolve<ISupervisorAcceptanceGrader>(),
+        scope.Resolve<IDecisionQueueService>(),
+        scope.Resolve<IDecisionArbiter>(),
+        scope.Resolve<IDecisionAnswerService>(),
+        scope.Resolve<Core.Services.Plans.IWorkPlanService>(),
+        scope.Resolve<Core.Services.Workflows.Lifecycle.IRunRecordLogger>(),
+        scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
+        scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(),
+        scope.Resolve<ILogger<SupervisorTurnService>>());
+
     private sealed record SupervisorDecisionRecordSnapshot(string Kind, string PayloadJson, string? OutcomeJson);
 
     /// <summary>A decider that always tries to stop with a real summary — I3 alone decides whether that stop proceeds, is rewritten to a merge, or is parked.</summary>
@@ -191,6 +308,17 @@ public sealed class SupervisorPublishGateFlowTests
             {
                 Kind = SupervisorDecisionKinds.Stop,
                 PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "completed", Summary = "shipped the feature" }, AgentJson.Options),
+            });
+    }
+
+    /// <summary>A decider that always tries to stop with a BLANK summary — proves I3's summary requirement still applies to a run published via the P0-5 ledger-direct recognition, not only the integration path.</summary>
+    private sealed class AlwaysStopWithNoSummaryDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision
+            {
+                Kind = SupervisorDecisionKinds.Stop,
+                PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "completed", Summary = "" }, AgentJson.Options),
             });
     }
 
@@ -307,6 +435,83 @@ public sealed class SupervisorPublishGateFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
             DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn-{Guid.NewGuid():N}", InputHash = "test",
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a <c>spawn</c> decision for a unit whose per-unit acceptance grade OBJECTIVELY REJECTED it (Finding 1's
+    /// shape) — mirrors <see cref="SeedSpawnAsync"/> but stamps <see cref="SupervisorAgentResult.AcceptancePassed"/> false.</summary>
+    private async Task SeedRejectedSpawnAsync(Guid runId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var teamId = await db.WorkflowRun.Where(r => r.Id == runId).Select(r => r.TeamId).SingleAsync();
+
+        var unit = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ChangedFiles = new[] { "feature.txt" }, AcceptancePassed = false };
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1 }, AgentJson.Options), new[] { unit });
+
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a genuinely-published Agent-kind <c>PublishManifest</c> row DIRECTLY (bypassing real git — this scenario proves the GATE reads the ledger, not the integrator's own push mechanics, which are covered elsewhere in this file).</summary>
+    private async Task SeedPushedManifestAsync(Guid runId, Guid teamId, Guid agentRunId, string branch, string alias = "primary")
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, AgentRunId = agentRunId,
+            RepositoryAlias = alias, Branch = branch, PublishStateValue = PublishState.Pushed,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a manifest row for a repo the agent touched but never pushed (patch-only) — the multi-repo "one sibling unpublished" half of the all-or-nothing test.</summary>
+    private async Task SeedPatchOnlyManifestAsync(Guid runId, Guid teamId, Guid agentRunId, string alias)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = runId, AgentRunId = agentRunId,
+            RepositoryAlias = alias, PublishStateValue = PublishState.PatchOnly,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a REAL merge decision whose recorded integration genuinely CONFLICTED — the same <c>{ merged, count, integration }</c>
+    /// shape the real integrator writes (see the real-git equivalent, <c>A_stop_after_a_conflicting_auto_merge_parks_to_ask_human</c>),
+    /// written directly so the ordering fix (Finding 2) has a deterministic, DB-only proof independent of real git.</summary>
+    private async Task SeedConflictedMergeAsync(Guid runId, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var teamId = await db.WorkflowRun.Where(r => r.Id == runId).Select(r => r.TeamId).SingleAsync();
+
+        var outcome = JsonSerializer.Serialize(new { merged = Array.Empty<object>(), count = 0, integration = new { status = "Conflicted", integratedBranch = (string?)null, reason } }, AgentJson.Options);
+
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome,
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();

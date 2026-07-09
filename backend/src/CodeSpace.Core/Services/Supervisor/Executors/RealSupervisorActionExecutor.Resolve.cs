@@ -108,7 +108,7 @@ public sealed partial class RealSupervisorActionExecutor
         foreach (var prior in context.PriorDecisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
             foreach (var result in SupervisorOutcome.ReadAgentResults(prior.OutcomeJson))
             {
-                if (IsAcceptanceRejected(result)) continue;   // slice 4: a per-unit-rejected unit's work never reaches the head, via the resolver door either
+                if (SupervisorOutcome.IsAcceptanceRejected(result)) continue;   // slice 4: a per-unit-rejected unit's work never reaches the head, via the resolver door either
 
                 foreach (var repo in result.RepositoryResults)
                     if (repo.RepositoryId == repositoryId && !string.IsNullOrWhiteSpace(repo.ProducedBranch) && !branches.Contains(repo.ProducedBranch!))
@@ -155,9 +155,9 @@ public sealed partial class RealSupervisorActionExecutor
     /// EVERY produced branch the prior spawn/retry agents pushed, in spawn order, deduped — the FULL set the resolver
     /// re-merges (NOT just the conflicting subset the integration block names; the resolver needs all the agents'
     /// branches to reconcile them) MINUS any unit a per-unit acceptance grade objectively REJECTED (slice 4 — withheld
-    /// via <see cref="IsAcceptanceRejected"/>). Mirrors <see cref="ResolveAgentRunIdsToMerge"/>'s "all prior spawn/retry
-    /// minus rejected" scope so the resolver reconciles exactly the set the merge integrated (the two doors to the head
-    /// withhold the same units). A branch-less agent (failed / no push) contributes nothing.
+    /// via <see cref="SupervisorOutcome.IsAcceptanceRejected"/>). Mirrors <see cref="ResolveAgentRunIdsToMerge"/>'s "all
+    /// prior spawn/retry minus rejected" scope so the resolver reconciles exactly the set the merge integrated (the two
+    /// doors to the head withhold the same units). A branch-less agent (failed / no push) contributes nothing.
     /// </summary>
     internal static IReadOnlyList<string> CollectAgentBranches(SupervisorTurnContext context)
     {
@@ -165,7 +165,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var prior in context.PriorDecisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry))
             foreach (var result in SupervisorOutcome.ReadAgentResults(prior.OutcomeJson))
-                if (!IsAcceptanceRejected(result) && !string.IsNullOrWhiteSpace(result.ProducedBranch) && !branches.Contains(result.ProducedBranch!))
+                if (!SupervisorOutcome.IsAcceptanceRejected(result) && !string.IsNullOrWhiteSpace(result.ProducedBranch) && !branches.Contains(result.ProducedBranch!))
                     branches.Add(result.ProducedBranch!);
 
         return branches;

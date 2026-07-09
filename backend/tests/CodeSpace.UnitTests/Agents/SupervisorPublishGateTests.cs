@@ -117,6 +117,88 @@ public class SupervisorPublishGateTests
         substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "fresh unconsolidated work after the failed merge is a NEW frontier, worth one more auto-merge attempt");
     }
 
+    // ── P0-5: the frontier's OWN contributor already has a genuinely published manifest ──
+
+    [Fact]
+    public void A_frontiers_already_published_contributor_satisfies_i3_without_any_merge_at_all()
+    {
+        // Real bug (run 96695645): a single accepted unit's own AgentRunId already had a Pushed PublishManifest
+        // row, but no SEPARATE Integration-kind manifest ever existed (the model's own ordinary merge never
+        // triggered the opt-in-gated integrate-at-stop augmentation) — I3 must recognize the already-published
+        // contributor directly, never force a redundant merge or park on a human forever with nothing that can change.
+        var agentRunId = Guid.NewGuid();
+        var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)));
+
+        SupervisorPublishGate.Validate(context, StopDecision("shipped the fix")).ShouldBeNull(
+            "the frontier's own contributor is already published on the canonical ledger — no merge is needed at all");
+    }
+
+    [Fact]
+    public void A_frontiers_already_published_contributor_with_a_blank_summary_still_parks_to_ask_human()
+    {
+        var agentRunId = Guid.NewGuid();
+        var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision(""));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "published work still needs a summary before the run can complete — the same rule as an integration-published run");
+    }
+
+    [Fact]
+    public void A_different_agents_publication_never_satisfies_a_different_frontiers_i3_check()
+    {
+        // The published set must be checked against THIS frontier's own contributor, never any agent the run
+        // happens to have published — a false positive here would let I3 wave through genuinely unpublished work.
+        var agentRunId = Guid.NewGuid();
+        var someOtherPublishedAgent = Guid.NewGuid();
+        var context = Context(published: new[] { someOtherPublishedAgent }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("done"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "the frontier's own agent is NOT in the published set — I3 falls through to the ordinary forced-merge ladder exactly as before this fix");
+    }
+
+    [Fact]
+    public void A_pushed_but_acceptance_rejected_contributor_never_satisfies_i3_via_the_published_shortcut()
+    {
+        // A raw push happens BEFORE the per-unit acceptance grade folds (AgentRunExecutor pushes at execution time;
+        // FoldUnitAcceptanceGradeAsync grades later) — so a REJECTED unit can still show up as Pushed in the ledger.
+        // The published shortcut must exclude it, the same "局部綠≠整合綠" bar the merge + resolver doors already
+        // enforce (SupervisorOutcome.IsAcceptanceRejected) — otherwise I3 lets a run complete with ONLY rejected work.
+        var agentRunId = Guid.NewGuid();
+        var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId, acceptancePassed: false)));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("done"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "the contributor's push does NOT count as published once its own acceptance grade rejected it — I3 falls through to the ordinary ladder");
+    }
+
+    [Fact]
+    public void A_frontiers_published_contributor_never_overrides_a_later_diagnosed_merge_conflict()
+    {
+        // "Pushed" and "cleanly integrates" are INDEPENDENT facts about the same branch — the contributor's own raw
+        // push happens at agent-completion time, strictly BEFORE any later merge/integrate attempt over that branch.
+        // A later merge that ran a real integrate step and genuinely conflicted must never be silently overridden by
+        // the raw-push shortcut — that would let I3 wave a stop through with a real, already-diagnosed integration
+        // failure still unresolved underneath it.
+        var agentRunId = Guid.NewGuid();
+        var context = Context(
+            published: new[] { agentRunId },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", integratedBranch: null, reason: "base SHA mismatch")));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped the fix"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a later diagnosed conflict outranks the raw-push shortcut — the run must park, not silently complete");
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("base SHA mismatch", Case.Insensitive, "the park names the diagnosed reason, not a generic message");
+    }
+
     // ── (5)/(6): published — the summary requirement ───────────────────────────────────
 
     [Fact]
@@ -209,8 +291,13 @@ public class SupervisorPublishGateTests
 
     private static readonly string VerifiedSummary = $"reconciled cleanly. {SupervisorResolverRecipe.TestsPassedMarker}";
 
-    private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) =>
-        new() { Goal = "ship", SupervisorRunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), NodeId = "sup", TurnNumber = prior.Length + 1, PriorDecisions = prior };
+    private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) => Context(published: null, prior);
+
+    private static SupervisorTurnContext Context(IReadOnlyCollection<Guid>? published, params SupervisorPriorDecision[] prior) => new()
+    {
+        Goal = "ship", SupervisorRunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), NodeId = "sup", TurnNumber = prior.Length + 1, PriorDecisions = prior,
+        PublishedAgentRunIds = published is null ? new HashSet<Guid>() : new HashSet<Guid>(published),
+    };
 
     private static SupervisorPriorDecision Decision(string kind, long seq, string? outcomeJson) =>
         new() { Id = Guid.NewGuid(), Sequence = seq, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
@@ -226,13 +313,14 @@ public class SupervisorPublishGateTests
         }, AgentJson.Options),
     };
 
-    private static string SpawnOutcome(bool hasWork)
+    private static string SpawnOutcome(bool hasWork, Guid? agentRunId = null, bool? acceptancePassed = null)
     {
         var result = new SupervisorAgentResult
         {
-            AgentRunId = Guid.NewGuid(),
+            AgentRunId = agentRunId ?? Guid.NewGuid(),
             Status = "Succeeded",
             ChangedFiles = hasWork ? new[] { "a.txt" } : Array.Empty<string>(),
+            AcceptancePassed = acceptancePassed,
         };
         return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
     }
