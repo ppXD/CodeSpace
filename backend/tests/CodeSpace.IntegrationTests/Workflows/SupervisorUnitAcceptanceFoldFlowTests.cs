@@ -135,6 +135,30 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().Contradiction.ShouldBeNull();
     }
 
+    [Theory]
+    [InlineData("Cancelled")]
+    [InlineData("TimedOut")]
+    public async Task A_cancelled_or_timed_out_units_vacuous_pass_folds_no_contradiction(string status)
+    {
+        // P4-1 regression: a Cancelled/TimedOut unit never reached a genuine self-report at all — it must NOT be
+        // folded as "self-reported failure" (which would durably mislabel it under_claim on a vacuous pass, as if
+        // it had given up on work that was actually fine, when in truth it was killed mid-flight and verified nothing).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayloadWithExpectsChanges("s1", Check, expectsChanges: false));
+        var killedUnit = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = status, Error = "abandoned by the reconciler", ProducedBranch = null };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(killedUnit));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var result = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        result.AcceptancePassed.ShouldBe(true, "the subtask declared no changes were expected, and none were produced — vacuously satisfied regardless of why the unit ended");
+        result.Contradiction.ShouldBeNull($"a {status} unit never self-reported anything — it must not be stamped under_claim just because it wasn't a literal 'Succeeded'");
+    }
+
     // ── S2: a branch-less unit's OWN recorded manifest (never the outcome-JSON snapshot — I2) ──────────
 
     [Fact]

@@ -24,8 +24,16 @@ public class WorkPlanChecklistTests
     [InlineData("Succeeded", false, WorkPlanItemStates.Failed)]    // acceptance-rejected is NOT done
     [InlineData("NeedsReview", null, WorkPlanItemStates.NeedsReview)]  // finished-awaiting-a-human is NOT "it broke"
     [InlineData("Failed", null, WorkPlanItemStates.Failed)]
+    // P4-1: a self-reported failure whose OWN check actually passed (an under-claim) is Completed, never Failed —
+    // the checklist row must never contradict the decider prompt's "objectively fine, do NOT retry" framing.
+    [InlineData("Failed", true, WorkPlanItemStates.Completed)]
+    [InlineData("Failed", false, WorkPlanItemStates.Failed)]
     [InlineData("TimedOut", null, WorkPlanItemStates.Failed)]
+    // Cancelled/TimedOut never reached a genuine self-report at all — stays Failed regardless of acceptancePassed,
+    // unlike "Failed" above (mirrors SupervisorTurnService.Rehydrate.ClassifyUnitContradiction's identical carve-out).
+    [InlineData("TimedOut", true, WorkPlanItemStates.Failed)]
     [InlineData("Cancelled", null, WorkPlanItemStates.Failed)]
+    [InlineData("Cancelled", true, WorkPlanItemStates.Failed)]
     [InlineData("Unknown", null, WorkPlanItemStates.Failed)]       // the fold's unresolvable-id placeholder fails closed
     public void The_state_rule_maps_the_latest_attempt(string? agentStatus, bool? acceptancePassed, string expected)
     {

@@ -530,7 +530,7 @@ public sealed partial class SupervisorTurnService
                 // P4-1: unlike the single-agent lane (which only ever grades a would-be Succeeded result), THIS fold
                 // grades every staged unit regardless of its own row status — a unit can genuinely self-report
                 // "Failed" while its check passes (an under-claim), so both directions are reachable here.
-                Contradiction = Agents.AgentContradiction.Detect(selfReportedSuccess: results[i].Status == "Succeeded", grade.Passed),
+                Contradiction = ClassifyUnitContradiction(results[i].Status, grade.Passed),
             });
             anyGraded = true;
         }
@@ -539,6 +539,21 @@ public sealed partial class SupervisorTurnService
 
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, graded) };
     }
+
+    /// <summary>
+    /// Classify a per-unit contradiction (P4-1) ONLY when the row carries a GENUINE self-report — "Succeeded" or
+    /// "Failed". Every other status (Cancelled / TimedOut / NeedsReview) means the unit never actually reached a
+    /// self-report at all; treating "not Succeeded" as "self-reported failure" would durably mislabel a run that
+    /// was killed/timed out mid-flight — which vacuously passes when its subtask declared no changes expected — as
+    /// one that "gave up on work that was actually fine," which never happened. Mirrors the exact-status-match style
+    /// <see cref="Deciders.SupervisorRecitation.Describe"/> / <see cref="Deciders.LlmSupervisorDecider"/> already use.
+    /// </summary>
+    private static string? ClassifyUnitContradiction(string status, bool? acceptancePassed) => status switch
+    {
+        "Succeeded" => Agents.AgentContradiction.Detect(selfReportedSuccess: true, acceptancePassed),
+        "Failed" => Agents.AgentContradiction.Detect(selfReportedSuccess: false, acceptancePassed),
+        _ => null,
+    };
 
     /// <summary>
     /// Grade ONE unit against its subtask acceptance SPEC, fail-closed: no repo → not-accepted; the grader is itself
