@@ -233,6 +233,27 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     [Fact]
+    public async Task P3_5_the_acceptance_grade_call_is_labeled_grader_acceptance_for_the_cost_cap_fold()
+    {
+        // P3.5 — the acceptance grader's OWN model call (an LlmJudge kind) must be recorded + counted toward the
+        // cost cap exactly like the decider's "supervisor.decision" and the critic's "critic.review". Proves the
+        // LlmCallContext.Push wrap around the grading seam is ACTUALLY active (not just present in the source) by
+        // capturing the ambient scope from INSIDE a stub grader — the same seam a real LlmJudgeGrader model call rides.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var grader = new ScopeCapturingGrader(new BenchmarkGrade { Passed = true, Detail = "ok" });
+
+        await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: null), new[] { "sh", "check.sh" }, grader);
+
+        grader.CapturedKind.ShouldBe(SupervisorTurnService.GraderAcceptanceCallKind, "the grade call ran under the 'grader.acceptance' label — its spend is now recorded + countable toward the cost cap");
+        grader.CapturedRunId.ShouldBe(runId);
+        grader.CapturedTeamId.ShouldBe(teamId);
+    }
+
+    [Fact]
     public async Task A_terminal_stop_with_no_model_acceptance_never_grades_and_is_byte_identical()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1009,6 +1030,38 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     /// <summary>Records each grade call (count + args) and returns a canned grade — or throws (the unexpected-failure path). The seam A3 grades at, faked so the test asserts call count (the replay-once contract) without real git.</summary>
+    /// <summary>P3.5 — a stub grader that captures the AMBIENT <c>LlmCallContext</c> at grade time, proving the acceptance-grading seam is wrapped in a "grader.acceptance"-labeled scope (the seam a real LlmJudgeGrader model call would ride, so its spend lands on the ledger + counts toward the cost cap).</summary>
+    private sealed class ScopeCapturingGrader : ISupervisorAcceptanceGrader
+    {
+        private readonly BenchmarkGrade _grade;
+
+        public ScopeCapturingGrader(BenchmarkGrade grade) => _grade = grade;
+
+        public string? CapturedKind { get; private set; }
+        public Guid? CapturedRunId { get; private set; }
+        public Guid? CapturedTeamId { get; private set; }
+
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            Capture();
+            return Task.FromResult(_grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            Capture();
+            return Task.FromResult(_grade);
+        }
+
+        private void Capture()
+        {
+            var scope = CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current;
+            CapturedKind = scope?.Kind;
+            CapturedRunId = scope?.RunId;
+            CapturedTeamId = scope?.TeamId;
+        }
+    }
+
     private sealed class RecordingGrader : ISupervisorAcceptanceGrader
     {
         private readonly BenchmarkGrade _grade;
