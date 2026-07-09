@@ -31,6 +31,16 @@ internal static class StructuredJsonText
         return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
     }
 
+    /// <summary>Augment the base system prompt after a PARSE failure (the previous reply wasn't valid JSON at all — not merely schema-invalid) so the RE-ASK names the fault + shows what was returned. The correction is precise: a single complete, valid, fully-closed JSON object and nothing else.</summary>
+    public static string WithMalformedFeedback(string systemPrompt, string? previousError)
+    {
+        var feedback =
+            "Your previous response was NOT valid JSON and could not be parsed. Respond AGAIN with a SINGLE, COMPLETE, valid JSON object and NOTHING else — no prose, no markdown fences, no trailing text. Make sure every string and every bracket is properly closed." +
+            (string.IsNullOrWhiteSpace(previousError) ? "" : "\n\nThe parser reported:\n" + previousError);
+
+        return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
+    }
+
     /// <summary>
     /// Recover a JSON object from a model's free-text reply — the fallback when it returned the JSON as content
     /// instead of a tool/function call. Strips a leading <c>```json</c> / trailing <c>```</c> fence, then takes the
