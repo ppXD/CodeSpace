@@ -95,15 +95,49 @@ public static class SeedBenchmarkCorpus
             goal: "The check script feeds a function values below, above, and inside a range and currently fails. Run it, infer the expected behaviour, and implement the function so every case passes."),
     };
 
-    private static BenchmarkTask Task(string id, string description, string fixtureRef, string goal) => new()
+    /// <summary>
+    /// P4.2 — the EXTENDED tier: meaningfully harder multi-step algorithms (not the base tier's single comparison /
+    /// loop-bound / depth-counter), so a real model likely needs several self-correction rounds rather than one
+    /// read-and-fix pass — exercising the TimedOut path honestly instead of every pair clearing in seconds.
+    /// Deliberately kept OUT of <see cref="Tasks"/> (the default corpus every push-triggered CI run drives): these
+    /// run through their OWN opt-in real-model CI lane (workflow_dispatch only) so a harder, possibly-slower pair can
+    /// never put the existing 60-minute gating floor's budget at risk. A generous <see cref="BenchmarkTask.TimeoutSeconds"/>
+    /// (20 minutes) accommodates genuine multi-round self-correction without artificially cutting it short.
+    /// </summary>
+    public static IReadOnlyList<BenchmarkTask> ExtendedTasks { get; } = new[]
     {
-        Id = id,
-        Description = description,
-        FixtureRef = fixtureRef,
-        Goal = goal,
-        Grading = BenchmarkGradingKind.TestsPass,
-        TestCommand = DefaultTestCommand,
-        Harness = "codex-cli",
-        Modes = DefaultModes,
+        Task(
+            id: "implement-roman-numeral",
+            description: "Convert an integer (1-3999) to a Roman numeral using standard subtractive notation; the stub returns the number unconverted.",
+            fixtureRef: "roman-numeral",
+            goal: "The check script exercises a function that should convert a number to its Roman numeral form (standard subtractive notation, e.g. 4 is IV, 1994 is MCMXCIV) but it currently returns the number unconverted. Run the check, work out the full rule from the cases it exercises, and implement the function so every case passes.",
+            timeoutSeconds: ExtendedTimeoutSeconds),
+
+        Task(
+            id: "implement-expr-precedence",
+            description: "Evaluate a space-separated arithmetic expression respecting operator precedence (x and / before + and -); the stub evaluates strictly left to right.",
+            fixtureRef: "expr-precedence",
+            goal: "The check script exercises a function that should evaluate a simple arithmetic expression (space-separated numbers and operators) but it currently evaluates strictly left to right with no regard for operator precedence, so several cases fail. Run the check, work out which operators must bind tighter than others, and implement the function so every case passes.",
+            timeoutSeconds: ExtendedTimeoutSeconds),
     };
+
+    /// <summary>The extended tier's generous wall-clock cap (20 minutes) — a genuinely harder multi-step algorithm may need several self-correction rounds; this is a ceiling to accommodate that, not a target duration.</summary>
+    internal const int ExtendedTimeoutSeconds = 1200;
+
+    private static BenchmarkTask Task(string id, string description, string fixtureRef, string goal, int? timeoutSeconds = null)
+    {
+        var task = new BenchmarkTask
+        {
+            Id = id,
+            Description = description,
+            FixtureRef = fixtureRef,
+            Goal = goal,
+            Grading = BenchmarkGradingKind.TestsPass,
+            TestCommand = DefaultTestCommand,
+            Harness = "codex-cli",
+            Modes = DefaultModes,
+        };
+
+        return timeoutSeconds is { } seconds ? task with { TimeoutSeconds = seconds } : task;
+    }
 }

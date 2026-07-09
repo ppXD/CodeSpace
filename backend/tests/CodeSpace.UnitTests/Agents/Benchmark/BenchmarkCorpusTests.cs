@@ -60,6 +60,45 @@ public class BenchmarkCorpusTests
         }
     }
 
+    [Fact]
+    public void Extended_tasks_are_kept_out_of_the_default_corpus_and_have_no_id_collision()
+    {
+        // P4.2's entire reason to keep ExtendedTasks separate: the default corpus (driven by the push-triggered,
+        // budget-bound real-model-benchmark CI job) must never silently grow to include the harder, unproven-difficulty
+        // tier — that lane's own opt-in job is the only place they run.
+        SeedBenchmarkCorpus.Tasks.ShouldNotContain(t => SeedBenchmarkCorpus.ExtendedTasks.Select(e => e.Id).Contains(t.Id));
+
+        var allIds = SeedBenchmarkCorpus.Tasks.Select(t => t.Id).Concat(SeedBenchmarkCorpus.ExtendedTasks.Select(t => t.Id)).ToList();
+        allIds.Distinct().Count().ShouldBe(allIds.Count, "a task id is the scorecard + result row key, so it must be unique across BOTH corpus tiers");
+    }
+
+    [Fact]
+    public void Extended_tasks_are_tests_pass_gradable_with_a_generous_timeout()
+    {
+        SeedBenchmarkCorpus.ExtendedTasks.Count.ShouldBeGreaterThan(0);
+
+        SeedBenchmarkCorpus.ExtendedTasks.ShouldAllBe(t => t.Grading == BenchmarkGradingKind.TestsPass, "the extended tier is graded by the same objective tests-pass oracle as the blessed corpus");
+        SeedBenchmarkCorpus.ExtendedTasks.ShouldAllBe(t => t.TestCommand.Count > 0, "every tests-pass task carries a test command for the grader to re-run");
+        SeedBenchmarkCorpus.ExtendedTasks.ShouldAllBe(t => t.Modes.Count > 0, "every task names the modes to compare it across");
+        SeedBenchmarkCorpus.ExtendedTasks.ShouldAllBe(t => t.TimeoutSeconds == SeedBenchmarkCorpus.ExtendedTimeoutSeconds, "a harder multi-step task needs the extended tier's generous wall-clock ceiling, not the default");
+    }
+
+    [Fact]
+    public void Every_extended_seed_fixture_ref_is_materialisable()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "cs-bench-corpus-ext-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            foreach (var task in SeedBenchmarkCorpus.ExtendedTasks)
+                Should.NotThrow(() => SeedBenchmarkFixtures.Stage(task.FixtureRef, Path.Combine(dir, task.FixtureRef)),
+                    customMessage: $"the extended corpus names fixture '{task.FixtureRef}' but the stager can't materialise it");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Theory]
     [InlineData(BenchmarkMode.HarnessCli, "bench:cli")]
     [InlineData(BenchmarkMode.HarnessCliWithMcp, "bench:cli-mcp")]
