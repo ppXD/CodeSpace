@@ -177,6 +177,24 @@ public class OpenAiClientStructuredTests
     }
 
     [Fact]
+    public async Task Recovers_a_TRUNCATED_structured_reply_by_repairing_it_instead_of_faulting()
+    {
+        // The forced function is unsupported (400), and the prompt-only floor returns JSON that was CUT OFF at the token
+        // cap — a long decision truncated mid-string. Before repair this threw a Malformed fault and lost the whole
+        // decision; now the client closes the object + recovers the completed leading fields.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice unsupported" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "{\"kind\":\"stop\",\"rationale\":{\"why\":\"the work is fully complete and verified" } } ] }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("stop", "a truncated decision is repaired + recovered, not lost to a Malformed fault");
+        result.Json.GetProperty("rationale").GetProperty("why").GetString().ShouldStartWith("the work is fully");
+    }
+
+    [Fact]
     public async Task Usage_totals_the_billed_forced_attempt_plus_the_floor_when_it_degrades()
     {
         // The forced-function attempt is a 200 with usage (BILLED) but yields no usable output → degrades to the floor,
