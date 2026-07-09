@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
@@ -136,6 +137,26 @@ public class SupervisorAskHumanTests
         SupervisorOutcome.ReadHumanWaitToken("""{"agentRunIds":["x"],"agentCount":1}""").ShouldBeNull();
         SupervisorOutcome.ReadHumanWaitToken(null).ShouldBeNull();
         SupervisorOutcome.ReadHumanWaitToken("not json").ShouldBeNull("a malformed outcome reads no token, never crashes");
+    }
+
+    // ── RejectedAskHumanOutcome: P0-2 action schema validation ─────────────────────────
+
+    [Fact]
+    public void The_rejected_ask_human_outcome_names_the_specific_defect()
+    {
+        var json = JsonSerializer.Serialize(RealSupervisorActionExecutor.RejectedAskHumanOutcome, AgentJson.Options);
+        using var doc = JsonDocument.Parse(json);
+
+        doc.RootElement.GetProperty("askHuman").GetString().ShouldBe("rejected");
+        doc.RootElement.GetProperty("reason").GetString().ShouldBe("the ask_human decision carried no question text");
+    }
+
+    [Fact]
+    public void A_rejected_ask_human_outcome_carries_no_wait_token_so_it_reads_as_a_synchronous_self_advance()
+    {
+        var json = JsonSerializer.Serialize(RealSupervisorActionExecutor.RejectedAskHumanOutcome, AgentJson.Options);
+
+        SupervisorOutcome.ReadHumanWaitToken(json).ShouldBeNull("the rejection never posts a card or stages a wait — no human interaction is spent on it");
     }
 
     // ── The answer-fold: a recorded human answer surfaces in the next turn's context ──

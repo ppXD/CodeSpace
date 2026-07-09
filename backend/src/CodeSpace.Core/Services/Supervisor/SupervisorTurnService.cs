@@ -183,10 +183,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var current = await _workPlans.GetCurrentAsync(context.SupervisorRunId, context.TeamId, cancellationToken, WorkPlanOrigins.Supervisor).ConfigureAwait(false);
 
-        // Defensive: the executor persists the WorkPlan BEFORE the plan decision turns terminal, so a terminal
-        // plan without a row is unreachable in production. Degrading open here (decider proceeds unconfirmed) is a
-        // deliberate, logged exception to the gate's otherwise fail-closed construction — a park would strand the
-        // run on a card whose checklist the operator could never review.
+        // Defensive: the executor persists the WorkPlan BEFORE a GENUINE plan decision turns terminal, so a
+        // terminal plan without a row means either a rejected malformed plan (P0-2: zero subtasks — nothing to
+        // confirm, correctly never persisted) or a genuinely unreachable state. Degrading open here (decider
+        // proceeds unconfirmed) is a deliberate, logged exception to the gate's otherwise fail-closed construction
+        // — a park would strand the run on a card whose checklist the operator could never review, and a rejected
+        // plan has no checklist to show in the first place.
         if (current == null)
         {
             _logger.LogWarning("Supervisor plan-confirmation gate found no WorkPlan row for run {RunId} at turn {Turn} — skipping the gate", context.SupervisorRunId, context.TurnNumber);

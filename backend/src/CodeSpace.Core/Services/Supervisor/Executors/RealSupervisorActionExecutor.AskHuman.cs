@@ -48,6 +48,9 @@ public sealed partial class RealSupervisorActionExecutor
                 ? AdvanceWithResolvedAnswer(context, ask.Question, wait.Token, wait.PayloadJson)
                 : ReparkOnExistingAsk(context, ask.Question, wait.Token);
 
+        if (string.IsNullOrWhiteSpace(ask.Question))
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(RejectedAskHumanOutcome, AgentJson.Options));
+
         if (!await CanPostToConversationAsync(context, cancellationToken).ConfigureAwait(false))
             return DegradeNoSurface(ask.Question);
 
@@ -96,6 +99,19 @@ public sealed partial class RealSupervisorActionExecutor
 
         return SupervisorExecution.Synchronous(AskOutcome(question, token, answer));
     }
+
+    /// <summary>
+    /// P0-2 (action schema validation): the ask_human payload named no question — either the model omitted the
+    /// <c>askHuman</c> sub-object entirely (schema-legal; only <c>kind</c> is root-required) or supplied a blank
+    /// <c>question</c> (the schema places no <c>minLength</c> on it). Checked BEFORE the tenancy/post step so a
+    /// blank question is REJECTED rather than posting a boilerplate card and spending a real human interaction on
+    /// nothing — strictly worse than a spawn no-op, since it can't be self-corrected until the human replies.
+    /// </summary>
+    internal static readonly object RejectedAskHumanOutcome = new
+    {
+        askHuman = "rejected",
+        reason = "the ask_human decision carried no question text",
+    };
 
     /// <summary>No usable conversation (none authored, or the tenancy check failed) → degrade to a SYNCHRONOUS no-surface outcome so the node self-advances rather than hanging on a card no one can answer.</summary>
     private SupervisorExecution DegradeNoSurface(string question)

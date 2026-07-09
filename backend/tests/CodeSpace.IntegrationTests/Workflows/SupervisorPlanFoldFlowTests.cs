@@ -58,6 +58,44 @@ public sealed class SupervisorPlanFoldFlowTests
     }
 
     [Fact]
+    public async Task An_empty_plan_is_rejected_with_a_specific_reason_and_persists_no_work_plan()
+    {
+        // P0-2 (action schema validation): a plan decision with zero subtasks (the model omitted the plan
+        // sub-object, or bad JSON degraded it) must not silently persist an empty work_plan version — it is
+        // REJECTED with a specific, actionable reason the decider reads on its next turn.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var context = Context(teamId);
+
+        using var scope = _fixture.BeginScope();
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(EmptyPlanDecision(), context, CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe("""{"plan":"rejected","reason":"the plan decision named no subtasks"}""");
+
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkPlan.AsNoTracking().CountAsync(p => p.WorkflowRunId == context.SupervisorRunId))
+            .ShouldBe(0, "a rejected plan never reaches the work_plan persistence step");
+    }
+
+    [Fact]
+    public async Task A_plan_with_an_explicit_null_subtasks_field_is_rejected_not_crashed()
+    {
+        // A well-formed JSON object can carry "subtasks":null explicitly (bypassing SupervisorPlanPayload's own
+        // non-null default, since deserialization assigns the literal null over it) — the rejection check must
+        // tolerate this exact shape, never throw a NullReferenceException on .Count.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var context = Context(teamId);
+
+        using var scope = _fixture.BeginScope();
+
+        var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Plan, PayloadJson = """{"goal":"g","subtasks":null}""" };
+        var execution = await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(decision, context, CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe("""{"plan":"rejected","reason":"the plan decision named no subtasks"}""");
+    }
+
+    [Fact]
     public async Task A_phased_plan_records_its_semantic_phases_alongside_the_subtasks()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -84,6 +122,12 @@ public sealed class SupervisorPlanFoldFlowTests
         TeamId = teamId,
         NodeId = "boss",   // deliberately NOT "sup": the executor falls back to the literal "sup" on an empty NodeId, so asserting "sup#..." could not detect a broken NodeId plumb
         TurnNumber = 0,
+    };
+
+    private static SupervisorDecision EmptyPlanDecision() => new()
+    {
+        Kind = SupervisorDecisionKinds.Plan,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = "g" }, AgentJson.Options),
     };
 
     private static SupervisorDecision PlanDecision(bool withPhases) => new()

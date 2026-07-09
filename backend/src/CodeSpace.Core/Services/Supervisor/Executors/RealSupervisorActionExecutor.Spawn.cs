@@ -116,6 +116,22 @@ public sealed partial class RealSupervisorActionExecutor
     private static SupervisorAgentDispatch? DispatchFor(SupervisorSpawnPayload spawn, string subtaskId) =>
         spawn.Agents?.FirstOrDefault(a => a.SubtaskId == subtaskId);
 
+    /// <summary>
+    /// P0-2 (action schema validation): the retry payload named no plan-local subtask id — either the model omitted
+    /// the <c>retry</c> sub-object entirely (schema-legal; only <c>kind</c> is root-required) or supplied a blank
+    /// <c>subtaskId</c> (the schema places no <c>minLength</c> on it). Unlike an empty spawn (which a legitimate
+    /// dependency-clamp can ALSO narrow to zero), nothing ever clamps a retry's <c>subtaskId</c> — an empty one
+    /// reaching here is unambiguously a malformed decision, so it is REJECTED with a specific reason rather than
+    /// silently no-opped, mirroring <see cref="ResolveSkipReason"/>'s named-reason precedent. The existing
+    /// no-progress watchdog already counts this turn's empty <c>agentResults</c> as a stall tick; this only makes
+    /// the reason legible to the decider on ITS next turn.
+    /// </summary>
+    internal static object BuildRejectedRetryOutcome() => new
+    {
+        retry = "rejected",
+        reason = "the retry decision named no subtaskId — a retry must name the plan-local subtask id to re-run",
+    };
+
     /// <summary>Retry: re-run ONE prior subtask as a FRESH agent run (a new Attempt), optionally with a revised instruction. Same stage-K-waits + barrier as spawn (here K = 1).</summary>
     private async Task<SupervisorExecution> ExecuteRetryAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
@@ -123,7 +139,7 @@ public sealed partial class RealSupervisorActionExecutor
         var subtasks = ResolvePlannedSubtasks(context);
 
         if (retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId))
-            return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)>(), context, cancellationToken).ConfigureAwait(false);
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildRejectedRetryOutcome(), AgentJson.Options));
 
         // S1 handoff applies to a retry exactly as it does to a fresh spawn — a producer may have pushed a NEW branch
         // since this subtask's original attempt (e.g. it was itself retried), so re-resolving staging here (rather than
