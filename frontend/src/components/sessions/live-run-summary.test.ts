@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RoomAction, RoomBlock } from "@/api/sessions";
-import { liveRunSummary } from "./SessionRoomView";
+import { liveRunSummary } from "./live-run-summary";
 
 /**
  * The pinned contract for the running turn's pinned live bar: it shows the LATEST activity line (a run emits several
