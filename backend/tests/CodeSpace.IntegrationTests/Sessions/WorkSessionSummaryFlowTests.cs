@@ -63,6 +63,26 @@ public class WorkSessionSummaryFlowTests
     }
 
     [Fact]
+    public async Task Summarizer_folds_the_rerun_winners_result_not_the_failed_originals()
+    {
+        // Rerun-aware session reads (S4 fold): turn 1's ORIGINAL attempt failed; a RERUN then succeeded. Once turn 1
+        // scrolls out of the window, the fold must distill the rerun's own result, never the superseded original's.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedRerunWinningTurnAsync(teamId, sessionId, turn: 1, goal: "goal-1", originalSummary: "ORIGINAL_CRASHED", rerunSummary: "RERUN_SUCCEEDED_RESULT");
+        for (var t = 2; t <= 12; t++) await SeedTurnAsync(teamId, sessionId, t, $"goal-{t}", $"result-{t}");   // push turn 1 out of the window
+
+        var capture = new CapturingLlmClient { Return = "DISTILLED" };
+        await RunSummarizerAsync(teamId, sessionId, capture);
+
+        capture.LastUserPrompt.ShouldNotBeNull();
+        capture.LastUserPrompt!.ShouldContain("RERUN_SUCCEEDED_RESULT", Case.Sensitive, "the rerun's own result is turn 1's effective outcome");
+        capture.LastUserPrompt.ShouldNotContain("ORIGINAL_CRASHED", Case.Sensitive, "the failed original's result must never reach the distillation input");
+    }
+
+    [Fact]
     public async Task Summarizer_is_a_no_op_for_a_thread_within_the_window()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -348,6 +368,42 @@ public class WorkSessionSummaryFlowTests
         db.WorkSession.Add(new WorkSession { Id = id, TeamId = teamId, Title = "thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open });
         await db.SaveChangesAsync();
         return id;
+    }
+
+    /// <summary>
+    /// Stage a turn whose ORIGINAL attempt FAILED and whose RERUN (real <c>RootRunId</c> lineage, later
+    /// <c>CreatedDate</c>) SUCCEEDED — the shape a real rerun-after-failure leaves for the summarizer to fold.
+    /// </summary>
+    private async Task SeedRerunWinningTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string originalSummary, string rerunSummary)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var originalRequestId = Guid.NewGuid();
+        var rerunRequestId = Guid.NewGuid();
+        var originalId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.AddRange(
+            new WorkflowRunRequest { Id = originalRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }), Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now },
+            new WorkflowRunRequest { Id = rerunRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Rerun, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now });
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = originalId, TeamId = teamId, RunRequestId = originalRequestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Failure, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { summary = originalSummary }),
+            CreatedDate = now.AddMinutes(-5), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = rerunRequestId, SourceType = WorkflowRunSourceTypes.Rerun,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = originalId, RerunFromNodeId = "agent",
+            OutputsJson = JsonSerializer.Serialize(new { summary = rerunSummary }),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Stage a finished top-level turn: a run bound to the session at <paramref name="turn"/>, its launch goal in the request payload + its result in OutputsJson — the SAME clean sources the digest + summarizer read.</summary>

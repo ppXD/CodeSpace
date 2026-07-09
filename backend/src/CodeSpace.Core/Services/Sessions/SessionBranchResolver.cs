@@ -8,11 +8,12 @@ namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
 /// Default <see cref="ISessionBranchResolver"/>. Scans the session's recent top-level turns newest first and, for each
-/// requested repo, returns the newest turn's produced branch for it — preferring each turn's <see cref="Agents.Publish.IPublishManifestStore"/>
-/// rows (I2: the single source of truth, via <see cref="SessionManifestBranches"/>) and falling back to the legacy
-/// <c>OutputsJson.branch</c> / <c>repositoryResults[]</c> read only for a turn with no manifest rows (older data, or a
-/// supervisor fold nobody has opened a PR for yet). The partial <c>idx_workflow_run_session</c> index (migration 0070)
-/// keeps the lookup cheap; the scan is bounded since the latest produced branch is always in a recent turn.
+/// requested repo, returns the newest turn's EFFECTIVE attempt's (<see cref="SessionTurnAttempts"/>) produced branch for
+/// it — preferring each attempt's <see cref="Agents.Publish.IPublishManifestStore"/> rows (I2: the single source of
+/// truth, via <see cref="SessionManifestBranches"/>) and falling back to the legacy <c>OutputsJson.branch</c> /
+/// <c>repositoryResults[]</c> read only for an attempt with no manifest rows (older data, or a supervisor fold nobody
+/// has opened a PR for yet). The partial <c>idx_workflow_run_session</c> index (migration 0070) keeps the lookup cheap;
+/// the scan is bounded since the latest produced branch is always in a recent turn.
 /// <para>A turn that surfaces no branch for a repo (an analysis-only turn, or a plan-map turn whose terminal carries
 /// only the synthesized text) simply contributes none, so the scan skips to the last turn that did — the safe, correct
 /// fallback (an absent repo ⇒ its default branch). Reading <c>repositoryResults</c> generically also fixes the v1
@@ -38,23 +39,31 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
     {
         if (repositoryIds.Count == 0) return Empty;
 
-        var recent = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
-            .OrderByDescending(r => r.SessionTurnIndex)
-            .Take(MaxTurnsScanned)
-            .Select(r => new { r.Id, r.ScopeRepositoryIds, r.OutputsJson })
+        // ALL rows in the session's lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
+        // turn's EFFECTIVE attempt is resolved below, so a superseded original never shadows its own successful rerun.
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.SessionId == sessionId && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.ScopeRepositoryIds, r.OutputsJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(recent.Select(r => r.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
+        var recent = lineage.GroupBy(r => r.RootRunId ?? r.Id)
+            .Where(g => g.Any(r => r.SessionTurnIndex != null))
+            .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex!.Value, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new { t.Turn, Row = r })
+            .OrderByDescending(t => t.Turn)
+            .Take(MaxTurnsScanned)
+            .ToList();
+
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(recent.Select(t => t.Row.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
         var wanted = new HashSet<Guid>(repositoryIds);
         var resolved = new Dictionary<Guid, string>();
 
-        foreach (var row in recent)   // newest first — the first turn that produced a repo's branch wins
+        foreach (var t in recent)   // newest turn first — the first turn that produced a repo's branch wins
         {
             if (resolved.Count == wanted.Count) break;
 
-            foreach (var (repoId, branch) in ProducedBranchesFor(row.Id, row.OutputsJson, row.ScopeRepositoryIds, manifestsByRunId))
+            foreach (var (repoId, branch) in ProducedBranchesFor(t.Row.Id, t.Row.OutputsJson, t.Row.ScopeRepositoryIds, manifestsByRunId))
             {
                 if (wanted.Contains(repoId) && !resolved.ContainsKey(repoId)) resolved[repoId] = branch;
             }

@@ -10,11 +10,11 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents.Context.Sources;
 
 /// <summary>
-/// The <c>session.turns</c> source — a thread's prior top-level turns rendered with their FULL, UN-CLIPPED results.
-/// This is the pull-not-push complement to <see cref="SessionContextBuilder"/>: the launch digest clips each turn's
-/// result to <see cref="SessionTurnText.MaxResultChars"/> so the prompt stays bounded; when the agent needs the whole
-/// thing back it pulls it here. Reads the SAME clean sources the digest does (each run's launch goal + its declared
-/// <c>OutputsJson</c> result + produced branch — preferring the run's <see cref="PublishManifest"/> row over the raw
+/// The <c>session.turns</c> source — a thread's prior top-level turns' EFFECTIVE attempts (<see cref="SessionTurnAttempts"/>)
+/// rendered with their FULL, UN-CLIPPED results. This is the pull-not-push complement to <see cref="SessionContextBuilder"/>:
+/// the launch digest clips each turn's result to <see cref="SessionTurnText.MaxResultChars"/> so the prompt stays
+/// bounded; when the agent needs the whole thing back it pulls it here. Reads the SAME clean sources the digest does
+/// (each run's launch goal + its declared <c>OutputsJson</c> result + produced branch — preferring the run's <see cref="PublishManifest"/> row over the raw
 /// <c>OutputsJson.branch</c> guess, via the shared <see cref="SessionManifestBranches"/> choke point, and the shared
 /// <see cref="SessionTurnText"/> for everything else) so the two never drift — the only difference is no per-turn clip.
 /// Newest-first, team- + session-scoped, bounded by a total-character budget (a giant thread can't blow up the
@@ -48,14 +48,21 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     {
         if (query.SessionId is not { } sessionId) return AgentContextResult.Empty;
 
-        // The session timeline, newest first (bounded scan), each turn's clean sources only. Only top-level turns carry a
-        // turn index (a child / replay / rerun inherits the SessionId but gets a NULL index — never a thread "turn").
-        var turns = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == query.TeamId && r.SessionTurnIndex != null)
-            .OrderByDescending(r => r.SessionTurnIndex)
-            .Take(MaxTurnsScanned)
-            .Select(r => new TurnRow(r.Id, r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
+        // The session's WHOLE lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
+        // turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original never
+        // shadows its own successful rerun in the pulled-back turns.
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.SessionId == sessionId && r.TeamId == query.TeamId)
+            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var turns = lineage.GroupBy(r => r.RootRunId ?? r.Id)
+            .Where(g => g.Any(r => r.SessionTurnIndex != null))
+            .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new TurnRow(r.Id, t.Turn, r.Status.ToString(), r.OutputsJson, r.Payload))
+            .OrderByDescending(t => t.Turn)
+            .Take(MaxTurnsScanned)
+            .ToList();
 
         if (turns.Count == 0) return AgentContextResult.Empty;
 
