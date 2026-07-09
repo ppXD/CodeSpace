@@ -180,7 +180,88 @@ public static class SeedBenchmarkFixtures
                 [ "$(clamp 5 -10 -1)" = "-1" ] || exit 1
                 """),
 
-        _ => throw new ArgumentException($"Unknown benchmark fixture '{fixtureRef}'. Known: failing-assertion, missing-function, off-by-one-loop, missing-guard, fizzbuzz, grade-boundaries, balanced-parens, gcd-euclid, clamp-range.", nameof(fixtureRef)),
+        // ── Extended tier (P4.2): meaningfully HARDER than the tier above — a multi-step ALGORITHM (not a single
+        //    comparison/loop-bound/depth-counter), so a real model needs several self-correction rounds rather than
+        //    one read-and-fix pass. Kept in SeedBenchmarkCorpus.ExtendedTasks, NOT the default Tasks — an operator
+        //    opts in via the dedicated (non-default-triggered) CI lane, so the existing 60-min budget/floor is
+        //    never put at risk by a harder, possibly-slower pair.
+
+        // Greedy subtractive-notation conversion: the model must apply ALL 13 value/symbol pairs (including the SIX
+        // subtractive cases IV/IX/XL/XC/CD/CM) in DESCENDING order — a single missed pair or wrong order breaks
+        // several cases at once, so this can't be patched one comparison at a time the way the easier tier can.
+        "roman-numeral" => (
+            Solution: """
+                #!/bin/sh
+                # to_roman N: echo the Roman numeral for N (1..3999) using standard subtractive notation
+                # (e.g. 4="IV", 9="IX", 40="XL", 1994="MCMXCIV"). The stub just echoes N unconverted. Implement the
+                # greedy algorithm: repeatedly subtract the largest value<=N from the table below, appending its symbol.
+                # Table (value, symbol), largest first: 1000 M, 900 CM, 500 D, 400 CD, 100 C, 90 XC, 50 L, 40 XL,
+                # 10 X, 9 IX, 5 V, 4 IV, 1 I.
+                to_roman() { echo "$1"; }
+                """,
+            Check: """
+                #!/bin/sh
+                . ./solution.sh
+                [ "$(to_roman 1)" = "I" ] || exit 1
+                [ "$(to_roman 4)" = "IV" ] || exit 1
+                [ "$(to_roman 9)" = "IX" ] || exit 1
+                [ "$(to_roman 14)" = "XIV" ] || exit 1
+                [ "$(to_roman 40)" = "XL" ] || exit 1
+                [ "$(to_roman 58)" = "LVIII" ] || exit 1
+                [ "$(to_roman 90)" = "XC" ] || exit 1
+                [ "$(to_roman 444)" = "CDXLIV" ] || exit 1
+                [ "$(to_roman 1994)" = "MCMXCIV" ] || exit 1
+                [ "$(to_roman 3999)" = "MMMCMXCIX" ] || exit 1
+                """),
+
+        // A two-pass operator-precedence evaluator: x and / must bind tighter than + and -, both left-associative.
+        // The stub evaluates strictly left-to-right (correct precedence by ACCIDENT on same-precedence-only inputs,
+        // which is exactly why several of the check's cases are chosen to still pass under the naive stub — the two
+        // MIXED cases below are the real discriminator forcing a genuine two-pass implementation, not memorized rules).
+        // Expression tokens are SPACE-SEPARATED (avoids a character-level tokenizer being the graded skill; the
+        // precedence algorithm itself is the point) — `set -- $expr` naturally splits them into positional params.
+        // Multiplication is "x", DELIBERATELY not "*": an UNQUOTED `set -- $expr` pathname-expands a bare "*" against
+        // the staged directory's own files (check.sh/solution.sh) — verified live (it hangs a naive-but-correct
+        // implementation in an infinite loop) — which would fail an agent for an unrelated shell pitfall instead of
+        // its actual precedence logic. "x" sidesteps the entire class of glob hazards.
+        "expr-precedence" => (
+            Solution: """
+                #!/bin/sh
+                # eval_expr "N op N op N ..." (space-separated tokens; ops are + - x /): echo the result respecting
+                # standard precedence (x and / bind tighter than + and -; same-precedence ops evaluate left to right;
+                # integer division truncates toward zero). The stub evaluates strictly left-to-right with NO
+                # precedence, which is WRONG whenever a lower-precedence op appears before a higher one (e.g.
+                # "2 + 3 x 4" must be 14, not 20). Implement the real two-pass (or equivalent) algorithm.
+                eval_expr() {
+                  set -- $1
+                  total=$1
+                  shift
+                  while [ "$#" -gt 0 ]; do
+                    op=$1; val=$2; shift 2
+                    case "$op" in
+                      "+") total=$((total + val)) ;;
+                      "-") total=$((total - val)) ;;
+                      "x") total=$((total * val)) ;;
+                      "/") total=$((total / val)) ;;
+                    esac
+                  done
+                  echo "$total"
+                }
+                """,
+            Check: """
+                #!/bin/sh
+                . ./solution.sh
+                [ "$(eval_expr "7")" = "7" ] || exit 1
+                [ "$(eval_expr "2 + 3 x 4")" = "14" ] || exit 1
+                [ "$(eval_expr "10 - 2 x 3")" = "4" ] || exit 1
+                [ "$(eval_expr "2 x 3 + 4")" = "10" ] || exit 1
+                [ "$(eval_expr "8 / 2 + 3")" = "7" ] || exit 1
+                [ "$(eval_expr "20 / 4 / 5")" = "1" ] || exit 1
+                [ "$(eval_expr "2 x 3 x 4")" = "24" ] || exit 1
+                [ "$(eval_expr "100 - 50 + 25")" = "75" ] || exit 1
+                """),
+
+        _ => throw new ArgumentException($"Unknown benchmark fixture '{fixtureRef}'. Known: failing-assertion, missing-function, off-by-one-loop, missing-guard, fizzbuzz, grade-boundaries, balanced-parens, gcd-euclid, clamp-range, roman-numeral, expr-precedence.", nameof(fixtureRef)),
     };
 
     /// <summary>Write a POSIX script 0755 (owner rwx, group/other r-x) so the runner can spawn / source it. A no-op on file mode where it doesn't apply.</summary>

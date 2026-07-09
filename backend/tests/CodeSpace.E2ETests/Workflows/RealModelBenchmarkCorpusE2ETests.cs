@@ -85,23 +85,27 @@ public sealed class RealModelBenchmarkCorpusE2ETests
             using (var scope = _fixture.BeginScope())
                 run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(SeedBenchmarkCorpus.Tasks, teamId, selection, CancellationToken.None);
 
+            // P4.2 — reuse the ALREADY-HONEST BenchmarkScorecard/EvalScorecard denominator (run.Scorecard.Overall)
+            // instead of re-deriving a stricter "RunStatus==Succeeded" filter here: that hand-rolled filter used to
+            // DROP any TimedOut/Failed/NeedsReview pair from BOTH halves of the fraction — a pair that ran long enough
+            // to time out (exactly what a longer, multi-phase corpus task makes more likely) would silently vanish
+            // instead of counting as an attempted-but-unsolved task, inflating the reported rate. The scorecard's own
+            // Total already counts every TERMINAL pair (Succeeded/Failed/TimedOut/NeedsReview/Cancelled) and its
+            // Succeeded already means "the grader passed" (BenchmarkScorecard.ToOutcome), not merely "the CLI exited 0".
+            var overall = run.Scorecard.Overall;
             var ran = run.Results.Count;
-            var executed = run.Results.Count(r => r.RunStatus == AgentRunStatus.Succeeded);
-            // solved is scoped to the SAME cleanly-run population as the denominator: a pair the grader passes but whose
-            // run did not reach Succeeded (CLI exited non-zero yet left correct code) must not inflate the rate past the
-            // executed set — numerator ⊆ denominator keeps rate ∈ [0,1] and honest.
-            var solved = run.Results.Count(r => r.RunStatus == AgentRunStatus.Succeeded && r.Grade.Passed);
 
-            // No pair ran, OR every pair that ran FAILED execution (the claude CLI could not reach the gateway / could
-            // not run) → infra, never a capability verdict. Mirrors the whole-loop's all-agents-failed classification:
-            // a gateway outage must not red the lane as a false CapabilityMiss.
-            if (executed == 0)
-                throw new AgentExecutionInfraException($"no benchmark pair executed cleanly — ran={ran}, executed=0, errored={run.Errored.Count} (gateway/execution infra, not a capability miss)");
+            // No pair reached a TERMINAL state at all (every pair errored during staging/execution — an infra fault,
+            // never a capability verdict). Mirrors the whole-loop's all-agents-failed classification: a gateway
+            // outage must not red the lane as a false CapabilityMiss.
+            if (overall.Total == 0)
+                throw new AgentExecutionInfraException($"no benchmark pair reached a terminal state — ran={ran}, errored={run.Errored.Count} (gateway/execution infra, not a capability miss)");
 
-            // executed ≥ 1 → a genuine capability verdict: of the pairs the agent RAN cleanly, did it SOLVE at least the floor?
-            var rate = (double)solved / executed;   // over the pairs that ran CLEANLY — a mid-corpus exec flake is infra, never deflates the capability rate
+            // Total ≥ 1 → a genuine capability verdict: of every pair that ran to a terminal state (TimedOut/Failed
+            // included), did the agent SOLVE at least the floor?
+            var rate = overall.SuccessRate;
             var outcome = rate >= MinSolveRate ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss;   // GATING FLOOR — short of the floor REDs the blessed wire (CapabilityMiss)
-            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {solved}/{executed} cleanly-run ({rate:P0}) vs floor {MinSolveRate:P0} → {outcome} over {SeedBenchmarkCorpus.Tasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}");
+            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {overall.Succeeded}/{overall.Total} ({rate:P0}) vs floor {MinSolveRate:P0} → {outcome} over {SeedBenchmarkCorpus.Tasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}");
         }, attempts: 1);
     }
 

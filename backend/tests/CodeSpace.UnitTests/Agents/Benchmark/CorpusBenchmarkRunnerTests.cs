@@ -46,6 +46,25 @@ public class CorpusBenchmarkRunnerTests
     }
 
     [Fact]
+    public async Task A_pair_whose_run_timed_out_still_counts_in_the_corpus_denominator_not_silently_dropped()
+    {
+        // P4.2 — the exact scenario RealModelBenchmarkCorpusE2ETests' fixed denominator now depends on: a pair that
+        // ran long enough to TIME OUT (never reached RunStatus.Succeeded) must still land in run.Scorecard.Overall.Total
+        // as an attempted-but-unsolved pair — never vanish from the rate the way a stricter "Succeeded-only" filter would.
+        var runner = new StubRunner(passWhen: (_, _) => true, timedOutWhen: (taskId, _) => taskId == "task-b");
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
+
+        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
+
+        run.Results.Count.ShouldBe(4, "all 4 pairs RAN (task-b's just timed out instead of erroring at the plumbing layer)");
+        run.Errored.ShouldBeEmpty("a timeout is a terminal run outcome, never an infra plumbing error");
+
+        run.Scorecard.Overall.Total.ShouldBe(4, "every terminal pair — including the 2 timed-out ones — counts in the denominator");
+        run.Scorecard.Overall.Succeeded.ShouldBe(2, "only task-a's 2 pairs solved");
+        run.Scorecard.Overall.SuccessRate.ShouldBe(0.5, "2 of 4 — the timed-out pairs correctly drag the rate down instead of being excluded");
+    }
+
+    [Fact]
     public async Task Stages_a_fresh_isolated_workspace_per_pair_and_hands_it_to_the_runner()
     {
         var stager = new RecordingStager();
@@ -152,12 +171,13 @@ public class CorpusBenchmarkRunnerTests
     {
         private readonly Func<string, BenchmarkMode, bool> _passWhen;
         private readonly Func<string, BenchmarkMode, bool>? _throwWhen;
+        private readonly Func<string, BenchmarkMode, bool>? _timedOutWhen;
         private readonly bool _cancel;
         public List<(string TaskId, BenchmarkMode Mode, string Workspace, BenchmarkAgentSelection? Selection)> Calls { get; } = new();
 
-        public StubRunner(Func<string, BenchmarkMode, bool> passWhen, Func<string, BenchmarkMode, bool>? throwWhen = null, bool cancel = false)
+        public StubRunner(Func<string, BenchmarkMode, bool> passWhen, Func<string, BenchmarkMode, bool>? throwWhen = null, Func<string, BenchmarkMode, bool>? timedOutWhen = null, bool cancel = false)
         {
-            _passWhen = passWhen; _throwWhen = throwWhen; _cancel = cancel;
+            _passWhen = passWhen; _throwWhen = throwWhen; _timedOutWhen = timedOutWhen; _cancel = cancel;
         }
 
         public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
@@ -166,6 +186,19 @@ public class CorpusBenchmarkRunnerTests
             if (_throwWhen?.Invoke(task.Id, mode) == true) throw new InvalidOperationException($"runner blew up on {task.Id}/{mode}");
 
             Calls.Add((task.Id, mode, workspaceDirectory, selection));
+
+            // A timed-out pair never reached Succeeded and never passed the grade — a terminal RUN outcome, distinct
+            // from an infra plumbing throw (which the corpus runner records as Errored, not a Result at all).
+            if (_timedOutWhen?.Invoke(task.Id, mode) == true)
+                return Task.FromResult(new BenchmarkResult
+                {
+                    TaskId = task.Id,
+                    Mode = mode,
+                    RunStatus = AgentRunStatus.TimedOut,
+                    Grade = new BenchmarkGrade { Passed = false, Detail = "grade-error: tests-timed-out" },
+                    McpEndpointEnabled = mode == BenchmarkMode.HarnessCliWithMcp,
+                    DurationSeconds = 120.0,
+                });
 
             var passed = _passWhen(task.Id, mode);
             return Task.FromResult(new BenchmarkResult

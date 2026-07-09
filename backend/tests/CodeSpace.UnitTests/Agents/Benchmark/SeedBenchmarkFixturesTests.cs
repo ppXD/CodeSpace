@@ -56,6 +56,28 @@ public sealed class SeedBenchmarkFixturesTests : IDisposable
     }
 
     [Fact]
+    public async Task Every_extended_seed_fixture_materialises_and_its_check_fails_in_the_shipped_start_state()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Same well-formedness proof as the blessed 9-task corpus above, applied to the P4.2 extended (harder) tier —
+        // kept as its own loop rather than merged into the one above, so this test's failure legibly points at the
+        // NEW tier, not a regression in the blessed corpus.
+        foreach (var task in SeedBenchmarkCorpus.ExtendedTasks)
+        {
+            var dir = StageFixture(task.FixtureRef);
+
+            File.Exists(Path.Combine(dir, SeedBenchmarkFixtures.CheckFileName)).ShouldBeTrue($"'{task.FixtureRef}' must materialise a check.sh");
+            File.Exists(Path.Combine(dir, SeedBenchmarkFixtures.SolutionFileName)).ShouldBeTrue($"'{task.FixtureRef}' must materialise the editable solution file");
+
+            var result = await RunCheckAsync(dir);
+
+            result.Status.ShouldBe(SandboxStatus.Failed, $"'{task.FixtureRef}' must ship in its FAILING start-state — the agent's job is to make it pass");
+            result.ExitCode.ShouldNotBe(0);
+        }
+    }
+
+    [Fact]
     public async Task The_documented_one_line_edit_makes_a_fixtures_check_pass()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -76,6 +98,8 @@ public sealed class SeedBenchmarkFixturesTests : IDisposable
     [InlineData("balanced-parens")]
     [InlineData("gcd-euclid")]
     [InlineData("clamp-range")]
+    [InlineData("roman-numeral")]
+    [InlineData("expr-precedence")]
     public async Task A_known_correct_solution_makes_each_harder_fixtures_check_pass(string fixtureRef)
     {
         if (OperatingSystem.IsWindows()) return;
@@ -123,6 +147,45 @@ public sealed class SeedBenchmarkFixturesTests : IDisposable
         "clamp-range" => """
             #!/bin/sh
             clamp() { x=$1; lo=$2; hi=$3; if [ "$x" -lt "$lo" ]; then echo "$lo"; elif [ "$x" -gt "$hi" ]; then echo "$hi"; else echo "$x"; fi; }
+            """,
+        "roman-numeral" => """
+            #!/bin/sh
+            to_roman() {
+              n=$1
+              result=""
+              for pair in "1000 M" "900 CM" "500 D" "400 CD" "100 C" "90 XC" "50 L" "40 XL" "10 X" "9 IX" "5 V" "4 IV" "1 I"; do
+                set -- $pair
+                val=$1
+                sym=$2
+                while [ "$n" -ge "$val" ]; do
+                  result="${result}${sym}"
+                  n=$((n - val))
+                done
+              done
+              echo "$result"
+            }
+            """,
+        // The two-pass precedence algorithm: a running additive `total` plus a `term` accumulator that absorbs x / (so
+        // + and - only ever fold a FULLY-reduced term into total) — genuinely different from the stub's naive single
+        // left-to-right fold, so this is a real discriminator, not an incidental pass.
+        "expr-precedence" => """
+            #!/bin/sh
+            eval_expr() {
+              set -- $1
+              term=$1
+              total=0
+              shift
+              while [ "$#" -gt 0 ]; do
+                op=$1; val=$2; shift 2
+                case "$op" in
+                  "x") term=$((term * val)) ;;
+                  "/") term=$((term / val)) ;;
+                  "+") total=$((total + term)); term=$val ;;
+                  "-") total=$((total + term)); term=$((0 - val)) ;;
+                esac
+              done
+              echo $((total + term))
+            }
             """,
         _ => throw new ArgumentException($"no known solution wired for '{fixtureRef}'", nameof(fixtureRef)),
     };

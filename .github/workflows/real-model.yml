@@ -354,6 +354,94 @@ jobs:
             exit 1
           fi
 
+  real-model-benchmark-extended:
+    name: real model (extended benchmark corpus — report only)
+    runs-on: ubuntu-latest
+    # P4.2 — the EXTENDED-tier solve-rate REPORT, kept in its OWN opt-in lane (workflow_dispatch ONLY — see the `on:`
+    # block at the top of this file, which the default push trigger does NOT reach): the extended corpus is 2 harder,
+    # new-to-the-corpus multi-step tasks (roman-numeral, expr-precedence) with an unproven natural solve-rate and a
+    # generous 20-min per-task timeout, so it must never share a budget with (or risk flaking) the blessed 9-task
+    # `real-model-benchmark` job above. Dispatch on demand via `gh workflow run real-model.yml --ref <branch>` to get a
+    # fresh extended-corpus read; it never runs on an automatic push to main.
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+
+    # Same UNCONFINED rationale as the blessed benchmark lane: this gate's signal is the live solve-rate REPORT, not
+    # sandbox confinement (proven fail-closed in the dedicated sandbox lane); the agent edits trusted offline fixtures.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-extended-benchmark-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        run: |
+          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          claude --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the extended-corpus solve-rate report — a real claude agent attempts the harder task set)
+        # REPORT-ONLY (RealModelGate.AssessLiveAsync gating:false) — never fails the job on a low solve-rate; only a
+        # genuinely broken test class (0 executed below) reds it. Self-skips when ALL CODESPACE_LLM_* are absent (fork
+        # stays green) and FAILS on a partial config.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelExtendedBenchmark"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-benchmark-extended.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the extended-benchmark report actually ran (no silent skip)
+        run: |
+          trx=backend/TestResults/real-model-benchmark-extended.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the RealModel extended-benchmark report to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
+
   real-model-injection:
     name: real model (agent/skill injection — claude gates, codex reports)
     runs-on: ubuntu-latest
