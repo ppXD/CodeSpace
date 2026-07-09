@@ -52,6 +52,14 @@ public sealed partial class SupervisorTurnService
             ? await _decisionQueue.ListPendingForAgentRunsAsync(StagedChildAgentRunIds(rows), teamId, cancellationToken).ConfigureAwait(false)
             : EmptyPendingDecisions;
 
+        // P0-5: which of this run's agents already have a genuinely published PublishManifest row — read off the
+        // SAME StagesAgents-gated predicate (a planning-only run with no staged agent never needs this). SupervisorPublishGate
+        // (I3) reads it directly so a single already-pushed contributor satisfies "published" without a separate
+        // Integration-kind manifest.
+        var publishedAgentRunIds = rows.Any(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
+            ? await FoldPublishedAgentRunIdsAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false)
+            : EmptyGuidSet;
+
         // The operator's OBJECTIVE acceptance command (L4 A3) — the argv a resolve verdict is graded against. Null
         // (none / all-blank) → no objective grade runs, the resolver self-report marker stands (byte-identical to pre-A3).
         var acceptanceCommand = NormalizeCommand(goalConfig?.AcceptanceChecks);
@@ -138,11 +146,36 @@ public sealed partial class SupervisorTurnService
             ReviewerAgent = goalConfig?.ReviewerAgent ?? false,
             ReviewerModelId = goalConfig?.ReviewerModelId,
             PendingChildDecisions = pendingChildDecisions,
+            PublishedAgentRunIds = publishedAgentRunIds,
         };
     }
 
     /// <summary>The shared empty pending-decision list for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAgentResults analogue for D4c-2).</summary>
     private static readonly IReadOnlyList<PendingDecision> EmptyPendingDecisions = Array.Empty<PendingDecision>();
+
+    /// <summary>The shared empty published-agent-id set for the common no-spawn rehydrate (the EmptyPendingDecisions analogue for P0-5).</summary>
+    private static readonly IReadOnlySet<Guid> EmptyGuidSet = new HashSet<Guid>();
+
+    /// <summary>
+    /// The AgentRunIds this run has a GENUINELY published <c>PublishManifest</c> row for — read once off the
+    /// canonical publish-or-park ledger (I1/I2/I3's single source of truth) so <see cref="SupervisorPublishGate"/>
+    /// can recognize an already-pushed contributor without needing a separate Integration-kind manifest. A
+    /// MULTI-repo agent (more than one manifest row for the same AgentRunId, one per repo it wrote to) counts
+    /// ONLY when EVERY one of its own repos is <c>Pushed</c> (or has an opened PR/MR) — the same all-or-nothing
+    /// posture <c>GradeUnitAcceptanceMultiRepoAsync</c> already applies to grading: a partially-published
+    /// multi-repo change is not genuinely published, so a lone pushed repo can never mask an unpublished sibling.
+    /// </summary>
+    private async Task<IReadOnlySet<Guid>> FoldPublishedAgentRunIdsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return manifests
+            .Where(m => m.AgentRunId is not null)
+            .GroupBy(m => m.AgentRunId!.Value)
+            .Where(g => g.All(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber is not null))
+            .Select(g => g.Key)
+            .ToHashSet();
+    }
 
     /// <summary>The DISTINCT agent-run ids this run's spawn/retry/resolve decisions staged (in recorded spawn order) — the key both the agent-results fold and the pending-decision read fan out over. Lifted so the two reads share ONE id source.</summary>
     private static List<Guid> StagedChildAgentRunIds(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows) =>

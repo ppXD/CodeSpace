@@ -453,6 +453,17 @@ public static class SupervisorOutcome
         || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
 
     /// <summary>
+    /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4): its
+    /// per-unit acceptance grade objectively REJECTED it (<see cref="SupervisorAgentResult.AcceptancePassed"/> == false).
+    /// Shared by every door to the head — the merge (<c>RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge</c>),
+    /// the resolver's branch collection (<c>RealSupervisorActionExecutor.Resolve.cs</c>), AND the I3 publish gate's
+    /// already-published shortcut (<see cref="SupervisorPublishGate"/>) — so none of the three can ever drift on
+    /// which units a rejection withholds. An ungraded unit (<c>null</c> — no per-unit contract, or a deferred
+    /// multi-repo unit) is NOT withheld (byte-identical to pre-slice).
+    /// </summary>
+    public static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
+
+    /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo
     /// facts (alias / repository id / produced branch / base / changed files) MINUS the unbounded per-repo diff
     /// (<c>Patch</c> + <c>PatchArtifactId</c> cleared) — the same reason the compact omits the top-level Patch. The
