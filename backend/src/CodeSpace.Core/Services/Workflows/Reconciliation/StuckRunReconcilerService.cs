@@ -66,6 +66,17 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// </summary>
     public static readonly TimeSpan TimerWakeLostAfter = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// Threshold for "SupervisorInfraPark deadline lost" (P4.3) — a SupervisorInfraPark wait still Pending past its
+    /// deadline (stored in <c>wake_at</c> — <see cref="Engine.WorkflowEngine.SuspendNodeAsync"/> reuses that column for
+    /// every bounded wait, not only Timer) by this grace, on a Suspended run. This wait kind had NO backstop until now:
+    /// unlike Timer/SupervisorDecision/Subworkflow, nothing re-fired a lost deadline job for the model-plane-outage
+    /// park ladder (P1.1), so a crash between the Suspended commit and the scheduled <c>ResumeByDeadlineAsync</c> job —
+    /// or a purged Hangfire job — would strand the run on the ladder FOREVER, even once the gateway recovered. Same 2
+    /// min grace as the Timer sweep: it dwarfs normal Hangfire fire latency without re-firing a healthy, just-due deadline.
+    /// </summary>
+    public static readonly TimeSpan SupervisorInfraParkWakeLostAfter = TimeSpan.FromMinutes(2);
+
     /// <summary>Batch size per sweep — bounds the work the reconciler can do in one tick so a backlog doesn't run forever.</summary>
     public const int BatchSize = 50;
 
@@ -122,6 +133,8 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         var recoveredTimerWaits = await RecoverStrandedTimerWaitsAsync(cancellationToken).ConfigureAwait(false);
 
+        var recoveredInfraParkWaits = await RecoverStrandedSupervisorInfraParkWaitsAsync(cancellationToken).ConfigureAwait(false);
+
         var recoveredSubworkflowParents = await RecoverStrandedSubworkflowParentsAsync(cancellationToken).ConfigureAwait(false);
 
         var summary = new StuckRunReconcileSummary
@@ -134,13 +147,14 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RecoveredAbandonedSupervisorRun = recoveredSupervisorRuns,
             ReleasedRerunLeases = releasedLeases,
             RecoveredStrandedTimerWait = recoveredTimerWaits,
+            RecoveredStrandedSupervisorInfraParkWait = recoveredInfraParkWaits,
             RecoveredStrandedSubworkflowParent = recoveredSubworkflowParents,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}, subworkflowParentsRecovered={SubworkflowParentsRecovered}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait, summary.RecoveredStrandedSubworkflowParent);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}, infraParkWaitsRecovered={InfraParkWaitsRecovered}, subworkflowParentsRecovered={SubworkflowParentsRecovered}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait, summary.RecoveredStrandedSupervisorInfraParkWait, summary.RecoveredStrandedSubworkflowParent);
 
         return summary;
     }
@@ -429,6 +443,57 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             {
                 // Per-row resilience: one stranded timer's failure doesn't abort the sweep.
                 _logger.LogWarning(ex, "StuckRunReconciler: stranded-timer recovery for run {RunId} wait {WaitId} failed; will retry next tick", wait.RunId, wait.Id);
+            }
+        }
+
+        return recovered;
+    }
+
+    /// <summary>
+    /// Stranded-SupervisorInfraPark recovery (P4.3) — the fourth bounded-deadline wait, and (until now) the last
+    /// un-backstopped one. A <c>SupervisorInfraPark</c> wait (the P1.1 model-plane-outage park ladder) still Pending
+    /// past its deadline (stored in <c>wake_at</c>, same column Timer uses — <see cref="Engine.WorkflowEngine.SuspendNodeAsync"/>
+    /// reuses it for every bounded wait) by <see cref="SupervisorInfraParkWakeLostAfter"/>, on a Suspended run, means
+    /// the scheduled <c>ResumeByDeadlineAsync</c> Hangfire job was lost — a crash between the Suspended commit and
+    /// the schedule, or a purged job. Timer has <see cref="RecoverStrandedTimerWaitsAsync"/>, SupervisorDecision has
+    /// <see cref="RecoverSupervisorAdvancesAsync"/>, Subworkflow has <see cref="RecoverStrandedSubworkflowParentsAsync"/>
+    /// — this wait kind had NONE, so a lost deadline would strand the run on the park ladder FOREVER, even once the
+    /// model plane recovered. Re-fire the SAME deadline resume the engine's scheduled job would —
+    /// <see cref="IWorkflowResumeService.ResumeByDeadlineAsync"/> with the wait's OWN stored payload (identical to the
+    /// TimeoutPayload the engine scheduled with — <c>AgentSupervisorNode.ParkForInfraOrStopAsync</c> sets both
+    /// <c>Payload</c> and <c>TimeoutPayload</c> to the SAME marker) — which resolves ONLY if still Pending, so a
+    /// re-fire racing the real (late) job is an idempotent no-op. Bounded by <see cref="BatchSize"/> per tick.
+    /// </summary>
+    private async Task<int> RecoverStrandedSupervisorInfraParkWaitsAsync(CancellationToken cancellationToken)
+    {
+        var threshold = DateTimeOffset.UtcNow - SupervisorInfraParkWakeLostAfter;
+
+        var stale = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.WaitKind == WorkflowWaitKinds.SupervisorInfraPark
+                        && w.Status == WorkflowWaitStatuses.Pending
+                        && w.WakeAt != null
+                        && w.WakeAt < threshold
+                        && w.PayloadJson != null
+                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+            .OrderBy(w => w.WakeAt)
+            .Take(BatchSize)
+            .Select(w => new { w.Id, w.PayloadJson })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var recovered = 0;
+        foreach (var wait in stale)
+        {
+            try
+            {
+                // Re-fire the SAME deadline resume the engine's scheduled job would. ResumeByDeadlineAsync's
+                // still-Pending gate makes a re-fire racing the real (late) job an idempotent no-op.
+                if (await _resumeService.ResumeByDeadlineAsync(wait.Id, wait.PayloadJson!, cancellationToken).ConfigureAwait(false)) recovered++;
+            }
+            catch (Exception ex)
+            {
+                // Per-row resilience: one stranded infra-park wait's failure doesn't abort the sweep.
+                _logger.LogWarning(ex, "StuckRunReconciler: stranded-SupervisorInfraPark recovery for wait {WaitId} failed; will retry next tick", wait.Id);
             }
         }
 

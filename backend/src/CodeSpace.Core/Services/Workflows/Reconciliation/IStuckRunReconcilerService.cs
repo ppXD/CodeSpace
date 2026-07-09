@@ -46,6 +46,12 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       times (counted from durable <c>supervisor.run_recovered</c> ledger records), after which it falls
 ///       through to the abandoned-Running failure sweep and terminates cleanly — never an infinite loop.
 ///       The sweep always runs; runs with no non-terminal supervisor decision simply don't match it.</item>
+///   <item><b>Stranded SupervisorInfraPark wait</b> (P4.3) — a <c>SupervisorInfraPark</c> wait (the P1.1
+///       model-plane-outage park ladder) still Pending past its deadline by 2 min, on a Suspended run, means the
+///       scheduled <c>ResumeByDeadlineAsync</c> Hangfire job was lost. Unlike Timer/SupervisorDecision/Subworkflow,
+///       this wait kind had NO backstop until now — a lost deadline would strand the run on the park ladder
+///       FOREVER, even once the model plane recovered. Re-fire the same deadline resume; idempotent against the
+///       real (late) job via the resume's still-Pending gate.</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -76,8 +82,11 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at) — the automated twin of the operator reissue verb. 0 when no timer wake is overdue.</summary>
     public int RecoveredStrandedTimerWait { get; init; }
 
-    /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost (a crash between the child's terminal commit and the resume) — the last un-backstopped wait strand. 0 when no parent is parked on a terminal child.</summary>
+    /// <summary>Stranded SupervisorInfraPark waits re-fired because their scheduled deadline resume was dropped (P4.3) — the model-plane-outage park ladder's own backstop, closing the last un-backstopped bounded wait. 0 when no infra-park deadline is overdue.</summary>
+    public int RecoveredStrandedSupervisorInfraParkWait { get; init; }
+
+    /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost (a crash between the child's terminal commit and the resume). 0 when no parent is parked on a terminal child.</summary>
     public int RecoveredStrandedSubworkflowParent { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait + RecoveredStrandedSubworkflowParent;
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait + RecoveredStrandedSupervisorInfraParkWait + RecoveredStrandedSubworkflowParent;
 }
