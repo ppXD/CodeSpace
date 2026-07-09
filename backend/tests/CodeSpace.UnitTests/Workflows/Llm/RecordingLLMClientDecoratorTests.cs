@@ -225,6 +225,39 @@ public class RecordingLLMClientDecoratorTests
         completed.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(5);
         completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(3);
         completed.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("stop");
+
+        logger.Calls.ShouldNotContain(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta,
+            "a small streamed output (under the coalescing threshold) rides entirely in completed — no delta noise");
+    }
+
+    [Fact]
+    public async Task A_large_streamed_output_records_COALESCED_interaction_delta_rows_between_started_and_completed()
+    {
+        // Many small text fragments coalesce into a FEW interaction.delta rows (bounded by DeltaFlushChars) — NOT one
+        // row per token — so a huge stream can't flood the ledger. The deltas are ordered (monotonic ordinal from 0),
+        // correlated to started/completed by one id, and their concatenation is a prefix of the authoritative completed text.
+        const int flush = RecordingStreamingStructuredLLMClientDecorator.DeltaFlushChars;
+        var parts = Enumerable.Repeat("x", flush * 2 + 50).ToList();   // 2*flush+50 single-char fragments → exactly 2 full flushes + a sub-threshold tail
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient { TextParts = parts });
+
+        using (PushScope(logger))
+        {
+            await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None)) { }
+        }
+
+        logger.Calls[0].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionStarted);
+        logger.Calls[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionCompleted);
+
+        var deltas = logger.Calls.Where(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta).ToList();
+        deltas.Count.ShouldBe(2, "2*flush+50 chars coalesce into exactly 2 full-threshold deltas (the sub-threshold tail rides in completed) — far fewer than the ~500 fragments");
+        deltas.Select(d => d.Payload.GetProperty("ordinal").GetInt32()).ShouldBe(new[] { 0, 1 }, "delta ordinals are monotonic from 0");
+        deltas.ShouldAllBe(d => d.CorrelationId == logger.Calls[0].CorrelationId, "every delta shares the started/completed correlation id");
+
+        var streamedText = string.Concat(deltas.Select(d => d.Payload.GetProperty("text").GetString()));
+        streamedText.Length.ShouldBe(flush * 2, "the deltas carry the coalesced text up to the last full flush");
+        // the completed output is the full authoritative text; the deltas are a prefix VIEW of it
+        logger.Calls[^1].Payload.GetProperty("output").GetString()!.ShouldStartWith(streamedText);
     }
 
     [Fact]
@@ -285,8 +318,9 @@ public class RecordingLLMClientDecoratorTests
 
     private sealed class StreamingFakeClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
     {
-        public int? ThrowAfter { get; init; }        // yield this many events, then throw ThrowWith (simulates a mid-stream gateway drop)
+        public int? ThrowAfter { get; init; }             // yield this many events, then throw ThrowWith (simulates a mid-stream gateway drop)
         public Exception? ThrowWith { get; init; }
+        public IReadOnlyList<string>? TextParts { get; init; }   // override the default "hello "/"there" text fragments (for coalescing tests)
 
         public string Provider => "streaming";
 
@@ -295,13 +329,11 @@ public class RecordingLLMClientDecoratorTests
 
         public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
-            var events = new LlmStreamEvent[]
-            {
-                new LlmStreamEvent.Meta(Model: "m", InputTokens: 5),
-                new LlmStreamEvent.TextDelta("hello "),
-                new LlmStreamEvent.TextDelta("there"),
-                new LlmStreamEvent.Meta(OutputTokens: 3, FinishReason: "stop"),
-            };
+            var parts = TextParts ?? new[] { "hello ", "there" };
+
+            var events = new List<LlmStreamEvent> { new LlmStreamEvent.Meta(Model: "m", InputTokens: 5) };
+            events.AddRange(parts.Select(p => (LlmStreamEvent)new LlmStreamEvent.TextDelta(p)));
+            events.Add(new LlmStreamEvent.Meta(OutputTokens: 3, FinishReason: "stop"));
 
             var yielded = 0;
             foreach (var e in events)
