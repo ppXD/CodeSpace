@@ -90,6 +90,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The team's unattended-delivery scorecard — the path-to-intelligence north-star ("task in → merged/published artifact out with zero human touches") over every terminal run, single-agent or supervisor-orchestrated alike. Optional since filter windows the trend. Team-scoped (the team is the X-Team-Id header, never the query string); empty when no terminal runs exist.</summary>
+    [HttpGet("unattended-delivery-scorecard")]
+    public async Task<IActionResult> GetUnattendedDeliveryScorecard([FromQuery] GetUnattendedDeliveryScorecardQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
