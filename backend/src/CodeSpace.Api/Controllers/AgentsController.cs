@@ -98,6 +98,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The team's premature-stop-rate report (P4) — the stability north-star: of the task runs it started (single-agent, plan-map, or supervisor alike), what fraction died prematurely rather than reaching a genuine conclusion. DELIBERATELY includes runs that haven't finished yet (never silently excluded); a run stuck for too long is surfaced as a loud, separate figure. Optional since filter windows the trend. Team-scoped (the team is the X-Team-Id header, never the query string).</summary>
+    [HttpGet("premature-stop-rate")]
+    public async Task<IActionResult> GetPrematureStopRate([FromQuery] GetPrematureStopRateQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
