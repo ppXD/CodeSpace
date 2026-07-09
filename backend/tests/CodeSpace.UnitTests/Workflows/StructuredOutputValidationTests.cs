@@ -70,16 +70,16 @@ public class StructuredOutputValidationTests
     [InlineData("""{"kind":"plan","note":"a } brace in a string"} trailing""", "plan")] // brace inside a string
     [InlineData("""{"kind":"plan"} {"kind":"merge"}""", "plan")]                          // first of two objects
     [InlineData("```json\n{\"kind\":\"plan\"}\n```", "plan")]                              // fenced
-    public void The_extractor_takes_the_first_balanced_object(string content, string expectedKind)
+    [InlineData("""{"kind":"plan" """, "plan")]                                            // truncated — REPAIRED (the object is closed) rather than lost
+    public void The_extractor_takes_the_first_balanced_or_repaired_object(string content, string expectedKind)
     {
         StructuredJsonText.TryExtractObject(content)!.Value.GetProperty("kind").GetString().ShouldBe(expectedKind);
     }
 
     [Theory]
-    [InlineData("""{"kind":"plan" """)]   // truncated — no closing brace
     [InlineData("no json here at all")]
     [InlineData("")]
-    public void The_extractor_returns_null_on_no_complete_object(string content)
+    public void The_extractor_returns_null_on_no_recoverable_object(string content)
     {
         StructuredJsonText.TryExtractObject(content).ShouldBeNull();
     }
