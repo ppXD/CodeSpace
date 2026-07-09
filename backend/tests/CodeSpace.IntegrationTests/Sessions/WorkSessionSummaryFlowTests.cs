@@ -140,6 +140,7 @@ public class WorkSessionSummaryFlowTests
         var session = await LoadSessionAsync(sessionId);
         session.Summary.ShouldBeNull("no credentialed model in the team's pool → fail-open, the summary is left unchanged");
         session.SummaryThroughTurnIndex.ShouldBeNull();
+        session.SummaryStaleSinceTurn.ShouldBe(1, "the fail-open path must NOT stay silent — it records the oldest turn the summary failed to fold");
         capture.Called.ShouldBeFalse("a missing pool model short-circuits before the LLM call");
     }
 
@@ -156,6 +157,7 @@ public class WorkSessionSummaryFlowTests
         var session = await LoadSessionAsync(sessionId);
         session.Summary.ShouldBeNull("an LLM failure is caught → the summary is left unchanged, the launch proceeds");
         session.SummaryThroughTurnIndex.ShouldBeNull();
+        session.SummaryStaleSinceTurn.ShouldBe(1);
     }
 
     [Fact]
@@ -172,6 +174,28 @@ public class WorkSessionSummaryFlowTests
         var session = await LoadSessionAsync(sessionId);
         session.Summary.ShouldBeNull("a model-resolution (credential-decrypt) fault fails open — never breaks the launch");
         session.SummaryThroughTurnIndex.ShouldBeNull();
+        session.SummaryStaleSinceTurn.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_subsequent_success_clears_the_stale_marker_and_advances_normally()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        for (var t = 1; t <= 12; t++) await SeedTurnAsync(teamId, sessionId, t, $"goal-{t}", $"result-{t}");
+
+        // NO credentialed model yet → fails open, marks the gap.
+        await RunSummarizerAsync(teamId, sessionId, new CapturingLlmClient());
+        (await LoadSessionAsync(sessionId)).SummaryStaleSinceTurn.ShouldBe(1, "sanity: the gap is marked before the model becomes available");
+
+        // The model becomes available (e.g. a credential is fixed) — the NEXT run succeeds normally.
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        await RunSummarizerAsync(teamId, sessionId, new CapturingLlmClient { Return = "CAUGHT UP" });
+
+        var session = await LoadSessionAsync(sessionId);
+        session.Summary.ShouldBe("CAUGHT UP");
+        session.SummaryThroughTurnIndex.ShouldBe(4);
+        session.SummaryStaleSinceTurn.ShouldBeNull("a successful fold catches the summary back up — the gap it left behind is gone");
     }
 
     [Fact]

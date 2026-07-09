@@ -23,6 +23,9 @@ public sealed record SessionDetail
     /// <summary>The highest turn the <see cref="Summary"/> already covers. Null when there is no summary.</summary>
     public int? SummaryThroughTurnIndex { get; init; }
 
+    /// <summary>Set when a distillation attempt failed (fail-open) and left <see cref="Summary"/> stale — the oldest un-folded turn, so a reader (room pill, digest note) can flag the summary as possibly incomplete instead of showing it as current. Null = fully caught up.</summary>
+    public int? SummaryStaleSinceTurn { get; init; }
+
     /// <summary>When entered by a run id, the turn that run belongs to (so the UI scrolls to it). Null when entered by session id, or when the run is not a turn in this thread.</summary>
     public int? AnchorTurnIndex { get; init; }
 

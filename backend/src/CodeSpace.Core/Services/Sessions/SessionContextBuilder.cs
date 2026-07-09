@@ -75,6 +75,12 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             sb.AppendLine();
             sb.AppendLine("## Summary of earlier work (older turns, distilled)");
             sb.AppendLine(summary.Trim());
+
+            // Fail-open distillation (SessionSummarizer) leaves Summary UNCHANGED on a model/LLM error — never silent
+            // here, since a stale summary read as current could mislead the continuing agent about what already
+            // happened before the gap turn.
+            if (session?.SummaryStaleSinceTurn is { } staleSince)
+                sb.AppendLine($"(Note: turns from {staleSince} onward have not yet been folded into this summary — it may be incomplete.)");
         }
 
         foreach (var row in Enumerable.Reverse(window))
