@@ -70,8 +70,9 @@ public sealed record WorkPlanChecklistItem
 /// <summary>
 /// The derived per-item states (an OPEN render vocabulary, not a dispatch enum). Derivation: never staged →
 /// <see cref="Pending"/>; latest attempt non-terminal → <see cref="InProgress"/>; latest attempt Succeeded and
-/// not acceptance-rejected → <see cref="Completed"/>; a would-be success a human must resolve →
-/// <see cref="NeedsReview"/>; any other terminal → <see cref="Failed"/>.
+/// not acceptance-rejected → <see cref="Completed"/>; latest attempt self-reported Failed but its OWN check
+/// actually PASSED (P4-1, an under-claim) → <see cref="Completed"/> too, never a bare Failed; a would-be success
+/// a human must resolve → <see cref="NeedsReview"/>; any other terminal → <see cref="Failed"/>.
 /// </summary>
 public static class WorkPlanItemStates
 {
@@ -89,12 +90,22 @@ public static class WorkPlanItemStates
     /// staged); nameof-bound so a status rename is a compile error here, and an UNKNOWN name fails closed to
     /// <see cref="Failed"/> (acceptable for a terminal; the exhaustiveness test forces a deliberate mapping
     /// whenever the enum grows).
+    ///
+    /// <para>The <see cref="AgentRunStatus.Failed"/> + <c>acceptancePassed == true</c> branch (P4-1, an
+    /// under-claim: the agent gave up, but its own objective check actually passed) is its own case, NOT folded
+    /// into the catch-all — a human reading this checklist row must never see "Failed" for the exact row the
+    /// supervisor decider prompt (<c>LlmSupervisorDecider.AppendUnitAcceptanceVerdict</c>) is simultaneously told
+    /// is "objectively fine, do NOT retry, merge it." A <see cref="AgentRunStatus.Cancelled"/>/<c>TimedOut</c> row
+    /// never reached a genuine self-report at all, so it stays <see cref="Failed"/> via the catch-all regardless
+    /// of <paramref name="acceptancePassed"/> — mirroring <c>SupervisorTurnService.Rehydrate.ClassifyUnitContradiction</c>'s
+    /// identical carve-out.</para>
     /// </summary>
     public static string Derive(string? agentStatus, bool? acceptancePassed) => agentStatus switch
     {
         null => Pending,
         nameof(AgentRunStatus.Queued) or nameof(AgentRunStatus.Running) => InProgress,
         nameof(AgentRunStatus.Succeeded) => acceptancePassed == false ? Failed : Completed,
+        nameof(AgentRunStatus.Failed) when acceptancePassed == true => Completed,
         nameof(AgentRunStatus.NeedsReview) => NeedsReview,
         _ => Failed,
     };

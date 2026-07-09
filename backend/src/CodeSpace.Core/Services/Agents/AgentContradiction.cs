@@ -13,6 +13,16 @@ namespace CodeSpace.Core.Services.Agents;
 /// the reverse, and <see cref="Agents.AgentAcceptanceContract"/> — an <c>Agents</c>-namespace type — needs to call
 /// this too. Pure + DB-free + exhaustively unit-testable, mirroring <see cref="AgentAcceptanceContract.IsInfraFailure"/>'s
 /// "one place, can't drift" precedent.</para>
+///
+/// <para><b>Deliberately NOT wired into two other self-report/gate pairs that exist elsewhere in the supervisor
+/// lane</b> — a <c>resolve</c> decision's resolver-authored success marker vs. its folded <c>acceptanceGrade</c>
+/// (<c>SupervisorOutcome.ReadResolutionVerdict</c>, its own three-way <c>SupervisorResolutionVerdict</c>), and a
+/// <c>stop</c> decision's model-declared outcome label vs. its folded <c>acceptanceGrade</c>
+/// (<c>SupervisorOutcome.ClassifyStop</c>). Both are a DIFFERENT shape (free-text marker / declared label, not a
+/// per-unit <c>SupervisorAgentResult</c> row) with their own established verdict types and
+/// consumers — folding them through THIS classifier would mean two representations for the same concept. If a
+/// future change wants "contradiction" to mean the same thing across all three shapes, that's a deliberate,
+/// separate design decision, not an oversight here.</para>
 /// </summary>
 public static class AgentContradiction
 {

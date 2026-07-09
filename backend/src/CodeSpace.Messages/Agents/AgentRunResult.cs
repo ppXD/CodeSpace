@@ -103,6 +103,12 @@ public sealed record AgentRunResult
     /// result whose check FAILED (the grading gate returns early on any other self-reported status, so an
     /// under-claim — a self-reported Failed run whose check actually passed — can never occur here). Null when the
     /// run carried no oracle, the grade agreed, or grading never ran.
+    ///
+    /// <para><b>Write-only as of P4-1</b> — persisted so it survives on the run's durable result and is available
+    /// to a future single-agent-lane consumer (the run-detail acceptance chip only shows <see cref="AcceptancePassed"/>
+    /// today), mirroring how the supervisor lane's twin field feeds the decider prompt + the journal card. No
+    /// current reader exists for THIS lane's value; that's an intentional asymmetry (single-agent runs have no
+    /// decider prompt to correct and no journal card of their own yet), not an oversight.</para>
     /// </summary>
     public string? Contradiction { get; init; }
 
