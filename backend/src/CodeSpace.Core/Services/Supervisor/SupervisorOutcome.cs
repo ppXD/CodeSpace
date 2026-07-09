@@ -138,6 +138,9 @@ public static class SupervisorOutcome
     /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "no progress"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
     public static string? ReadStopReason(string? payloadJson) => ReadStringField(payloadJson, "reason");
 
+    /// <summary>P3.5 — the OPTIONAL <c>detail</c> a server-forced stop stamped alongside its <c>reason</c> (<c>{ reason, detail }</c>) — a dynamic elaboration (e.g. the cost cap's realized-spend breakdown) for the bounds that carry one. Null when absent (every reason without a per-run figure to cite, and every non-forced stop).</summary>
+    public static string? ReadStopDetail(string? payloadJson) => ReadStringField(payloadJson, "detail");
+
     /// <summary>
     /// Classify a <c>stop</c> decision's terminal shape from its PAYLOAD (<c>{reason}</c> for a server-forced stop) plus
     /// its OUTCOME (<c>{outcome, summary}</c> for a model-authored stop) — the single success/degraded verdict both the
@@ -160,7 +163,7 @@ public static class SupervisorOutcome
         var reason = ReadStopReason(payloadJson);
 
         if (!string.IsNullOrWhiteSpace(reason))
-            return new SupervisorStopClassification { Kind = SupervisorStopKind.Forced, Reason = reason };
+            return new SupervisorStopClassification { Kind = SupervisorStopKind.Forced, Reason = reason, Detail = ReadStopDetail(payloadJson) };
 
         return new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = summary };
     }

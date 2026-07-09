@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
@@ -18,6 +19,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed partial class SupervisorTurnService
 {
+    /// <summary>P3.5 — the interaction-record label for the acceptance grader's LlmJudge model call, so its spend is visible + countable exactly like the decider's own "supervisor.decision" and the critic's "critic.review". Pinned by a unit test (Rule 8).</summary>
+    public const string GraderAcceptanceCallKind = "grader.acceptance";
+
     public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken)
     {
         var rows = await _ledger.GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
@@ -71,8 +75,16 @@ public sealed partial class SupervisorTurnService
             if (SupervisorDecisionStateMachine.IsTerminal(row.Status))
             {
                 decision = FoldAgentResults(decision, agentResultsById);
-                decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, teamId, cancellationToken).ConfigureAwait(false);
-                decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, teamId, cancellationToken).ConfigureAwait(false);
+
+                // P3.5 — an LlmJudge-kind acceptance check makes a real model call; label it "grader.acceptance" so
+                // its spend lands on the ledger (RecordingLLMClientDecorator records nothing with no ambient scope) and
+                // counts toward the run's cost cap. A no-op for every OTHER grader kind (TestsPass etc. make no model call).
+                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
+                {
+                    decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, teamId, cancellationToken).ConfigureAwait(false);
+                    decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, teamId, cancellationToken).ConfigureAwait(false);
+                }
+
                 priorDecisions.Add(decision);
             }
             else
@@ -85,6 +97,17 @@ public sealed partial class SupervisorTurnService
                 await _ledger.UpdateOutcomeAsync(row.Id, teamId, decision.OutcomeJson!, cancellationToken).ConfigureAwait(false);
         }
 
+        var plan = SupervisorGoalPlan.From(goalConfig);
+
+        // P3.5 — brain-plane spend (the supervisor's own decision calls, a decision critic's review, an
+        // acceptance-grading judge, any future in-process model call) is DB-gated on a cost cap actually being set:
+        // an uncapped run (the common case — MaxCostUsd defaults to null) never pays this extra query, staying
+        // byte-identical to before. When capped, it's summed alongside the agent-execution spend below.
+        var agentExecutionSpend = FoldRunSpendUsd(priorDecisions);
+        var brainPlaneSpend = plan.MaxCostUsd is not null
+            ? await FoldBrainPlaneSpendAsync(supervisorRunId, cancellationToken).ConfigureAwait(false)
+            : BrainPlaneSpendSummary.Empty;
+
         return new SupervisorTurnContext
         {
             Goal = goal,
@@ -95,9 +118,13 @@ public sealed partial class SupervisorTurnService
             PriorDecisions = priorDecisions,
             InFlight = inFlight,
             TotalSpawnedAgents = FoldTotalSpawnedAgents(priorDecisions),
-            RunSpendUsd = FoldRunSpendUsd(priorDecisions),
+            RunSpendUsd = agentExecutionSpend + brainPlaneSpend.TotalUsd,
+            AgentExecutionSpendUsd = agentExecutionSpend,
+            BrainPlaneSpendUsd = brainPlaneSpend.TotalUsd,
+            BrainPlaneSpendByKind = brainPlaneSpend.ByKind,
+            MaxCostUsd = plan.MaxCostUsd,
             NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
-            ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
+            ApprovalPolicy = plan.ApprovalPolicy,
             AgentProfile = goalConfig?.AgentProfile,
             AcceptanceChecks = acceptanceCommand,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
@@ -147,6 +174,23 @@ public sealed partial class SupervisorTurnService
         priorDecisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson)));
+
+    /// <summary>
+    /// P3.5 — sum the run's REALIZED brain-plane USD spend: every <c>interaction.completed</c> ledger row this run
+    /// recorded (the supervisor's own decision calls, a decision critic's review, an acceptance-grading judge, any
+    /// future in-process model call — <c>RecordingLLMClientDecorator</c>/<c>RecordingStructuredLLMClientDecorator</c>
+    /// record EVERY one with zero per-caller wiring), priced the SAME way agent-execution spend is
+    /// (<see cref="AgentCostPricing"/>), grouped by kind for the recitation/stop-detail breakdown. Only called when a
+    /// cost cap is actually set (the caller gates this) — an uncapped run never pays the extra query.
+    /// </summary>
+    private async Task<BrainPlaneSpendSummary> FoldBrainPlaneSpendAsync(Guid supervisorRunId, CancellationToken cancellationToken)
+    {
+        var records = await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == supervisorRunId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return BrainPlaneSpendSummary.From(records.Select(InteractionSpend.From).ToList());
+    }
 
     /// <summary>
     /// Count the MOST RECENT consecutive decisions that produced no new SETTLED EVIDENCE of progress (the no-progress
@@ -652,7 +696,11 @@ public sealed partial class SupervisorTurnService
 
         if (targets.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
 
-        var grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, cancellationToken).ConfigureAwait(false);
+        // P3.5 — see the identical rationale on the rehydrate-fold's own grading wrap: labels any LlmJudge model call
+        // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
+        BenchmarkGrade grade;
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
+            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
@@ -901,14 +949,16 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>
     /// The forced terminal decision when a fail-closed bound or governance refusal trips (PR-E E2/E5) — a
-    /// <c>stop</c> stamping the DISTINCT <paramref name="reason"/> (a <see cref="SupervisorStopReasons"/> value).
-    /// DETERMINISTIC given (reason): a re-entry after the same bound tripped re-derives the identical stop, so the
-    /// per-turn idempotency key is stable and the run terminates cleanly with the operator-legible reason.
+    /// <c>stop</c> stamping the DISTINCT <paramref name="reason"/> (a <see cref="SupervisorStopReasons"/> value) and,
+    /// for the bounds that carry one (P3.5 — currently only the cost cap), a dynamic <paramref name="detail"/> citing
+    /// the active cap and remaining budget. DETERMINISTIC given (reason, detail): both are derived from the durable
+    /// ledger, so a re-entry after the same bound tripped re-derives the IDENTICAL stop (nothing writes a new
+    /// ledger-recorded spend after a terminal stop), keeping the per-turn idempotency key stable.
     /// </summary>
-    private static SupervisorDecision ForcedStop(string reason) => new()
+    private static SupervisorDecision ForcedStop(string reason, string? detail = null) => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new { reason }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new { reason, detail }, AgentJson.Options),
     };
 
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>

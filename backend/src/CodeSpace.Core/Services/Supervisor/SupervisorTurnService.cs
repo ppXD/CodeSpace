@@ -332,6 +332,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var postBound = SupervisorBounds.PostDecision(context, plan, decision);
 
+        // P3.5 — the cost cap is the one bound with a per-run figure worth citing (which cap, how much over/left,
+        // broken down by lane) — every other bound's reason is already fully self-explanatory as a bare string.
+        if (postBound == SupervisorStopReasons.CostCapReached)
+            return ForcedStop(postBound, Deciders.SupervisorBudgetRecitation.Summary(plan.MaxCostUsd!.Value, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
+
         if (postBound != null) return ForcedStop(postBound);
 
         // I3 (publish-or-park): a stop that would terminalize accepted-but-unpublished work is rejected and
