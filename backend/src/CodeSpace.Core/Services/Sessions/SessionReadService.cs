@@ -60,9 +60,9 @@ public sealed class SessionReadService : ISessionReadService, IScopedDependency
             ? new List<SessionProjection.SessionRunRow>()
             : (await _db.WorkflowRun.AsNoTracking()
                 .Where(r => r.TeamId == teamId && r.SessionId != null && sessionIds.Contains(r.SessionId.Value) && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
-                .Select(r => new { SessionId = r.SessionId!.Value, r.Id, r.Status, r.ProjectionKind, r.CreatedDate })
+                .Select(r => new { SessionId = r.SessionId!.Value, r.Id, r.Status, r.ProjectionKind, r.CreatedDate, r.RootRunId, r.SessionTurnIndex })
                 .ToListAsync(cancellationToken).ConfigureAwait(false))
-                .Select(r => new SessionProjection.SessionRunRow(r.SessionId, r.Id, r.Status, r.ProjectionKind, r.CreatedDate))
+                .Select(r => new SessionProjection.SessionRunRow(r.SessionId, r.Id, r.Status, r.ProjectionKind, r.CreatedDate, r.RootRunId, r.SessionTurnIndex))
                 .ToList();
 
         var latestBySession = SessionProjection.LatestRunBySession(runRows);

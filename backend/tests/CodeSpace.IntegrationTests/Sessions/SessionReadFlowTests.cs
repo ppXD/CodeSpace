@@ -237,6 +237,32 @@ public class SessionReadFlowTests
     }
 
     [Fact]
+    public async Task Detail_shows_the_succeeded_rerun_even_when_an_even_newer_replay_failed()
+    {
+        // Rerun-aware session reads: a later attempt existing (a replay that itself then failed) must never mask an
+        // earlier attempt's real SUCCESS — the turn's effective attempt is the lineage-terminal success, not just newest.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        var sessionId = await SeedSessionAsync(teamId, userId, "Flaky then fixed then re-checked", lastActivityAt: now, turns: 1);
+
+        var original = await SeedRunAsync(teamId, sessionId, turnIndex: 1, goal: "Ship it", status: WorkflowRunStatus.Failure,
+            outputs: """{"summary":"boom"}""", createdAt: now.AddMinutes(-10));
+        var winner = await SeedRunAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Success,
+            source: WorkflowRunSourceTypes.Rerun, rerunFromNodeId: "impl", outputs: """{"summary":"fixed","branch":"cs/fixed"}""", createdAt: now.AddMinutes(-5));
+        await SeedRunAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Failure,
+            source: WorkflowRunSourceTypes.Replay, outputs: """{"summary":"a stale re-check crashed"}""", createdAt: now);
+
+        var detail = await DetailAsync(sessionId, teamId);
+
+        var turn = detail!.Turns.ShouldHaveSingleItem();
+        turn.RunId.ShouldBe(winner, "the succeeded rerun is the turn's real outcome, even though a newer replay later failed");
+        turn.RunStatus.ShouldBe(WorkflowRunStatus.Success);
+        turn.Result.ShouldBe("fixed");
+        turn.ProducedBranch.ShouldBe("cs/fixed");
+        turn.AttemptCount.ShouldBe(3, "the ladder still lists every attempt");
+    }
+
+    [Fact]
     public async Task Detail_excludes_nested_sub_workflow_child_runs()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -79,6 +79,30 @@ public class SessionProjectionTests
         t.Attempts[^1].SourceType.ShouldBe("rerun");
     }
 
+    [Fact]
+    public void A_succeeded_attempt_wins_over_an_even_newer_failed_replay()
+    {
+        // The rerun-aware fix: a later attempt existing (a replay/rerun that itself then failed) must never mask an
+        // earlier attempt's real SUCCESS — SessionTurnAttempts picks the lineage-terminal success, not just newest.
+        var b0 = Guid.NewGuid(); var b1 = Guid.NewGuid(); var b2 = Guid.NewGuid();
+        var runs = new[]
+        {
+            Run(b0, turn: 5, status: WorkflowRunStatus.Failure, created: T0, goal: """{"goal":"ship it"}""", outputs: """{"summary":"boom"}"""),
+            Run(b1, turn: null, root: b0, status: WorkflowRunStatus.Success, source: "rerun", rerunFrom: "impl", created: T0.AddMinutes(1), outputs: """{"summary":"fixed","branch":"cs/fixed"}"""),
+            Run(b2, turn: null, root: b0, status: WorkflowRunStatus.Failure, source: "replay", created: T0.AddMinutes(2), outputs: """{"summary":"a stale re-check crashed"}"""),
+        };
+
+        var t = SessionProjection.BuildTurns(runs, NonePending).ShouldHaveSingleItem();
+
+        t.RunId.ShouldBe(b1, "the succeeded attempt is the turn's real outcome even though a newer replay later failed");
+        t.RunStatus.ShouldBe(WorkflowRunStatus.Success);
+        t.Result.ShouldBe("fixed");
+        t.ProducedBranch.ShouldBe("cs/fixed");
+        t.AttemptCount.ShouldBe(3, "the ladder still lists every attempt");
+        t.Attempts!.Select(a => a.RunId).ShouldBe(new[] { b0, b1, b2 }, "the ladder stays oldest → newest regardless of which one is effective");
+        t.Attempts!.Single(a => a.IsLatest).RunId.ShouldBe(b1, "IsLatest marks the EFFECTIVE attempt the turn shows by default, not merely the chronologically-newest one");
+    }
+
     [Theory]
     [InlineData("""{"combined":"map synthesis"}""", "map synthesis")]
     [InlineData("""{"reason":"supervisor reason"}""", "supervisor reason")]
@@ -231,9 +255,9 @@ public class SessionProjectionTests
         var newest1 = Guid.NewGuid();
         var rows = new[]
         {
-            new SessionProjection.SessionRunRow(s1, Guid.NewGuid(), WorkflowRunStatus.Failure, "single-agent", T0),
-            new SessionProjection.SessionRunRow(s1, newest1, WorkflowRunStatus.Running, "supervisor", T0.AddMinutes(5)),
-            new SessionProjection.SessionRunRow(s2, Guid.NewGuid(), WorkflowRunStatus.Success, "single-agent", T0),
+            new SessionProjection.SessionRunRow(s1, Guid.NewGuid(), WorkflowRunStatus.Failure, "single-agent", T0, null, 1),
+            new SessionProjection.SessionRunRow(s1, newest1, WorkflowRunStatus.Running, "supervisor", T0.AddMinutes(5), null, 2),
+            new SessionProjection.SessionRunRow(s2, Guid.NewGuid(), WorkflowRunStatus.Success, "single-agent", T0, null, 1),
         };
 
         var latest = SessionProjection.LatestRunBySession(rows);
@@ -242,5 +266,26 @@ public class SessionProjectionTests
         latest[s1].Status.ShouldBe(WorkflowRunStatus.Running, "the newest run drives the session's live badge");
         latest[s1].ProjectionKind.ShouldBe("supervisor");
         latest.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void LatestRunBySession_shows_the_latest_turns_succeeded_rerun_not_a_newer_failed_replay()
+    {
+        // The list badge must never disagree with the detail view it deep-links to: a lineage's succeeded rerun wins
+        // over an even-newer failed replay of the SAME turn, exactly like BuildTurns.
+        var sessionId = Guid.NewGuid();
+        var turnRoot = Guid.NewGuid();
+        var succeededRerun = Guid.NewGuid();
+        var rows = new[]
+        {
+            new SessionProjection.SessionRunRow(sessionId, turnRoot, WorkflowRunStatus.Failure, "single-agent", T0, null, 3),
+            new SessionProjection.SessionRunRow(sessionId, succeededRerun, WorkflowRunStatus.Success, "single-agent", T0.AddMinutes(1), turnRoot, null),
+            new SessionProjection.SessionRunRow(sessionId, Guid.NewGuid(), WorkflowRunStatus.Failure, "single-agent", T0.AddMinutes(2), turnRoot, null),
+        };
+
+        var latest = SessionProjection.LatestRunBySession(rows);
+
+        latest[sessionId].Id.ShouldBe(succeededRerun, "the badge must agree with the detail view's effective-attempt resolution, not the chronologically-newest row");
+        latest[sessionId].Status.ShouldBe(WorkflowRunStatus.Success);
     }
 }

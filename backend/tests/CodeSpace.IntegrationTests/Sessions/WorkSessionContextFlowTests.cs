@@ -77,6 +77,27 @@ public class WorkSessionContextFlowTests
     }
 
     [Fact]
+    public async Task Builder_shows_the_rerun_winners_result_and_branch_not_the_failed_originals()
+    {
+        // Rerun-aware session reads (S4 fold): the digest's "Result" / "Produced branch" for a reran turn must come
+        // from the SUCCEEDED rerun, never the superseded failed original — even though the original is the turn's
+        // first/oldest attempt.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        await SeedRerunWinningTurnAsync(teamId, sessionId, turn: 1, repoId, goal: "Ship the feature",
+            originalSummary: "ORIGINAL_ATTEMPT_CRASHED", rerunSummary: "RERUN_FIXED_IT", rerunBranch: "codespace/agent/rerun-fixed");
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain("RERUN_FIXED_IT", customMessage: "the rerun's own result is the turn's effective outcome");
+        context.ShouldContain("Produced branch: codespace/agent/rerun-fixed");
+        context.ShouldNotContain("ORIGINAL_ATTEMPT_CRASHED", customMessage: "the failed original's result must never surface once a rerun succeeded");
+    }
+
+    [Fact]
     public async Task Builder_surfaces_the_result_for_every_projection_shape()
     {
         // The result key differs by projection: single-agent → summary, plan-map → combined, supervisor → reason.
@@ -353,6 +374,50 @@ public class WorkSessionContextFlowTests
 
         await db.SaveChangesAsync();
         return repoId;
+    }
+
+    /// <summary>
+    /// Stage a turn whose ORIGINAL attempt FAILED and whose RERUN (real <c>RootRunId</c> lineage, later
+    /// <c>CreatedDate</c>) SUCCEEDED with its own pushed <see cref="PublishManifest"/> branch — the shape a real
+    /// rerun-after-failure leaves for the digest to read.
+    /// </summary>
+    private async Task SeedRerunWinningTurnAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string goal, string originalSummary, string rerunSummary, string rerunBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var originalRequestId = Guid.NewGuid();
+        var rerunRequestId = Guid.NewGuid();
+        var originalId = Guid.NewGuid();
+        var rerunId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.AddRange(
+            new WorkflowRunRequest { Id = originalRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }), Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now },
+            new WorkflowRunRequest { Id = rerunRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Rerun, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now });
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = originalId, TeamId = teamId, RunRequestId = originalRequestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Failure, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { summary = originalSummary }),
+            CreatedDate = now.AddMinutes(-5), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = rerunId, TeamId = teamId, RunRequestId = rerunRequestId, SourceType = WorkflowRunSourceTypes.Rerun,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = originalId, RerunFromNodeId = "agent",
+            OutputsJson = JsonSerializer.Serialize(new { summary = rerunSummary }),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = rerunId, RepositoryAlias = "primary",
+            RepositoryId = repoId, Branch = rerunBranch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Stage a finished turn with an arbitrary OutputsJson shape (a projection other than single-agent surfaces different result keys).</summary>

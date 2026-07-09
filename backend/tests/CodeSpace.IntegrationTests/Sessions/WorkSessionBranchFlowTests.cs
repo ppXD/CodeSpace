@@ -137,6 +137,25 @@ public class WorkSessionBranchFlowTests
     }
 
     [Fact]
+    public async Task Continue_clones_the_rerun_winners_branch_not_the_failed_originals()
+    {
+        // Rerun-aware session reads (S4 fold): the ORIGINAL attempt failed with a stale/no manifest branch; a REAL
+        // rerun (correct RootRunId lineage) then succeeded with its OWN pushed manifest branch. The turn's effective
+        // attempt is the rerun — a CONTINUE must clone at ITS branch, never the superseded original's.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedRerunWinningTurnAsync(teamId, sessionId, turn: 1, repoId, originalBranch: "stale-failed-branch", rerunBranch: "codespace/agent/rerun-fixed");
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoId, "Keep going after the fix"));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("codespace/agent/rerun-fixed",
+            "the rerun's own pushed branch wins over the failed original's stale/no branch");
+    }
+
+    [Fact]
     public async Task Continue_with_no_prior_branch_clones_the_default_branch()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -445,6 +464,52 @@ public class WorkSessionBranchFlowTests
 
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    /// <summary>
+    /// Stage a turn whose ORIGINAL attempt FAILED (with a stale raw branch, no manifest — a crashed run's leftover
+    /// guess) and whose RERUN (real <c>RootRunId</c> lineage, later <c>CreatedDate</c>) SUCCEEDED with its own pushed
+    /// <see cref="PublishManifest"/> branch — the shape a real rerun-after-failure leaves.
+    /// </summary>
+    private async Task SeedRerunWinningTurnAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string originalBranch, string rerunBranch)
+    {
+        using var dbScope = _fixture.BeginScope();
+        var db = dbScope.Resolve<CodeSpaceDbContext>();
+
+        var originalRequestId = Guid.NewGuid();
+        var rerunRequestId = Guid.NewGuid();
+        var originalId = Guid.NewGuid();
+        var rerunId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.AddRange(
+            new WorkflowRunRequest { Id = originalRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now },
+            new WorkflowRunRequest { Id = rerunRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Rerun, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now });
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = originalId, TeamId = teamId, RunRequestId = originalRequestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Failure, SessionId = sessionId, SessionTurnIndex = turn,
+            ScopeRepositoryIds = new[] { repoId }.ToList(),
+            OutputsJson = JsonSerializer.Serialize(new { branch = originalBranch }),
+            CreatedDate = now.AddMinutes(-5), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = rerunId, TeamId = teamId, RunRequestId = rerunRequestId, SourceType = WorkflowRunSourceTypes.Rerun,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = originalId, RerunFromNodeId = "agent",
+            ScopeRepositoryIds = new[] { repoId }.ToList(),
+            OutputsJson = JsonSerializer.Serialize(new { summary = "fixed on rerun" }),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, WorkflowRunId = rerunId, RepositoryAlias = "primary",
+            RepositoryId = repoId, Branch = rerunBranch, PublishStateValue = PublishState.Pushed,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedRepositoryAsync(Guid teamId)

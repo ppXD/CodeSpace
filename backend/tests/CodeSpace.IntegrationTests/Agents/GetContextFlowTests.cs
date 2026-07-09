@@ -51,6 +51,23 @@ public class GetContextFlowTests
     }
 
     [Fact]
+    public async Task Session_turns_shows_the_rerun_winners_result_not_the_failed_originals()
+    {
+        // Rerun-aware session reads (S4 fold): session.turns must pull the SUCCEEDED rerun's result, never the
+        // superseded failed original's — the same effective-attempt resolution the digest and room display use.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+
+        await SeedRerunWinningTurnAsync(teamId, sessionId, turn: 1, goal: "the work", originalSummary: "ORIGINAL_CRASHED", rerunSummary: "RERUN_SUCCEEDED_RESULT");
+
+        var result = await RetrieveTurnsAsync(teamId, sessionId);
+
+        result.Found.ShouldBeTrue();
+        result.Text.ShouldContain("RERUN_SUCCEEDED_RESULT", customMessage: "the rerun's own result is the turn's effective outcome");
+        result.Text.ShouldNotContain("ORIGINAL_CRASHED", customMessage: "the failed original's result must never surface once a rerun succeeded");
+    }
+
+    [Fact]
     public async Task Session_turns_query_filters_to_matching_turns()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -333,6 +350,42 @@ public class GetContextFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
             Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
             OutputsJson = outputsJson, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Stage a turn whose ORIGINAL attempt FAILED and whose RERUN (real <c>RootRunId</c> lineage, later
+    /// <c>CreatedDate</c>) SUCCEEDED — the shape a real rerun-after-failure leaves for session.turns to pull.
+    /// </summary>
+    private async Task SeedRerunWinningTurnAsync(Guid teamId, Guid sessionId, int turn, string goal, string originalSummary, string rerunSummary)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var originalRequestId = Guid.NewGuid();
+        var rerunRequestId = Guid.NewGuid();
+        var originalId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.AddRange(
+            new WorkflowRunRequest { Id = originalRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }), Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now },
+            new WorkflowRunRequest { Id = rerunRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Rerun, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now });
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = originalId, TeamId = teamId, RunRequestId = originalRequestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Failure, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { summary = originalSummary }),
+            CreatedDate = now.AddMinutes(-5), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = rerunRequestId, SourceType = WorkflowRunSourceTypes.Rerun,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = originalId, RerunFromNodeId = "agent",
+            OutputsJson = JsonSerializer.Serialize(new { summary = rerunSummary }),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 
         await db.SaveChangesAsync();

@@ -7,8 +7,9 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
-/// Default <see cref="ISessionContextBuilder"/>. Reads the session's prior top-level turns from CLEAN sources only —
-/// each run's launch goal (the request payload's <c>goal</c>) and its declared result (<c>OutputsJson</c>, read
+/// Default <see cref="ISessionContextBuilder"/>. Reads the session's prior top-level turns' EFFECTIVE attempts
+/// (<see cref="SessionTurnAttempts"/> — a rerun that fixed a failed original wins) from CLEAN sources only — each
+/// turn's launch goal (the request payload's <c>goal</c>) and its declared result (<c>OutputsJson</c>, read
 /// generically across projection shapes via <see cref="SessionTurnText.ReadResult"/>, plus a produced branch —
 /// preferring the run's <see cref="PublishManifest"/> row (I2's single source of truth) over the raw
 /// <c>OutputsJson.branch</c> guess, via the same <see cref="SessionManifestBranches"/> choke point
@@ -37,14 +38,21 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
     public async Task<string?> BuildAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
     {
-        // The session timeline, most recent first (bounded), then flipped to chronological for rendering. One query —
-        // EF joins the request for the goal payload. Only top-level turns (a child / replay has a null turn index).
-        var window = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
-            .OrderByDescending(r => r.SessionTurnIndex)
-            .Take(MaxTurns)
-            .Select(r => new { r.Id, Turn = r.SessionTurnIndex, r.Status, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
+        // The session's WHOLE lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
+        // turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original never
+        // shadows its own successful rerun in the digest. One query — EF joins the request for the goal payload.
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.SessionId == sessionId && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var window = lineage.GroupBy(r => r.RootRunId ?? r.Id)
+            .Where(g => g.Any(r => r.SessionTurnIndex != null))
+            .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new { t.Turn, r.Id, r.Status, r.OutputsJson, r.Payload })
+            .OrderByDescending(r => r.Turn)
+            .Take(MaxTurns)
+            .ToList();
 
         if (window.Count == 0) return null;
 

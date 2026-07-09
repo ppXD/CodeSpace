@@ -12,10 +12,11 @@ namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
 /// Default <see cref="ISessionSummarizer"/>. Folds the turns that have scrolled out of the digest's recent window
-/// (those above the summary watermark) into <c>WorkSession.Summary</c> via a plain-text LLM distillation, resolving
-/// the model from the team's pool the SAME way <c>LlmWorkflowPlanner</c> does. Incremental (only the newly scrolled-out
-/// turns are folded into the existing summary) and FAIL-OPEN (no pool model / LLM error ⇒ the summary is left
-/// unchanged and the launch proceeds with the recent window only).
+/// (those above the summary watermark) — each turn's EFFECTIVE attempt per <see cref="SessionTurnAttempts"/> — into
+/// <c>WorkSession.Summary</c> via a plain-text LLM distillation, resolving the model from the team's pool the SAME way
+/// <c>LlmWorkflowPlanner</c> does. Incremental (only the newly scrolled-out turns are folded into the existing summary)
+/// and FAIL-OPEN (no pool model / LLM error ⇒ the summary is left unchanged and the launch proceeds with the recent
+/// window only).
 /// </summary>
 public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 {
@@ -36,17 +37,26 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 
     public async Task EnsureSummaryUpToDateAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
     {
+        // The session's WHOLE lineage (a rerun/replay attempt inherits the SessionId with a NULL turn index) — each
+        // turn's EFFECTIVE attempt (SessionTurnAttempts) is resolved before windowing, so a superseded original never
+        // shadows its own successful rerun in the folded summary.
+        var lineage = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.SessionId == sessionId && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.RootRunId, r.SessionTurnIndex, r.Status, r.CreatedDate, r.OutputsJson, Payload = r.RunRequest.NormalizedPayloadJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
         // The turns OLDER than the recent verbatim window = ALL BUT the most recent MaxTurns turns (by turn index).
         // ROW-based (Skip), NOT value-based (latest − MaxTurns), so it stays exactly complementary to BuildAsync's
         // count-based Take(MaxTurns) window even when turn indices are non-contiguous (a gap would otherwise leave a
         // turn in NEITHER the summary nor the window, or in BOTH). Empty ⇒ the whole thread fits the window ⇒ no
         // summary needed (byte-identical short-thread digest). Newest-first; the watermark is the newest older turn.
-        var olderTurns = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.TeamId == teamId && r.SessionTurnIndex != null)
-            .OrderByDescending(r => r.SessionTurnIndex)
+        var olderTurns = lineage.GroupBy(r => r.RootRunId ?? r.Id)
+            .Where(g => g.Any(r => r.SessionTurnIndex != null))
+            .Select(g => new { Turn = g.First(r => r.SessionTurnIndex != null).SessionTurnIndex, EffectiveId = SessionTurnAttempts.ResolveEffectiveId(g.Select(r => new SessionTurnAttempts.AttemptRow(r.Id, r.Status, r.CreatedDate))) })
+            .Join(lineage, t => t.EffectiveId, r => r.Id, (t, r) => new TurnRow(r.Id, t.Turn, r.Status.ToString(), r.OutputsJson, r.Payload))
+            .OrderByDescending(t => t.Turn)
             .Skip(SessionContextBuilder.MaxTurns)
-            .Select(r => new TurnRow(r.Id, r.SessionTurnIndex, r.Status.ToString(), r.OutputsJson, r.RunRequest.NormalizedPayloadJson))
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+            .ToList();
 
         if (olderTurns.Count == 0) return;
 
