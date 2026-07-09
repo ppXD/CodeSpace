@@ -79,7 +79,7 @@ public sealed class AgentMetricsReader : IScopedDependency
         {
             Status = status,
             Error = FailureError(status, result?.Error, rowError),
-            Goal = DeriveTitle(task?.Goal),
+            Goal = DeriveTitle(task?.DisplayTitle ?? task?.Goal),
             DurationMs = ComputeDuration(startedAt, completedAt, now),
             InputTokens = tokens?.InputTokens,
             OutputTokens = tokens?.OutputTokens,
@@ -142,8 +142,8 @@ public sealed class AgentMetricsReader : IScopedDependency
     /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat + the failure error — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
     private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error);
 
-    /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + resume marker + harness kind — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
-    private sealed record TaskSlice(string? Model, string? Goal, string? ResumeFromSessionId, string? Harness);
+    /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + display title + resume marker + harness kind — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
+    private sealed record TaskSlice(string? Model, string? Goal, string? DisplayTitle, string? ResumeFromSessionId, string? Harness);
 
     /// <summary>
     /// A concise one-line display TITLE from an agent's goal — so a fan-out branch reads as its subtask rather than a

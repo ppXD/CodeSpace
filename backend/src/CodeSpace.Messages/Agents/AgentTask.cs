@@ -18,6 +18,15 @@ public sealed record AgentTask
     public required string Goal { get; init; }
 
     /// <summary>
+    /// The CLEAN task text for display (an agent card's title), distinct from <see cref="Goal"/> — a CONTINUE's Goal
+    /// is prefixed with the session's grounding digest ("# Earlier turns…") before it reaches the model, so deriving
+    /// a title from Goal's first line would show the grounding heading instead of what the user actually asked. Null
+    /// on older/legacy task envelopes (pre-dating this field) ⇒ the reader falls back to Goal's first line.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayTitle { get; init; }
+
+    /// <summary>
     /// B1: the agent's PERSONA / system prompt (its identity + standing instructions), distinct from the task <see cref="Goal"/>.
     /// The resolver stamps it from the bound persona; each harness projects it through its NATIVE system-prompt channel
     /// (Claude Code: <c>--append-system-prompt</c>; Codex: an <c>AGENTS.md</c> in its config home), NOT prepended to the

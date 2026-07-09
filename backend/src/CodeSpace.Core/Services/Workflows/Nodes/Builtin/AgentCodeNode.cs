@@ -131,6 +131,7 @@ public sealed class AgentCodeNode : INodeRuntime
         if (context.ResumePayload.HasValue) return Task.FromResult(MapResult(context.ResumePayload.Value));
 
         var goal = ReadString(context.Config, "goal");
+        var displayTitle = ReadOptionalString(context.Config, "displayTitle");
         var harness = ReadString(context.Config, "harness");
 
         if (!TryReadAgentDefinitionId(context, out var agentDefinitionId)) return Fail("Config 'agentDefinitionId' must be an agent persona id (uuid).");
@@ -167,6 +168,7 @@ public sealed class AgentCodeNode : INodeRuntime
         var task = new AgentTask
         {
             Goal = goal,
+            DisplayTitle = displayTitle,
             Harness = harness,
             Model = ReadOptionalString(context.Config, "model"),
             AgentDefinitionId = agentDefinitionId,

@@ -206,6 +206,24 @@ public class WorkSessionContextFlowTests
     }
 
     [Fact]
+    public async Task Continue_carries_a_clean_display_title_even_though_the_goal_is_grounding_prefixed()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedCompletedTurnAsync(teamId, sessionId, turn: 1, goal: "Add the retry backoff", summary: "PRIOR_WORK_DID_THE_BACKOFF", branch: "run-1/api");
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, "Now add jitter on top"));
+
+        var agentGoal = await ReadAgentGoalAsync(result.RunId);
+        agentGoal.ShouldContain("Earlier turns", customMessage: "sanity: this run's goal really is grounding-prefixed");
+
+        (await ReadAgentDisplayTitleAsync(result.RunId)).ShouldBe("Now add jitter on top",
+            "the card's title is the clean follow-up text, never the grounding digest heading — the mechanism that used to leak into AgentMetricsReader.DeriveTitle");
+    }
+
+    [Fact]
     public async Task A_fresh_launch_agent_goal_is_the_clean_goal_byte_identical()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -311,6 +329,15 @@ public class WorkSessionContextFlowTests
         var root = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement;
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
         return agent.GetProperty("config").GetProperty("goal").GetString()!;
+    }
+
+    /// <summary>Reads the frozen agent.code node's <c>displayTitle</c> config key — the CLEAN task text a card derives its title from, distinct from <c>goal</c> which a CONTINUE prepends the session grounding to.</summary>
+    private async Task<string?> ReadAgentDisplayTitleAsync(Guid runId)
+    {
+        var run = await LoadRunAsync(runId);
+        var root = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+        return agent.GetProperty("config").TryGetProperty("displayTitle", out var v) ? v.GetString() : null;
     }
 
     private async Task<Guid> SeedSessionAsync(Guid teamId)

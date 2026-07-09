@@ -229,6 +229,21 @@ public class SupervisorBuildAgentTaskTests
             .Goal.ShouldBe("the revised thing", "the revised retry instruction wins over the planned one");
     }
 
+    [Fact]
+    public void DisplayTitle_is_the_clean_instruction_never_a_role_prefix_or_handoff_fold()
+    {
+        var subtasks = new Dictionary<string, SupervisorPlannedSubtask>
+        {
+            [SubtaskId] = new() { Id = SubtaskId, Title = "T", Instruction = "do the planned thing" },
+        };
+        var staging = new DependencyStagingResult { Ref = "codespace/agent/producer", GoalFoldText = "Your producer already committed work on branch `x`." };
+
+        var task = RealSupervisorActionExecutor.BuildAgentTask(subtasks, SubtaskId, revisedInstruction: null, new SupervisorTurnContext { Goal = "the goal" }, spec: new SupervisorAgentDispatch { SubtaskId = SubtaskId, Role = "security reviewer" }, staging: staging);
+
+        task.Goal.ShouldStartWith(staging.GoalFoldText!, customMessage: "the MODEL still sees the role framing + handoff fold, exactly as before");
+        task.DisplayTitle.ShouldBe("do the planned thing", "the CARD title is the clean instruction — never the role prefix or the handoff paragraph");
+    }
+
     // ── L4 arc B: a model-authored per-agent dispatch overrides + is clamped ───────────
 
     [Fact]
