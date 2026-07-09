@@ -578,6 +578,24 @@ public class ModelPoolSelectorFlowTests
             .ShouldBeNull("no enabled pool model → null (the reconciler then keeps its harness floor)");
     }
 
+    [Fact]
+    public async Task ResolveTeamDefaultProvider_agrees_with_ModelCredentialResolver_by_avoiding_Frontier_by_default()
+    {
+        // P3.4 — this method exists ONLY so HarnessModelReconciler picks a harness that matches whichever provider
+        // ModelCredentialResolver will ACTUALLY dispatch. Both must rank the SAME row winner (AgentPlaneModelRanking),
+        // so an un-pinned pool with a Frontier AND a Strong model must pick the Strong one's provider here too —
+        // never the alphabetically-named or highest-tier row (that's the BRAIN lane's job, a deliberately different policy).
+        var teamId = await SeedTeamAsync();
+        var anthropic = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        await AddModelReturningIdAsync(anthropic, "aaa-frontier", tier: ModelCapabilityTier.Frontier);   // sorts first, but Frontier
+        var openai = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-o");
+        await AddModelReturningIdAsync(openai, "zzz-strong", tier: ModelCapabilityTier.Strong);          // sorts last, but the preferred tier
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IModelPoolSelector>().ResolveTeamDefaultProviderAsync(teamId, CancellationToken.None))
+            .ShouldBe("OpenAI", "avoids the Frontier row's provider by default — matching ModelCredentialResolver's own agent-plane ranking");
+    }
+
     private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId, bool isDefault = false, ModelCapabilityTier? tier = null, bool enabled = true, bool? available = null, ModelCapabilityTier? probedTier = null)
     {
         using var scope = _fixture.BeginScope();

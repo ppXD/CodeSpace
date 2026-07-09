@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -175,36 +176,105 @@ public class ModelCredentialResolverFlowTests
     }
 
     [Fact]
-    public async Task An_unpinned_run_defaults_to_the_pools_first_enabled_model()
+    public async Task An_unpinned_run_prefers_the_higher_tier_model_not_the_alphabetically_first()
     {
         var teamId = await SeedTeamAsync();
         var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-team-openai");
-        await SeedModelAsync(id, "metis-coder-max", enabled: true);
-        await SeedModelAsync(id, "metis-coder", enabled: true);
+        await SeedModelAsync(id, "metis-coder", enabled: true, tier: ModelCapabilityTier.Basic);           // sorts FIRST alphabetically
+        await SeedModelAsync(id, "metis-coder-max", enabled: true, tier: ModelCapabilityTier.Strong);      // sorts LAST, but the stronger tier
 
         var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
 
-        // The first ENABLED model by id across the pool — an "auto" run (no pinned model) runs on one of the team's OWN
-        // models, so a custom gateway never falls back to the CLI default (codex gpt-5.5) it can't serve.
-        resolved!.DefaultModel.ShouldBe("metis-coder");
+        // P3.4 — the agent-plane auto pick is tier-aware, not alphabetical: "metis-coder-max" wins despite sorting
+        // after "metis-coder", because it is the higher-tier model — an "auto" run (no pinned model) runs on one of
+        // the team's OWN models, so a custom gateway never falls back to the CLI default (codex gpt-5.5) it can't serve.
+        resolved!.DefaultModel.ShouldBe("metis-coder-max");
     }
 
     [Fact]
-    public async Task An_unpinned_run_picks_the_first_model_across_the_FULL_pool_with_the_matching_key()
+    public async Task An_unpinned_run_picks_the_higher_tier_across_the_FULL_pool_not_credential_recency_or_alphabetical()
     {
         var teamId = await SeedTeamAsync();
-        // Credential B is created LATER (the old recency-first pick would choose it) and holds an alphabetically-LATE
-        // model; credential A (earlier) holds an alphabetically-EARLY one. The full-pool pick must land on A's model,
-        // AND the resolved key must come from A — the model + key are ONE row, never a recency-credential mismatch.
+        // Credential B is created LATER (the old recency-first pick would choose it) and holds an alphabetically-EARLY
+        // but LOWER-tier model; credential A (earlier) holds an alphabetically-LATE but HIGHER-tier model. The
+        // full-pool pick must land on A's model — proving tier decides across the WHOLE pool, never credential
+        // recency nor alphabetical model-id order — AND the resolved key must come from A (the model + key are ONE
+        // row, never a recency-credential mismatch).
         var a = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-a");
-        await SeedModelAsync(a, "aaa-early", enabled: true);
+        await SeedModelAsync(a, "zzz-strong", enabled: true, tier: ModelCapabilityTier.Strong);
         var b = await SeedCredentialAsync(teamId, "Custom", key: "sk-b");
-        await SeedModelAsync(b, "zzz-late", enabled: true);
+        await SeedModelAsync(b, "aaa-basic", enabled: true, tier: ModelCapabilityTier.Basic);
 
         var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI", "Custom"));
 
-        resolved!.DefaultModel.ShouldBe("aaa-early", "model-first across the WHOLE pool — not the most-recent credential's first row");
+        resolved!.DefaultModel.ShouldBe("zzz-strong", "tier-first across the WHOLE pool — neither the most-recent credential's row nor alphabetical model-id order decides");
         resolved.ApiKey.ShouldBe("sk-a", "the key comes from the SAME credential as the picked model");
+    }
+
+    [Fact]
+    public async Task An_unpinned_run_over_a_fully_untiered_pool_is_decided_by_row_id_not_model_name()
+    {
+        // Neither model carries ANY tier signal (both effectively Unknown) — the pick must still not secretly fall
+        // back to comparing model NAMES. The row with the ORDINAL-SMALLER id wins ("zzz-lower-row-id" is
+        // alphabetically LAST but has the smaller Guid) — proving the tie-break is row id, never model-id text.
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        var lowerRowId = new Guid("00000000-0000-0000-0000-000000000001");
+        var higherRowId = new Guid("00000000-0000-0000-0000-000000000002");
+        await SeedModelAsync(id, "zzz-lower-row-id", enabled: true, id: lowerRowId);
+        await SeedModelAsync(id, "aaa-higher-row-id", enabled: true, id: higherRowId);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
+
+        resolved!.DefaultModel.ShouldBe("zzz-lower-row-id", "an untiered pool's tie-break is row id, never alphabetical model-id order — 'zzz' wins here purely because its row id is ordinally smaller");
+    }
+
+    [Fact]
+    public async Task An_unpinned_run_avoids_the_Frontier_tier_by_default()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await SeedModelAsync(id, "frontier-model", enabled: true, tier: ModelCapabilityTier.Frontier);
+        await SeedModelAsync(id, "strong-model", enabled: true, tier: ModelCapabilityTier.Strong);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("Anthropic"));
+
+        // P3.4 — ordinary agent execution is verified downstream by the task's own acceptance checks, so it doesn't
+        // reach for the priciest (Frontier) tier automatically; only an explicit pin/default should spend Frontier.
+        resolved!.DefaultModel.ShouldBe("strong-model", "the agent-execution lane avoids Frontier by default, unlike the brain/planner/reviewer/grader lane");
+    }
+
+    [Fact]
+    public async Task An_unpinned_run_uses_Frontier_when_it_is_the_only_tier_available()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await SeedModelAsync(id, "only-frontier", enabled: true, tier: ModelCapabilityTier.Frontier);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("Anthropic"));
+
+        // Anti-strand (mirrors ModelPoolSelector's own Available soft-filter): avoiding Frontier would leave zero
+        // candidates, so the full set is used instead — a pricier model beats no model at all.
+        resolved!.DefaultModel.ShouldBe("only-frontier");
+    }
+
+    [Fact]
+    public async Task The_agent_plane_and_brain_plane_lanes_diverge_by_design_over_the_SAME_pool()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await SeedModelAsync(id, "frontier-model", enabled: true, tier: ModelCapabilityTier.Frontier);
+        await SeedModelAsync(id, "strong-model", enabled: true, tier: ModelCapabilityTier.Strong);
+
+        // Ordinary execution (this resolver) avoids Frontier by default — verified downstream by acceptance checks.
+        var executionPick = await ResolveAsync(NoPin(), teamId, Projector("Anthropic"));
+        executionPick!.DefaultModel.ShouldBe("strong-model", "the agent-execution lane avoids Frontier by default");
+
+        // The brain/planner/reviewer/grader lane (ModelPoolSelector) reaches for the strongest available instead —
+        // "auto = the strongest available brain", a DELIBERATELY different policy for high-stakes decision roles.
+        using var scope = _fixture.BeginScope();
+        var brainPick = await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, "Anthropic", allowedModels: null, pinnedModel: null, CancellationToken.None);
+        brainPick!.ModelId.ShouldBe("frontier-model", "the brain/planner/reviewer/grader lane prefers the strongest available tier, Frontier included");
     }
 
     [Fact]
@@ -278,12 +348,25 @@ public class ModelCredentialResolverFlowTests
         (await ResolveAsync(TaskWith(id), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("zzz-marked-default");
     }
 
-    private async Task SeedModelAsync(Guid credentialId, string modelId, bool enabled, bool isDefault = false)
+    [Fact]
+    public async Task A_pinned_credentials_auto_model_pick_is_tier_aware_and_avoids_Frontier()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        await SeedModelAsync(id, "aaa-frontier", enabled: true, tier: ModelCapabilityTier.Frontier);   // sorts first, but Frontier
+        await SeedModelAsync(id, "zzz-strong", enabled: true, tier: ModelCapabilityTier.Strong);       // sorts last, but the preferred tier
+
+        // P3.4 — a PINNED credential's own auto-model pick (no operator default marked) is the SAME "avoid Frontier by
+        // default" policy as the full-pool pick, not alphabetical.
+        (await ResolveAsync(TaskWith(id), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("zzz-strong");
+    }
+
+    private async Task SeedModelAsync(Guid credentialId, string modelId, bool enabled, bool isDefault = false, ModelCapabilityTier? tier = null, Guid? id = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = enabled, IsDefault = isDefault, Source = ModelSource.Manual });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id ?? Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = enabled, IsDefault = isDefault, CapabilityTier = tier, Source = ModelSource.Manual });
         await db.SaveChangesAsync();
     }
 

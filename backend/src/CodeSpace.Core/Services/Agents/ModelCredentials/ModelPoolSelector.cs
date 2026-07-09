@@ -228,15 +228,23 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return provider != null && eligible.Contains(provider.ToLower()) ? modelCredentialModelId : null;
     }
 
-    public async Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) =>
-        // The top enabled pool row across ALL active team credentials in the credential resolver's precedence order
-        // (IsDefault > model id > row id — NOT Ordinal, to MATCH ModelCredentialResolver's DB ordering so the two agree
-        // in any environment), provider-AGNOSTIC. Only the provider tag; no decrypt.
-        await _db.ModelCredentialModel.AsNoTracking()
+    public async Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        // The top enabled pool row across ALL active team credentials, ranked by AgentPlaneModelRanking (P3.4 — IsDefault
+        // > tier-aware, Frontier-avoided > row id) — MATCHING ModelCredentialResolver's OWN ranking exactly, so the two
+        // agree in any environment: this method only picks the PROVIDER for HarnessModelReconciler to match a harness
+        // against, and if it disagreed with the row ModelCredentialResolver actually dispatches, the reconciled harness
+        // could target a different provider than the model that really runs. Ordered IN-MEMORY (capability_tier is TEXT).
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
-            .Select(m => m.Credential.Provider)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            .Select(m => new { m.Id, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Credential.Provider })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return AgentPlaneModelRanking.Rank(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier)
+            .ThenBy(m => m.Id)
+            .Select(m => m.Provider)
+            .FirstOrDefault();
+    }
 
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {

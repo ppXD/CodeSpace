@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Messages.Agents;
@@ -73,14 +74,16 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
 
     /// <summary>
     /// No-pin "auto" resolve. Picks a (model, credential) pair from the FULL team pool — the operator-marked default model
-    /// if one is set, else the first enabled model (by id, then row id for a deterministic tie-break) across ALL the team's Active credentials whose provider the harness can
-    /// drive — so an "auto" run sees EVERY applicable model (null pool ⇒ all apply, the same contract <c>IModelPoolSelector</c>
-    /// honours), never just one credential's rows. The model id and the decrypted key come from the SAME row, so they are
-    /// always consistent. When the team has eligible credentials but NO registered models (an official vendor that hosts
-    /// everything), fall back to the most-recent one with no default model — the CLI's own default stands, correct there.
-    /// Null when the team has no usable credential at all (→ the operator-global key). Provider matching is case-insensitive
-    /// in memory (a team has few credentials). It is NOT routed through <c>IModelPoolSelector.SelectAsync</c> because that
-    /// is single-provider, whereas an agent harness drives SEVERAL providers and the pool here spans them — the null=all
+    /// if one is set, else the strongest available model NOT counting Frontier (P3.4 — <see cref="AgentPlaneModelRanking"/>;
+    /// ordinary execution is verified downstream by the task's own acceptance checks, so it doesn't reach for the priciest
+    /// tier automatically) across ALL the team's Active credentials whose provider the harness can drive — so an "auto" run
+    /// sees EVERY applicable model (null pool ⇒ all apply, the same contract <c>IModelPoolSelector</c> honours), never just
+    /// one credential's rows. The model id and the decrypted key come from the SAME row, so they are always consistent.
+    /// When the team has eligible credentials but NO registered models (an official vendor that hosts everything), fall
+    /// back to the most-recent one with no default model — the CLI's own default stands, correct there. Null when the
+    /// team has no usable credential at all (→ the operator-global key). Provider matching is case-insensitive in memory
+    /// (a team has few credentials). It is NOT routed through <c>IModelPoolSelector.SelectAsync</c> because that is
+    /// single-provider, whereas an agent harness drives SEVERAL providers and the pool here spans them — the null=all
     /// semantic, not the method, is the shared contract.
     /// </summary>
     private async Task<ResolvedModelCredential?> ResolveTeamDefaultAsync(Guid teamId, IReadOnlyList<string> supportedProviders, CancellationToken cancellationToken)
@@ -96,13 +99,18 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
 
         var eligibleIds = eligible.Select(c => c.Id).ToHashSet();
 
-        // Operator-marked default first, else model id, then row id (a stable total order). If TWO eligible credentials
-        // each mark a default, the (model-id, row-id) tie-break decides — deterministic, not credential-recency-weighted.
-        var pick = await _db.ModelCredentialModel.AsNoTracking()
+        // Ordered IN-MEMORY (capability_tier is stored as TEXT — a DB ORDER BY would sort it alphabetically, not by
+        // rank), mirroring ModelPoolSelector's own established pattern. IsDefault first, then AgentPlaneModelRanking
+        // (tier-aware, Frontier soft-avoided), then row id — a stable total order, never credential-recency-weighted.
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && eligibleIds.Contains(m.ModelCredentialId))
-            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
+            .Select(m => new { m.ModelId, m.ModelCredentialId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var pick = AgentPlaneModelRanking.Rank(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier)
+            .ThenBy(m => m.Id)
             .Select(m => new { m.ModelId, m.ModelCredentialId })
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            .FirstOrDefault();
 
         // A model in the pool → pair it with ITS OWN credential (key + model from one row). No models → the most-recent
         // eligible credential, no default model (an official vendor hosts the CLI default).
@@ -112,16 +120,24 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
     }
 
     /// <summary>
-    /// A PINNED credential's default model: its first ENABLED model (by id). Credential-scoped on purpose — the operator
-    /// pinned THIS credential, so an "auto" model must come from ITS rows, never the wider pool. Null when the pinned
-    /// credential has no registered models (→ the CLI default). The no-pin path uses the full-pool pick above instead.
+    /// A PINNED credential's default model: its operator-marked default, else the strongest available model not
+    /// counting Frontier (P3.4 — <see cref="AgentPlaneModelRanking"/>, the SAME "avoid Frontier by default" policy as
+    /// the full-pool pick). Credential-scoped on purpose — the operator pinned THIS credential, so an "auto" model
+    /// must come from ITS rows, never the wider pool. Null when the pinned credential has no registered models (→ the
+    /// CLI default). The no-pin path uses the full-pool pick above instead.
     /// </summary>
-    private async Task<string?> PickDefaultModelAsync(Guid credentialId, CancellationToken cancellationToken) =>
-        await _db.ModelCredentialModel.AsNoTracking()
+    private async Task<string?> PickDefaultModelAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.ModelCredentialId == credentialId && m.Enabled)
-            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId)
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return AgentPlaneModelRanking.Rank(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier)
+            .ThenBy(m => m.Id)
             .Select(m => m.ModelId)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            .FirstOrDefault();
+    }
 
     /// <summary>
     /// Last resort: the operator-global single-tenant key from the worker env, for the first supported provider
