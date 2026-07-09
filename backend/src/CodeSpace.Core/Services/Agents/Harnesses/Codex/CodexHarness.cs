@@ -114,6 +114,12 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         AppendModelProviderConfig(args, task);
         AppendTelemetryConfig(args, task);
 
+        // P3.3: Codex's default hook trust-review flow requires an interactive decision before a NON-managed command
+        // hook may run — a freshly generated per-run hook has no persisted trust record, and there is no human at a
+        // non-interactive `exec` run to answer the prompt. Bypass ONLY when WE actually wrote a hook (never
+        // unconditionally — an operator-authored hooks.json in the target repo still goes through normal review).
+        if (InLoopAcceptanceHook.AppliesTo(task)) args.Add("--dangerously-bypass-hook-trust");
+
         // B1: Codex exec has NO system-prompt flag, so the persona + operating contract ride an AGENTS.md in the config
         // home (see BuildConfigHomeFiles) — verified against codex 0.142.2 that it loads $CODEX_HOME/AGENTS.md (and merges
         // it with any workspace AGENTS.md). So the Goal positional stays the CLEAN task, never conflated with the persona.
@@ -187,8 +193,32 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         if (task.ResumeFromSessionId is { Length: > 0 } sessionId && task.RestoredTranscript is { Length: > 0 } transcript)
             files.Add(new ConfigHomeFile { RelativePath = $"{SessionsRoot}/rollout-{sessionId}.jsonl", Content = transcript });
 
+        // P3.3: the in-loop acceptance Stop hook — same generated script Claude Code wires, plus Codex's OWN
+        // hooks.json wrapper. BuildInvocation pairs this with --dangerously-bypass-hook-trust, since a freshly
+        // generated per-run hook has no persisted trust decision and Codex's default trust-review flow would
+        // otherwise block on an interactive prompt that never comes in a non-interactive `exec` run.
+        if (InLoopAcceptanceHook.AppliesTo(task))
+        {
+            files.Add(new ConfigHomeFile
+            {
+                RelativePath = InLoopAcceptanceHook.ScriptRelativePath,
+                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks),
+            });
+            files.Add(new ConfigHomeFile { RelativePath = "hooks.json", Content = StopHookJson });
+        }
+
         return files;
     }
+
+    /// <summary>
+    /// The <c>hooks.json</c> wiring the generated <see cref="InLoopAcceptanceHook.ScriptRelativePath"/> to Codex's
+    /// <c>Stop</c> event (matcher is not honored for <c>Stop</c> — Codex's own docs list it explicitly, so it's
+    /// omitted). References the script via <c>$CODEX_HOME</c> directly, matching Codex's own documented example
+    /// (<c>python3 ~/.codex/hooks/session_start.py</c>) — the command string is itself shell-interpreted, so a
+    /// bare <c>"$CODEX_HOME"/...</c> reference expands at hook-invocation time with no wrapper needed.
+    /// </summary>
+    private static readonly string StopHookJson =
+        "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"\\\"$CODEX_HOME\\\"/" + InLoopAcceptanceHook.ScriptRelativePath + "\"}]}]}}";
 
     public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
     {

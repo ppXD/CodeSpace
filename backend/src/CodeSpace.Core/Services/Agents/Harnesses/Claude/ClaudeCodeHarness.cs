@@ -132,7 +132,11 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // `--setting-sources user` when we project skills to PIN settings to the isolated per-run user config home (§344)
         // — so the run inherits ONLY our config, never the TARGET REPO's `.claude` project/local settings (an untrusted
         // -input vector). Byte-identical argv for a skill-less run. The real-model E2E is the live arbiter of application.
-        if (task.Skills is { Count: > 0 })
+        // P3.3: the SAME pin is required when we project an in-loop acceptance Stop hook (BuildConfigHomeFiles writes a
+        // settings.json) — without it, Claude ALSO loads the target repo's own project/local .claude settings, which
+        // could carry an UNTRUSTED Stop hook of the repo's own. Widening this condition (not adding a second flag) keeps
+        // the pin's rule uniform: whenever WE write settings into the isolated config home, that's the ONLY layer that loads.
+        if (task.Skills is { Count: > 0 } || InLoopAcceptanceHook.AppliesTo(task))
         {
             args.Add("--setting-sources");
             args.Add("user");
@@ -181,26 +185,52 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// <summary>
     /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
     /// session's restored transcript at <c>projects/&lt;sanitized-cwd&gt;/&lt;sessionId&gt;.jsonl</c> where
-    /// <c>claude --resume</c> reads it (P3.3a). The transcript is added ONLY when the run carries both the session id
-    /// AND the captured bytes AND a workspace cwd to key the path on — otherwise the skills list is returned unchanged
-    /// (byte-identical for a fresh run). The cwd encoding is the SHARPEST hazard (see <see cref="ClaudeTranscriptPath"/>):
-    /// it must be the resolved cwd the process runs in, which the producer slice supplies.
+    /// <c>claude --resume</c> reads it, PLUS — when the task carries a real acceptance contract — the P3.3 in-loop
+    /// Stop hook (the generated script + a <c>settings.json</c> wiring it to <c>hooks.Stop</c>). Each addition is
+    /// purely additive and independently gated, so a run using none of them returns the bare skills list unchanged
+    /// (byte-identical). The transcript-restore cwd encoding is the SHARPEST hazard (see
+    /// <see cref="ClaudeTranscriptPath"/>): it must be the resolved cwd the process runs in, which the producer
+    /// slice supplies.
     /// </summary>
     private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
     {
-        var skills = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot);
+        var files = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot).ToList();
 
-        if (task.ResumeFromSessionId is not { Length: > 0 } sessionId
-            || task.RestoredTranscript is not { Length: > 0 } transcript
-            || string.IsNullOrWhiteSpace(task.WorkspaceDirectory))
-            return skills;
-
-        return skills.Append(new ConfigHomeFile
+        if (task.ResumeFromSessionId is { Length: > 0 } sessionId
+            && task.RestoredTranscript is { Length: > 0 } transcript
+            && !string.IsNullOrWhiteSpace(task.WorkspaceDirectory))
         {
-            RelativePath = ClaudeTranscriptPath.For(task.WorkspaceDirectory, sessionId),
-            Content = transcript,
-        }).ToList();
+            files.Add(new ConfigHomeFile
+            {
+                RelativePath = ClaudeTranscriptPath.For(task.WorkspaceDirectory, sessionId),
+                Content = transcript,
+            });
+        }
+
+        if (InLoopAcceptanceHook.AppliesTo(task))
+        {
+            files.Add(new ConfigHomeFile
+            {
+                RelativePath = InLoopAcceptanceHook.ScriptRelativePath,
+                Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks),
+            });
+            files.Add(new ConfigHomeFile { RelativePath = "settings.json", Content = StopHookSettingsJson });
+        }
+
+        return files;
     }
+
+    /// <summary>
+    /// The <c>settings.json</c> wiring the generated <see cref="InLoopAcceptanceHook.ScriptRelativePath"/> to Claude
+    /// Code's <c>Stop</c> hook. References the script via the <c>$CLAUDE_CONFIG_DIR</c> env var (never a baked-in
+    /// absolute path) because <see cref="BuildInvocation"/> runs BEFORE the runner assigns the actual per-run
+    /// config-home directory — the env var is resolved at hook-invocation time, once the real path is known. The
+    /// explicit <c>"shell":"bash"</c> handler field (documented for command hooks) forces the WHOLE command string
+    /// through a real shell, so the <c>$CLAUDE_CONFIG_DIR</c> reference expands regardless of how the surrounding
+    /// hook-handler value would otherwise be tokenized — no nested quoting to get wrong.
+    /// </summary>
+    private static readonly string StopHookSettingsJson =
+        "{\"hooks\":{\"Stop\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"\\\"$CLAUDE_CONFIG_DIR\\\"/" + InLoopAcceptanceHook.ScriptRelativePath + "\",\"shell\":\"bash\"}]}]}}";
 
     public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
     {
