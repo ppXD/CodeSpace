@@ -40,7 +40,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 /// context limit). So a pinned param never 400s a reasoning endpoint, and a plain gateway model is sent the widely-supported
 /// shape.</para>
 /// </summary>
-public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
+public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
 {
     public const string DefaultApiBaseUrl = "https://api.openai.com/v1";
 
@@ -55,11 +55,26 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        var (_, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: false);
+        var body = BuildChatBody(request, stream);
+
+        return stream
+            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
+            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stream the completion as provider-normalized events — FORCES <c>stream:true</c> (the caller wants deltas) regardless of the buffered path's large-output gate; fold with <see cref="LlmTextStreamFold"/> to recover the whole <see cref="LLMCompletion"/>.</summary>
+    public IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
+        => StreamTextEventsAsync(BuildChatBody(request, stream: true), request.Credential, cancellationToken);
+
+    /// <summary>Build the chat request body. Identical for the buffered and streaming paths except the <paramref name="stream"/> flag — extracted so <see cref="CompleteAsync"/> and <see cref="StreamAsync"/> can never drift on the wire shape.</summary>
+    private OpenAiChatRequest BuildChatBody(LLMCompletionRequest request, bool stream)
+    {
         var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
         var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
-        var (cap, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: false);
+        var (cap, _) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: false);
 
-        var body = new OpenAiChatRequest
+        return new OpenAiChatRequest
         {
             Model = request.Model,
             // A set cap rides as `max_completion_tokens` for a reasoning model (which 400s on the deprecated `max_tokens`)
@@ -78,10 +93,6 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             Stream = stream ? true : null,                                                    // omitted when false → unchanged non-streaming body
             StreamOptions = stream ? new OpenAiStreamOptions { IncludeUsage = true } : null,  // ask the wire to emit a final usage chunk (LiteLLM/OpenRouter/vLLM honour it; a gateway that ignores it just leaves usage null)
         };
-
-        return stream
-            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
-            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The non-streaming path (small / bounded output) — one buffered POST, unchanged from the pre-streaming client.</summary>

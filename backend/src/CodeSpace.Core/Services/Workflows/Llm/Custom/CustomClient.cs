@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 
 namespace CodeSpace.Core.Services.Workflows.Llm.Custom;
@@ -16,7 +17,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Custom;
 /// way to the supervisor". The structured client makes <c>"Custom"</c> an eligible brain provider (the brain auto-pick +
 /// the decider's provider-match both flow through it).</para>
 /// </summary>
-public sealed class CustomClient : ILLMClient, IStructuredLLMClient
+public sealed class CustomClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
 {
     private readonly OpenAiClient _wire;
 
@@ -29,6 +30,28 @@ public sealed class CustomClient : ILLMClient, IStructuredLLMClient
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
         Retagged(() => _wire.CompleteStructuredAsync(request, cancellationToken));
+
+    /// <summary>Delegate the OpenAI-wire stream, re-tagging any transport error to "Custom" AS IT SURFACES mid-enumeration. The <see cref="Retagged{T}"/> helper wraps a <c>Task</c>, which an <c>IAsyncEnumerable</c> can't return through — so the re-tag guards each <c>MoveNextAsync</c> here (the error is thrown lazily on the first/next pull, not at call time).</summary>
+    public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await using var enumerator = _wire.StreamAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+        while (true)
+        {
+            LlmStreamEvent current;
+            try
+            {
+                if (!await enumerator.MoveNextAsync().ConfigureAwait(false)) yield break;
+                current = enumerator.Current;
+            }
+            catch (LlmApiException ex)
+            {
+                throw new LlmApiException("Custom", ex.StatusCode, ex.Category, ex.ProviderMessage, ex.RetryAfter, ex);
+            }
+
+            yield return current;
+        }
+    }
 
     /// <summary>Run the inner OpenAI wire and re-tag any transport error as provider "Custom" (preserving the status / category / message / retry-after), so a misconfigured Custom gateway surfaces "Custom API error" against the operator's OWN endpoint — not a misleading "OpenAI" label. The category is preserved, so the decider's capability-miss filter is unaffected.</summary>
     private static async Task<T> Retagged<T>(Func<Task<T>> call)

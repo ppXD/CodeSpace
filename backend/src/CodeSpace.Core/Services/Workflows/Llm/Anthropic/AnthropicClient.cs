@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 /// trimming, retry policy) belongs in the llm.complete node or the LLM-side resilience
 /// service, not in this transport.
 /// </summary>
-public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
+public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
 {
     public const string ApiKeyEnvVar = "CODESPACE_ANTHROPIC_API_KEY";
     public const string DefaultApiBaseUrl = "https://api.anthropic.com";
@@ -38,10 +38,25 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
-        var (cap, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: true);
+        var (_, stream) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: true);
+        var body = BuildMessageBody(request, stream);
 
-        var body = new AnthropicMessageRequest
+        return stream
+            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
+            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stream the completion as provider-normalized events — FORCES <c>stream:true</c> (the caller wants deltas) regardless of the buffered path's large-output gate; fold with <see cref="LlmTextStreamFold"/> to recover the whole <see cref="LLMCompletion"/>.</summary>
+    public IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
+        => StreamTextEventsAsync(BuildMessageBody(request, stream: true), request.Credential, cancellationToken);
+
+    /// <summary>Build the message request body. Identical for the buffered and streaming paths except the <paramref name="stream"/> flag — extracted so <see cref="CompleteAsync"/> and <see cref="StreamAsync"/> can never drift on the wire shape.</summary>
+    private static AnthropicMessageRequest BuildMessageBody(LLMCompletionRequest request, bool stream)
+    {
+        var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
+        var (cap, _) = LlmModelCapabilities.ResolveOutputBudget(request.Model, request.MaxOutputTokens, requiresField: true);
+
+        return new AnthropicMessageRequest
         {
             Model = request.Model,
             MaxTokens = cap ?? LlmModelCapabilities.DefaultMaxOutputTokens,   // requiresField ⇒ cap is non-null; the ?? is a defensive floor
@@ -52,10 +67,6 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } },
             Stream = stream ? true : null,   // omitted when false → the non-streaming body is BYTE-IDENTICAL to before (every small-cap caller unchanged)
         };
-
-        return stream
-            ? await CompleteStreamingAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false)
-            : await CompleteBufferedAsync(body, request.Model, request.Credential, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The non-streaming path (small / bounded output) — one buffered POST, unchanged from the pre-streaming client.</summary>

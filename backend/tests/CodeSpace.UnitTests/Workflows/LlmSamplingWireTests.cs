@@ -401,6 +401,83 @@ public class LlmSamplingWireTests
         result.Usage.FinishReason.ShouldBe("stop");
     }
 
+    // ── IStreamingLLMClient sibling: the public streaming surface (ISP — never widens ILLMClient) ──────────────────
+    // StreamAsync exposes the same provider-normalized events CompleteAsync folds internally; it FORCES streaming (the
+    // caller explicitly wants deltas) regardless of the output cap, and folds byte-identically to the buffered result.
+
+    [Fact]
+    public void All_three_wire_clients_are_streaming_siblings()
+    {
+        (new OpenAiClient(Factory(new CapturingHandler("{}"))) is IStreamingLLMClient).ShouldBeTrue();
+        (new AnthropicClient(Factory(new CapturingHandler("{}"))) is IStreamingLLMClient).ShouldBeTrue();
+        (new CustomClient(Factory(new CapturingHandler("{}"))) is IStreamingLLMClient).ShouldBeTrue("a Custom gateway streams via the OpenAI wire it delegates to");
+    }
+
+    [Fact]
+    public async Task OpenAi_StreamAsync_forces_streaming_and_yields_deltas_that_fold_to_the_completion()
+    {
+        var handler = new CapturingHandler(OpenAiSse);
+        var client = (IStreamingLLMClient)new OpenAiClient(Factory(handler));
+
+        var events = new List<LlmStreamEvent>();
+        await foreach (var e in client.StreamAsync(new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, Credential = Cred("OpenAI") }, CancellationToken.None))
+            events.Add(e);
+
+        JsonDocument.Parse(handler.Body!).RootElement.GetProperty("stream").GetBoolean().ShouldBeTrue("StreamAsync forces streaming even at a small cap — the caller explicitly wants deltas");
+        events.OfType<LlmStreamEvent.TextDelta>().Select(d => d.Text).ShouldBe(new[] { "hello ", "there" });
+        events.OfType<LlmStreamEvent.Meta>().Any(m => m.FinishReason == "stop").ShouldBeTrue();
+        events.OfType<LlmStreamEvent.Meta>().Any(m => m.OutputTokens == 3).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Anthropic_StreamAsync_yields_deltas_that_fold_to_the_completion()
+    {
+        var handler = new CapturingHandler(AnthropicSse);
+        var client = (IStreamingLLMClient)new AnthropicClient(Factory(handler));
+
+        var completion = await LlmTextStreamFold.AccumulateAsync(
+            client.StreamAsync(new LLMCompletionRequest { Model = "claude-opus-4-8", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, Credential = Cred("Anthropic") }, CancellationToken.None),
+            "fb", CancellationToken.None);
+
+        JsonDocument.Parse(handler.Body!).RootElement.GetProperty("stream").GetBoolean().ShouldBeTrue();
+        completion.Text.ShouldBe("hello there");
+        completion.Usage.InputTokens.ShouldBe(5);
+        completion.Usage.OutputTokens.ShouldBe(3);
+        completion.Usage.FinishReason.ShouldBe("end_turn");
+    }
+
+    [Fact]
+    public async Task Custom_StreamAsync_delegates_to_the_openai_wire_and_folds_identically()
+    {
+        var handler = new CapturingHandler(OpenAiSse);
+        var client = (IStreamingLLMClient)new CustomClient(Factory(handler));
+
+        var completion = await LlmTextStreamFold.AccumulateAsync(
+            client.StreamAsync(new LLMCompletionRequest { Model = "metis-coder-max", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 1024, Credential = Cred("Custom") }, CancellationToken.None),
+            "fb", CancellationToken.None);
+
+        completion.Text.ShouldBe("hello there", "the Custom seam streams identically to the OpenAI wire it delegates to");
+        completion.Usage.FinishReason.ShouldBe("stop");
+    }
+
+    [Fact]
+    public async Task StreamAsync_folds_to_the_same_completion_CompleteAsync_returns_for_a_large_cap()
+    {
+        // The public identity: for a large cap (which CompleteAsync streams anyway), fold(StreamAsync) == CompleteAsync.
+        var streamed = await LlmTextStreamFold.AccumulateAsync(
+            ((IStreamingLLMClient)new OpenAiClient(Factory(new CapturingHandler(OpenAiSse)))).StreamAsync(
+                new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("OpenAI") }, CancellationToken.None),
+            "fb", CancellationToken.None);
+
+        var buffered = await new OpenAiClient(Factory(new CapturingHandler(OpenAiSse)))
+            .CompleteAsync(new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 60000, Credential = Cred("OpenAI") }, CancellationToken.None);
+
+        streamed.Text.ShouldBe(buffered.Text);
+        streamed.Usage.InputTokens.ShouldBe(buffered.Usage.InputTokens);
+        streamed.Usage.OutputTokens.ShouldBe(buffered.Usage.OutputTokens);
+        streamed.Usage.FinishReason.ShouldBe(buffered.Usage.FinishReason);
+    }
+
     // ── Harness ──────────────────────────────────────────────────────────────────────
 
     private static ResolvedModelCredential Cred(string provider) => new() { Provider = provider, ApiKey = "k" };

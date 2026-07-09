@@ -133,4 +133,29 @@ public class CustomClientTests
         handler.AuthorizationHeader.ShouldBeNull("no key → NO Authorization header to the keyless gateway");
         handler.RequestUri.ShouldBe("https://local-gw.local/v1/chat/completions");
     }
+
+    [Fact]
+    public async Task StreamAsync_re_tags_a_mid_stream_transport_error_to_the_custom_provider()
+    {
+        // The streaming sibling must re-tag exactly like the buffered path — the Retagged<Func<Task<T>>> helper can't wrap
+        // an IAsyncEnumerable, so a dedicated async-iterator re-tag guards the enumeration. A 401 from the gateway surfaces
+        // as a "Custom" AuthFailed error, not a misleading "OpenAI" one.
+        var handler = new CapturingHandler("""{ "error": { "message": "bad key" } }""") { Status = HttpStatusCode.Unauthorized };
+        var client = (IStreamingLLMClient)new CustomClient(new StubHttpClientFactory(handler));
+
+        var request = new LLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u",
+            Credential = new ResolvedModelCredential { Provider = "Custom", ApiKey = "k", BaseUrl = "https://gw.local/v1" },
+        };
+
+        var ex = await Should.ThrowAsync<LlmApiException>(async () =>
+        {
+            await foreach (var _ in client.StreamAsync(request, CancellationToken.None)) { }
+        });
+
+        ex.Provider.ShouldBe("Custom", "a mid-stream transport error names the operator's Custom gateway, not the OpenAI wire");
+        ex.Category.ShouldBe(LlmErrorCategory.AuthFailed, "the typed category is preserved");
+        ex.StatusCode.ShouldBe(401);
+    }
 }
