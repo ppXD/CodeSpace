@@ -93,46 +93,45 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         return new LLMCompletion { Text = message?.Content ?? "", Model = parsed.Model ?? fallbackModel, Usage = UsageFrom(parsed) };
     }
 
-    /// <summary>
-    /// The streaming path (large / unbounded output): accumulate the SSE chunk stream into the SAME <see cref="LLMCompletion"/>.
-    /// OpenAI's chunks carry incremental <c>choices[0].delta.content</c> (the text), a terminal <c>finish_reason</c>, and —
-    /// with <c>stream_options.include_usage</c> — a final usage chunk (<c>prompt_tokens</c>/<c>completion_tokens</c>); all are
-    /// folded here so the caller sees no difference from the buffered path except the output is no longer capped for fear of a timeout.
-    /// </summary>
+    /// <summary>The streaming path (large / unbounded output): fold the provider-normalized event stream into the SAME <see cref="LLMCompletion"/> the buffered path returns, so the caller sees no difference except the output is no longer capped for fear of a timeout.</summary>
     private async Task<LLMCompletion> CompleteStreamingAsync(OpenAiChatRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+        => await LlmTextStreamFold.AccumulateAsync(StreamTextEventsAsync(body, credential, cancellationToken), fallbackModel, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The OpenAI chat SSE normalized to the provider-neutral <see cref="LlmStreamEvent"/> sequence: chunks carry incremental
+    /// <c>choices[0].delta.content</c> (a <see cref="LlmStreamEvent.TextDelta"/>), a terminal <c>finish_reason</c> + the chunk
+    /// <c>model</c> + — with <c>stream_options.include_usage</c> — a final usage chunk (<c>prompt_tokens</c>/<c>completion_tokens</c>),
+    /// each a <see cref="LlmStreamEvent.Meta"/>. <see cref="LlmTextStreamFold"/> folds them; the byte-for-byte-same result the
+    /// prior inline accumulation produced (model = last chunk's, usage from the include_usage chunk).
+    /// </summary>
+    private async IAsyncEnumerable<LlmStreamEvent> StreamTextEventsAsync(OpenAiChatRequest body, ResolvedModelCredential? credential, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var (http, message) = BuildRequest(body, credential);
 
         using (message)
         {
-            var text = new System.Text.StringBuilder();
-            string? model = null, finishReason = null;
-            int? inputTokens = null, outputTokens = null;
-
             await foreach (var evt in LlmHttpTransport.StreamSseAsync(http, message, Provider, cancellationToken).ConfigureAwait(false))
             {
-                if (evt.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String) model = m.GetString();
+                if (evt.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String)
+                    yield return new LlmStreamEvent.Meta(Model: m.GetString());
 
                 if (evt.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0)
                 {
                     var choice = choices[0];
-                    if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String) text.Append(c.GetString());
-                    if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String) finishReason = fr.GetString();
+                    if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
+                        yield return new LlmStreamEvent.TextDelta(c.GetString()!);
+                    if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                        yield return new LlmStreamEvent.Meta(FinishReason: fr.GetString());
                 }
 
                 if (evt.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object)
                 {
-                    if (u.TryGetProperty("prompt_tokens", out var pt) && pt.TryGetInt32(out var pv)) inputTokens = pv;
-                    if (u.TryGetProperty("completion_tokens", out var ct) && ct.TryGetInt32(out var cv)) outputTokens = cv;
+                    int? inputTokens = u.TryGetProperty("prompt_tokens", out var pt) && pt.TryGetInt32(out var pv) ? pv : null;
+                    int? outputTokens = u.TryGetProperty("completion_tokens", out var ct) && ct.TryGetInt32(out var cv) ? cv : null;
+                    if (inputTokens is not null || outputTokens is not null)
+                        yield return new LlmStreamEvent.Meta(InputTokens: inputTokens, OutputTokens: outputTokens);
                 }
             }
-
-            return new LLMCompletion
-            {
-                Text = text.ToString(),
-                Model = model ?? fallbackModel,
-                Usage = new LlmUsage { InputTokens = inputTokens, OutputTokens = outputTokens, FinishReason = finishReason },
-            };
         }
     }
 

@@ -66,49 +66,46 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         return new LLMCompletion { Text = TextContent(parsed), Model = parsed.Model ?? fallbackModel, Usage = UsageFrom(parsed) };
     }
 
-    /// <summary>
-    /// The streaming path (large / unbounded output — the model can emit up to its true ceiling without an idle-connection
-    /// timeout): accumulate the SSE event stream into the SAME <see cref="LLMCompletion"/> the caller expects. Anthropic's
-    /// events — <c>message_start</c> (input tokens + model), <c>content_block_delta</c>/<c>text_delta</c> (the text), and
-    /// <c>message_delta</c> (final output tokens + stop_reason) — are folded here; a caller sees no difference from the
-    /// buffered path except that the output is no longer capped for fear of a timeout.
-    /// </summary>
+    /// <summary>The streaming path (large / unbounded output — the model can emit up to its true ceiling without an idle-connection timeout): fold the provider-normalized event stream into the SAME <see cref="LLMCompletion"/> the buffered path returns.</summary>
     private async Task<LLMCompletion> CompleteStreamingAsync(AnthropicMessageRequest body, string fallbackModel, ResolvedModelCredential? credential, CancellationToken cancellationToken)
+        => await LlmTextStreamFold.AccumulateAsync(StreamTextEventsAsync(body, credential, cancellationToken), fallbackModel, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Anthropic's message SSE normalized to the provider-neutral <see cref="LlmStreamEvent"/> sequence: <c>message_start</c>
+    /// (model + input tokens → <see cref="LlmStreamEvent.Meta"/>), <c>content_block_delta</c>/<c>text_delta</c> (a
+    /// <see cref="LlmStreamEvent.TextDelta"/>), and <c>message_delta</c> (stop_reason + final output tokens → Meta).
+    /// <see cref="LlmTextStreamFold"/> folds them into the byte-for-byte-same result the prior inline accumulation produced.
+    /// </summary>
+    private async IAsyncEnumerable<LlmStreamEvent> StreamTextEventsAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var (http, message) = BuildRequest(body, credential);
 
         using (message)
         {
-            var text = new System.Text.StringBuilder();
-            string? model = null, stopReason = null;
-            int? inputTokens = null, outputTokens = null;
-
             await foreach (var evt in LlmHttpTransport.StreamSseAsync(http, message, Provider, cancellationToken).ConfigureAwait(false))
             {
                 switch (evt.TryGetProperty("type", out var t) ? t.GetString() : null)
                 {
                     case "message_start" when evt.TryGetProperty("message", out var msg):
-                        if (msg.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String) model = m.GetString();
-                        if (msg.TryGetProperty("usage", out var u) && u.TryGetProperty("input_tokens", out var it) && it.TryGetInt32(out var iv)) inputTokens = iv;
+                        string? model = msg.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
+                        int? inputTokens = msg.TryGetProperty("usage", out var u) && u.TryGetProperty("input_tokens", out var it) && it.TryGetInt32(out var iv) ? iv : null;
+                        if (model is not null || inputTokens is not null)
+                            yield return new LlmStreamEvent.Meta(Model: model, InputTokens: inputTokens);
                         break;
 
                     case "content_block_delta" when evt.TryGetProperty("delta", out var d) && d.TryGetProperty("type", out var dt) && dt.GetString() == "text_delta":
-                        if (d.TryGetProperty("text", out var txt) && txt.ValueKind == JsonValueKind.String) text.Append(txt.GetString());
+                        if (d.TryGetProperty("text", out var txt) && txt.ValueKind == JsonValueKind.String)
+                            yield return new LlmStreamEvent.TextDelta(txt.GetString()!);
                         break;
 
                     case "message_delta":
-                        if (evt.TryGetProperty("delta", out var md) && md.TryGetProperty("stop_reason", out var sr) && sr.ValueKind == JsonValueKind.String) stopReason = sr.GetString();
-                        if (evt.TryGetProperty("usage", out var mu) && mu.TryGetProperty("output_tokens", out var ot) && ot.TryGetInt32(out var ov)) outputTokens = ov;
+                        string? stopReason = evt.TryGetProperty("delta", out var md) && md.TryGetProperty("stop_reason", out var sr) && sr.ValueKind == JsonValueKind.String ? sr.GetString() : null;
+                        int? outputTokens = evt.TryGetProperty("usage", out var mu) && mu.TryGetProperty("output_tokens", out var ot) && ot.TryGetInt32(out var ov) ? ov : null;
+                        if (stopReason is not null || outputTokens is not null)
+                            yield return new LlmStreamEvent.Meta(OutputTokens: outputTokens, FinishReason: stopReason);
                         break;
                 }
             }
-
-            return new LLMCompletion
-            {
-                Text = text.ToString(),
-                Model = model ?? fallbackModel,
-                Usage = new LlmUsage { InputTokens = inputTokens, OutputTokens = outputTokens, FinishReason = stopReason },
-            };
         }
     }
 
