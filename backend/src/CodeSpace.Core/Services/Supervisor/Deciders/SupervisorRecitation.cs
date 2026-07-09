@@ -33,7 +33,7 @@ public static class SupervisorRecitation
         {
             var state = StateFor(subtask.Id, priorDecisions);
 
-            builder.AppendLine().Append($"- [{subtask.Id}] {subtask.Title}: {state}");
+            builder.AppendLine().Append($"- [{subtask.Id}] {subtask.Title}: {state}{EscalationNoteFor(subtask.Id, priorDecisions)}");
 
             // Authoring LINT, recited every turn until fixed (the free tier-0 check the supervisor lane's plans
             // never got): a half-authored acceptance spec (judge without rubric, schema check without schema) can
@@ -73,26 +73,53 @@ public static class SupervisorRecitation
     /// </summary>
     internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
     {
+        if (FindCoveringDecision(subtaskId, priors) is not { } decision) return "pending";
+
+        var index = IndexOf(UnitSubtaskIds(decision), subtaskId);
+        var results = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
+
+        return index >= results.Count ? "running" : Describe(results[index]);   // staged, outcome not folded yet
+    }
+
+    /// <summary>
+    /// A2 (P4-2) — the subtask's LATEST covering decision's OWN escalation note, purely a DISPLAY suffix (never
+    /// folded into <see cref="StateFor"/>'s return value, which <see cref="Render"/>'s finished/unfinished gate
+    /// pattern-matches exactly — concatenating it there would break that match for a "done"/"done (accepted)"
+    /// escalated retry). A retry only ever stages ONE unit, so any escalation its covering decision recorded is
+    /// unambiguously about THIS subtask. Empty when the covering decision recorded none (the common case).
+    /// </summary>
+    private static string EscalationNoteFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors) =>
+        FindCoveringDecision(subtaskId, priors) is { } decision && SupervisorOutcome.ReadEscalation(decision.OutcomeJson) is { } escalation
+            ? $" [escalated to {escalation.To}: {escalation.Reason}]"
+            : "";
+
+    /// <summary>The LATEST spawn/retry decision that staged this subtask id — the one shared walk <see cref="StateFor"/> and <see cref="EscalationNoteFor"/> both join off, so they can never disagree about WHICH attempt is the freshest one.</summary>
+    private static SupervisorPriorDecision? FindCoveringDecision(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
+    {
         for (var i = priors.Count - 1; i >= 0; i--)
         {
             var decision = priors[i];
 
-            if (!SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) continue;
-
-            var ids = SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson);
-            var index = IndexOf(ids, subtaskId);
-
-            if (index < 0) continue;
-
-            var results = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
-
-            if (index >= results.Count) return "running";   // staged, outcome not folded yet
-
-            return Describe(results[index]);
+            if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind) && IndexOf(UnitSubtaskIds(decision), subtaskId) >= 0)
+                return decision;
         }
 
-        return "pending";
+        return null;
     }
+
+    /// <summary>
+    /// Real-bug fix: a <c>retry</c> decision's payload carries the plan-local subtask id as a SINGULAR <c>subtaskId</c>
+    /// field (<see cref="SupervisorRetryPayload.SubtaskId"/>), never the <c>spawn</c> payload's PLURAL <c>subtaskIds</c>
+    /// array — so calling <see cref="SupervisorOutcome.ReadSpawnSubtaskIds"/> unconditionally (as this method did before
+    /// this fix) always returned empty for a genuine retry, silently skipping it and leaving the recitation showing the
+    /// STALE original-spawn state forever, contradicting <see cref="StateFor"/>'s own doc comment ("a retry supersedes
+    /// the original spawn"). Mirrors the SAME kind-aware read <c>SupervisorTurnService.Rehydrate.UnitSubtaskIds</c>
+    /// already uses for the identical join.
+    /// </summary>
+    private static IReadOnlyList<string> UnitSubtaskIds(SupervisorPriorDecision decision) =>
+        decision.DecisionKind == SupervisorDecisionKinds.Spawn
+            ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
+            : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
 
     private static string Describe(SupervisorAgentResult result) => result.Status switch
     {

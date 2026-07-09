@@ -193,6 +193,55 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_names_a_retrys_tier_escalation()
+    {
+        // A2 (P4-2): the decider must see that a stronger model was already tried this retry — both so it doesn't
+        // wonder why the same model wasn't retried again, and so it can reason about whether escalating further
+        // (were it still failing) would help at all.
+        var agentId = Guid.NewGuid();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentRunIds = new[] { agentId },
+            agentCount = 1,
+            escalation = new { from = "claude-haiku-4-5", to = "claude-sonnet-4-5", reason = "the prior attempt's self-report contradicted its acceptance grade (over_claim)" },
+            agentResults = new[] { new { agentRunId = agentId, status = "Succeeded", summary = "did it" } },
+        }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+
+        var retry = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Retry, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskId":"s1"}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, retry));
+
+        prompt.ShouldContain("ESCALATED model for this retry", customMessage: "the decider must be told a stronger model was already tried");
+        prompt.ShouldContain("claude-haiku-4-5");
+        prompt.ShouldContain("claude-sonnet-4-5");
+        prompt.ShouldContain("contradicted its acceptance grade");
+    }
+
+    [Fact]
+    public void The_user_prompt_names_no_escalation_for_an_ordinary_retry()
+    {
+        var agentId = Guid.NewGuid();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentRunIds = new[] { agentId },
+            agentCount = 1,
+            agentResults = new[] { new { agentRunId = agentId, status = "Succeeded", summary = "did it" } },
+        }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+
+        var retry = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Retry, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskId":"s1"}""", OutcomeJson = outcome,
+        };
+
+        LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, retry)).ShouldNotContain("ESCALATED");
+    }
+
+    [Fact]
     public void The_user_prompt_calls_out_an_under_claim_where_the_agent_reported_failure_but_the_check_passed()
     {
         // P4-1: the inverse of the over-claim case above — the agent itself reported FAILURE, but its OWN check

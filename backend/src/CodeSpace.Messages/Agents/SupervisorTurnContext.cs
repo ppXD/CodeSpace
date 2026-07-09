@@ -94,6 +94,16 @@ public sealed record SupervisorTurnContext
     public int NoProgressDecisions { get; init; }
 
     /// <summary>
+    /// A2 (P4-2) — the run's own no-progress force-stop cap (carried from <c>SupervisorGoalPlan.MaxNoProgressDecisions</c>
+    /// so a retry can tell how CLOSE <see cref="NoProgressDecisions"/> is to it, one of the two tier-escalation
+    /// triggers — <c>SupervisorRetryEscalation.EscalationReason</c>). Defaults to <c>8</c> — the literal
+    /// <c>SupervisorLane.DefaultMaxNoProgressDecisions</c> in Core also falls back to for an absent config (Messages
+    /// can't reference Core, Rule 18.1, so the literal is duplicated, not shared) — so a test/context built with no
+    /// explicit value never spuriously reads as "one away from the cap".
+    /// </summary>
+    public int MaxNoProgressDecisions { get; init; } = 8;
+
+    /// <summary>
     /// The approval policy in force for this run (PR-E E5 governance) — carried so the executor / turn loop routes
     /// every side-effecting decision through <c>AgentToolGate</c> at the policy-derived tier. Default
     /// <see cref="Dtos.Agents.SupervisorApprovalPolicy.None"/> matches pre-E5 behaviour (no gate).

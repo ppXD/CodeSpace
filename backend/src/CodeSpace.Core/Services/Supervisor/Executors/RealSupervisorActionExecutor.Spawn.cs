@@ -170,9 +170,54 @@ public sealed partial class RealSupervisorActionExecutor
         var effectiveStaging = PreferPriorAttemptStaging(priorAttemptStaging, staging);
 
         var builtTask = BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: effectiveStaging);
-        var task = prior is null ? builtTask : ApplyResumeRecord(builtTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
 
-        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken).ConfigureAwait(false);
+        var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorAgentRunId, context, cancellationToken).ConfigureAwait(false);
+
+        var task = prior is null ? escalatedTask : ApplyResumeRecord(escalatedTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
+
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A2 (P4-2) — raise this retry's model floor when the run's OWN evidence says the prior attempt's model was
+    /// insufficient (a self-report/acceptance-grade contradiction, or the run one no-progress decision away from its
+    /// force-stop cap): <see cref="SupervisorRetryEscalation.EscalationReason"/> names WHY, <see cref="ResolveEscalatedModelAsync"/>
+    /// picks the strongest credentialed candidate above the prior model's own effective tier. Skipped entirely once
+    /// the run is already over its cost cap (never spend into a cap that is about to force-stop it anyway) — the SAME
+    /// "EXCEEDS" predicate the turn loop's own cost-cap force-stop uses. No trigger, no candidate, or already-capped
+    /// → the task's ordinary model resolution (the profile's pin, or none) passes through UNCHANGED, escalation null.
+    /// </summary>
+    private async Task<(AgentTask Task, SupervisorRetryEscalationOutcome? Escalation)> ApplyRetryEscalationAsync(AgentTask builtTask, Guid? priorAgentRunId, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (context.MaxCostUsd is { } cap && context.RunSpendUsd > cap) return (builtTask, null);
+
+        var priorResult = SupervisorOutcome.FindResultByAgentRunId(context.PriorDecisions, priorAgentRunId);
+
+        var reason = SupervisorRetryEscalation.EscalationReason(priorResult?.Contradiction, context.NoProgressDecisions, context.MaxNoProgressDecisions);
+
+        if (reason is null) return (builtTask, null);
+
+        var picked = await ResolveEscalatedModelAsync(priorResult?.Model, context, cancellationToken).ConfigureAwait(false);
+
+        if (picked is null) return (builtTask, null);
+
+        return (builtTask with { Model = picked }, new SupervisorRetryEscalationOutcome { From = priorResult?.Model, To = picked, Reason = reason });
+    }
+
+    /// <summary>The escalated candidate pool: every ENABLED model on an ACTIVE, non-deleted credential of this team, bounded by <see cref="SupervisorTurnContext.AllowedModelIds"/> (empty = every team row) — the SAME pool + bound <c>ApplyDispatchModelAsync</c>'s own <c>ResolveDispatchAsync</c> will re-validate the picked name against, so an escalated pick can never be a phantom the pool gate then rejects.</summary>
+    private async Task<string?> ResolveEscalatedModelAsync(string? priorModelName, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var query = _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == context.TeamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active);
+
+        if (context.AllowedModelIds is { Count: > 0 } allowed)
+            query = query.Where(m => allowed.Contains(m.Id));
+
+        var rows = await query
+            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return SupervisorRetryEscalation.PickStrongerModel(rows, m => m.IsDefault, m => m.ProbedCapabilityTier, m => m.CapabilityTier, m => m.ModelId, priorModelName)?.ModelId;
     }
 
     /// <summary>The pure fold of a resumable prior attempt onto the task: always stamps the session/transcript, and — ONLY when <paramref name="workspaceHasPriorWork"/> is false — appends the honest-redo line so the hint's truth value always matches the actual git state. Internal + static so the honesty branch is unit-pinned directly.</summary>
@@ -209,7 +254,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -222,6 +267,7 @@ public sealed partial class RealSupervisorActionExecutor
         var orphans = await ReclaimableOrphanAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
 
         var agentRunIds = new List<Guid>(tasks.Count);
+        var reclaimedAny = false;
 
         for (var k = 0; k < tasks.Count; k++)
         {
@@ -232,7 +278,10 @@ public sealed partial class RealSupervisorActionExecutor
             // gate — team inherited from the supervisor run, never model-supplied. Linked to the supervisor run
             // + node so the completion notifier resumes the right run, and the reconciler's parent-terminal
             // guard governs it.
-            var agentRunId = k < orphans.Count
+            var reclaimed = k < orphans.Count;
+            reclaimedAny |= reclaimed;
+
+            var agentRunId = reclaimed
                 ? orphans[k]
                 : await CreateResolvedAgentRunAsync(tasks[k].Task, tasks[k].Spec, context, cancellationToken).ConfigureAwait(false);
 
@@ -243,11 +292,31 @@ public sealed partial class RealSupervisorActionExecutor
         // One SaveChanges for all K wait rows — the agent rows are already persisted (CreateAsync saves each).
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Count }, AgentJson.Options);
+        // A crash-recovery reclaim reuses the orphan's OWN already-persisted TaskJson verbatim (never re-resolved,
+        // see above) — so if THIS pass freshly recomputed an escalation pick, it can drift from what the CRASHED
+        // pass actually baked into that orphan (the team's model pool may have changed between the crash and this
+        // replay: a model disabled/enabled, re-tiered, or newly credentialed). Reconcile against the one AgentRun
+        // this retry actually dispatches on, so the recorded "to" always describes truth, never a stale re-guess.
+        if (escalation is not null && reclaimedAny)
+            escalation = await ReconcileEscalationWithDispatchedModelAsync(escalation, agentRunIds[0], cancellationToken).ConfigureAwait(false);
+
+        var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Count, escalation }, AgentJson.Options);
 
         _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s))", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count));
 
         return SupervisorExecution.ParkedOnAgents(outcome, agentRunIds.Count);
+    }
+
+    /// <summary>The crash-recovery correction for <see cref="StageAgentsAndParkAsync"/>: reads the reclaimed orphan's OWN persisted <see cref="AgentTask.Model"/> back off its TaskJson — never re-derived — and stamps it as the escalation's <c>To</c>, since that row's dispatch was fixed by the crashed pass, not by this replay. Falls back to the original guess only if the row/model can't be read (best-effort, never throws) — a slightly-stale note is still better than a hard failure over purely informational metadata.</summary>
+    private async Task<SupervisorRetryEscalationOutcome> ReconcileEscalationWithDispatchedModelAsync(SupervisorRetryEscalationOutcome escalation, Guid dispatchedAgentRunId, CancellationToken cancellationToken)
+    {
+        var taskJson = await _db.AgentRun.AsNoTracking().Where(r => r.Id == dispatchedAgentRunId).Select(r => r.TaskJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(taskJson)) return escalation;
+
+        var actualModel = Deserialize<AgentTask>(taskJson)?.Model;
+
+        return NullIfBlank(actualModel) is { } model ? escalation with { To = model } : escalation;
     }
 
     /// <summary>This turn's already-staged AgentRun wait tokens (the agent-run ids) in spawn-index order, or empty when none — the recovery anchor for a crash AFTER the waits committed but before the terminal was recorded.</summary>

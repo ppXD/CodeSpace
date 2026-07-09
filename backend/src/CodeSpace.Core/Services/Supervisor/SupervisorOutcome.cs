@@ -464,6 +464,24 @@ public static class SupervisorOutcome
     public static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
 
     /// <summary>
+    /// The FOLDED result for one specific agent-run id, searched across every staging (spawn/retry/resolve) decision
+    /// in the tape — A2 (P4-2)'s read of "what did THIS unit's prior attempt actually do" (its self-report×grade
+    /// <see cref="SupervisorAgentResult.Contradiction"/>, its resolved <see cref="SupervisorAgentResult.Model"/>) so a
+    /// retry can decide whether to escalate and off what floor. Null id or no match (never staged / not yet folded) →
+    /// null — the caller then has no contradiction evidence and no known prior model, exactly the pre-A2 read.
+    /// </summary>
+    public static SupervisorAgentResult? FindResultByAgentRunId(IReadOnlyList<SupervisorPriorDecision> priorDecisions, Guid? agentRunId)
+    {
+        if (agentRunId is not { } id) return null;
+
+        foreach (var decision in priorDecisions)
+            foreach (var result in ReadAgentResults(decision.OutcomeJson))
+                if (result.AgentRunId == id) return result;
+
+        return null;
+    }
+
+    /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo
     /// facts (alias / repository id / produced branch / base / changed files) MINUS the unbounded per-repo diff
     /// (<c>Patch</c> + <c>PatchArtifactId</c> cleared) — the same reason the compact omits the top-level Patch. The
@@ -624,6 +642,40 @@ public static class SupervisorOutcome
                 IntegratedBranch = integration.TryGetProperty("integratedBranch", out var ib) && ib.ValueKind == JsonValueKind.String ? ib.GetString() : null,
                 ConflictedFiles = conflictedFiles,
                 PreservedBranches = preservedBranches,
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Read the on-disk ESCALATION block a <c>retry</c> outcome records (A2/P4-2) into the compact, decider-visible
+    /// <see cref="SupervisorRetryEscalationOutcome"/> — null when the outcome carries no <c>escalation</c> object
+    /// (the common, non-escalated retry, or any other decision kind) or it's malformed. Best-effort + pure, mirroring
+    /// <see cref="ReadIntegration"/>'s exact shape.
+    /// </summary>
+    public static SupervisorRetryEscalationOutcome? ReadEscalation(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("escalation", out var escalation) || escalation.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (!escalation.TryGetProperty("to", out var toEl) || toEl.ValueKind != JsonValueKind.String
+                || !escalation.TryGetProperty("reason", out var reasonEl) || reasonEl.ValueKind != JsonValueKind.String)
+                return null;
+
+            return new SupervisorRetryEscalationOutcome
+            {
+                To = toEl.GetString()!,
+                From = escalation.TryGetProperty("from", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null,
+                Reason = reasonEl.GetString()!,
             };
         }
         catch (JsonException)
