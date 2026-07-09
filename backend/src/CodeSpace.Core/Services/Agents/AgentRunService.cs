@@ -589,7 +589,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // Every agent run at this cell anywhere in the chain that captured a session id (team-scoped; served by idx_agent_run_workflow_run).
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(a => a.TeamId == teamId && chainIds.Contains(a.WorkflowRunId) && a.NodeId == nodeId && a.IterationKey == iterationKey && a.SessionId != null)
-            .Select(a => new { a.WorkflowRunId, a.SessionId, a.ResultJson })
+            .Select(a => new { a.Id, a.WorkflowRunId, a.SessionId, a.ResultJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // The NEAREST ancestor's RESUMABLE session — chain order (nearest first), skipping a captured-but-transcript-less
@@ -599,7 +599,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         {
             var candidate = candidates.FirstOrDefault(c => c.WorkflowRunId == runId);
 
-            if (candidate is not null && TryResumable(candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
+            if (candidate is not null && TryResumable(candidate.Id, candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
         }
 
         return null;
@@ -615,7 +615,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(a => a.TeamId == teamId && a.WorkflowRunId == supervisorRunId && a.SessionId != null)
             .OrderByDescending(a => a.CreatedDate).ThenByDescending(a => a.Id)
-            .Select(a => new { a.SessionId, a.ResultJson, a.TaskJson })
+            .Select(a => new { a.Id, a.SessionId, a.ResultJson, a.TaskJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // The most-recent RESUMABLE prior attempt of THIS subtask — skip a captured-but-transcript-less attempt so it
@@ -624,19 +624,20 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         {
             if (SubtaskIdOf(candidate.TaskJson) != subtaskId) continue;
 
-            if (TryResumable(candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
+            if (TryResumable(candidate.Id, candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
         }
 
         return null;
     }
 
     /// <summary>
-    /// A prior agent run's (session id, result json) → its RESUMABLE session, or null when not resumable: no session id,
-    /// no transcript (both-or-neither — a resume without one fails "No conversation found"), or a corrupt/undeserializable
-    /// result (cold-start, NEVER a throw). Normalizes an offloaded <c>""</c> transcript to a null inline so the ref case
-    /// carries a clean null. Shared by the fork-cell lineage lookup and the supervisor subtask-attempt lookup.
+    /// A prior agent run's (id, session id, result json) → its RESUMABLE session, or null when not resumable: no
+    /// session id, no transcript (both-or-neither — a resume without one fails "No conversation found"), or a
+    /// corrupt/undeserializable result (cold-start, NEVER a throw). Normalizes an offloaded <c>""</c> transcript to a
+    /// null inline so the ref case carries a clean null. Shared by the fork-cell lineage lookup and the supervisor
+    /// subtask-attempt lookup.
     /// </summary>
-    private static ResumableSession? TryResumable(string? sessionId, string? resultJson)
+    private static ResumableSession? TryResumable(Guid agentRunId, string? sessionId, string? resultJson)
     {
         if (sessionId is not { Length: > 0 } sid || resultJson is null) return null;
 
@@ -647,7 +648,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var inline = result?.SessionTranscript is { Length: > 0 } t ? t : null;
         var artifactId = result?.SessionTranscriptArtifactId;
 
-        return inline is not null || artifactId is not null ? new ResumableSession(sid, inline, artifactId) : null;
+        return inline is not null || artifactId is not null ? new ResumableSession(agentRunId, sid, inline, artifactId) : null;
     }
 
     /// <summary>The <see cref="AgentTask.SubtaskId"/> a spawned agent's persisted task carries, or null (non-supervisor task / corrupt json).</summary>

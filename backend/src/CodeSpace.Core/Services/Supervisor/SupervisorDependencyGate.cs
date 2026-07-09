@@ -113,6 +113,15 @@ public static class SupervisorDependencyGate
     private static bool IsSatisfied(SupervisorAgentResult result) =>
         string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false;
 
+    /// <summary>
+    /// The AgentRunId of a subtask's LATEST attempt (retry-resume's world-state continuity), UNFILTERED on success —
+    /// unlike <see cref="LatestSucceededAgentRunIds"/>, a retry's whole point is that the prior attempt did NOT
+    /// cleanly succeed, so gating on <see cref="IsSatisfied"/> here would always miss the very attempt a retry needs
+    /// to stage its workspace from. Null when the subtask has no recorded prior attempt (a genuine cold-start retry).
+    /// </summary>
+    public static Guid? LatestAgentRunId(SupervisorTurnContext context, string subtaskId) =>
+        LatestResultsBySubtask(context).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
+
     /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
     private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
     {
