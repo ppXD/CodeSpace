@@ -152,6 +152,41 @@ public class SupervisorDependencyGateTests
         SupervisorDependencyGate.LatestSucceededAgentRunIds(ctx, new[] { "a", "b", "c" }).ShouldBe(new[] { aRunId, cRunId }, "request order preserved, b (failed) dropped");
     }
 
+    // ── LatestAgentRunId: retry world-state conservation's UNFILTERED subtask→attempt lookup ──
+
+    [Fact]
+    public void A_subtask_with_no_prior_attempt_resolves_no_agent_run_id()
+    {
+        var ctx = Context(Plan(("a", null), ("b", null)), Spawn(("a", "Succeeded", null)));
+
+        SupervisorDependencyGate.LatestAgentRunId(ctx, "b").ShouldBeNull("b never ran — a genuine cold-start retry");
+    }
+
+    [Theory]
+    [InlineData("Succeeded", null)]
+    [InlineData("Succeeded", false)]  // objectively REJECTED — still the attempt a retry must continue from
+    [InlineData("Failed", null)]      // the common retry trigger — a plain failure
+    [InlineData("TimedOut", null)]
+    public void A_prior_attempt_resolves_regardless_of_success_or_acceptance(string status, bool? accepted)
+    {
+        var ctx = Context(Plan(("a", null)), Spawn((("a", status, accepted))));
+        var aRunId = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[1].OutcomeJson).Single().AgentRunId;
+
+        SupervisorDependencyGate.LatestAgentRunId(ctx, "a").ShouldBe(aRunId, "unlike LatestSucceededAgentRunIds, a retry's whole point is the prior attempt did NOT cleanly succeed");
+    }
+
+    [Fact]
+    public void A_later_retry_supersedes_the_original_attempt_for_LatestAgentRunId_too()
+    {
+        var ctx = Context(Plan(("a", null)),
+            Spawn(("a", "Failed", null)),
+            Retry(("a", "Failed", null)));   // the retry ALSO failed — still the latest attempt to continue from
+
+        var retryRunId = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions[2].OutcomeJson).Single().AgentRunId;
+
+        SupervisorDependencyGate.LatestAgentRunId(ctx, "a").ShouldBe(retryRunId, "the LATEST attempt is always the retry target, regardless of its own outcome");
+    }
+
     // ── Frontier: the decider's guidance ───────────────────────────────────────────────
 
     [Fact]

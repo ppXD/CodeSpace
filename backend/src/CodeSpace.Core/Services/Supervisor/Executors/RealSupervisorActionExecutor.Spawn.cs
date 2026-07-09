@@ -70,6 +70,10 @@ public sealed partial class RealSupervisorActionExecutor
     internal static IReadOnlyList<string> DependsOnFor(SupervisorPlannedSubtask? planned, SupervisorAgentDispatch? spec) =>
         !string.IsNullOrWhiteSpace(spec?.BaseSubtaskId) ? new[] { spec!.BaseSubtaskId! } : planned?.DependsOn ?? Array.Empty<string>();
 
+    /// <summary>The retry world-state-conservation precedence (P0-1): a resolved prior-attempt ref is strictly MORE specific than a plan-dependency handoff (it is THIS exact subtask's own committed work, not a producer's), so it wins whenever both resolve. No prior-attempt ref → the dependency staging stands unchanged (byte-identical to before P0-1). Internal + static so the precedence is unit-pinned directly, mirroring <see cref="DependsOnFor"/>.</summary>
+    internal static DependencyStagingResult PreferPriorAttemptStaging(DependencyStagingResult priorAttemptStaging, DependencyStagingResult dependencyStaging) =>
+        priorAttemptStaging.Ref is not null ? priorAttemptStaging : dependencyStaging;
+
     /// <summary>The subtask's target repository, resolved the SAME way <see cref="BuildTaskWithGoal"/> will resolve it — a pure pre-computation so dependency staging can look up the right repo's manifest before the task itself is built.</summary>
     private static Guid? ResolveTargetRepositoryId(SupervisorAgentDispatch? spec, SupervisorTurnContext context)
     {
@@ -133,21 +137,38 @@ public sealed partial class RealSupervisorActionExecutor
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(new[] { new DependencyBlock(retry.SubtaskId, staging.BlockedReason!, staging.ConflictedFiles, staging.PreservedBranches) }), AgentJson.Options));
 
         // D1 (retry-resume): a retry CONTINUES the failed attempt's conversation instead of restarting the subtask cold —
-        // find the prior attempt of THIS subtask in THIS run + stamp the resume hint (the executor resolves any ref, the
-        // Claude harness restores the transcript at the retry's own cwd). No prior resumable attempt ⇒ byte-identical cold-start.
-        var task = await ApplyRetryResumeHintAsync(BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: staging), retry.SubtaskId, context, cancellationToken).ConfigureAwait(false);
+        // find the prior attempt of THIS subtask in THIS run FIRST (the executor resolves any ref, the Claude harness
+        // restores the transcript at the retry's own cwd). No prior resumable attempt ⇒ byte-identical cold-start.
+        var prior = await _agentRuns.FindResumableSubtaskAttemptAsync(context.TeamId, context.SupervisorRunId, retry.SubtaskId, cancellationToken).ConfigureAwait(false);
+
+        // P0-1 (retry world-state conservation): the retried subtask's OWN prior attempt may have already pushed a
+        // branch — that continuity is MORE specific than a plan dependency's handoff, so it wins the clone ref when
+        // both resolve (the rare case a retried subtask also declares a DependsOn). The git-state lookup MUST key off
+        // the SAME attempt whose conversation is being resumed (never a separately-resolved "latest attempt") so the
+        // resume hint's honesty claim always describes what it actually restores; only when there is NO resumable
+        // conversation at all does the literal latest attempt (by decision order) stand in, since there is then no
+        // conversation-honesty concern to reconcile against. No prior attempt / no pushed branch → NoOverride, and the
+        // plan-dependency staging (if any) stands unchanged.
+        var priorAgentRunId = prior?.AgentRunId ?? SupervisorDependencyGate.LatestAgentRunId(context, retry.SubtaskId);
+        var priorAttemptStaging = await ResolvePriorAttemptStagingAsync(priorAgentRunId, repositoryId, context, cancellationToken).ConfigureAwait(false);
+        var effectiveStaging = PreferPriorAttemptStaging(priorAttemptStaging, staging);
+
+        var builtTask = BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: effectiveStaging);
+        var task = prior is null ? builtTask : ApplyResumeRecord(builtTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
 
         return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Stamp the retry-resume hint from the subtask's most-recent resumable prior attempt (the same session id + transcript ref/inline the executor consumes), or return the task unchanged when no prior attempt is resumable (cold-start).</summary>
-    private async Task<AgentTask> ApplyRetryResumeHintAsync(AgentTask task, string subtaskId, SupervisorTurnContext context, CancellationToken cancellationToken)
+    /// <summary>The pure fold of a resumable prior attempt onto the task: always stamps the session/transcript, and — ONLY when <paramref name="workspaceHasPriorWork"/> is false — appends the honest-redo line so the hint's truth value always matches the actual git state. Internal + static so the honesty branch is unit-pinned directly.</summary>
+    internal static AgentTask ApplyResumeRecord(AgentTask task, ResumableSession prior, bool workspaceHasPriorWork)
     {
-        if (await _agentRuns.FindResumableSubtaskAttemptAsync(context.TeamId, context.SupervisorRunId, subtaskId, cancellationToken).ConfigureAwait(false) is not { } prior)
-            return task;
+        var resumed = task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
 
-        return task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
+        return workspaceHasPriorWork ? resumed : resumed with { Goal = $"{resumed.Goal}\n\n{HonestNoContinuityHint}" };
     }
+
+    /// <summary>The honest-redo line (P0-1): fires ONLY when a resumed conversation exists but the workspace was NOT pinned to a prior pushed branch — never on a genuine cold-start retry (no prior attempt at all), which stays byte-identical.</summary>
+    internal const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (no pushed branch was found to continue from) — you must redo any relevant file changes from scratch.";
 
     /// <summary>
     /// Create each agent run (through the admission gate, team-inherited) + stage its AgentRun wait keyed

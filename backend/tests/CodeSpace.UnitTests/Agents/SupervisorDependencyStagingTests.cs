@@ -46,6 +46,58 @@ public class SupervisorDependencyStagingTests
         RealSupervisorActionExecutor.DependsOnFor(new SupervisorPlannedSubtask { Id = "a", Title = "a", Instruction = "do" }, spec: null).ShouldBeEmpty("a flat subtask with no DependsOn resolves no dependency — byte-identical no-override path");
     }
 
+    // ── PreferPriorAttemptStaging: retry world-state conservation's precedence (P0-1) ──
+
+    [Fact]
+    public void A_resolved_prior_attempt_ref_wins_over_a_plan_dependency_ref()
+    {
+        var priorAttempt = new DependencyStagingResult { Ref = "codespace/agent/prior-attempt", GoalFoldText = "prior attempt fold" };
+        var dependency = new DependencyStagingResult { Ref = "codespace/agent/producer", GoalFoldText = "producer fold" };
+
+        RealSupervisorActionExecutor.PreferPriorAttemptStaging(priorAttempt, dependency).ShouldBe(priorAttempt, "the retried subtask's OWN committed work is more specific than a plan dependency's handoff");
+    }
+
+    [Fact]
+    public void With_no_prior_attempt_ref_the_dependency_staging_stands_unchanged()
+    {
+        var dependency = new DependencyStagingResult { Ref = "codespace/agent/producer", GoalFoldText = "producer fold" };
+
+        RealSupervisorActionExecutor.PreferPriorAttemptStaging(DependencyStagingResult.NoOverride, dependency).ShouldBe(dependency, "no prior-attempt continuity → byte-identical to pre-P0-1 dependency staging");
+    }
+
+    [Fact]
+    public void With_neither_resolved_the_result_is_still_NoOverride()
+    {
+        RealSupervisorActionExecutor.PreferPriorAttemptStaging(DependencyStagingResult.NoOverride, DependencyStagingResult.NoOverride).ShouldBe(DependencyStagingResult.NoOverride, "a genuine cold-start retry with no declared dependency clones the default branch");
+    }
+
+    // ── ApplyResumeRecord: the resume hint's TRUTH VALUE must match the actual git state (P0-1) ──
+
+    [Fact]
+    public void A_workspace_pinned_to_prior_work_carries_no_honest_redo_hint()
+    {
+        var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli" };
+        var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
+
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceHasPriorWork: true);
+
+        resumed.ResumeFromSessionId.ShouldBe("sess-1");
+        resumed.RestoredTranscript.ShouldBe("transcript");
+        resumed.Goal.ShouldBe("do the thing", "the workspace genuinely contains the prior branch — no honesty caveat needed");
+    }
+
+    [Fact]
+    public void A_workspace_with_no_preserved_git_state_gets_the_honest_redo_hint()
+    {
+        var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli" };
+        var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
+
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceHasPriorWork: false);
+
+        resumed.ResumeFromSessionId.ShouldBe("sess-1", "the conversation is still restored");
+        resumed.Goal.ShouldBe($"do the thing\n\n{RealSupervisorActionExecutor.HonestNoContinuityHint}", "the goal now HONESTLY says the git changes are NOT present, so the agent never trusts a restored conversation implying work it can't see");
+    }
+
     // ── BuildBlockedSpawnOutcome: the wire shape resolve's conflict reader consumes ─────
 
     [Fact]

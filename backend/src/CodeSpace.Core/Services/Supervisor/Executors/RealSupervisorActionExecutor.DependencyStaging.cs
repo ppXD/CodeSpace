@@ -53,6 +53,36 @@ public sealed partial class RealSupervisorActionExecutor
         return await IntegrateProducersAsync(producers, repoId, context, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Retry world-state conservation (P0-1): resolve a RETRIED subtask's OWN prior attempt continuity ref — the
+    /// branch that attempt actually pushed, per its <see cref="Persistence.Entities.PublishManifest"/> row — so the
+    /// retry's sandbox is checked out AT that committed work, never a fresh clone of the repository's default branch
+    /// (the root-cause forensic finding of run 96695645). <paramref name="priorAgentRunId"/> MUST be the SAME attempt
+    /// the caller is about to resume the conversation from (when one exists) — never independently re-resolved —
+    /// so a resume hint's "your git changes were/weren't preserved" claim always describes the attempt it actually
+    /// restores, not a different, unrelated one. No prior attempt id, no manifest row for this repository, or a
+    /// manifest with no pushed branch (patch-only, or acceptance never got that far) →
+    /// <see cref="DependencyStagingResult.NoOverride"/> — the default-branch clone stands, and the caller must make
+    /// the resume hint say so honestly.
+    /// </summary>
+    private async Task<DependencyStagingResult> ResolvePriorAttemptStagingAsync(Guid? priorAgentRunId, Guid? repositoryId, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (repositoryId is not { } repoId || priorAgentRunId is not { } runId) return DependencyStagingResult.NoOverride;
+
+        var rows = await _manifests.ListForAgentRunAsync(runId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var manifest = rows.FirstOrDefault(r => r.RepositoryId == repoId) ?? (rows.Count == 1 ? rows[0] : null);
+
+        if (manifest is null || string.IsNullOrEmpty(manifest.Branch)) return DependencyStagingResult.NoOverride;
+
+        return new DependencyStagingResult { Ref = manifest.Branch, GoalFoldText = FoldPriorAttempt(manifest) };
+    }
+
+    /// <summary>The server-authored continuity block for a retry whose prior attempt already pushed a branch — deterministic, from durable data only, mirroring <see cref="FoldSingleProducer"/>'s style.</summary>
+    private static string FoldPriorAttempt(Persistence.Entities.PublishManifest priorAttempt) =>
+        $"Your PRIOR attempt already committed work on branch `{priorAttempt.Branch}`" +
+        (string.IsNullOrWhiteSpace(priorAttempt.Summary) ? "" : $": {priorAttempt.Summary}") +
+        $" ({priorAttempt.ChangedFileCount} file(s) changed). This workspace is checked out AT that branch — do not redo work already present here.";
+
     /// <summary>Each producer's manifest row for THIS repository (by RepositoryId; the sole row when a producer only ever touched one repo) — the durable branch/patch/summary handoff never re-derived from a decision's outcome JSON snapshot.</summary>
     private async Task<IReadOnlyList<Persistence.Entities.PublishManifest>> ResolveProducerManifestsAsync(IReadOnlyList<Guid> producerAgentRunIds, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
