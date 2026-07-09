@@ -102,6 +102,18 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     {
         var plan = Deserialize<SupervisorPlanPayload>(decision.PayloadJson) ?? new SupervisorPlanPayload();
 
+        // P0-2 (action schema validation): the model chose kind="plan" but omitted the plan sub-object entirely
+        // (schema-legal; only "kind" is root-required) or supplied zero/null subtasks (bad JSON also lands here via
+        // the ?? fallback above; an EXPLICIT "subtasks":null bypasses SupervisorPlanPayload's own non-null default,
+        // since deserialization assigns the literal null over it) — unlike spawn, nothing ever clamps a plan's
+        // subtasks, so an empty one reaching here is unambiguously malformed. Rejected rather than silently
+        // persisting an empty plan, mirroring Resolve.cs's named-reason precedent; the existing no-progress watchdog
+        // already counts this turn (plan is never a StagesAgents kind) — this only makes the reason legible to the
+        // decider. Never persisted — see SupervisorTurnService.GatePlanConfirmationAsync's own comment for why a
+        // rejected plan correctly leaves no WorkPlan row.
+        if ((plan.Subtasks?.Count ?? 0) == 0)
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { plan = "rejected", reason = "the plan decision named no subtasks" }, AgentJson.Options));
+
         await PersistWorkPlanAsync(plan, context, cancellationToken).ConfigureAwait(false);
 
         // L4 arc C: a plan that authored semantic phases records them alongside the subtasks (the scorecard / tasks-phases

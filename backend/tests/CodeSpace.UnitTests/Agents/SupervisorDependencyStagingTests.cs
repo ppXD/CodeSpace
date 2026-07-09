@@ -147,6 +147,26 @@ public class SupervisorDependencyStagingTests
         entries.Select(e => e.GetProperty("reason").GetString()).ShouldBe(new[] { "reason one", "reason two" }, "every withheld subtask is named with its OWN reason, never collapsed into one");
     }
 
+    // ── BuildRejectedRetryOutcome: P0-2 action schema validation ────────────────────────
+
+    [Fact]
+    public void The_rejected_retry_outcome_names_the_specific_defect()
+    {
+        var json = JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedRetryOutcome(), AgentJson.Options);
+        using var doc = JsonDocument.Parse(json);
+
+        doc.RootElement.GetProperty("retry").GetString().ShouldBe("rejected");
+        doc.RootElement.GetProperty("reason").GetString().ShouldBe("the retry decision named no subtaskId — a retry must name the plan-local subtask id to re-run");
+    }
+
+    [Fact]
+    public void A_rejected_retry_outcome_carries_no_agent_results_so_the_no_progress_watchdog_still_counts_it()
+    {
+        var json = JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedRetryOutcome(), AgentJson.Options);
+
+        SupervisorOutcome.HasSettledEvidence(SupervisorOutcome.ReadAgentResults(json)).ShouldBeFalse("the rejection reads as no settled evidence — the EXISTING no-progress streak already trips on this without any new counter");
+    }
+
     // ── FindMostRecentConflictDecision: the widened Merge-OR-Spawn conflict source ─────
 
     [Fact]
