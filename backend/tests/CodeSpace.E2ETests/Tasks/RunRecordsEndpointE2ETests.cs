@@ -66,6 +66,52 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound, "a run that isn't the team's is 404 — team-scoped, no existence leak");
     }
 
+    [Fact]
+    public async Task Get_records_stream_tails_the_ledger_as_server_sent_events_and_ends_at_the_terminal_record()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamId);   // ends with run.failed → the terminal record closes the stream itself
+
+        using var client = _factory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(30);   // safety net — a correct tail closes the stream at the terminal record
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/stream?after=0");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        request.Headers.Add("X-Team-Id", teamId.ToString());
+
+        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+        response.Content.Headers.ContentType!.MediaType.ShouldBe("text/event-stream", "the tail is a Server-Sent Events stream");
+
+        var body = await response.Content.ReadAsStringAsync();   // completes when the terminal record closes the stream
+
+        body.ShouldContain("event: " + WorkflowRunRecordTypes.RunStarted, customMessage: "the lifecycle records stream as SSE events");
+        body.ShouldContain("event: " + WorkflowRunRecordTypes.RunFailed, customMessage: "the terminal record is streamed");
+        body.ShouldContain("id: ", customMessage: "each frame carries its Sequence as the SSE id — Last-Event-ID / ?after= resume");
+        body.ShouldContain("\ndata: {", customMessage: "each frame carries a JSON data payload");
+        body.TrimEnd().ShouldEndWith("}", customMessage: "the stream ends right after the terminal record's frame — it does not hang open");
+    }
+
+    [Fact]
+    public async Task Get_records_stream_for_a_foreign_run_yields_an_empty_stream()
+    {
+        var (_, teamA) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamA);
+        var (userB, teamB) = await SeedTeamMembershipAsync();
+
+        using var client = _factory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/stream?after=0");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userB));
+        request.Headers.Add("X-Team-Id", teamB.ToString());
+
+        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        var body = await response.Content.ReadAsStringAsync();
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        body.ShouldBeEmpty("a foreign run streams NO events — the run precheck is the tenancy boundary, no ledger leak");
+    }
+
     private async Task<Guid> SeedRunWithRecordsAsync(Guid teamId)
     {
         using var scope = _factory.Services.CreateScope();
