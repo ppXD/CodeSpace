@@ -83,6 +83,45 @@ public class RunRecordInteractionFlowTests
         completed.GetProperty("output").GetProperty("decision").GetString().ShouldBe("plan", "the completion JSON is captured inline when small");
     }
 
+    [Fact]
+    public async Task A_recorded_STREAMING_call_persists_the_started_completed_pair_with_the_folded_text_and_usage()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Drive the REAL streaming decorator over the REAL scoped logger + offloader — the production streaming write path.
+        using (var scope = _fixture.BeginScope())
+        {
+            var logger = scope.Resolve<IRunRecordLogger>();
+            var offloader = scope.Resolve<IArtifactOffloader>();
+            var decorator = new RecordingStreamingStructuredLLMClientDecorator(new FakeStreamingClient());
+
+            using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "sup", "sup#turn1", "supervisor.decision", logger, offloader)))
+            {
+                await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "claude-x", SystemPrompt = "SYS", UserPrompt = "USR" }, CancellationToken.None)) { }
+            }
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var rows = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && InteractionTypes.Contains(r.RecordType))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        rows.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted },
+            "a streamed call lands the SAME started+completed pair a buffered one does, on the real ledger");
+        rows[0].CorrelationId.ShouldBe(rows[1].CorrelationId, "the streamed triple is paired by one correlation id");
+
+        var completed = JsonDocument.Parse(rows[1].PayloadJson).RootElement;
+        completed.GetProperty("output").GetString().ShouldBe("hello there", "the streamed deltas fold into the recorded completion text");
+        completed.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(7);
+        completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(4);
+        completed.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("end_turn");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static StructuredLLMCompletionRequest BuildRequest() => new()
@@ -117,5 +156,21 @@ public class RunRecordInteractionFlowTests
             Model = "claude-x",
             Usage = new LlmUsage { InputTokens = 10, OutputTokens = 5, FinishReason = "stop" },
         });
+    }
+
+    private sealed class FakeStreamingClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public string Provider => "anthropic";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "hello there", Model = "claude-x" });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { }), Model = "claude-x" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            yield return new LlmStreamEvent.Meta(Model: "claude-x", InputTokens: 7);
+            yield return new LlmStreamEvent.TextDelta("hello ");
+            yield return new LlmStreamEvent.TextDelta("there");
+            yield return new LlmStreamEvent.Meta(OutputTokens: 4, FinishReason: "end_turn");
+            await Task.CompletedTask;
+        }
     }
 }

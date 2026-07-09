@@ -163,29 +163,98 @@ public class RecordingLLMClientDecoratorTests
     }
 
     [Fact]
-    public void Autofac_conditionally_wraps_a_structured_client_as_structured_and_a_plain_client_as_plain()
+    public void Autofac_conditionally_wraps_each_client_so_the_recorder_mirrors_the_inners_faces()
     {
-        // The TWO recording decorators are registered conditionally so the WRAPPED type mirrors the inner: a
-        // structured-capable client stays IStructuredLLMClient (the decider's .OfType<IStructuredLLMClient>() cast lands
-        // on it), a plain-text-only client stays non-structured (the merge synthesis's `is not IStructuredLLMClient`
-        // text-provider pick still finds it). The regression #824 introduced: a single decorator implementing BOTH
-        // unconditionally lied about the plain client → the synthesis fell through to the wrong client.
+        // The THREE recording decorators are registered on mutually-exclusive conditions so the WRAPPED type mirrors the
+        // inner: a structured+streaming client stays castable to BOTH IStructuredLLMClient AND IStreamingLLMClient (the
+        // decider's .OfType<IStructuredLLMClient>() AND a streaming caller's .OfType<IStreamingLLMClient>() both land on
+        // the recorder, not the raw client — so capture is never bypassed); a structured-only client stays structured
+        // but not streaming; a plain-text-only client stays neither (the merge synthesis's `is not IStructuredLLMClient`
+        // text-provider pick still finds it). One decorator implementing faces unconditionally lied about the narrower
+        // clients (regression #824).
         var builder = new ContainerBuilder();
+        builder.RegisterInstance(new StreamingFakeClient()).As<ILLMClient>().As<IStructuredLLMClient>().As<IStreamingLLMClient>().SingleInstance();
         builder.RegisterInstance(new FakeClient(Completion())).As<ILLMClient>().As<IStructuredLLMClient>().SingleInstance();
         builder.RegisterInstance(new PlainClient()).As<ILLMClient>().SingleInstance();
-        builder.RegisterDecorator<RecordingStructuredLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is IStructuredLLMClient);
+        builder.RegisterDecorator<RecordingStreamingStructuredLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is IStructuredLLMClient && c.CurrentInstance is IStreamingLLMClient);
+        builder.RegisterDecorator<RecordingStructuredLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is IStructuredLLMClient && c.CurrentInstance is not IStreamingLLMClient);
         builder.RegisterDecorator<RecordingLLMClientDecorator, ILLMClient>(c => c.CurrentInstance is not IStructuredLLMClient);
 
         using var container = builder.Build();
         var clients = container.Resolve<IEnumerable<ILLMClient>>().ToList();
 
+        var streaming = clients.Single(c => c.Provider == "streaming");
+        streaming.ShouldBeOfType<RecordingStreamingStructuredLLMClientDecorator>("a structured+streaming client is wrapped by the full-face recorder");
+        streaming.ShouldBeAssignableTo<IStreamingLLMClient>("so a streaming caller's .OfType<IStreamingLLMClient>() lands on the recorder — capture is never bypassed");
+        streaming.ShouldBeAssignableTo<IStructuredLLMClient>("and it still carries the structured face");
+
         var structured = clients.Single(c => c.Provider == "anthropic");
-        structured.ShouldBeOfType<RecordingStructuredLLMClientDecorator>("a structured client is wrapped by the structured recorder");
-        structured.ShouldBeAssignableTo<IStructuredLLMClient>("so the decider's .OfType<IStructuredLLMClient>() cast lands on the recorder, not the raw client");
+        structured.ShouldBeOfType<RecordingStructuredLLMClientDecorator>("a structured-only client is wrapped by the structured recorder");
+        structured.ShouldBeAssignableTo<IStructuredLLMClient>();
+        structured.ShouldNotBeAssignableTo<IStreamingLLMClient>("a non-streaming client must not claim the streaming face");
 
         var plain = clients.Single(c => c.Provider == "plain");
         plain.ShouldBeOfType<RecordingLLMClientDecorator>("a plain-text-only client is wrapped by the narrow recorder");
         plain.ShouldNotBeAssignableTo<IStructuredLLMClient>("so a `is not IStructuredLLMClient` text-provider pick still finds it — the regression that broke the merge synthesis");
+    }
+
+    [Fact]
+    public async Task A_streaming_call_tees_the_events_live_and_records_started_then_completed_with_the_folded_usage()
+    {
+        var inner = new StreamingFakeClient();
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner);
+
+        var events = new List<LlmStreamEvent>();
+        using (PushScope(logger))
+        {
+            await foreach (var e in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "SYS", UserPrompt = "USR" }, CancellationToken.None))
+                events.Add(e);
+        }
+
+        // The events flow through verbatim — the decorator is a live tee, not a buffer.
+        events.OfType<LlmStreamEvent.TextDelta>().Select(d => d.Text).ShouldBe(new[] { "hello ", "there" });
+
+        // AND the same interaction triple the buffered path records lands, with the FOLDED text + usage on completed.
+        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted });
+        logger.Calls[0].CorrelationId.ShouldBe(logger.Calls[1].CorrelationId);
+        logger.Calls[0].Payload.GetProperty("prompt").GetProperty("user").GetString().ShouldBe("USR");
+
+        var completed = logger.Calls[1].Payload;
+        completed.GetProperty("output").GetString().ShouldBe("hello there", "the streamed deltas fold into the recorded completion text");
+        completed.GetProperty("usage").GetProperty("inputTokens").GetInt32().ShouldBe(5);
+        completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(3);
+        completed.GetProperty("usage").GetProperty("finishReason").GetString().ShouldBe("stop");
+    }
+
+    [Fact]
+    public async Task A_streaming_call_records_nothing_with_no_scope_and_still_forwards_every_event()
+    {
+        var events = new List<LlmStreamEvent>();
+        await foreach (var e in new RecordingStreamingStructuredLLMClientDecorator(new StreamingFakeClient())
+            .StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None))
+            events.Add(e);
+
+        events.OfType<LlmStreamEvent.TextDelta>().Select(d => d.Text).ShouldBe(new[] { "hello ", "there" }, "no run scope ⇒ a pure delegate, no capture, no fault");
+    }
+
+    [Fact]
+    public async Task A_mid_stream_throw_records_started_then_failed_and_rethrows_verbatim()
+    {
+        var inner = new StreamingFakeClient { ThrowAfter = 1, ThrowWith = new InvalidOperationException("stream boom") };
+        var logger = new CapturingLogger();
+        var decorator = new RecordingStreamingStructuredLLMClientDecorator(inner);
+
+        using (PushScope(logger))
+        {
+            await Should.ThrowAsync<InvalidOperationException>(async () =>
+            {
+                await foreach (var _ in decorator.StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u" }, CancellationToken.None)) { }
+            });
+        }
+
+        logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionFailed });
+        logger.Calls[1].Payload.GetProperty("error").GetString().ShouldBe("stream boom");
     }
 
     // ── Fakes ──────────────────────────────────────────────────────────────
@@ -212,6 +281,37 @@ public class RecordingLLMClientDecoratorTests
         public string Provider => "anthropic";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw _ex;
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => throw _ex;
+    }
+
+    private sealed class StreamingFakeClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public int? ThrowAfter { get; init; }        // yield this many events, then throw ThrowWith (simulates a mid-stream gateway drop)
+        public Exception? ThrowWith { get; init; }
+
+        public string Provider => "streaming";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "hello there", Model = "m" });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonDocument.Parse("{}").RootElement, Model = "m" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            var events = new LlmStreamEvent[]
+            {
+                new LlmStreamEvent.Meta(Model: "m", InputTokens: 5),
+                new LlmStreamEvent.TextDelta("hello "),
+                new LlmStreamEvent.TextDelta("there"),
+                new LlmStreamEvent.Meta(OutputTokens: 3, FinishReason: "stop"),
+            };
+
+            var yielded = 0;
+            foreach (var e in events)
+            {
+                if (ThrowAfter is { } n && yielded >= n) throw ThrowWith!;
+                yield return e;
+                yielded++;
+                await Task.Yield();
+            }
+        }
     }
 
     private sealed class NoopOffloader : IArtifactOffloader

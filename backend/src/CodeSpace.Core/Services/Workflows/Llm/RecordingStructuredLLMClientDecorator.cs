@@ -13,9 +13,10 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// <para>Splitting the two (rather than one decorator implementing both unconditionally) is what keeps the type honest:
 /// a plain-text-only client stays non-structured after wrapping, so a consumer feature-detecting with
 /// <c>is not IStructuredLLMClient</c> (the merge synthesis picking a dedicated text provider) is never fooled into the
-/// fallback, and the decider never matches a non-structured client as if it were structured.</para>
+/// fallback, and the decider never matches a non-structured client as if it were structured. Not sealed so
+/// <see cref="RecordingStreamingStructuredLLMClientDecorator"/> can extend it for a structured+streaming client.</para>
 /// </summary>
-public sealed class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator, IStructuredLLMClient
+public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator, IStructuredLLMClient
 {
     private readonly IStructuredLLMClient _structuredInner;
 

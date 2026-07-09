@@ -248,13 +248,17 @@ public class CodeSpaceModule : Autofac.Module
 
         // Side-channel: record every in-process model call (prompt/completion/usage) onto the run ledger as
         // interaction.* — captures the supervisor brain's reasoning that was discarded, generically at the client seam.
-        // Over ILLMClient (the interface the registry holds + the decider casts to IStructuredLLMClient). TWO decorators,
-        // conditionally applied so the wrapped type MIRRORS the inner's: a structured-capable client gets the structured
-        // decorator (stays IStructuredLLMClient — the decider's OfType<IStructuredLLMClient>() cast lands here), a
-        // plain-text-only client gets the narrow one (stays non-structured — the merge synthesis's `is not
-        // IStructuredLLMClient` text-provider pick still finds it). One decorator implementing both unconditionally lied
-        // about a plain client, breaking that pick.
-        builder.RegisterDecorator<Services.Workflows.Llm.RecordingStructuredLLMClientDecorator, Services.Workflows.Llm.ILLMClient>(context => context.CurrentInstance is Services.Workflows.Llm.IStructuredLLMClient);
+        // Over ILLMClient (the interface the registry holds + the faces callers cast to). THREE decorators on
+        // MUTUALLY-EXCLUSIVE conditions so the wrapped type MIRRORS the inner's faces: a structured+streaming client gets
+        // the full-face decorator (stays IStructuredLLMClient AND IStreamingLLMClient — so BOTH the decider's
+        // OfType<IStructuredLLMClient>() AND a streaming caller's OfType<IStreamingLLMClient>() land on the recorder, never
+        // bypassing capture); a structured-only client gets the structured decorator; a plain-text-only client gets the
+        // narrow one (stays non-structured — the merge synthesis's `is not IStructuredLLMClient` text-provider pick still
+        // finds it). One decorator implementing faces unconditionally lied about the narrower clients. (A hypothetical
+        // streaming-only, non-structured client would fall to the narrow branch and lose the streaming face — no such
+        // client exists; adding one is a deliberate act that would add a fourth branch + its test.)
+        builder.RegisterDecorator<Services.Workflows.Llm.RecordingStreamingStructuredLLMClientDecorator, Services.Workflows.Llm.ILLMClient>(context => context.CurrentInstance is Services.Workflows.Llm.IStructuredLLMClient && context.CurrentInstance is Services.Workflows.Llm.IStreamingLLMClient);
+        builder.RegisterDecorator<Services.Workflows.Llm.RecordingStructuredLLMClientDecorator, Services.Workflows.Llm.ILLMClient>(context => context.CurrentInstance is Services.Workflows.Llm.IStructuredLLMClient && context.CurrentInstance is not Services.Workflows.Llm.IStreamingLLMClient);
         builder.RegisterDecorator<Services.Workflows.Llm.RecordingLLMClientDecorator, Services.Workflows.Llm.ILLMClient>(context => context.CurrentInstance is not Services.Workflows.Llm.IStructuredLLMClient);
     }
 
