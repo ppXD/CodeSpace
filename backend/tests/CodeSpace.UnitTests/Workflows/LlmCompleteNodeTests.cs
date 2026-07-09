@@ -26,6 +26,7 @@ public class LlmCompleteNodeTests
     {
         public string Provider => "Anthropic";
         public StructuredLLMCompletionRequest? StructuredRequest;
+        public LLMCompletionRequest? TextRequest;
         public LLMCompletion TextResult = new() { Text = "plain answer", Model = "claude-opus-4-8", Usage = new() { InputTokens = 10, OutputTokens = 5, FinishReason = "end_turn" } };
         public StructuredLLMCompletion StructuredResult = new()
         {
@@ -33,7 +34,11 @@ public class LlmCompleteNodeTests
             Model = "claude-opus-4-8", Usage = new() { InputTokens = 11, OutputTokens = 6, FinishReason = "tool_use" }
         };
 
-        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(TextResult);
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct)
+        {
+            TextRequest = request;
+            return Task.FromResult(TextResult);
+        }
 
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
         {
@@ -87,6 +92,34 @@ public class LlmCompleteNodeTests
 
     private static LlmCompleteNode Node(ILLMClient client, IModelPoolSelector selector) =>
         new(new StubRegistry(client), new StubScopeFactory(selector));
+
+    [Fact]
+    public void The_maxTokens_config_has_no_artificial_ceiling_so_a_large_output_can_stream()
+    {
+        var maxTokens = Node(new StructuredStubClient(), StubPoolSelector.WithModel())
+            .Manifest.ConfigSchema.GetProperty("properties").GetProperty("maxTokens");
+
+        maxTokens.TryGetProperty("maximum", out _).ShouldBeFalse(
+            "the node must not hardcode an output ceiling — the transport clamps to the model's REAL ceiling and streams a large output; a stale schema constant would cap a model below its true limit");
+        maxTokens.GetProperty("default").GetInt32().ShouldBe(2048,
+            "the default stays small so an ordinary node output remains buffered (non-breaking — only an explicit large maxTokens streams)");
+        maxTokens.GetProperty("minimum").GetInt32().ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_large_maxTokens_config_passes_through_unclamped_so_the_transport_can_stream_it()
+    {
+        var stub = new StructuredStubClient();
+        var node = Node(stub, StubPoolSelector.WithModel());
+        var config = new Dictionary<string, JsonElement> { ["maxTokens"] = JsonSerializer.SerializeToElement(60000) };
+
+        var result = await node.RunAsync(Context(config, userPrompt: "write a long document"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        stub.TextRequest.ShouldNotBeNull();
+        stub.TextRequest!.MaxOutputTokens.ShouldBe(60000,
+            "the node passes a large cap straight through — the transport (not the node) clamps per-model and decides to stream (60000 > the 21000 streaming threshold)");
+    }
 
     [Fact]
     public async Task Text_path_outputs_completion_text_and_null_json()
