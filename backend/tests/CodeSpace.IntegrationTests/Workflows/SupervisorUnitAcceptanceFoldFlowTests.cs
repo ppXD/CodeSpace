@@ -73,6 +73,68 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
     }
 
+    // ── P4-1: the per-unit fold's contradiction classification (both directions + agreement) ──────────
+
+    [Fact]
+    public async Task A_unit_that_self_reports_succeeded_but_fails_its_check_folds_an_over_claim()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().Contradiction
+            .ShouldBe(AgentContradiction.OverClaim, "the agent believed it was Succeeded; the objective check disagreed");
+    }
+
+    [Fact]
+    public async Task A_unit_that_self_reports_failed_but_passes_its_check_folds_an_under_claim()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var failedUnit = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Failed", Error = "the agent gave up", ProducedBranch = "codespace/agent/s1" };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(failedUnit));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        grader.CallCount.ShouldBe(1, "the per-unit fold grades a unit regardless of its OWN self-reported status — unlike the single-agent lane, which only grades a would-be Succeeded result");
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var result = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single();
+        result.AcceptancePassed.ShouldBe(true, "the objective grade is what it is, independent of the self-report");
+        result.Contradiction.ShouldBe(AgentContradiction.UnderClaim, "the agent gave up on work that was actually fine");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_unit_whose_self_report_agrees_with_its_grade_folds_no_contradiction(bool gradePasses)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        // "Succeeded" + passing grade agree; "Failed" + failing grade agree — both are the honest, non-contradictory case.
+        var unit = gradePasses
+            ? Unit(Guid.NewGuid(), "codespace/agent/s1")
+            : new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Failed", Error = "boom", ProducedBranch = "codespace/agent/s1" };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(unit));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = gradePasses, Detail = gradePasses ? "tests-passed" : "tests-failed-exit-1" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().Contradiction.ShouldBeNull();
+    }
+
     // ── S2: a branch-less unit's OWN recorded manifest (never the outcome-JSON snapshot — I2) ──────────
 
     [Fact]

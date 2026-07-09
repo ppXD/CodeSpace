@@ -57,4 +57,13 @@ public sealed record JournalAgentCard
 
     /// <summary>The LATEST independent reviewer's verdict on this agent's produced work (the S8 agent-based output review) — the "✓ reviewed" / "⚠ flagged" chip + the reviewer-run deep-link the card shows. Null when the agent's output was never agent-reviewed (or the review hasn't landed yet).</summary>
     public JournalReviewVerdict? Review { get; init; }
+
+    /// <summary>
+    /// Whether this agent's self-report contradicted its objective acceptance grade (P4-1) — a
+    /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value ("over_claim" / "under_claim"), carried
+    /// straight off the supervisor's folded <c>SupervisorAgentResult.Contradiction</c> so the journal card can't
+    /// disagree with the decider prompt's own framing of the same row. Null when there's nothing to compare (no
+    /// per-unit contract) or the self-report and the grade agree.
+    /// </summary>
+    public string? Contradiction { get; init; }
 }

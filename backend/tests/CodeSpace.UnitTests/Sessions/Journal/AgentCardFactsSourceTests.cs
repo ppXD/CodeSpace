@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
@@ -65,6 +66,24 @@ public class AgentCardFactsSourceTests
         card.Files.Select(f => (f.Path, f.Additions, f.Deletions)).ShouldBe(new[] { ("auth/session.ts", (int?)42, (int?)3) }, "the per-file diffstat rides onto the card");
         card.Resumed.ShouldBeTrue("the resume provenance rides onto the card");
         card.Review.ShouldBeNull("an un-reviewed agent carries no verdict chip");
+    }
+
+    [Fact]
+    public void The_compacts_contradiction_rides_straight_onto_the_card()
+    {
+        // P4-1: the journal card must read the SAME classification the decider prompt does — never re-derive it —
+        // so the two surfaces can't disagree about whether a unit's self-report contradicted its grade.
+        var compact = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Contradiction = AgentContradiction.OverClaim };
+
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: compact).Contradiction
+            .ShouldBe(AgentContradiction.OverClaim);
+    }
+
+    [Fact]
+    public void A_null_compact_or_an_ungraded_unit_carries_no_contradiction()
+    {
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: null).Contradiction.ShouldBeNull();
+        AgentCardFactsSource.ToCard(Guid.NewGuid(), Metrics(), allocation: null, compact: Compact("a.cs")).Contradiction.ShouldBeNull("Compact() carries no per-unit grade — nothing to contradict");
     }
 
     [Fact]

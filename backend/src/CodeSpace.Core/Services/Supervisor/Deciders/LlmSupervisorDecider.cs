@@ -656,7 +656,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (passed)
         {
-            builder.AppendLine("      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
+            // P4-1: the agent itself reported failure, yet the objective check passed — previously silent (this line
+            // only ever read AcceptancePassed, never Status), so a passed-but-self-reported-failed unit rendered
+            // identically to a clean pass with no signal that the agent disagreed with its own verified result.
+            // Reads Status directly (not the newer Contradiction field) so this applies to every row, old or new.
+            builder.AppendLine(result.Status == "Failed"
+                ? "      acceptance PASSED — this unit's definition-of-done check ran green, even though the agent itself reported failure. The work is objectively fine; do NOT retry this subtask, merge it."
+                : "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
             return;
         }
 

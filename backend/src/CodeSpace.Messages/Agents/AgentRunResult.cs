@@ -95,6 +95,17 @@ public sealed record AgentRunResult
     /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
     public string? AcceptanceDetail { get; init; }
 
+    /// <summary>
+    /// Whether this run's self-report contradicted its objective grade (P4-1) — a
+    /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value. In THIS lane the only reachable value is
+    /// <c>over_claim</c>: <see cref="Core.Services.Agents.AgentAcceptanceContract.FailClosed"/> is the sole write
+    /// site, and every one of its call sites only ever fires on a would-be <see cref="AgentRunStatus.Succeeded"/>
+    /// result whose check FAILED (the grading gate returns early on any other self-reported status, so an
+    /// under-claim — a self-reported Failed run whose check actually passed — can never occur here). Null when the
+    /// run carried no oracle, the grade agreed, or grading never ran.
+    /// </summary>
+    public string? Contradiction { get; init; }
+
     /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, failed open, or never ran.</summary>
     public string? ReviewFeedback { get; init; }
 

@@ -71,4 +71,17 @@ public sealed record SupervisorAgentResult
     /// <summary>The per-unit acceptance verdict detail (the grader's reason — e.g. "tests-passed", "tests-failed-exit-1", "no-branch-or-repo", "grade-error: …"). Null-omitted; only present alongside a non-null <see cref="AcceptancePassed"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AcceptanceDetail { get; init; }
+
+    /// <summary>
+    /// Whether this unit's self-report (<see cref="Status"/>) CONTRADICTS its objective grade (<see cref="AcceptancePassed"/>)
+    /// — a <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value (P4-1): <c>over_claim</c> when
+    /// <see cref="Status"/> is "Succeeded" but the check FAILED (the agent believes it's done; the check disagrees);
+    /// <c>under_claim</c> when <see cref="Status"/> is "Failed" but the check PASSED (the agent gave up on work that
+    /// was actually fine); null when there's nothing to compare (no grade) or the two agree. Folded ONCE, at the
+    /// same instant <see cref="AcceptancePassed"/> is folded — never re-derived ad-hoc by a prompt renderer, so no
+    /// two consumers can frame the same row differently. Null-omitted, mirroring <see cref="AcceptancePassed"/>'s
+    /// back-compat contract.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Contradiction { get; init; }
 }
