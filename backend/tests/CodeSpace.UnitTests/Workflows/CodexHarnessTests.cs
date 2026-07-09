@@ -55,6 +55,71 @@ public class CodexHarnessTests
         agents.Content.ShouldContain("UNATTENDED agent");
     }
 
+    // ── P3.3: the in-loop acceptance Stop hook ──
+
+    [Fact]
+    public void An_acceptance_bearing_task_gets_the_stop_hook_script_and_hooks_json()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        var paths = spec.ConfigHomeFiles.Select(f => f.RelativePath).ToList();
+        paths.ShouldContain(InLoopAcceptanceHook.ScriptRelativePath);
+        paths.ShouldContain("hooks.json");
+
+        var script = spec.ConfigHomeFiles.Single(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath).Content;
+        script.ShouldContain("set -- 'sh' 'check.sh'", Case.Sensitive, "the task's own acceptance command rides the generated hook, not a placeholder");
+    }
+
+    [Fact]
+    public void The_stop_hook_json_wires_stop_to_the_generated_script_via_the_isolated_config_home()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var hooksJson = Harness.BuildInvocation(task).ConfigHomeFiles.Single(f => f.RelativePath == "hooks.json").Content;
+
+        using var doc = System.Text.Json.JsonDocument.Parse(hooksJson);
+        var command = doc.RootElement.GetProperty("hooks").GetProperty("Stop")[0].GetProperty("hooks")[0].GetProperty("command").GetString();
+
+        command.ShouldBe($"\"$CODEX_HOME\"/{InLoopAcceptanceHook.ScriptRelativePath}",
+            "references the script via the env var (never a baked-in path) — BuildInvocation runs before the runner assigns the real config-home directory");
+    }
+
+    [Fact]
+    public void An_acceptance_bearing_task_gets_the_hook_trust_bypass_flag()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        Harness.BuildInvocation(task).Args.ShouldContain("--dangerously-bypass-hook-trust",
+            "a freshly generated per-run hook has no persisted trust decision, and a non-interactive exec run has no human to answer the trust prompt");
+    }
+
+    [Fact]
+    public void A_task_with_no_acceptance_never_gets_the_hook_trust_bypass_flag()
+    {
+        // The bypass is conditional on CodeSpace itself injecting a hook — never unconditional, so an
+        // operator-authored hooks.json in the target repo still goes through Codex's normal trust review.
+        Harness.BuildInvocation(Task()).Args.ShouldNotContain("--dangerously-bypass-hook-trust");
+    }
+
+    [Fact]
+    public void A_task_with_no_acceptance_gets_no_stop_hook_files()
+    {
+        var spec = Harness.BuildInvocation(Task());
+
+        spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath);
+        spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == "hooks.json");
+    }
+
+    [Fact]
+    public void A_task_with_an_empty_or_blank_acceptance_command_gets_no_stop_hook()
+    {
+        var blank = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "", "  " } } };
+
+        Harness.BuildInvocation(blank).ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath);
+    }
+
     [Fact]
     public void Persona_and_operating_contract_ride_agents_md_not_the_goal()
     {

@@ -574,3 +574,96 @@ jobs:
             echo "::error::Expected the RealModel publish-manifest gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
             exit 1
           fi
+
+  real-model-stop-hook:
+    name: real model (in-loop acceptance stop-hook)
+    runs-on: ubuntu-latest
+    # THE live behavioral proof of P3.3 (loop-engineer in-loop verify): a REAL claude AND a REAL codex agent are each
+    # given a goal that never mentions creating a file, but the task's Acceptance command only passes once that file
+    # exists — the model's natural first stop attempt is GUARANTEED to fail the check, guaranteeing the injected Stop
+    # hook (settings.json for Claude, hooks.json for Codex) actually fires against the real binary. REPORT-ONLY on
+    # both wires (gating: false): whether a live model ACTS on the hook's feedback is capability-dependent, not a
+    # deterministic wiring guarantee, so this never blocks main — only a run that fails to COMPLETE at all (and isn't
+    # gateway/wire infra) is treated as a genuine miss worth a manual log review. One attempt each (~30-90s), so the
+    # 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets / a CLI are absent (skip ≠ pass; a
+    # fork stays green at zero cost).
+    timeout-minutes: 30
+
+    # Same UNCONFINED rationale as the injection lane: this gate's signal is whether the Stop hook fires + the model
+    # reacts, not sandbox confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner
+    # is flaky.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-stop-hook-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLIs)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLIs (Claude Code + Codex)
+        # BOTH harness binaries: claude (ClaudeCodeHarness) drives the settings.json Stop hook, codex (CodexHarness)
+        # drives the hooks.json Stop hook. FATAL install (a missing binary must RED the lane, never let it self-skip
+        # green — "skip ≠ pass"). Pins match the injection lane's own pinned versions.
+        run: |
+          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
+          claude --version
+          codex --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (a real claude + a real codex agent react to the in-loop acceptance Stop hook's feedback)
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~StopHookE2ETests"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-stop-hook.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the stop-hook gates actually ran (no silent skip)
+        run: |
+          trx=backend/TestResults/real-model-stop-hook.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 2 ]; then
+            echo "::error::Expected both the claude and codex Stop-hook proofs to run, but ${executed:-0} executed — the filter matched fewer than 2 (FQN/trait regression?)."
+            exit 1
+          fi

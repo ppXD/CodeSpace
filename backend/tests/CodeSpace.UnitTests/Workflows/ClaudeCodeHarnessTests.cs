@@ -64,6 +64,69 @@ public class ClaudeCodeHarnessTests
         spec.Args.ShouldNotContain("--setting-sources", "a bare / persona-only run is argv byte-identical — the setting-source pin rides ONLY with a projected skill");
     }
 
+    // ── P3.3: the in-loop acceptance Stop hook ──
+
+    [Fact]
+    public void An_acceptance_bearing_task_gets_the_stop_hook_script_and_settings_json()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        var paths = spec.ConfigHomeFiles.Select(f => f.RelativePath).ToList();
+        paths.ShouldContain(InLoopAcceptanceHook.ScriptRelativePath);
+        paths.ShouldContain("settings.json");
+
+        var script = spec.ConfigHomeFiles.Single(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath).Content;
+        script.ShouldContain("set -- 'sh' 'check.sh'", Case.Sensitive, "the task's own acceptance command rides the generated hook, not a placeholder");
+    }
+
+    [Fact]
+    public void The_stop_hook_settings_json_wires_stop_to_the_generated_script_via_the_isolated_config_dir()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var settingsJson = Harness.BuildInvocation(task).ConfigHomeFiles.Single(f => f.RelativePath == "settings.json").Content;
+
+        using var doc = System.Text.Json.JsonDocument.Parse(settingsJson);
+        var command = doc.RootElement.GetProperty("hooks").GetProperty("Stop")[0].GetProperty("hooks")[0].GetProperty("command").GetString();
+
+        command.ShouldBe($"\"$CLAUDE_CONFIG_DIR\"/{InLoopAcceptanceHook.ScriptRelativePath}",
+            "references the script via the env var (never a baked-in path) — BuildInvocation runs before the runner assigns the real config-home directory");
+    }
+
+    [Fact]
+    public void An_acceptance_bearing_task_ALSO_pins_setting_sources_to_user_even_with_no_skills()
+    {
+        // The same untrusted-input-vector concern that gates skills gates the Stop hook: without this pin, Claude
+        // would ALSO load the target repo's own project/local .claude settings — which could carry an untrusted
+        // hook of the repo's own.
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var args = Harness.BuildInvocation(task).Args.ToList();
+
+        var at = args.IndexOf("--setting-sources");
+        at.ShouldBeGreaterThanOrEqualTo(0, "an acceptance-bearing run pins settings to the isolated user config home too");
+        args[at + 1].ShouldBe("user");
+    }
+
+    [Fact]
+    public void A_task_with_neither_skills_nor_acceptance_gets_no_hook_files_and_no_setting_sources_pin()
+    {
+        var spec = Harness.BuildInvocation(Task() with { Acceptance = null });
+
+        spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath);
+        spec.Args.ShouldNotContain("--setting-sources");
+    }
+
+    [Fact]
+    public void A_task_with_an_empty_or_blank_acceptance_command_gets_no_stop_hook()
+    {
+        var blank = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "", "  " } } };
+
+        Harness.BuildInvocation(blank).ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
