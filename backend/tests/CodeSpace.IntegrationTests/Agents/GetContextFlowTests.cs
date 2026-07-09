@@ -179,6 +179,18 @@ public class GetContextFlowTests
     }
 
     [Fact]
+    public async Task Session_summary_notes_when_a_prior_distillation_left_a_gap()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, summary: "EARLIER_WORK_DISTILLED", staleSinceTurn: 5);
+
+        var result = await RetrieveSummaryAsync(teamId, sessionId);
+
+        result.Text.ShouldContain("EARLIER_WORK_DISTILLED");
+        result.Text.ShouldContain("have not yet been folded", customMessage: "a pulled summary must disclose a fail-open gap too, not just the pushed digest");
+    }
+
+    [Fact]
     public async Task Session_summary_is_team_scoped()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -322,12 +334,12 @@ public class GetContextFlowTests
     /// <summary>The tool declares an output schema, so the handler also returns the typed object under structuredContent.</summary>
     private static JsonElement StructuredOutput(JsonElement toolResult) => toolResult.GetProperty("structuredContent");
 
-    private async Task<Guid> SeedSessionAsync(Guid teamId, string? summary = null)
+    private async Task<Guid> SeedSessionAsync(Guid teamId, string? summary = null, int? staleSinceTurn = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var id = Guid.CreateVersion7();
-        db.WorkSession.Add(new WorkSession { Id = id, TeamId = teamId, Title = "thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open, Summary = summary });
+        db.WorkSession.Add(new WorkSession { Id = id, TeamId = teamId, Title = "thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open, Summary = summary, SummaryStaleSinceTurn = staleSinceTurn });
         await db.SaveChangesAsync();
         return id;
     }

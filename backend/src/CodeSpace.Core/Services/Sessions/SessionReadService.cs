@@ -98,7 +98,7 @@ public sealed class SessionReadService : ISessionReadService, IScopedDependency
     {
         var session = await _db.WorkSession.AsNoTracking()
             .Where(s => s.Id == sessionId && s.TeamId == teamId)
-            .Select(s => new { s.Id, s.Title, s.Kind, s.Status, s.CreatedDate, s.Summary, s.SummaryThroughTurnIndex })
+            .Select(s => new { s.Id, s.Title, s.Kind, s.Status, s.CreatedDate, s.Summary, s.SummaryThroughTurnIndex, s.SummaryStaleSinceTurn })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (session == null) return null;   // foreign / missing — indistinguishable not-found
@@ -114,6 +114,7 @@ public sealed class SessionReadService : ISessionReadService, IScopedDependency
             CreatedDate = session.CreatedDate,
             Summary = session.Summary,
             SummaryThroughTurnIndex = session.SummaryThroughTurnIndex,
+            SummaryStaleSinceTurn = session.SummaryStaleSinceTurn,
             AnchorTurnIndex = null,
             Turns = turns,
         };

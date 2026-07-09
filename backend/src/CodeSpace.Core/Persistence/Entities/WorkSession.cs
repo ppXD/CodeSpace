@@ -78,6 +78,15 @@ public class WorkSession : IEntity<Guid>, IAuditable
     public int? SummaryThroughTurnIndex { get; set; }
 
     /// <summary>
+    /// Set to the oldest turn a distillation attempt FAILED to fold (fail-open: no pool model / a decrypt or LLM
+    /// error) — <see cref="Summary"/> is left unchanged, so the digest silently carries a gap between this turn and
+    /// <see cref="SummaryThroughTurnIndex"/> unless the caller surfaces it. Never overwritten by a LATER failure
+    /// (the oldest gap is the one that matters); cleared back to NULL the next time distillation succeeds and
+    /// catches the summary back up. NULL = the summary is fully caught up (the common case).
+    /// </summary>
+    public int? SummaryStaleSinceTurn { get; set; }
+
+    /// <summary>
     /// The highest top-level turn ordinal assigned in this thread — the atomic, race-free turn counter that replaces
     /// the old MAX(SessionTurnIndex)+1 read. Starts at 1 (the opening run's turn, <c>WorkSessionService.FirstTurnIndex</c>).
     /// A CONTINUE atomically increments it (<c>UPDATE … SET last_turn_index = last_turn_index + 1 … RETURNING</c>), so

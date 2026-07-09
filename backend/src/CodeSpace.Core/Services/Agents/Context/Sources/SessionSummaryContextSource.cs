@@ -31,13 +31,18 @@ public sealed class SessionSummaryContextSource : IContextSource, IScopedDepende
     {
         if (query.SessionId is not { } sessionId) return AgentContextResult.Empty;
 
-        var summary = await _db.WorkSession.AsNoTracking()
+        var row = await _db.WorkSession.AsNoTracking()
             .Where(s => s.Id == sessionId && s.TeamId == query.TeamId)
-            .Select(s => s.Summary)
+            .Select(s => new { s.Summary, s.SummaryStaleSinceTurn })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return string.IsNullOrWhiteSpace(summary)
-            ? AgentContextResult.Empty
-            : AgentContextResult.From($"# Distilled summary of earlier work in this thread\n{summary.Trim()}");
+        if (row is null || string.IsNullOrWhiteSpace(row.Summary)) return AgentContextResult.Empty;
+
+        var text = $"# Distilled summary of earlier work in this thread\n{row.Summary.Trim()}";
+
+        if (row.SummaryStaleSinceTurn is { } staleSince)
+            text += $"\n\n(Note: turns from {staleSince} onward have not yet been folded into this summary — it may be incomplete.)";
+
+        return AgentContextResult.From(text);
     }
 }

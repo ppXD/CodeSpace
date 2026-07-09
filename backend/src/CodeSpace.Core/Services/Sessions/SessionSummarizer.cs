@@ -80,10 +80,18 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 
         var distilled = await TryDistillAsync(teamId, session.Summary, newTurns, manifestsByRunId, cancellationToken).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(distilled)) return;   // fail-open: no model / LLM error — leave the summary unchanged
+        if (string.IsNullOrWhiteSpace(distilled))
+        {
+            // Fail-open: no model / LLM error — Summary is left unchanged, but the GAP must not stay silent. The
+            // oldest un-folded turn is the earliest one this failure leaves behind; never overwritten by a LATER
+            // failure's (necessarily newer) gap — the oldest gap is the one a reader needs to know about.
+            session.SummaryStaleSinceTurn ??= newTurns[0].Turn;
+            return;
+        }
 
         session.Summary = distilled.Trim();
         session.SummaryThroughTurnIndex = targetWatermark;
+        session.SummaryStaleSinceTurn = null;
     }
 
     /// <summary>Distill the existing summary + the newly scrolled-out turns into an updated summary. Returns null (fail-open) when no provider/model is available or the LLM call fails. Internal so the real-model eval can drive the live distillation directly (DB-free), pinning that the summary actually preserves older turns.</summary>

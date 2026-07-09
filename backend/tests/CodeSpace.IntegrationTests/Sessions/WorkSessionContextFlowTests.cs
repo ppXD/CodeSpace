@@ -58,6 +58,34 @@ public class WorkSessionContextFlowTests
     }
 
     [Fact]
+    public async Task Builder_notes_the_summary_is_stale_when_a_prior_distillation_failed()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedCompletedTurnAsync(teamId, sessionId, turn: 1, goal: "Old work", summary: "DISTILLED_OLDER_WORK", branch: null);
+        await StampSummaryAsync(sessionId, summary: "DISTILLED_OLDER_WORK", throughTurn: 1, staleSinceTurn: 2);
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain("DISTILLED_OLDER_WORK");
+        context.ShouldContain("have not yet been folded", customMessage: "a fail-open distillation gap must never be silently read as a current, complete summary");
+    }
+
+    [Fact]
+    public async Task Builder_shows_no_staleness_note_when_the_summary_is_fully_caught_up()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedCompletedTurnAsync(teamId, sessionId, turn: 1, goal: "Old work", summary: "DISTILLED_OLDER_WORK", branch: null);
+        await StampSummaryAsync(sessionId, summary: "DISTILLED_OLDER_WORK", throughTurn: 1, staleSinceTurn: null);
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context!.ShouldNotContain("have not yet been folded", customMessage: "byte-identical to before this field existed when the summary is fully caught up");
+    }
+
+    [Fact]
     public async Task Builder_prefers_the_manifest_branch_over_a_conflicting_raw_OutputsJson_branch()
     {
         // I2: the digest's "Produced branch" must read the SAME source of truth as the room/continuity paths — a
@@ -348,6 +376,20 @@ public class WorkSessionContextFlowTests
         db.WorkSession.Add(new WorkSession { Id = id, TeamId = teamId, Title = "thread", Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open });
         await db.SaveChangesAsync();
         return id;
+    }
+
+    /// <summary>Stamp a session's rolling summary + watermark + staleness marker directly — bypassing the real SessionSummarizer distillation, so a test can set up a "fail-open left a gap" state cheaply.</summary>
+    private async Task StampSummaryAsync(Guid sessionId, string summary, int throughTurn, int? staleSinceTurn)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var session = await db.WorkSession.SingleAsync(s => s.Id == sessionId);
+        session.Summary = summary;
+        session.SummaryThroughTurnIndex = throughTurn;
+        session.SummaryStaleSinceTurn = staleSinceTurn;
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Stage a finished single-agent-shape turn — a request carrying the goal payload + a run with {summary, branch} on OutputsJson.</summary>
