@@ -602,6 +602,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (agentResults.Count > 0)
         {
             builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest — act on THESE results)" : "")}: payload={prior.PayloadJson}");
+
+            // A2 (P4-2): name the tier escalation THIS decision applied, if any — so the model sees a stronger
+            // model was already tried before it considers escalating again (or before it reads a still-failing
+            // result and wonders why a retry didn't just fix things with the same model as before).
+            if (SupervisorOutcome.ReadEscalation(prior.OutcomeJson) is { } escalation)
+                builder.AppendLine($"    ESCALATED model for this retry: {escalation.From ?? "(unknown)"} → {escalation.To} — {escalation.Reason}");
+
             for (var k = 0; k < agentResults.Count; k++)
             {
                 var r = agentResults[k];

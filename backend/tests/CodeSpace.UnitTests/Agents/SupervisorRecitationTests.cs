@@ -51,6 +51,26 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void A_genuine_retry_decision_supersedes_the_original_spawn()
+    {
+        // Real bug: a retry decision's payload carries the plan-local id as a SINGULAR "subtaskId" field
+        // (SupervisorRetryPayload), never the spawn payload's PLURAL "subtaskIds" array — FindCoveringDecision
+        // unconditionally called ReadSpawnSubtaskIds, which always read empty for a genuine retry, silently
+        // skipping it and leaving the recitation showing the STALE original-spawn state forever.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Failed", error: "flaked")),
+            Retry(3, "s1", Result("Succeeded", acceptancePassed: true)),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("- [s1] First: done (accepted)", customMessage: "a GENUINE retry decision (singular subtaskId payload) must supersede the failed original spawn");
+        recitation.ShouldContain("Every plan item is finished");
+    }
+
+    [Fact]
     public void A_rejected_unit_recites_its_acceptance_detail_and_a_replan_supersedes_the_old_plan()
     {
         var priors = new[]
@@ -157,7 +177,46 @@ public sealed class SupervisorRecitationTests
         recitation.ShouldNotContain("[s2] Sound: pending ⚠", customMessage: "a valid spec lints nothing");
     }
 
+    // ─── A2 (P4-2) tier escalation ──────────────────────────────────────────────
+
+    [Fact]
+    public void An_escalated_retry_shows_the_note_without_affecting_the_finished_gate()
+    {
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Failed", error: "flaked")),
+            Retry(3, "s1", Result("Succeeded", acceptancePassed: true), escalatedTo: "claude-sonnet-4-5", escalatedFrom: "claude-haiku-4-5", reason: "the prior attempt's self-report contradicted its acceptance grade (over_claim)"),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("- [s1] First: done (accepted) [escalated to claude-sonnet-4-5: the prior attempt's self-report contradicted its acceptance grade (over_claim)]");
+        recitation.ShouldContain("Every plan item is finished", customMessage: "the escalation suffix must never break the EXACT done/done(accepted) finished-match");
+    }
+
+    [Fact]
+    public void A_non_escalated_retry_shows_no_escalation_note()
+    {
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Retry(3, "s1", Result("Succeeded", acceptancePassed: true)),
+        };
+
+        SupervisorRecitation.Render(priors)!.ShouldNotContain("[escalated");
+    }
+
     // ─── fixtures ────────────────────────────────────────────────────────────
+
+    private static SupervisorPriorDecision Retry(int seq, string subtaskId, object result, string? escalatedTo = null, string? escalatedFrom = null, string? reason = null) =>
+        Prior(seq, SupervisorDecisionKinds.Retry,
+            JsonSerializer.Serialize(new { subtaskId }, AgentJson.Options),
+            JsonSerializer.Serialize(new
+            {
+                agentResults = new[] { result },
+                escalation = escalatedTo is null ? null : new { to = escalatedTo, from = escalatedFrom, reason },
+            }, AgentJson.Options));
 
     private static SupervisorPriorDecision Plan(int seq, params (string Id, string Title)[] subtasks) =>
         Prior(seq, SupervisorDecisionKinds.Plan, JsonSerializer.Serialize(new
