@@ -60,6 +60,23 @@ public class SupervisorDecisionSchemaTests
     }
 
     [Fact]
+    public void The_plan_delivery_object_is_closed_and_wholly_optional()
+    {
+        // DC-1: the delivery contract nests INSIDE plan.properties, not at the schema root — it is data the model
+        // proposes ALONGSIDE a plan, never its own verb. Closed + optional at every level, matching every sibling
+        // plan sub-object (subtasks/phases): a drift here is a contract change a reviewer must see.
+        var plan = Schema.GetProperty("properties").GetProperty("plan");
+        var delivery = plan.GetProperty("properties").GetProperty("delivery");
+
+        delivery.GetProperty("type").GetString().ShouldBe("object");
+        delivery.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse("the delivery object rejects invented fields");
+        delivery.GetProperty("properties").TryGetProperty("openPullRequest", out _).ShouldBeTrue();
+        delivery.GetProperty("properties").TryGetProperty("targetBranch", out _).ShouldBeTrue();
+
+        plan.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldNotContain("delivery", "a plan that names no delivery preference at all must remain schema-valid");
+    }
+
+    [Fact]
     public void A_root_level_rationale_is_declared_for_every_verb()
     {
         // Rationale is a DECISION-level annotation (why + evidence), authored uniformly at the root for every verb —

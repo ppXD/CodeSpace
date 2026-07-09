@@ -25,12 +25,23 @@ public static class SupervisorPlanConfirmation
     /// <summary>The marker phrase EVERY plan-confirmation question carries — the stable, load-bearing tail the gate matches to recognise its OWN card (vs a content ask_human or an approval card). Pinned by a unit test so a reword is a visible decision.</summary>
     public const string ConfirmationMarker = "Reply 'approve' to run this plan, or describe the changes you want.";
 
-    /// <summary>Build the confirmation ask_human for the run's current plan version. Deterministic given (version, itemCount) — a replayed turn re-derives the same card bytes → the same idempotency key.</summary>
-    public static SupervisorDecision IntoAskHuman(int planVersion, int itemCount) => new()
+    /// <summary>Build the confirmation ask_human for the run's current plan version. Deterministic given (version, itemCount, delivery) — a replayed turn re-derives the same card bytes → the same idempotency key.</summary>
+    public static SupervisorDecision IntoAskHuman(int planVersion, int itemCount, DeliverySpec? delivery) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(planVersion, itemCount) }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(planVersion, itemCount, delivery) }, AgentJson.Options),
     };
+
+    /// <summary>
+    /// The tape's LATEST plan decision, or null when none exists — DC-1's own read for anything that needs the
+    /// CURRENT plan's own payload (its delivery contract), not just this gate's confirmation bookkeeping.
+    /// </summary>
+    public static SupervisorPriorDecision? LatestPlanDecision(IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        var index = LastPlanIndex(priors);
+
+        return index < 0 ? null : priors[index];
+    }
 
     /// <summary>
     /// Whether the tape's LATEST terminal plan still awaits confirmation — true when a plan decision exists and
@@ -143,7 +154,22 @@ public static class SupervisorPlanConfirmation
         return -1;
     }
 
-    /// <summary>The confirmation question naming the plan version + size, so the operator knows what they are approving before opening the checklist.</summary>
-    private static string QuestionFor(int planVersion, int itemCount) =>
-        $"The supervisor authored plan v{planVersion} with {itemCount} step(s). Review the plan checklist, then confirm. {ConfirmationMarker}";
+    /// <summary>The confirmation question naming the plan version + size + (DC-1) any side-effecting delivery contract, so the operator knows EVERYTHING they are approving before opening the checklist — including a pull request the run would open automatically on completion.</summary>
+    private static string QuestionFor(int planVersion, int itemCount, DeliverySpec? delivery) =>
+        $"The supervisor authored plan v{planVersion} with {itemCount} step(s).{DeliverySummary(delivery)} Review the plan checklist, then confirm. {ConfirmationMarker}";
+
+    /// <summary>
+    /// DC-1 — a leading-space sentence naming the ONE side-effecting delivery contract behavior (opening a PR)
+    /// this plan would trigger automatically, or empty when the contract carries nothing side-effecting. An
+    /// explicit "don't open a PR" (<c>OpenPullRequest == false</c>) renders nothing extra — that direction is
+    /// the safe default, not a new side effect the operator needs flagged before approving.
+    /// </summary>
+    private static string DeliverySummary(DeliverySpec? delivery)
+    {
+        if (delivery?.OpenPullRequest != true) return "";
+
+        var branch = string.IsNullOrWhiteSpace(delivery.TargetBranch) ? "the repository's default branch" : delivery.TargetBranch;
+
+        return $" On completion it will automatically open a pull request against {branch}.";
+    }
 }

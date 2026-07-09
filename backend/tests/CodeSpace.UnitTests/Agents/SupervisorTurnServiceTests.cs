@@ -847,7 +847,7 @@ public class SupervisorTurnServiceTests
 
     private static SupervisorPriorDecision AnsweredConfirmation(string answer)
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
         return new SupervisorPriorDecision
         {
             Id = Guid.NewGuid(),

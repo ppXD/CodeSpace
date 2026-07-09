@@ -157,6 +157,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         }
 
         decision = ClampSpawnToDependencyFrontier(context, decision);
+        decision = ClampPlanDelivery(context, decision);
 
         return ApplyPostDecisionGate(context, plan, decision);
     }
@@ -200,7 +201,13 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         _logger.LogInformation("Supervisor plan v{Version} awaits the operator's confirmation at turn {Turn} on node {NodeId} — parking before any agent is created", current.Version, context.TurnNumber, context.NodeId);
 
-        return SupervisorPlanConfirmation.IntoAskHuman(current.Version, CountPlanItems(current.ItemsJson));
+        // DC-1: the CURRENT plan decision's own (already server-clamped) delivery contract, so the confirmation
+        // card names any side-effecting behaviour (e.g. an auto-opened PR) the operator is about to approve —
+        // never the model's raw unclamped proposal, since ClampPlanDelivery already ran before this turn persisted.
+        var latestPlan = SupervisorPlanConfirmation.LatestPlanDecision(context.PriorDecisions);
+        var delivery = SupervisorOutcome.ReadPlanDelivery(latestPlan?.PayloadJson);
+
+        return SupervisorPlanConfirmation.IntoAskHuman(current.Version, CountPlanItems(current.ItemsJson), delivery);
     }
 
     /// <summary>
@@ -301,6 +308,39 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         if (kept.Length > 0) root["agents"] = new JsonArray(kept);
         else root.Remove("agents");
+    }
+
+    /// <summary>
+    /// DC-1 — server-clamp a fresh plan's model-PROPOSED delivery contract against the OPERATOR's own pre-declared
+    /// <see cref="SupervisorTurnContext.DeliverySpec"/> BEFORE it is claimed + frozen, so the PERSISTED payload's
+    /// <c>delivery</c> is always the EFFECTIVE contract (<see cref="SupervisorDeliveryClamp"/> — per field, the
+    /// operator's own declared value always wins, including an explicit <c>false</c> surviving a model proposing
+    /// the opposite). Rewrites ONLY the <c>delivery</c> key in place — mirrors <see cref="NarrowSpawnPayload"/>'s
+    /// byte-preservation: a rebuild from the typed <see cref="SupervisorPlanPayload"/> would silently drop the
+    /// rationale + any other frozen root key. No operator contract at all → the decision passes through UNCHANGED
+    /// (byte-identical, the dominant pre-DC-1 case). Internal so the byte-preservation is unit-pinned directly,
+    /// mirroring <see cref="NarrowSpawnPayload"/>'s own visibility choice for the identical reason.
+    /// </summary>
+    internal static SupervisorDecision ClampPlanDelivery(SupervisorTurnContext context, SupervisorDecision decision)
+    {
+        if (decision.Kind != SupervisorDecisionKinds.Plan || context.DeliverySpec is null) return decision;
+
+        JsonObject? root;
+        try { root = JsonNode.Parse(decision.PayloadJson) as JsonObject; }
+        catch (JsonException) { return decision; }
+
+        if (root is null) return decision;
+
+        DeliverySpec? modelProposed = null;
+        try { if (root["delivery"] is JsonObject proposed) modelProposed = JsonSerializer.Deserialize<DeliverySpec>(proposed.ToJsonString(AgentJson.Options), AgentJson.Options); }
+        catch (JsonException) { /* malformed model proposal — treat as none; the operator's own contract still applies below */ }
+
+        var clamped = SupervisorDeliveryClamp.Clamp(modelProposed, context.DeliverySpec);
+
+        if (clamped is null) root.Remove("delivery");
+        else root["delivery"] = JsonSerializer.SerializeToNode(clamped, AgentJson.Options);
+
+        return decision with { PayloadJson = root.ToJsonString(AgentJson.Options) };
     }
 
     /// <summary>
