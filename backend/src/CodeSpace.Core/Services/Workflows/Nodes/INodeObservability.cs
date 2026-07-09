@@ -41,6 +41,16 @@ public interface INodeObservability
     Task<TResult> TraceExternalCallAsync<TResult>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, Task<TResult>> action, Func<TResult, ExternalCallCompletion>? completionExtractor = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The STREAMING counterpart of <see cref="TraceExternalCallAsync"/> — for a call whose result arrives as an
+    /// <see cref="IAsyncEnumerable{T}"/> the buffered <c>Func&lt;CT,Task&lt;TResult&gt;&gt;</c> shape can't carry. Emits
+    /// <c>external_call.started</c> before the first event, yields every event VERBATIM (a live tee — the caller folds
+    /// them), then emits <c>external_call.completed</c> after the stream ends, or <c>external_call.failed</c> on a
+    /// mid-stream throw / cancellation. The rich model facts (usage / output) ride the <c>interaction.*</c> records the
+    /// client seam writes; this trace is the call-plumbing bracket, so its completed record is bare.
+    /// </summary>
+    IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Persist <paramref name="bytes"/> as a workflow artifact, scoped to the team that owns
     /// the run. Returns a JSON reference of the form
     /// <c>{"$artifact_id":"&lt;guid&gt;","size_bytes":N,"content_type":"..."}</c> suitable for

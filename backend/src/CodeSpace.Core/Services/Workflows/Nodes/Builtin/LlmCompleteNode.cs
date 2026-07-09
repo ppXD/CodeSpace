@@ -129,22 +129,36 @@ public sealed class LlmCompleteNode : INodeRuntime
         // carries the token counts (cheap to inline). The full text lives in workflow_artifact,
         // keeping the ledger payload small while still preserving the model output for replay
         // / audit.
-        var completion = await context.Observability.TraceExternalCallAsync(
-            target: $"{provider.ToLowerInvariant()}:{pick.ModelId}",
-            method: "complete",
-            requestPayload: BuildRequestPayloadAudit(pick.ModelId, systemPrompt, userPrompt, maxTokens, temperature),
-            action: ct => client.CompleteAsync(new LLMCompletionRequest
-            {
-                Model = pick.ModelId,
-                Credential = pick.Credential,
-                SystemPrompt = systemPrompt,
-                UserPrompt = userPrompt,
-                MaxOutputTokens = maxTokens,
-                Temperature = temperature,
-                Sampling = sampling
-            }, ct),
-            completionExtractor: result => LedgerCompletion(result.Model, result.Usage, result.Text?.Length ?? 0),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var request = new LLMCompletionRequest
+        {
+            Model = pick.ModelId,
+            Credential = pick.Credential,
+            SystemPrompt = systemPrompt,
+            UserPrompt = userPrompt,
+            MaxOutputTokens = maxTokens,
+            Temperature = temperature,
+            Sampling = sampling,
+        };
+        var target = $"{provider.ToLowerInvariant()}:{pick.ModelId}";
+        var audit = BuildRequestPayloadAudit(pick.ModelId, systemPrompt, userPrompt, maxTokens, temperature);
+
+        // A LARGE output (an explicit maxTokens above the streaming gate) STREAMS through the streaming sibling: the deltas
+        // flow through the recording decorator as interaction.delta AND the wire can't idle-timeout, while the traced
+        // stream folds back into the SAME whole completion the buffered path returns. A small output stays a single
+        // buffered call — only an explicit large maxTokens is streamed, never forced onto every node call.
+        LLMCompletion completion;
+        if (maxTokens > LlmModelCapabilities.StreamingThreshold && client is IStreamingLLMClient streaming)
+        {
+            var traced = context.Observability.TraceExternalStreamAsync(target, "complete", audit, ct => streaming.StreamAsync(request, ct), cancellationToken);
+            completion = await LlmTextStreamFold.AccumulateAsync(traced, request.Model, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            completion = await context.Observability.TraceExternalCallAsync(target, "complete", audit,
+                ct => client.CompleteAsync(request, ct),
+                result => LedgerCompletion(result.Model, result.Usage, result.Text?.Length ?? 0),
+                cancellationToken).ConfigureAwait(false);
+        }
 
         context.Logger.LogInformation("LLM completion {Model} in={InTok} out={OutTok} finish={Finish}", completion.Model, completion.Usage.InputTokens, completion.Usage.OutputTokens, completion.Usage.FinishReason);
 

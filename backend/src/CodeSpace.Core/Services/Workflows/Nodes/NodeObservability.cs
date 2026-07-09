@@ -69,6 +69,37 @@ public sealed class NodeObservability : INodeObservability
         }
     }
 
+    public async IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        var (_, correlationId) = await _recordLogger.ExternalCallStartedAsync(_runId, _nodeId, target, method, requestPayload, _parentRecordId, cancellationToken).ConfigureAwait(false);
+
+        await using var enumerator = stream(cancellationToken).GetAsyncEnumerator(cancellationToken);
+        while (true)
+        {
+            TEvent current;
+            try
+            {
+                if (!await enumerator.MoveNextAsync().ConfigureAwait(false)) break;
+                current = enumerator.Current;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", DateTimeOffset.UtcNow - startedAt, CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+                throw;
+            }
+
+            yield return current;
+        }
+
+        await _recordLogger.ExternalCallCompletedAsync(_runId, _nodeId, correlationId, statusCode: null, responsePayload: null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<JsonElement> PersistArtifactAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
         var artifactId = await _artifactStore.PutAsync(_teamId, bytes, contentType, cancellationToken).ConfigureAwait(false);
@@ -95,6 +126,9 @@ public sealed class NodeObservability : INodeObservability
     {
         public Task<TResult> TraceExternalCallAsync<TResult>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, Task<TResult>> action, Func<TResult, ExternalCallCompletion>? completionExtractor = null, CancellationToken cancellationToken = default) =>
             action(cancellationToken);
+
+        public IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, CancellationToken cancellationToken = default) =>
+            stream(cancellationToken);
 
         public Task<JsonElement> PersistArtifactAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) =>
             Task.FromResult(JsonSerializer.SerializeToElement(new { artifact_id = Guid.Empty, size_bytes = bytes.Length, content_type = contentType }));
