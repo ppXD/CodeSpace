@@ -193,6 +193,37 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_calls_out_an_under_claim_where_the_agent_reported_failure_but_the_check_passed()
+    {
+        // P4-1: the inverse of the over-claim case above — the agent itself reported FAILURE, but its OWN check
+        // actually PASSED. Previously this rendered identically to a clean pass with no signal that the agent
+        // disagreed with its own verified result; the decider must be told NOT to retry a unit that is already fine.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Failed", Error = "the agent gave up", ProducedBranch = "codespace/agent/foo",
+                    AcceptancePassed = true, AcceptanceDetail = "tests-passed",
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
+        prompt.ShouldContain("even though the agent itself reported failure", Case.Insensitive, "the under-claim must be called out, not silently rendered as a clean pass");
+        prompt.ShouldContain("do NOT retry", Case.Insensitive, "the work is objectively fine — retrying it wastes a round-trip");
+    }
+
+    [Fact]
     public void The_user_prompt_renders_an_infra_classed_rejection_as_unverified_never_as_retry_bait()
     {
         // P0: 'no-branch-or-repo' with work present means the CHECK could not run — telling the brain to RETRY it

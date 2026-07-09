@@ -53,6 +53,7 @@ public class AgentRunExecutorAcceptanceTests
 
         result.ShouldBe(failed, "a failed run is already the truth — nothing to gate");
         grader.Calls.ShouldBe(0);
+        result.Contradiction.ShouldBeNull("this early return is EXACTLY why an under-claim (Failed self-report, passing grade) can never occur in this lane — a self-reported failure is never graded at all");
     }
 
     [Fact]
@@ -81,6 +82,7 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
         grader.Calls.ShouldBe(0, "there is nothing to clone — fail closed, never a phantom pass");
         grader.PatchCalls.ShouldBe(0);
+        result.Contradiction.ShouldBe(AgentContradiction.OverClaim, "the run self-reported Succeeded (the gate's own precondition) but the contract could not be verified — an over-claim");
     }
 
     // ── S2: no branch, but a recorded patch (a PatchOnly-mode producer, or a policy-blocked push) ─────
@@ -99,6 +101,7 @@ public class AgentRunExecutorAcceptanceTests
         grader.Calls.ShouldBe(0, "no branch → the branch-based path is never invoked");
         grader.PatchCalls.ShouldBe(1);
         grader.LastPatchBaseSha.ShouldBe(patchOnly.BaseSha);
+        result.Contradiction.ShouldBeNull("self-report Succeeded + grade passed agree — nothing to flag");
     }
 
     [Fact]
@@ -112,6 +115,7 @@ public class AgentRunExecutorAcceptanceTests
         result.ExitReason.ShouldBe("acceptance-failed");
         result.AcceptancePassed.ShouldBe(false);
         result.AcceptanceDetail.ShouldBe("exit 1");
+        result.Contradiction.ShouldBe(AgentContradiction.OverClaim);
     }
 
     [Fact]
@@ -141,6 +145,7 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptanceDetail.ShouldStartWith("not-applicable");
         grader.Calls.ShouldBe(0);
         grader.PatchCalls.ShouldBe(0);
+        result.Contradiction.ShouldBeNull("a vacuous pass agrees with the self-report — no oracle actually ran to disagree");
     }
 
     [Fact]
@@ -180,6 +185,7 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptanceDetail.ShouldBe("exit 0");
         grader.Calls.ShouldBe(1);
         grader.LastCommand.ShouldBe(new[] { "sh", "check.sh" });
+        result.Contradiction.ShouldBeNull("self-report Succeeded + grade passed agree");
     }
 
     [Fact]
@@ -196,6 +202,7 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptanceDetail.ShouldBe("exit 1");
         result.ProducedBranch.ShouldBe(succeeded.ProducedBranch, "the captured work survives for diagnosis");
         result.Error.ShouldNotBeNull();
+        result.Contradiction.ShouldBe(AgentContradiction.OverClaim, "the agent believed it was Succeeded; the objective check disagreed");
     }
 
     [Fact]
@@ -208,6 +215,7 @@ public class AgentRunExecutorAcceptanceTests
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.AcceptanceDetail.ShouldStartWith("grade-error:");
+        result.Contradiction.ShouldBe(AgentContradiction.OverClaim, "a grader error still fails closed via FailClosed — the same over-claim correction, regardless of WHY the grade came back false");
     }
 
     [Fact]

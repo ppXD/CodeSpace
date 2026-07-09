@@ -24,7 +24,14 @@ public static class AgentAcceptanceContract
     /// <summary>The <see cref="AgentRunResult.ExitReason"/> a fail-closed acceptance re-grade stamps — the machine-readable marker consumers (the agent.code node's retry verdict) key on to tell a DETERMINISTIC verdict failure from a transient death. Pinned by a unit test (Rule 8) so producer + consumer can't drift.</summary>
     public const string FailClosedExitReason = "acceptance-failed";
 
-    /// <summary>The fail-closed re-grade: the work (branch, diff, transcript) is preserved — the STATUS tells the truth, the contract was not met (or could not be verified).</summary>
+    /// <summary>
+    /// The fail-closed re-grade: the work (branch, diff, transcript) is preserved — the STATUS tells the truth, the
+    /// contract was not met (or could not be verified). Every call site guards on the result already being a
+    /// would-be <see cref="AgentRunStatus.Succeeded"/> before reaching here (the grading gate returns early on any
+    /// other self-reported status) — so THIS is unconditionally the over-claim correction site (P4-1): the agent
+    /// believed it was done; the check disagreed. <see cref="AgentRunResult.Contradiction"/> records that fact
+    /// durably, at the SAME instant the status is corrected — never re-derived ad-hoc downstream.
+    /// </summary>
     public static AgentRunResult FailClosed(AgentRunResult result, string? detail) => result with
     {
         Status = AgentRunStatus.Failed,
@@ -33,6 +40,7 @@ public static class AgentAcceptanceContract
         Error = $"The acceptance check did not pass: {detail}",
         AcceptancePassed = false,
         AcceptanceDetail = detail,
+        Contradiction = AgentContradiction.OverClaim,
     };
 
     /// <summary>

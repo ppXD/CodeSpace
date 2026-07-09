@@ -126,6 +126,7 @@ public sealed class AgentCardFactsSource : IJournalFactsSource
             Files = m.ChangedFileStats.Count > 0 ? m.ChangedFileStats : compactFiles.Select(p => new FileDiffStat(p, null, null)).ToList(),
             Resumed = m.Resumed,
             Review = review,
+            Contradiction = compact?.Contradiction,
         };
     }
 

@@ -95,6 +95,24 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void An_under_claim_recites_that_the_check_actually_passed_despite_the_self_reported_failure()
+    {
+        // P4-1: the inverse of the rejected-unit case above — Status "Failed" with AcceptancePassed true. Previously
+        // fell straight through to "failed (...)" with no signal the agent's own check disagreed with its self-report.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Failed", error: "gave up", acceptancePassed: true, acceptanceDetail: "tests-passed")),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("reported failed, but its OWN acceptance check actually PASSED (tests-passed)");
+        recitation.ShouldContain("do not retry, merge it");
+        recitation.ShouldContain("Every plan item is finished", customMessage: "an under-claimed unit is objectively done — it must not stay on the unfinished list");
+    }
+
+    [Fact]
     public void An_infra_classed_rejection_recites_could_not_run_never_rejected()
     {
         // P0: the recitation and the decider's verdict line must give the SAME framing — a check that could not RUN

@@ -17,6 +17,9 @@ public static class SupervisorRecitation
     /// <summary>The block's pinned header — the recitation is a stable prompt landmark (tests + the model key on it).</summary>
     public const string Header = "CURRENT PLAN STATE (recite before deciding — unfinished items are the remaining work):";
 
+    /// <summary>The stable, matchable prefix of an under-claim's recited state (P4-1) — <see cref="Render"/>'s unfinished-list gate matches on this rather than the full dynamic string (which carries the grader's detail).</summary>
+    private const string UnderClaimPrefix = "reported failed, but its OWN acceptance check actually PASSED";
+
     public static string? Render(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var subtasks = LatestPlanSubtasks(priorDecisions);
@@ -39,7 +42,10 @@ public static class SupervisorRecitation
             if (subtask.Acceptance is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
                 builder.Append($" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check.");
 
-            if (state is not ("done (accepted)" or "done")) unfinished.Add(subtask.Id);
+            // An under-claim (P4-1) reads its own guidance line ("do not retry, merge it") — it is objectively DONE,
+            // just self-reported wrong, so it must not also land on the unfinished list and contradict its own text.
+            if (state is not ("done (accepted)" or "done") && !state.StartsWith(UnderClaimPrefix, StringComparison.Ordinal))
+                unfinished.Add(subtask.Id);
         }
 
         builder.AppendLine().Append(unfinished.Count == 0
@@ -93,9 +99,16 @@ public static class SupervisorRecitation
         "Succeeded" when result.AcceptancePassed == true => "done (accepted)",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).
+        // Reads AcceptancePassed directly (not the newer Contradiction field) so a row folded BEFORE P4-1 shipped —
+        // which carries AcceptancePassed but no Contradiction — keeps rendering identically; back-compat, not a shortcut.
         "Succeeded" when result.AcceptancePassed == false && IsInfraRejection(result) => $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — re-plan the check, do not retry the agent",
         "Succeeded" when result.AcceptancePassed == false => $"done but REJECTED by its acceptance check ({Truncate(result.AcceptanceDetail)})",
         "Succeeded" => "done",
+        // P4-1: the agent gave up on work that its OWN check actually passed — the inverse of the over-claim above,
+        // and previously unhandled here (a "Failed" row fell straight to the bare error line regardless of the
+        // verdict), silently discarding the one signal that says "do not retry, this is already fine." Same
+        // back-compat stance: reads AcceptancePassed directly, so it applies to every row, old or new.
+        "Failed" when result.AcceptancePassed == true => $"{UnderClaimPrefix} ({Truncate(result.AcceptanceDetail)}) — the work is objectively fine; do not retry, merge it",
         "Failed" when result.AcceptancePassed == false && IsInfraRejection(result) => $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — re-plan the check, do not retry the agent",
         "Failed" => $"failed ({Truncate(result.Error ?? result.AcceptanceDetail)})",
         var other => (other ?? "running").ToLowerInvariant(),

@@ -446,7 +446,15 @@ public sealed partial class SupervisorTurnService
                 grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
 
-            graded.Add(results[i] with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail });
+            graded.Add(results[i] with
+            {
+                AcceptancePassed = grade.Passed,
+                AcceptanceDetail = grade.Detail,
+                // P4-1: unlike the single-agent lane (which only ever grades a would-be Succeeded result), THIS fold
+                // grades every staged unit regardless of its own row status — a unit can genuinely self-report
+                // "Failed" while its check passes (an under-claim), so both directions are reachable here.
+                Contradiction = Agents.AgentContradiction.Detect(selfReportedSuccess: results[i].Status == "Succeeded", grade.Passed),
+            });
             anyGraded = true;
         }
 
