@@ -231,6 +231,10 @@ public sealed class PostgresFixture : IAsyncLifetime
         // but cross-fixture leak is impossible.
         builder.RegisterType<Binding.TestRemoteHookStore>().AsSelf().SingleInstance();
 
+        // Records every OpenPullRequestAsync call TestRepositoryProvider receives, so a test can assert what
+        // actually reached the provider (e.g. the TargetBranch) — RoomPullRequestOpened carries no branch field.
+        builder.RegisterType<Binding.TestPullRequestOpenCapture>().AsSelf().SingleInstance();
+
         // ICodeSpaceBackgroundJobClient test impl. Records Enqueue calls + lets tests simulate
         // Hangfire failure via ThrowOnEnqueue. SingleInstance so tests can assert the
         // recorded call list across fixture scopes.

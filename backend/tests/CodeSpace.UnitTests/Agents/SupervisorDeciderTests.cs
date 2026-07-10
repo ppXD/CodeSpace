@@ -1,10 +1,12 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -533,6 +535,17 @@ public class SupervisorDeciderTests
         PayloadJson = "{}", OutcomeJson = outcomeJson,
     };
 
+    private static SupervisorPriorDecision Decision(string kind, long sequence, string? outcomeJson) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson,
+    };
+
+    private static string PublishOutcome(RoomPullRequestDisposition disposition, int? number = null, string? url = null, string? error = null) =>
+        JsonSerializer.Serialize(new RoomPullRequestResult
+        {
+            PullRequests = new[] { new RoomPullRequestOpened { Alias = "primary", Disposition = disposition, Number = number, Url = url, Error = error } },
+        }, AgentJson.Options);
+
     [Fact]
     public void ReadIntegration_parses_a_conflicted_block_aggregating_files_and_preserved_branches()
     {
@@ -634,6 +647,56 @@ public class SupervisorDeciderTests
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision("""{"integration":{"status":"Clean","integratedBranch":"b","outcomes":[]}}""")));
 
         prompt.ShouldNotContain("INTEGRATION CONFLICTED");
+    }
+
+    // ── DC-2d: a prior `publish` decision (server-authored only) renders legibly, not as raw jsonb ──
+
+    [Fact]
+    public void The_user_prompt_explains_a_prior_publish_decision_was_never_the_models_own_choice()
+    {
+        var publish = Decision(SupervisorDecisionKinds.Publish, sequence: 2, outcomeJson: PublishOutcome(RoomPullRequestDisposition.Opened, number: 42, url: "https://example.test/pr/42"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, publish));
+
+        prompt.ShouldContain("did not choose this", Case.Insensitive, "publish is server-authored only — the model must not think it decided to publish");
+        prompt.ShouldContain("opened #42", Case.Insensitive);
+        prompt.ShouldContain("https://example.test/pr/42");
+    }
+
+    [Fact]
+    public void The_user_prompt_names_a_failed_publish_target_plainly()
+    {
+        var publish = Decision(SupervisorDecisionKinds.Publish, sequence: 2, outcomeJson: PublishOutcome(RoomPullRequestDisposition.Failed, error: "the provider rejected the request"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, publish));
+
+        prompt.ShouldContain("FAILED", Case.Insensitive);
+        prompt.ShouldContain("the provider rejected the request", Case.Insensitive);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    public void The_user_prompt_never_throws_on_a_publish_decision_with_malformed_outcome(string? outcomeJson)
+    {
+        var publish = Decision(SupervisorDecisionKinds.Publish, sequence: 2, outcomeJson: outcomeJson);
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, publish));
+
+        prompt.ShouldContain("no targets resolved", Case.Insensitive, "a malformed/absent outcome degrades to an explicit empty state, never a raw jsonb dump or a throw");
+    }
+
+    [Theory]
+    [InlineData(RoomPullRequestDisposition.AlreadyOpened, "already open #42")]
+    [InlineData(RoomPullRequestDisposition.Skipped, "skipped")]
+    public void The_user_prompt_names_every_publish_disposition_plainly(RoomPullRequestDisposition disposition, string expectedFragment)
+    {
+        var publish = Decision(SupervisorDecisionKinds.Publish, sequence: 2, outcomeJson: PublishOutcome(disposition, number: 42, error: "no source branch"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, publish));
+
+        prompt.ShouldContain(expectedFragment, Case.Insensitive);
     }
 
     [Fact]

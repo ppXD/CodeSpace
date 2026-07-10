@@ -10,13 +10,14 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// The SYNCHRONOUS publish half of the real executor (Rule 10 <c>.Publish.cs</c>, DC-2b): open a pull request
 /// against the run's already-published branch(es) via the SAME shared <see cref="ISupervisorPullRequestOpener"/>
 /// core the Room's Open-PR action uses, but driven from the LIVE turn context (<c>context.AgentProfile?.RepositoryId</c>
-/// — the pre-terminal precedent <c>SupervisorTurnService.Rehydrate.ResolveAcceptanceTargets</c> already
-/// established) rather than a terminal <c>WorkflowRun.OutputsJson</c> read. <see cref="SupervisorTurnContext.DeliverySpec"/>'s
-/// <c>TargetBranch</c> (when the operator or an approved plan pinned one) overrides every target's own resolved
-/// default; the REJECTED stop's own summary (<see cref="SupervisorPublishPayload.StopSummary"/>, threaded through
-/// by <see cref="SupervisorDeliveryGate"/>'s substitution) becomes the opened PR's title/body. Always
-/// SYNCHRONOUS — <see cref="SupervisorDeliveryGate"/> only ever substitutes this decision for a <c>stop</c>,
-/// never proposes it independently.
+/// — the SAME pre-terminal source the stop-time acceptance grade's own target resolution uses) rather than a
+/// terminal <c>WorkflowRun.OutputsJson</c> read. <see cref="SupervisorPublishPayload.TargetBranch"/>
+/// (DC-2d) is the EFFECTIVE branch <see cref="SupervisorDeliveryGate"/> already resolved at substitution time —
+/// read from THIS decision's own payload, never re-derived from <c>context.DeliverySpec</c> directly, so the
+/// value the confirmation card showed a human and the value execution targets can never silently diverge; the
+/// REJECTED stop's own summary (<see cref="SupervisorPublishPayload.StopSummary"/>, threaded the same way)
+/// becomes the opened PR's title/body. Always SYNCHRONOUS — <see cref="SupervisorDeliveryGate"/> only ever
+/// substitutes this decision for a <c>stop</c>, never proposes it independently.
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
@@ -28,7 +29,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         try
         {
-            result = await _pullRequestOpener.OpenAsync(context.SupervisorRunId, context.TeamId, context.PriorDecisions, context.AgentProfile?.RepositoryId, context.DeliverySpec?.TargetBranch, publish.StopSummary, actorUserId: null, cancellationToken).ConfigureAwait(false);
+            result = await _pullRequestOpener.OpenAsync(context.SupervisorRunId, context.TeamId, context.PriorDecisions, context.AgentProfile?.RepositoryId, publish.TargetBranch, publish.StopSummary, actorUserId: null, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

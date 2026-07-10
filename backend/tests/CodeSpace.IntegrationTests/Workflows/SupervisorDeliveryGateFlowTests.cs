@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.IntegrationTests.Binding;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -167,6 +168,70 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     [Fact]
+    public async Task An_opener_that_throws_unexpectedly_folds_into_a_diagnosed_failure_instead_of_crashing_the_turn()
+    {
+        // DC-2b sweep fix (ii) shipped unpinned: the executor's catch (Exception ex) when (ex is not
+        // OperationCanceledException) had no test at any tier driving a genuinely THROWING opener through
+        // ExecutePublishAsync. Proven here end to end with a REAL turn service + a DI-swapped opener that throws.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new AlwaysStopDecider();
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, b => b.RegisterType<ThrowingPullRequestOpener>().As<ISupervisorPullRequestOpener>());
+
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "the turn must still record a publish decision — an unexpected throw folds into the outcome, never crashes the turn loop mid-decision");
+
+        var result = JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!;
+        var failed = result.PullRequests.Single();
+        failed.Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
+        failed.Error.ShouldContain("boom");
+
+        // The NEXT stop's gate reads this diagnosed failure and parks instead of blind-retrying (mirrors the
+        // unit-level "never re-substitute after a failure" ladder step, now proven with a REAL persisted outcome).
+        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig);
+        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+        parked.PayloadJson.ShouldContain("boom");
+    }
+
+    [Fact]
+    public async Task A_forced_publish_opens_the_pr_against_the_confirmed_plans_own_target_branch_not_the_repositorys_default()
+    {
+        // DC-2d sweep finding: the confirmation card names the LATEST PLAN's own clamped TargetBranch, but
+        // execution used to read ONLY the operator's raw launch-time DeliverySpec — a plan-proposed branch the
+        // operator never set would show on the card, then silently vanish at execution (the repo's default branch
+        // opens instead). Proven here end to end: the operator names no branch at all, but the confirmed plan does.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new PlansTrueThenStopsDecider("release");
+
+        await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 1: plan proposes TargetBranch "release"
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 2: tries to stop
+
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish);
+
+        var result = JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!;
+        result.PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+
+        using var verify = _fixture.BeginScope();
+        verify.Resolve<TestPullRequestOpenCapture>().Last!.TargetBranch.ShouldBe("release", "the PR must target the branch the confirmation card actually showed the human, not the repository's default");
+    }
+
+    [Fact]
     public async Task A_patch_only_repository_is_skipped_not_failed_and_the_run_still_completes()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -193,9 +258,9 @@ public sealed class SupervisorDeliveryGateFlowTests
 
     // ─── Drive a real turn ─────────────────────────────────────────────────────────
 
-    private async Task<SupervisorPriorDecision> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig)
+    private async Task<SupervisorPriorDecision> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig, Action<ContainerBuilder>? configureScope = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = configureScope is null ? _fixture.BeginScope() : _fixture.BeginScope(configureScope);
         var service = NewTurnService(scope, decider);
         await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
 
@@ -239,9 +304,13 @@ public sealed class SupervisorDeliveryGateFlowTests
             });
     }
 
-    /// <summary>Turn 1 authors a plan proposing <c>openPullRequest:true</c>; every later turn tries to stop.</summary>
+    /// <summary>Turn 1 authors a plan proposing <c>openPullRequest:true</c> (optionally naming its own <paramref name="targetBranch"/>, DC-2d); every later turn tries to stop.</summary>
     private sealed class PlansTrueThenStopsDecider : ISupervisorDecider
     {
+        private readonly string? _targetBranch;
+
+        public PlansTrueThenStopsDecider(string? targetBranch = null) => _targetBranch = targetBranch;
+
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
             Task.FromResult(context.PriorDecisions.All(d => d.DecisionKind != SupervisorDecisionKinds.Plan)
                 ? new SupervisorDecision
@@ -251,7 +320,7 @@ public sealed class SupervisorDeliveryGateFlowTests
                     {
                         Goal = Goal,
                         Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "T", Instruction = "do it" } },
-                        Delivery = new DeliverySpec { OpenPullRequest = true },
+                        Delivery = new DeliverySpec { OpenPullRequest = true, TargetBranch = _targetBranch },
                     }, AgentJson.Options),
                 }
                 : new SupervisorDecision
@@ -259,6 +328,13 @@ public sealed class SupervisorDeliveryGateFlowTests
                     Kind = SupervisorDecisionKinds.Stop,
                     PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "completed", Summary = "shipped the feature" }, AgentJson.Options),
                 });
+    }
+
+    /// <summary>DC-2d regression: a real dependency that throws, DI-swapped in for one turn to prove the executor's exception fold (RealSupervisorActionExecutor.Publish.cs) never crashes the turn loop.</summary>
+    private sealed class ThrowingPullRequestOpener : ISupervisorPullRequestOpener
+    {
+        public Task<RoomPullRequestResult> OpenAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, Guid? primaryRepositoryId, string? targetBranchOverride, string? currentTurnStopSummary, Guid? actorUserId, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("boom");
     }
 
     // ─── Seeding (mirrors RoomPullRequestServiceFlowTests) ─────────────────────────────

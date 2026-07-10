@@ -594,7 +594,7 @@ public sealed partial class SupervisorTurnService
     /// Grade a MULTI-repo unit's subtask acceptance SPEC against EVERY repo it actually changed — mirroring
     /// <see cref="GradeStopTargetsAsync"/>'s run-level multi-target grade at the per-unit grain (a subtask's
     /// contract binds its WHOLE change, not just its primary repo). A repo with no produced branch had nothing to
-    /// verify there, so it is not a target (same filter as <see cref="ResolveAcceptanceTargets"/>) — S2's per-repo
+    /// verify there, so it is not a target (same filter as <see cref="ResolveAcceptanceTargetsAsync"/>) — S2's per-repo
     /// patch fallback is deliberately NOT extended here (scope trim; the single-repo path above is the one this
     /// slice's design targets) — a unit that produced NO branch across every repo falls back to
     /// <paramref name="expectsChanges"/>'s verdict, same as the single-repo path. All targets must pass,
@@ -750,7 +750,22 @@ public sealed partial class SupervisorTurnService
 
         if (gates.All(g => g.Spec is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
 
-        var targets = ResolveAcceptanceTargets(context);
+        IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets;
+
+        try
+        {
+            targets = await ResolveAcceptanceTargetsAsync(context, teamId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // DC-2d sweep finding: this is now real DB I/O (the shared ISupervisorPublishedBranchResolver), unlike
+            // the old pure in-memory tape read it replaced — every OTHER grading I/O step in this file already
+            // folds a fail-closed verdict on an unexpected throw rather than stranding the terminal row; this one
+            // must too.
+            _logger.LogWarning(ex, "Stop acceptance target resolution for run {RunId} failed unexpectedly; recording not-accepted", context.SupervisorRunId);
+
+            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, false, $"grade-error: {ex.Message}") };
+        }
 
         if (targets.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
 
@@ -807,22 +822,23 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>
-    /// The reviewable head(s) a terminal stop grades against: the SINGLE integrated branch (single-repo) when present,
-    /// else EVERY per-repo final head (multi-repo, L4 C2). A multi-repo head missing its repository id can't be cloned,
-    /// so it is kept with <see cref="Guid.Empty"/> — the grader fails it CLOSED rather than silently passing an
-    /// un-gradeable repo. Empty ⇒ branchless (analysis-only / un-integrated) ⇒ the caller skips.
+    /// DC-2d — the reviewable head(s) a terminal stop grades against, off the SAME unified
+    /// <see cref="ISupervisorPublishedBranchResolver"/> every other "what did this run publish" reader shares
+    /// (DC-3) — merge-derived FIRST, falling back to the P0-5 LEDGER-DIRECT read (a single accepted agent's own
+    /// pushed <see cref="Persistence.Entities.PublishManifest"/> row, no merge ever ran) when neither
+    /// merge-derived shape exists. Before this fix, the operator's own acceptance FLOOR silently skipped a
+    /// ledger-direct run entirely (this method saw zero targets and the caller treated that as "nothing to grade,
+    /// pass vacuously") while <see cref="SupervisorDeliveryGate"/> could still auto-open a PR for that SAME
+    /// never-graded work — the identical blindness DC-3 already fixed for the 4 other readers, now closed here
+    /// too. A resolved branch missing its repository id is kept with <see cref="Guid.Empty"/> — the grader fails
+    /// it CLOSED rather than silently passing an un-gradeable repo. Empty ⇒ branchless (analysis-only /
+    /// un-integrated) ⇒ the caller skips.
     /// </summary>
-    private static IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> ResolveAcceptanceTargets(SupervisorTurnContext context)
+    private async Task<IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)>> ResolveAcceptanceTargetsAsync(SupervisorTurnContext context, Guid teamId, CancellationToken cancellationToken)
     {
-        var integrated = SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions);
+        var branches = await _publishedBranches.ResolveAsync(context.SupervisorRunId, teamId, context.PriorDecisions, context.AgentProfile?.RepositoryId, cancellationToken).ConfigureAwait(false);
 
-        if (!string.IsNullOrEmpty(integrated) && context.AgentProfile?.RepositoryId is { } repoId)
-            return new[] { (repoId, "", integrated) };
-
-        return SupervisorOutcome.ReadFinalRepositoryBranches(context.PriorDecisions)
-            .Where(b => !string.IsNullOrEmpty(b.SourceBranch))
-            .Select(b => (b.RepositoryId ?? Guid.Empty, b.Alias, b.SourceBranch))
-            .ToList();
+        return branches.Select(b => (b.RepositoryId ?? Guid.Empty, b.Alias, b.SourceBranch)).ToList();
     }
 
     /// <summary>

@@ -19,9 +19,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// <para><see cref="ResolveAsync"/> is PRE-TERMINAL-SAFE: the single-repo merge-derived path needs a repository id
 /// that <see cref="Messages.Dtos.Workflows.WorkflowRun.OutputsJson"/> carries ONLY once the run reaches terminal
 /// completion (<c>AgentSupervisorNode.Finish</c> writes it). A caller with a LIVE <c>SupervisorTurnContext</c>
-/// (the gate's executor, the stop-time terminal-output enrichment) supplies <paramref name="primaryRepositoryId"/>
-/// itself — <c>context.AgentProfile?.RepositoryId</c>, the SAME source <c>SupervisorTurnService.Rehydrate.ResolveAcceptanceTargets</c>
-/// already uses for an identical pre-terminal need. A post-terminal caller (the Room, which only ever calls this
+/// (the gate's executor, the stop-time terminal-output enrichment, DC-2d's own stop-acceptance target resolution)
+/// supplies <paramref name="primaryRepositoryId"/> itself — <c>context.AgentProfile?.RepositoryId</c>. A
+/// post-terminal caller (the Room, which only ever calls this
 /// once <c>WorkflowRunState.IsTerminal</c>) passes null and gets the OutputsJson fallback — harmless as a no-op for
 /// a pre-terminal analysis-only run that genuinely has none either way.</para>
 ///

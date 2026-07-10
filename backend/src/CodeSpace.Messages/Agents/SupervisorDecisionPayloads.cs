@@ -157,6 +157,17 @@ public sealed record SupervisorPublishPayload
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? StopSummary { get; init; }
+
+    /// <summary>
+    /// DC-2d — the EFFECTIVE target branch <see cref="Supervisor.SupervisorDeliveryGate"/> resolved at substitution
+    /// time (the same latest-plan-first, operator-declaration-fallback read its <c>OpenPullRequest</c> authorization
+    /// already uses), frozen onto this decision so the executor opens the PR against the EXACT branch the
+    /// confirmation card showed a human — never re-derived independently, which is what let the card's promise and
+    /// the actual PR target silently diverge before this field existed. Null-omitted when neither side named one
+    /// (the opener then falls back to the bound repository's own default branch).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetBranch { get; init; }
 }
 
 /// <summary>

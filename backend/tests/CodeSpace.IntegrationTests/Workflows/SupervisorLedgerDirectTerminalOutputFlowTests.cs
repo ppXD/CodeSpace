@@ -94,19 +94,16 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
     {
         // The withhold invariant (L4 P1): a FAILED acceptance grade must withhold the reviewable branch — the NEW
         // enrichment step must respect the SAME AcceptancePassed==false flag BuildResult already computes, never
-        // resurrecting a branch behind it. Driven via the MERGE-DERIVED path deliberately: acceptance grading's own
-        // target resolution (SupervisorTurnService.Rehydrate.ResolveAcceptanceTargets) has the identical
-        // ledger-direct blindness this slice fixes for the 4 named readers, but fixing ResolveAcceptanceTargets
-        // itself is a separate, not-yet-scoped concern — this test isolates the ENRICHMENT's own withhold-respecting
-        // guard from that adjacent gap.
+        // resurrecting a branch behind it. Driven via the MERGE-DERIVED path — this isolates the ENRICHMENT's own
+        // withhold-respecting guard from the target-resolution fix proven separately below.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedBoundRepositoryAsync(teamId);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
 
         await SeedSingleRepoMergeAsync(runId, teamId, "codespace/integration/run/turn1");
 
-        // ResolveAcceptanceTargets (the grading target resolver) needs context.AgentProfile?.RepositoryId to clone
-        // the head + run the floor against it — set here so grading genuinely RUNS (and genuinely fails).
+        // ResolveAcceptanceTargetsAsync (the grading target resolver) needs context.AgentProfile?.RepositoryId to
+        // clone the head + run the floor against it — set here so grading genuinely RUNS (and genuinely fails).
         var goalConfig = new SupervisorGoalConfig { Goal = Goal, AcceptanceChecks = new[] { "sh", "-c", "exit 1" }, AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId } };
 
         var result = await RunTurnAsync(runId, teamId, new AlwaysStopDecider(), goalConfig);
@@ -114,6 +111,31 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         result.AcceptancePassed.ShouldBe(false);
         result.IntegratedBranch.ShouldBeNull("a withheld stop must never surface a branch — the enrichment's guard checks the SAME flag BuildResult already computed");
         result.RepositoryBranches.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_ledger_direct_stop_is_genuinely_graded_against_the_operator_floor_not_silently_skipped()
+    {
+        // DC-2d fix: acceptance grading's own target resolution used to be tape-only (merge-derived reads only),
+        // the identical ledger-direct blindness DC-3 fixed for the 4 other "what did this run publish" readers —
+        // so a P0-5 ledger-direct run (a single accepted agent's own pushed manifest, no merge ever ran) saw ZERO
+        // grading targets and the floor silently passed VACUOUSLY (AcceptancePassed stayed null, never false),
+        // while SupervisorDeliveryGate could still auto-open a PR for that same never-graded work. Now the SAME
+        // unified resolver DC-3 built surfaces the ledger-direct branch here too, so grading genuinely runs — this
+        // repo's fake, unclonable remote URL then fails the grade CLOSED, proving the floor was actually REACHED.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
+
+        var goalConfig = new SupervisorGoalConfig { Goal = Goal, AcceptanceChecks = new[] { "sh", "-c", "exit 0" }, AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId } };
+
+        var result = await RunTurnAsync(runId, teamId, new AlwaysStopDecider(), goalConfig);
+
+        result.AcceptancePassed.ShouldBe(false, "before this fix the ledger-direct run had ZERO grading targets and this stayed null (vacuous pass) — it must now be reached and fail closed against the unclonable fake remote");
     }
 
     // ─── Drive a real turn ─────────────────────────────────────────────────────────
