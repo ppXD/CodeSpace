@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -273,6 +274,48 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
+    public async Task A_room_opened_pull_request_touch_is_scoped_to_its_own_run_not_a_decoy()
+    {
+        // Mirrors the approval-count source's own decoy test (below) — the PR-touch source has no join, so a
+        // dropped/weakened WHERE filter (workflowRunIds.Contains / TeamId) could silently leak a touch across runs
+        // with nothing else in the suite catching it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedIntegrationPullRequestManifestAsync(teamId, runId, actorUserId: userId);
+
+        var decoyRunId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, decoyRunId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedIntegrationPullRequestManifestAsync(teamId, decoyRunId, actorUserId: userId);
+
+        var card = await ComputeAsync(teamId);
+
+        card.Runs.Single(r => r.WorkflowRunId == runId).HumanTouches.ShouldBe(1, "this run's own PR-open touch must be found");
+        card.Runs.Single(r => r.WorkflowRunId == decoyRunId).HumanTouches.ShouldBe(1, "the decoy's OWN touch must not bleed onto the run under test, and vice versa — each run counts its own PR-open exactly once");
+    }
+
+    [Fact]
+    public async Task A_later_system_triggered_rebind_of_the_same_pr_row_does_not_erase_the_original_human_actor()
+    {
+        // The discriminator's fragile point (found by the M-1-style sweep): PublishManifestStore.UpsertAsync's
+        // repeat-write path is a bulk ExecuteUpdateAsync that bypasses SaveChangesAsync/ApplyAuditFields entirely —
+        // CreatedBy survives an update ONLY because its SetProperty list never assigns it. This proves that
+        // invariant holds through the REAL store, not just by reading the SetProperty list: a human opens a PR
+        // first (real insert, real ApiUser-shaped actor), then a LATER system-scoped call updates the SAME
+        // (WorkflowRunId, RepositoryAlias) row (a rebind to a fresh branch) — the row's CreatedBy, and therefore
+        // its human-touch classification, must survive unchanged.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+
+        await UpsertIntegrationPullRequestAsync(teamId, runId, actorUserId: userId, pullRequestNumber: 7, branch: "codespace/integration/turn1");
+        await UpsertIntegrationPullRequestAsync(teamId, runId, actorUserId: null, pullRequestNumber: 8, branch: "codespace/integration/turn2");
+
+        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        run.HumanTouches.ShouldBe(1, "the row's ORIGINAL human actor must still be the one the touch count reads — a later system-scoped rebind must not silently erase it");
+    }
+
+    [Fact]
     public async Task A_flow_wait_approval_node_resolution_is_unconditionally_a_human_touch()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -480,6 +523,29 @@ public class UnattendedDeliveryScorecardFlowTests
         });
 
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Same shape as <see cref="SeedIntegrationPullRequestManifestAsync"/> but through the REAL
+    /// <see cref="IPublishManifestStore"/> (not a raw <see cref="CodeSpaceDbContext"/> add) — so a SECOND call for
+    /// the same <paramref name="teamId"/>/<paramref name="runId"/>/alias genuinely exercises
+    /// <c>PublishManifestStore.UpsertAsync</c>'s repeat-write <c>ExecuteUpdateAsync</c> path (the bulk SQL update
+    /// that bypasses <c>ApplyAuditFields</c>), not just a second insert.
+    /// </summary>
+    private async Task UpsertIntegrationPullRequestAsync(Guid teamId, Guid runId, Guid? actorUserId, int pullRequestNumber, string branch)
+    {
+        using var scope = actorUserId is { } uid ? _fixture.BeginScopeAs(uid, teamId, Roles.Admin) : _fixture.BeginScope();
+
+        await scope.Resolve<IPublishManifestStore>().UpsertForIntegrationAsync(new PublishManifestUpsert
+        {
+            TeamId = teamId,
+            WorkflowRunId = runId,
+            RepositoryAlias = "pr-touch-probe",
+            Branch = branch,
+            PublishStateValue = PublishState.Pushed,
+            PullRequestNumber = pullRequestNumber,
+            PullRequestUrl = $"https://example.test/pr/{pullRequestNumber}",
+        }, CancellationToken.None);
     }
 
     private async Task SeedAskHumanDecisionAsync(Guid teamId, Guid runId, string outcomeJson)

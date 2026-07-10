@@ -132,11 +132,17 @@ public sealed class HumanTouchReader : IHumanTouchReader, IScopedDependency
     /// human touch, but it posts no <c>ask_human</c> row, no approval, and no node wait, so it was invisible to the
     /// other three sources. Recorded on <see cref="PublishManifest"/> (<see cref="PublishManifestKind.Integration"/>,
     /// <see cref="PublishManifest.PullRequestNumber"/> set) — <c>CreatedBy</c> is the discriminator, NOT the mere
-    /// presence of a PR number: EF's audit stamping (<c>CodeSpaceDbContext.ApplyAuditFields</c>) writes the real
-    /// authenticated <c>ICurrentUser</c> for a Room-initiated, HTTP-request-scoped call, and
-    /// <see cref="SystemUsers.SeederId"/> (<c>BackgroundSeederUser</c>) for anything running outside an HTTP
-    /// context — a background job, a recurring job, or a future server-authored deliver-at-stop PR-open. This
-    /// keys on WHO opened it, not on whether a PR exists, so a server-side open is correctly never counted here.
+    /// presence of a PR number. On the row's FIRST write (a genuinely new PR), EF's audit stamping
+    /// (<c>CodeSpaceDbContext.ApplyAuditFields</c>, the tracked-entity <c>SaveChangesAsync</c> insert path) sets
+    /// <c>CreatedBy</c> to the real authenticated <c>ICurrentUser</c> for a Room-initiated, HTTP-request-scoped
+    /// call, and to <see cref="SystemUsers.SeederId"/> (<c>BackgroundSeederUser</c>) for anything running outside
+    /// an HTTP context — a background job, a recurring job, or a future server-authored deliver-at-stop PR-open.
+    /// On a LATER update to the same row (e.g. a rebind to a genuinely different turn-scoped branch),
+    /// <c>PublishManifestStore.UpsertAsync</c> uses a bulk <c>ExecuteUpdateAsync</c> that bypasses
+    /// <c>SaveChangesAsync</c>/<c>ApplyAuditFields</c> ENTIRELY — <c>CreatedBy</c> survives only because its
+    /// <c>SetProperty</c> list never assigns it, not because of any audit-field guard. A future edit that adds
+    /// <c>CreatedBy</c> to that list would silently defeat this discriminator; don't. This keys on WHO opened it,
+    /// not on whether a PR exists, so a server-side open is correctly never counted here.
     /// </summary>
     private async Task<IReadOnlyDictionary<Guid, int>> RoomOpenedPullRequestCountsAsync(IReadOnlyCollection<Guid> workflowRunIds, Guid teamId, CancellationToken cancellationToken)
     {
