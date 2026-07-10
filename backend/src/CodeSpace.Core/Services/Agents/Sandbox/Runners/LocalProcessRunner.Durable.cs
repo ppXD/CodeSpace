@@ -640,7 +640,9 @@ public sealed partial class LocalProcessRunner
     /// Write the harness's projected config-home files (skill <c>SKILL.md</c> artifacts, …) into the per-run config-home,
     /// each at its config-home-relative path with intermediate dirs created. No-op without a config-home (nowhere
     /// isolated to put them). These are NOT secrets (default perms — the per-run dir is the boundary), unlike the 0600
-    /// MCP declaration. The harness owns the content; the runner lays the bytes down verbatim. A relative path that
+    /// MCP declaration; a file marked <see cref="ConfigHomeFile.IsExecutable"/> (a hook script the harness config invokes
+    /// by direct path) additionally gets +x — without it the shell's exec fails with 126 and the hook silently never runs.
+    /// The harness owns the content; the runner lays the bytes down verbatim. A relative path that
     /// would escape the config-home is skipped — the last gate before a write, though the slug is already sanitized upstream.
     /// </summary>
     internal static void WriteConfigHomeFiles(IReadOnlyList<ConfigHomeFile> files, string? configHome)
@@ -657,6 +659,9 @@ public sealed partial class LocalProcessRunner
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, file.Content);
+
+            if (file.IsExecutable && !OperatingSystem.IsWindows())
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         }
     }
 

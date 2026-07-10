@@ -82,6 +82,18 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void The_stop_hook_script_is_marked_executable_and_settings_json_is_not()
+    {
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
+
+        var files = Harness.BuildInvocation(task).ConfigHomeFiles;
+
+        files.Single(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath).IsExecutable.ShouldBeTrue(
+            "settings.json invokes the script by direct path (\"$CLAUDE_CONFIG_DIR\"/…), which execs the file — without +x the CLI gets exit 126 and the hook silently never runs");
+        files.Single(f => f.RelativePath == "settings.json").IsExecutable.ShouldBeFalse();
+    }
+
+    [Fact]
     public void The_stop_hook_settings_json_wires_stop_to_the_generated_script_via_the_isolated_config_dir()
     {
         var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };

@@ -203,6 +203,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
             {
                 RelativePath = InLoopAcceptanceHook.ScriptRelativePath,
                 Content = InLoopAcceptanceHook.BuildScript(task.Acceptance!.Command, InLoopAcceptanceHook.MaxBlocks),
+                IsExecutable = true,
             });
             files.Add(new ConfigHomeFile { RelativePath = "hooks.json", Content = StopHookJson });
         }

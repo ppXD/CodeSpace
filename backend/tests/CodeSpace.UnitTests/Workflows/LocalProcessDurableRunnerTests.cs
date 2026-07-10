@@ -552,6 +552,27 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void WriteConfigHomeFiles_marks_an_executable_file_executable_and_leaves_others_read_write()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var configHome = TempDir();
+
+        LocalProcessRunner.WriteConfigHomeFiles(new[]
+        {
+            new ConfigHomeFile { RelativePath = "hooks/stop-acceptance-check.sh", Content = "#!/bin/sh\nexit 0\n", IsExecutable = true },
+            new ConfigHomeFile { RelativePath = "settings.json", Content = "{}" },
+        }, configHome);
+
+        var scriptMode = File.GetUnixFileMode(Path.Combine(configHome, "hooks", "stop-acceptance-check.sh"));
+        scriptMode.HasFlag(UnixFileMode.UserExecute).ShouldBeTrue(
+            "both CLIs invoke the hook by direct command path (\"$CONFIG_DIR\"/hooks/…), which execs the file itself — without +x the shell exits 126 and the hook silently never runs");
+
+        var settingsMode = File.GetUnixFileMode(Path.Combine(configHome, "settings.json"));
+        settingsMode.HasFlag(UnixFileMode.UserExecute).ShouldBeFalse("a plain config file stays non-executable — the flag rides per-file, never blanket");
+    }
+
+    [Fact]
     public void WriteConfigHomeFiles_is_a_no_op_without_files_or_config_home()
     {
         var configHome = TempDir();
