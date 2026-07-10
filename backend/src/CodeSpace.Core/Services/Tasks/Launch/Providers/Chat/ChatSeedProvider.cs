@@ -29,7 +29,7 @@ public sealed class ChatSeedProvider : ITaskLaunchSeedProvider, ISingletonDepend
             SurfaceKind = TaskLaunchSurfaceKinds.Chat,
             TeamId = request.TeamId,
             RepositoryId = request.RepositoryId,
-            BaseBranch = request.BaseBranch,
+            BaseBranch = request.BaseBranch?.Trim(),
         };
 
         return Task.FromResult(seed);

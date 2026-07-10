@@ -34,7 +34,7 @@ public sealed class RepoSeedProvider : ITaskLaunchSeedProvider, ISingletonDepend
             SurfaceKind = TaskLaunchSurfaceKinds.Repo,
             TeamId = request.TeamId,
             RepositoryId = request.RepositoryId,
-            BaseBranch = request.BaseBranch,
+            BaseBranch = request.BaseBranch?.Trim(),
         };
 
         return Task.FromResult(seed);
