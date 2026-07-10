@@ -32,9 +32,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly Workflows.Lifecycle.IRunRecordLogger _recordLogger;
     private readonly Workflows.Artifacts.IArtifactOffloader _offloader;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
@@ -48,6 +49,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _recordLogger = recordLogger;
         _offloader = offloader;
         _manifests = manifests;
+        _publishedBranches = publishedBranches;
         _logger = logger;
     }
 
@@ -66,7 +68,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var execution = await ClaimAndExecuteAsync(supervisorRunId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(context, decision, execution);
+        return await BuildFinalResultAsync(context, teamId, decision, execution, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<SupervisorTurnResult> ForceStopAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, string reason, CancellationToken cancellationToken)
@@ -81,7 +83,38 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var execution = await ClaimAndExecuteAsync(supervisorRunId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(context, decision, execution);
+        return await BuildFinalResultAsync(context, teamId, decision, execution, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// DC-3 — <see cref="BuildResult"/> stays PURE (merge/resolve-derived reads only, unit-pinned directly); this
+    /// wraps it with the ONE additional case it structurally cannot cover: a terminal stop whose accepted work was
+    /// published via the P0-5 LEDGER-DIRECT path (a single contributor's own pushed <c>PublishManifest</c> row, no
+    /// merge/resolve ever ran) surfaced NOTHING in <see cref="SupervisorTurnResult.IntegratedBranch"/> /
+    /// <see cref="SupervisorTurnResult.RepositoryBranches"/> — silently breaking a downstream <c>git.open_pr</c> /
+    /// <c>git.open_change_set</c> node wired to either output, and leaving <c>AgentSupervisorNode.Finish</c>'s own
+    /// output bag blind to run 96695645's own motivating scenario. Purely ADDITIVE: only reached when
+    /// <see cref="BuildResult"/> already found NOTHING (never overrides a genuine merge-derived result) and the
+    /// stop was never withheld by a failed acceptance grade. One resolved branch surfaces as
+    /// <see cref="SupervisorTurnResult.IntegratedBranch"/> (the single-repo shape); more than one surfaces as
+    /// <see cref="SupervisorTurnResult.RepositoryBranches"/> (the multi-repo shape) — the SAME single-vs-many
+    /// discriminator the existing merge-derived readers already use.
+    /// </summary>
+    private async Task<SupervisorTurnResult> BuildFinalResultAsync(SupervisorTurnContext context, Guid teamId, SupervisorDecision decision, SupervisorExecution execution, CancellationToken cancellationToken)
+    {
+        var result = BuildResult(context, decision, execution);
+
+        if (!result.IsFinished || result.AcceptancePassed == false) return result;
+        if (!string.IsNullOrEmpty(result.IntegratedBranch) || result.RepositoryBranches.Count > 0) return result;
+
+        var branches = await _publishedBranches.ResolveAsync(context.SupervisorRunId, teamId, context.PriorDecisions, context.AgentProfile?.RepositoryId, cancellationToken).ConfigureAwait(false);
+
+        return branches.Count switch
+        {
+            0 => result,
+            1 => result with { IntegratedBranch = branches[0].SourceBranch },
+            _ => result with { RepositoryBranches = branches },
+        };
     }
 
     /// <summary>
@@ -103,7 +136,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var execution = await ExecuteUnderClaimAsync(context.InFlight.Id, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(context, decision, execution);
+        return await BuildFinalResultAsync(context, teamId, decision, execution, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

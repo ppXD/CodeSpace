@@ -130,6 +130,7 @@ public sealed class SupervisorPlanDeliveryFlowTests
         scope.Resolve<Core.Services.Workflows.Lifecycle.IRunRecordLogger>(),
         scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
         scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(),
+        scope.Resolve<Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     /// <summary>A decider that always authors a plan with one subtask, proposing the given delivery contract (or none).</summary>

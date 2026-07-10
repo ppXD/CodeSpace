@@ -464,6 +464,20 @@ public static class SupervisorOutcome
     public static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
 
     /// <summary>
+    /// EVERY agent-run id this run's staging (spawn/retry/resolve) decisions folded an objectively REJECTED
+    /// (<see cref="IsAcceptanceRejected"/>) result for, across the WHOLE tape — DC-3's ledger-direct branch resolver
+    /// needs the run-wide set (not one frontier's), since it can surface a contributor from any earlier round that
+    /// never went through a later merge. Pure + replay-deterministic.
+    /// </summary>
+    public static IReadOnlySet<Guid> RejectedAgentRunIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => ReadAgentResults(d.OutcomeJson))
+            .Where(IsAcceptanceRejected)
+            .Select(r => r.AgentRunId)
+            .ToHashSet();
+
+    /// <summary>
     /// The FOLDED result for one specific agent-run id, searched across every staging (spawn/retry/resolve) decision
     /// in the tape — A2 (P4-2)'s read of "what did THIS unit's prior attempt actually do" (its self-report×grade
     /// <see cref="SupervisorAgentResult.Contradiction"/>, its resolved <see cref="SupervisorAgentResult.Model"/>) so a

@@ -905,6 +905,83 @@ public class RoomProjectorFlowTests
         room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.ShouldNotContain(a => a.Kind == RoomActionKind.OpenPullRequest);
     }
 
+    [Fact]
+    public async Task A_ledger_direct_published_run_also_offers_the_OpenPullRequest_action()
+    {
+        // DC-3 (task_8008ae86): run 96695645's own motivating scenario — a single accepted agent already pushed to
+        // a manifest row, no merge/integration decision ever ran. Before DC-3, PublishStateAsync read ONLY the
+        // merge-derived tape and reported HasPublishedBranch=false — the button stayed disabled for a run that
+        // genuinely already published real work.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the feature");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the feature", resultSummary: "shipped it");
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnDecisionAsync(teamId, run, (agentRunId, new[] { "a.txt" }));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "primary", RepositoryId = repoId,
+                Branch = "codespace/agent/fix", ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+            }, CancellationToken.None);
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+
+        var action = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.SingleOrDefault(a => a.Kind == RoomActionKind.OpenPullRequest);
+
+        action.ShouldNotBeNull("a ledger-direct published run (no merge at all) must still offer the Open-PR action");
+        action!.Enabled.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_pr_opened_outside_any_workflow_node_still_surfaces_a_delivery_card()
+    {
+        // DC-3 (the 4th reader): the Room's terracotta PR card previously read ONLY a git.open_pr WORKFLOW NODE's
+        // own output — a PR opened via the Room's own Open-PR button (or a server-authored delivery step) never
+        // ran that node, so the card stayed silent even though the run's own "View PR" link worked fine.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the feature");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the feature", resultSummary: "shipped it");
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnDecisionAsync(teamId, run, (agentRunId, new[] { "a.txt" }));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var manifests = scope.Resolve<IPublishManifestStore>();
+
+            await manifests.UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "primary", RepositoryId = repoId,
+                Branch = "codespace/agent/fix", ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+            }, CancellationToken.None);
+
+            await manifests.UpsertForIntegrationAsync(new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "primary", RepositoryId = repoId,
+                Branch = "codespace/agent/fix", PublishStateValue = PublishState.Pushed,
+                PullRequestNumber = 42, PullRequestUrl = "https://example.test/org/repo/pull/42",
+            }, CancellationToken.None);
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var delivery = turn.Blocks.OfType<DeliveryBlock>().Single();
+        delivery.Reference.ShouldBe("#42");
+        delivery.Url.ShouldBe("https://example.test/org/repo/pull/42");
+        delivery.BranchHead.ShouldBe("codespace/agent/fix");
+        // BranchBase has NO manifest-row fallback (RoomProjector.DeliveryFromManifestAsync reads it ONLY off the
+        // resolver's own join) — a non-null value here is the genuine proof the resolver join fired, since
+        // BranchHead alone can't distinguish "joined off the resolver" from "read straight off the bare manifest".
+        delivery.BranchBase.ShouldBe("main", "the repository's own default branch — only ever populated via the resolver's join, never the manifest row directly");
+    }
+
     private async Task SeedIntegrationMergeAsync(Guid teamId, Guid runId, string integratedBranch)
     {
         using var scope = _fixture.BeginScope();

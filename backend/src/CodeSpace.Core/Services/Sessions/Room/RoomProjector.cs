@@ -36,9 +36,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly ISupervisorDecisionLog _decisionLog;
     private readonly IWorkPlanChecklistService _checklists;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly CodeSpaceDbContext _db;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, CodeSpaceDbContext db)
     {
         _sessions = sessions;
         _phases = phases;
@@ -47,6 +48,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         _decisionLog = decisionLog;
         _checklists = checklists;
         _manifests = manifests;
+        _publishedBranches = publishedBranches;
         _db = db;
     }
 
@@ -151,9 +153,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>
     /// PR-6's gating signal for <see cref="RoomActionKind.OpenPullRequest"/> — null (button omitted) for a
     /// non-terminal run, so a running turn pays zero extra reads. Reads the SAME durable facts
-    /// <see cref="IRoomPullRequestService"/> itself opens a PR off (the terminal decision tape via
-    /// <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/> / <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/>),
-    /// so "can I open one" and "what does opening one actually do" can never drift.
+    /// <see cref="IRoomPullRequestService"/> itself opens a PR off (<see cref="ISupervisorPublishedBranchResolver"/>,
+    /// DC-3 — merge-derived OR ledger-direct), so "can I open one" and "what does opening one actually do" can
+    /// never drift.
     /// </summary>
     private async Task<RoomPublishState?> PublishStateAsync(Guid runId, Guid teamId, Messages.Enums.WorkflowRunStatus status, CancellationToken cancellationToken)
     {
@@ -161,10 +163,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var hasBranch = !string.IsNullOrEmpty(SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions))
-            || SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count > 0;
+        var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
 
-        if (!hasBranch) return new RoomPublishState { HasPublishedBranch = false };
+        if (branches.Count == 0) return new RoomPublishState { HasPublishedBranch = false };
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var openedUrl = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })?.PullRequestUrl;
@@ -385,7 +386,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             .GroupBy(e => e.AgentRunId)
             .ToDictionary(g => g.Key, g => g.First().Text!.Trim());
 
-        var delivery = await DeliveryAsync(runId, cancellationToken).ConfigureAwait(false);
+        var delivery = await DeliveryAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         // The run's durable plan checklist (contract + tape-derived states) — null for pre-plan runs, which then
         // project exactly as before (the per-round plan stat rows carry the story).
@@ -548,15 +549,38 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         catch (JsonException) { return "tool"; }
     }
 
-    /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches). Null when the turn opened none.</summary>
-    private async Task<RoomDelivery?> DeliveryAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches) — OR, DC-3, a fallback onto <c>PublishManifest</c> for a PR opened OUTSIDE any workflow node (the Room's own Open-PR button, or a server-authored delivery step) that a pre-wired <c>git.open_pr</c> node never ran for. Null when the turn opened none either way.</summary>
+    private async Task<RoomDelivery?> DeliveryAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         var nodes = await _db.WorkflowRunNode.AsNoTracking()
             .Where(n => n.RunId == runId)
             .Select(n => new { n.OutputsJson, n.InputsJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return nodes.Select(n => RoomDeliveryParser.Parse(n.OutputsJson, n.InputsJson)).FirstOrDefault(d => d != null);
+        return nodes.Select(n => RoomDeliveryParser.Parse(n.OutputsJson, n.InputsJson)).FirstOrDefault(d => d != null)
+            ?? await DeliveryFromManifestAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Joins the resolver's branch (for head/base) with the manifest's own PR reference (number/url), by alias — the ONE non-node-output source of "did this run open a PR" the card can show.</summary>
+    private async Task<RoomDelivery?> DeliveryFromManifestAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var opened = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 });
+
+        if (opened is null) return null;
+
+        var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
+        var branch = branches.FirstOrDefault(b => b.Alias == opened.RepositoryAlias);
+
+        return new RoomDelivery
+        {
+            Title = $"Pull request #{opened.PullRequestNumber}",
+            Reference = opened.PullRequestNumber is { } n ? $"#{n}" : null,
+            BranchHead = branch?.SourceBranch ?? opened.Branch,
+            BranchBase = branch?.TargetBranch,
+            Url = opened.PullRequestUrl,
+        };
     }
 
     /// <summary>The run's append-only change watermark — MAX(Sequence) over its records, 0 before any record. The streaming cursor + the focused turn's block Seq.</summary>
