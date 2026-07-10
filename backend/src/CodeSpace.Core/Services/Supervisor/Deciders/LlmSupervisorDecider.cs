@@ -695,7 +695,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
     }
 
-    /// <summary>Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted (retry within the cap, or stop and leave the conflict for a human).</summary>
+    /// <summary>Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted — issue another 'resolve' (within the cap) or 'stop'. The copy deliberately names the RESOLVE verb: an earlier draft said "Retry the resolution", and the live golden eval proved a model obediently picks the 'retry' VERB off that word — re-running a source subtask instead of the reconciliation (M0, 2026-07-11).</summary>
     private static void AppendResolutionVerdict(StringBuilder builder, SupervisorPriorDecision prior)
     {
         var verdict = SupervisorOutcome.ReadResolutionVerdict(prior.OutcomeJson);
@@ -703,7 +703,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine(verdict switch
         {
             SupervisorResolutionVerdict.Verified => "    resolution VERIFIED — the reconciliation built and passed the tests; it is safe to accept (merge again / open a PR).",
-            SupervisorResolutionVerdict.Unverified => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. Retry the resolution or stop and leave the conflict for a human.",
+            SupervisorResolutionVerdict.Unverified => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. Issue another 'resolve' (a fresh reconciliation attempt, within the resolve cap), or 'stop' and leave the conflict for a human — never 'retry' (that re-runs a source subtask, not the reconciliation).",
             _ => "    resolution verdict unknown — the resolver has not produced a verified result.",
         });
     }
