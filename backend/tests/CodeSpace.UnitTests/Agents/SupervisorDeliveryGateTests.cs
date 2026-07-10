@@ -152,14 +152,249 @@ public class SupervisorDeliveryGateTests
     [Theory]
     [InlineData(RoomPullRequestDisposition.Opened)]
     [InlineData(RoomPullRequestDisposition.AlreadyOpened)]
-    [InlineData(RoomPullRequestDisposition.Skipped)]
     public void A_stop_after_a_fully_satisfied_publish_attempt_is_untouched(RoomPullRequestDisposition disposition)
     {
         var context = Context(new DeliverySpec { OpenPullRequest = true },
             Plan(1, openPullRequest: true),
             Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(disposition)));
 
-        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("every target is satisfied — nothing left to enforce, let stop through");
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("a real PR exists for every non-failed target — nothing left to enforce, let stop through");
+    }
+
+    // ── H1 (vacuous-success fix): an EMPTY publish result is NOT satisfaction ─────────
+
+    [Fact]
+    public void A_stop_after_a_publish_attempt_that_resolved_zero_targets_parks_instead_of_vacuously_passing()
+    {
+        // The verified false-green chain: empty-handed stop passes I3 → this gate forces a publish → the branch
+        // resolver finds NOTHING to open a PR from → the opener returns PullRequests=[] → the old satisfaction
+        // rung filtered ONLY Failed, so the empty set passed vacuously and a required-PR run completed with zero
+        // PRs. An empty result must park: the contract is UNSATISFIED, not satisfied-by-absence.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted.ShouldNotBeNull("an empty publish result satisfies nothing — vacuous success is the exact hole this gate exists to close");
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("no published branch", Case.Insensitive);
+    }
+
+    [Fact]
+    public void A_missing_publish_outcome_parks_the_same_as_an_empty_one()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, outcomeJson: "{}"));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "an unreadable/absent result proves nothing was delivered — fail closed, never fail open");
+    }
+
+    // ── H1 (Skipped-as-satisfied fix): policy-skipped is a HUMAN decision, not satisfaction ──
+
+    [Fact]
+    public void A_stop_after_an_all_skipped_publish_attempt_parks_naming_the_patch_only_policy()
+    {
+        // PatchOnly repos yield Skipped by deliberate policy — but the operator ALSO required a PR. Two operator
+        // intents conflict; the gate must surface the conflict to a human, never silently pick "no PR" and call
+        // the contract satisfied. (The full WaivedByPolicy state with recorded authority lands in Phase T — the
+        // interim waiver is the human's answer to THIS card.)
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(RoomPullRequestDisposition.Skipped)));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("patch-only", Case.Insensitive);
+    }
+
+    [Fact]
+    public void A_mixed_opened_and_skipped_publish_attempt_still_satisfies()
+    {
+        // Multi-repo: one repo got its PR, a sibling is patch-only. Something REAL was delivered against the
+        // contract — the skipped sibling is policy-consistent, not a vacuous pass.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(
+                new RoomPullRequestOpened { Alias = "primary", Disposition = RoomPullRequestDisposition.Opened },
+                new RoomPullRequestOpened { Alias = "docs", Disposition = RoomPullRequestDisposition.Skipped })));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull();
+    }
+
+    // ── H1 (adjudication): an answered Delivery-gate card buys ONE re-attempt, then stands as the waiver ──
+    //
+    // Without this, every park below is a dead end: the human answers, the model stops again, the gate re-parks
+    // on the identical tape state forever (the audit's own "re-parks every stop" finding). The answer is
+    // deliberately CONTENT-BLIND — never parsed into an authorization (that would be the prefix-matching
+    // laundering hole). Because the card invites FIXING the blocker and only this gate can re-issue a publish,
+    // an answer first buys exactly one fresh server re-attempt (an answer that fixed the world produces the PR);
+    // only a re-check that is STILL unsatisfied lets the answer stand as the interim waiver and release the
+    // stop. Structured waivers with recorded authority replace this in Phase T.
+
+    [Fact]
+    public void An_answered_gate_card_after_an_unsatisfied_publish_buys_one_fresh_re_attempt()
+    {
+        // e.g. the human flipped the repo off patch-only and answered "retry" — the ONLY actor that can re-issue
+        // a publish is this gate, so the answer must produce a re-attempt, never a direct completion waiver.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            GateCard(3, answer: "fixed the blocker — retry"));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.Publish);
+    }
+
+    [Fact]
+    public void A_failed_publish_with_an_answered_gate_card_re_attempts_instead_of_re_parking_forever()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(RoomPullRequestDisposition.Failed, error: "boom")),
+            GateCard(3, answer: "provider is back up, go"));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.Publish);
+    }
+
+    [Fact]
+    public void A_still_unsatisfied_re_check_after_an_answered_card_releases_the_stop()
+    {
+        // The full adjudication arc: publish found nothing → card answered → ONE re-check ran → still nothing.
+        // The human's answer now stands as the interim waiver — the run completes without the PR instead of
+        // cycling park→answer→park forever.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            GateCard(3, answer: "understood — finish without the PR"),
+            Decision(SupervisorDecisionKinds.Publish, 4, EmptyPublishOutcome()));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("adjudicated AND re-verified — the waiver stands");
+    }
+
+    [Fact]
+    public void A_re_check_that_still_fails_after_an_answered_card_also_releases()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, PublishOutcome(RoomPullRequestDisposition.Failed, error: "boom")),
+            GateCard(3, answer: "give up on the PR then"),
+            Decision(SupervisorDecisionKinds.Publish, 4, PublishOutcome(RoomPullRequestDisposition.Failed, error: "boom")));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("one adjudicated re-attempt is the bound — the Room button remains for a manual open afterwards");
+    }
+
+    [Fact]
+    public void A_re_check_that_SUCCEEDS_after_an_answered_card_satisfies_normally()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            GateCard(3, answer: "pushed the branch — retry"),
+            Decision(SupervisorDecisionKinds.Publish, 4, PublishOutcome(RoomPullRequestDisposition.Opened)));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("the re-attempt opened the real PR — the contract is genuinely satisfied, not waived");
+    }
+
+    [Fact]
+    public void An_answered_gate_card_invalidated_by_fresh_work_before_the_publish_does_not_release()
+    {
+        // The answer adjudicated an OLDER state; a merge then moved the world and the publish after it produced
+        // a fresh verdict the human has never seen. Stale adjudication must not leak forward.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            GateCard(2, answer: "fine"),
+            Decision(SupervisorDecisionKinds.Merge, 3, "{}"),
+            Decision(SupervisorDecisionKinds.Publish, 4, EmptyPublishOutcome()));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+    }
+
+    [Fact]
+    public void An_unanswered_gate_card_does_not_release()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            GateCard(3, answer: null));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+    }
+
+    [Fact]
+    public void Fresh_work_after_an_answered_gate_card_gets_a_new_publish_attempt_not_a_stale_release()
+    {
+        // Adjudication covered round 1's emptiness; round 2 then merged REAL work. The stale release must not
+        // let the stop skip round 2's own delivery obligation — the state-change rung outranks the release.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            GateCard(3, answer: "fine"),
+            Decision(SupervisorDecisionKinds.Merge, 4, "{}"));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.Publish);
+    }
+
+    [Fact]
+    public void An_answered_unauthorized_park_releases_the_stop_but_never_substitutes_a_publish()
+    {
+        // The human answered the "never confirmed" card. A free-text answer is NOT parsed into an authorization
+        // (content-blind release) — the stop passes, but no PR is auto-opened on the strength of prose.
+        var context = Context(deliverySpec: null,
+            Plan(1, openPullRequest: true),
+            GateCard(2, answer: "ok, no PR needed"));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision()).ShouldBeNull("adjudicated — but only the stop is released; prose never becomes PR authorization");
+    }
+
+    [Fact]
+    public void A_non_gate_ask_card_never_releases()
+    {
+        // Only THIS gate's own cards adjudicate its parks — an unrelated answered ask (a content question, a plan
+        // confirmation) proves nothing about the delivery contract.
+        var context = Context(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()),
+            AskCard(3, question: "which auth provider should I use?", answer: "google"));
+
+        SupervisorDeliveryGate.Validate(context, StopDecision())!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+    }
+
+    // ── H1: no conversation surface — a park would be unanswerable, so force-stop with the diagnosis ──
+
+    [Fact]
+    public void An_unsatisfied_publish_with_no_conversation_surface_force_stops_with_the_delivery_diagnosis()
+    {
+        // Without a conversation, the substituted ask degrades to an unanswerable no-card self-advance and the
+        // run would grind no-progress turns into a misleading NoProgress stop — burning decider calls to say the
+        // wrong thing. Mirror GatePlanConfirmationAsync: stop immediately, naming the delivery reason.
+        var context = NoConversationContext(new DeliverySpec { OpenPullRequest = true },
+            Plan(1, openPullRequest: true),
+            Decision(SupervisorDecisionKinds.Publish, 2, EmptyPublishOutcome()));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        SupervisorOutcome.ReadStopReason(substituted.PayloadJson).ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable);
+    }
+
+    [Fact]
+    public void An_unauthorized_contract_with_no_conversation_surface_also_force_stops_distinctly()
+    {
+        var context = NoConversationContext(deliverySpec: null, Plan(1, openPullRequest: true));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        SupervisorOutcome.ReadStopReason(substituted.PayloadJson).ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable);
     }
 
     [Fact]
@@ -261,9 +496,14 @@ public class SupervisorDeliveryGateTests
     {
         Goal = "ship", SupervisorRunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), NodeId = "sup", TurnNumber = prior.Length + 1,
         PriorDecisions = prior, DeliverySpec = deliverySpec,
+        // A usable conversation surface is the common case — the no-surface force-stop has its own dedicated tests.
+        ConversationId = Guid.NewGuid(),
     };
 
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) => Context(deliverySpec: null, prior);
+
+    private static SupervisorTurnContext NoConversationContext(DeliverySpec? deliverySpec, params SupervisorPriorDecision[] prior) =>
+        Context(deliverySpec, prior) with { ConversationId = null };
 
     /// <summary>A Plan decision whose own PAYLOAD (not outcome) carries a delivery contract — <c>ReadPlanDelivery</c> reads the PAYLOAD (the model's authored — here already-clamped — proposal), mirroring what <c>ClampPlanDelivery</c> freezes onto a real plan before persist.</summary>
     private static SupervisorPriorDecision Plan(long sequence, bool openPullRequest, string? targetBranch = null)
@@ -288,6 +528,23 @@ public class SupervisorDeliveryGateTests
 
     private static SupervisorPriorDecision Decision(string kind, long sequence, string? outcomeJson) =>
         new() { Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
+
+    /// <summary>One of THIS gate's own parked cards (question carries the pinned prefix), answered or not.</summary>
+    private static SupervisorPriorDecision GateCard(long sequence, string? answer) =>
+        AskCard(sequence, question: $"{SupervisorDeliveryGate.QuestionPrefix}a pull request could not be opened — resolve", answer);
+
+    private static SupervisorPriorDecision AskCard(long sequence, string question, string? answer) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options),
+        OutcomeJson = JsonSerializer.Serialize(new { question, askHumanToken = "tok", answer }, AgentJson.Options),
+    };
+
+    private static string EmptyPublishOutcome() =>
+        JsonSerializer.Serialize(new RoomPullRequestResult { PullRequests = Array.Empty<RoomPullRequestOpened>() }, AgentJson.Options);
+
+    private static string PublishOutcome(params RoomPullRequestOpened[] pullRequests) =>
+        JsonSerializer.Serialize(new RoomPullRequestResult { PullRequests = pullRequests }, AgentJson.Options);
 
     private static SupervisorDecision StopDecision() => new()
     {

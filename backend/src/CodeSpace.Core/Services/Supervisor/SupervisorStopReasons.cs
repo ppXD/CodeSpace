@@ -27,6 +27,9 @@ public static class SupervisorStopReasons
     /// <summary>The S3 plan-confirmation gate has NO surface to ask on (the run has no usable conversation — e.g. a task launch, which does not wire one yet) — the run stops rather than spawning an unconfirmed plan (fail-closed, no silent bypass).</summary>
     public const string PlanConfirmationUnavailable = "plan confirmation unavailable (no conversation surface)";
 
+    /// <summary>The DC-2b delivery gate found the required pull request UNSATISFIED (nothing published to open one from, policy-skipped, or failed) and the run has NO conversation surface to adjudicate on — it stops with the delivery diagnosis instead of grinding no-progress turns on unanswerable parks (H1; mirrors <see cref="PlanConfirmationUnavailable"/>).</summary>
+    public const string DeliveryAdjudicationUnavailable = "delivery contract unsatisfied (no conversation surface to adjudicate)";
+
     /// <summary>A spawn/retry was refused because the latest plan version stands REJECTED (the operator answered its confirmation with revision feedback) and no revised version has been authored — a rejected plan may never be executed.</summary>
     public const string RejectedPlanSpawnRefused = "rejected plan spawn refused";
 

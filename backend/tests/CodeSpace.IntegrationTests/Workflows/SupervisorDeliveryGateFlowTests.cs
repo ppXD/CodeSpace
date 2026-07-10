@@ -161,8 +161,11 @@ public sealed class SupervisorDeliveryGateFlowTests
 
         var substituted = await RunTurnAsync(runId, teamId, decider, goalConfig);   // turn 2: tries to stop
 
-        substituted.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a pure model proposal with neither a confirmed card nor an operator declaration must never auto-open a PR");
-        substituted.PayloadJson.ShouldContain("never confirmed", customMessage: "the park must name WHY, so a human knows to confirm or open it manually");
+        // H1: this run has NO conversation surface — a park would be unanswerable, so the gate force-stops with
+        // the DISTINCT delivery diagnosis instead (never a silent auto-open, never a misleading NoProgress grind).
+        substituted.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "a pure model proposal with neither a confirmed card nor an operator declaration must never auto-open a PR");
+        SupervisorOutcome.ReadStopReason(substituted.PayloadJson).ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable);
+        substituted.PayloadJson.ShouldContain("never confirmed", customMessage: "the stop detail must name WHY, so a human knows to confirm or open it manually");
 
         (await ListManifestsAsync(runId, teamId)).ShouldNotContain(m => m.Kind == PublishManifestKind.Integration, "no PR was ever opened");
     }
@@ -193,11 +196,13 @@ public sealed class SupervisorDeliveryGateFlowTests
         failed.Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
         failed.Error.ShouldContain("boom");
 
-        // The NEXT stop's gate reads this diagnosed failure and parks instead of blind-retrying (mirrors the
-        // unit-level "never re-substitute after a failure" ladder step, now proven with a REAL persisted outcome).
-        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig);
-        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman);
-        parked.PayloadJson.ShouldContain("boom");
+        // The NEXT stop's gate reads this diagnosed failure and never blind-retries (mirrors the unit-level
+        // ladder step, now proven with a REAL persisted outcome). H1: with NO conversation surface to park on,
+        // that surfaces as the DISTINCT force-stop carrying the diagnosis — never another publish substitution.
+        var stopped = await RunTurnAsync(runId, teamId, decider, goalConfig);
+        stopped.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
+        SupervisorOutcome.ReadStopReason(stopped.PayloadJson).ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable);
+        stopped.PayloadJson.ShouldContain("boom");
     }
 
     [Fact]
@@ -232,9 +237,14 @@ public sealed class SupervisorDeliveryGateFlowTests
     }
 
     [Fact]
-    public async Task A_patch_only_repository_is_skipped_not_failed_and_the_run_still_completes()
+    public async Task A_patch_only_repository_parks_on_the_policy_conflict_and_completes_only_after_a_human_adjudicates()
     {
+        // H1 (Skipped-as-satisfied fix): PatchOnly forbids the PR the operator ALSO required — two operator
+        // intents conflict. The old behavior silently equated the skip with satisfaction; the honest behavior
+        // surfaces the conflict once (ask_human naming patch-only), and the human's answer — content-blind, the
+        // interim waiver until Phase T's structured WaivedByPolicy — releases the stop exactly once for this state.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
         var repoId = await SeedBoundRepositoryAsync(teamId);
         await SetPatchOnlyAsync(repoId);
         var runId = await SeedSupervisorRunAsync(teamId, userId);
@@ -246,23 +256,55 @@ public sealed class SupervisorDeliveryGateFlowTests
         var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
         var decider = new AlwaysStopDecider();
 
-        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig);
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
         publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish);
 
         var result = JsonSerializer.Deserialize<RoomPullRequestResult>(publish.OutcomeJson!, AgentJson.Options)!;
         result.PullRequests.Single().Disposition.ShouldBe(RoomPullRequestDisposition.Skipped, "a patch-only repo is a deliberate policy choice, never a failure a human needs to fix");
 
-        var stop = await RunTurnAsync(runId, teamId, decider, goalConfig);
-        stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "a skip is satisfied — nothing left to park about, the run completes");
+        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "policy forbids the required PR — the conflict goes to a human, never silently resolved as satisfied");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(parked.PayloadJson, AgentJson.Options)!
+            .Question.ShouldContain("patch-only", Case.Insensitive);
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "understood — patch-only is fine, finish without the PR");
+
+        var reCheck = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        reCheck.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "the answer buys exactly one fresh re-attempt — had the human flipped the publish mode, THIS is where the real PR would open");
+
+        var stop = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "still policy-blocked after the adjudicated re-check — the answer stands as the interim waiver, the run completes");
+    }
+
+    /// <summary>A real conversation channel — without one the ask executor degrades (no card, no wait), so the park could never be answered.</summary>
+    private async Task<Guid> SeedConversationAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var slug = "sup-delivery-" + Guid.NewGuid().ToString("N")[..8];
+        return await scope.Resolve<Core.Services.Chat.IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, userId, CancellationToken.None);
+    }
+
+    /// <summary>Answers the run's single pending Action wait via the REAL token-correlated resume path (mirrors <c>SupervisorAskHumanFlowTests</c>' own helper).</summary>
+    private async Task AnswerPendingAskAsync(Guid runId, Guid teamId, Guid actorUserId, string answer)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var token = (await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .SingleAsync(w => w.RunId == runId && w.WaitKind == Messages.Constants.WorkflowWaitKinds.Action && w.Status == Messages.Constants.WorkflowWaitStatuses.Pending)).Token;
+
+        var result = await scope.Resolve<Core.Services.Workflows.Engine.IWorkflowResumeService>()
+            .ResumeByActionTokenAsync(token, Core.Services.Supervisor.Executors.RealSupervisorActionExecutor.AnswerActionKey, actorUserId, answer, values: null, teamId, CancellationToken.None);
+
+        result.ShouldBe(Core.Services.Workflows.Engine.ActionResumeResult.Resumed);
     }
 
     // ─── Drive a real turn ─────────────────────────────────────────────────────────
 
-    private async Task<SupervisorPriorDecision> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig, Action<ContainerBuilder>? configureScope = null)
+    private async Task<SupervisorPriorDecision> RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig, Action<ContainerBuilder>? configureScope = null, Guid? conversationId = null)
     {
         using var scope = configureScope is null ? _fixture.BeginScope() : _fixture.BeginScope(configureScope);
         var service = NewTurnService(scope, decider);
-        await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
+        await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId, goalConfig, CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         var row = await verify.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
