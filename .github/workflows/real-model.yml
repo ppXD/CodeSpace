@@ -111,7 +111,7 @@ jobs:
           fi
 
   real-model-wholeloop:
-    name: real model (live-brain whole-loop)
+    name: real model (live-brain whole-loop — supervisor arcs)
     runs-on: ubuntu-latest
     # The live brain authors up to maxRounds (12 — a FAIR budget for a real, less-efficient model to reach the accept
     # head) decisions, each a live API call (~15-60s), plus real git clone/capture/integrate per spawned agent + the
@@ -212,8 +212,145 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
       - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
-        # Scoped to the DB-backed whole-loop RealModel classes in E2ETests:
-        #   ~RealModelSupervisorWholeLoop → the supervisor drive→accept kill-gate (+ its two reaction arcs).
+        # Scoped to the SUPERVISOR whole-loop arcs ONLY (the heaviest gating set: headline drive→accept + the two
+        # reaction arcs + heterogeneous dispatch + real-coding solve + multi-repo + DoD). The session / planner /
+        # delivery-gate whole-loops run on the PARALLEL sibling job below (real-model-wholeloop-aux) — one lane's
+        # grown volume killed two consecutive runs at its own ceiling (60:00, then 120:00 on 2026-07-10), so the
+        # split keeps each half inside a budget where a kill means a genuinely wedged run, not sheer volume.
+        # GATING on the real-model-DROVE-to-completion criterion: the HEADLINE drive→accept arc HARD-fails main unless the
+        # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
+        # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
+        # only if EVERY non-infra attempt parks short). A CODE FAULT reds at once; a gateway timeout is non-gating LOUD infra.
+        # The reaction arcs (conflict→resolve, failure→retry) NOW also GATE: the live model must drive a SAFE recovery on
+        # the real adverse state (spawn→conflict→resolve|stop|escalate, or spawn→fail→retry|escalate) or RED after the same
+        # best-of-N (CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS, uniform). Same CodeFault-reds-at-once / gateway-is-infra contract.
+        # Each test self-skips when ALL CODESPACE_LLM_* secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass),
+        # fork stays green — and FAILS on a partial config.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-wholeloop.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the whole-loop gates actually ran (no silent skip)
+        # Same fail-closed guard as the component job: `dotnet test --filter` exits 0 on zero matches, so an FQN/trait
+        # drift that de-selects the supervisor OR session whole-loop must RED this lane, not pass green at zero cost.
+        run: |
+          trx=backend/TestResults/real-model-wholeloop.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected RealModel whole-loop gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
+
+  real-model-wholeloop-aux:
+    name: real model (live-brain whole-loop — session · planner · delivery arcs)
+    runs-on: ubuntu-latest
+    # The live brain authors up to maxRounds (12 — a FAIR budget for a real, less-efficient model to reach the accept
+    # head) decisions, each a live API call (~15-60s), plus real git clone/capture/integrate per spawned agent + the
+    # acceptance grade; the headline arc may re-run up to best-of-N (3, set below) independent times when the model parks
+    # short. The original 60-min ceiling was calibrated for ≈3 attempts × ~12 rounds + 2 reaction arcs — the lane has
+    # since grown far past that budget (heterogeneous dispatch, real-coding solve, multi-repo, DoD, session + planner
+    # gates, the delivery-gate adjudication arc), and a 2026-07-10 run was killed at EXACTLY 60:00 mid-arc — an
+    # evaluator-infra cancel, not a model verdict. 120 holds the grown worst case; a genuinely wedged run still dies
+    # loudly here rather than running unbounded.
+    timeout-minutes: 120
+
+    # A plain host runner (NOT a privileged bwrap container). This lane's gate is the LIVE BRAIN driving the real
+    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). The spawned
+    # agent here is a TRUSTED test fake (FileWritingFakeCli), so it needs no confinement; and bwrap on a plain runner is
+    # FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the same userns on
+    # some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss). So we force the
+    # already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe unavailable → unconfined;
+    # REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on ubuntu-latest (the test self-skips if not).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        # Host-port mapped (NOT a container-alias) — this job runs directly on the runner, so the E2ETests fixture
+        # reaches Postgres at localhost:5432 (its appsettings default), exactly like the e2e-http job.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # best-of-N capability-floor for the strict whole-loop gate (Rule 8 escape hatch): 3 independent attempts absorb a
+      # real model's run-to-run variance so a single off-run can't flaky-red main, while a persistent park-short still REDs.
+      CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
+      # Force the fake agent UNCONFINED on this brain-gate lane: a non-existent bwrap binary makes BubblewrapSandbox's
+      # probe degrade to "unavailable" → the agent runs unconfined (deterministic), bypassing plain-host bwrap flakiness.
+      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the agent is a trusted test fake, and confinement is gated
+      # for real in the sandbox lane. A best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-brain-gate-lane
+      # ALSO disable the prlimit resource caps (caps=0 → ProcessRlimits.Wrap returns the command UNCHANGED → no prlimit
+      # wrapper). Disabling bwrap left prlimit ARMED, and RLIMIT_NPROC is a PER-UID cap: on a plain unprivileged shared
+      # ubuntu-latest host it counts the runner's WHOLE process table, so a heavier runner-image baseline can push the
+      # wrapped fake's fork()s over the cap → the kernel SIGNAL-KILLS it → the durable spool's $? marker records
+      # 128+signal → AgentRun Status=Failed → realPatches=0 (the false-red observed from ~02:00 UTC 2026-06-24). The
+      # green prlimit lanes run as ROOT in --privileged containers, where NPROC headroom is unlimited + the process
+      # table is near-empty, so the cap never bites. The agent here is a trusted fake that needs no fork-bomb/file-size
+      # cap; real resource confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        # Installs the REAL Claude Code CLI so the live CODING-AGENT arm (the_real_coding_agent_solves_a_goal_relevance_task)
+        # can drive a live model to author a real solution.sh + have the goal-relevance oracle grade whether it SOLVED the
+        # task. ClaudeCodeHarness resolves `claude` on PATH + projects the seeded gateway credential onto its env
+        # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
+        # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
+        #
+        # FATAL install (was continue-on-error during the report-only rollout): the_real_coding_agent_solves arm is now a
+        # GATING best-of-N solve-rate gate, so a missing `claude` binary must RED the lane, never let the gating arm self-skip
+        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The v2.1.x pin is confirmed-installable by the
+        # prior report-only runs; a future pinned-version miss is a real lane break to fix, not a silent skip.
+        run: |
+          # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
+          # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
+          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          claude --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
+        # Scoped to the DB-backed whole-loop RealModel classes in E2ETests (the supervisor arcs run on the
+        # PARALLEL sibling job above — see its comment for the volume-split rationale):
         #   ~RealModelSession → the session whole-loop gates (RealModelSessionWholeLoopE2ETests + the session convergence
         #     whole-loop). Same de-selection bug as the component job: their class token is "RealModelSession", so the old
         #     single-clause filter ran them on NO lane. Both are [Surface=Engine] DB+git whole-loop tests, so this Postgres
@@ -236,16 +373,16 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate"
+          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate"
           --logger "console;verbosity=normal"
-          --logger "trx;LogFileName=real-model-wholeloop.trx"
+          --logger "trx;LogFileName=real-model-wholeloop-aux.trx"
           --results-directory backend/TestResults
 
       - name: Assert the whole-loop gates actually ran (no silent skip)
         # Same fail-closed guard as the component job: `dotnet test --filter` exits 0 on zero matches, so an FQN/trait
         # drift that de-selects the supervisor OR session whole-loop must RED this lane, not pass green at zero cost.
         run: |
-          trx=backend/TestResults/real-model-wholeloop.trx
+          trx=backend/TestResults/real-model-wholeloop-aux.trx
           test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0}"

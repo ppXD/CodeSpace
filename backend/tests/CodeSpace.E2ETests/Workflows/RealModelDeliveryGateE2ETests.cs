@@ -62,14 +62,24 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
 
     private readonly PostgresFixture _fixture;
 
+    private readonly string? _integrateBefore;
+
     public RealModelDeliveryGateE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
+        _integrateBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
+
+        // Chassis parity with RealModelSupervisorWholeLoopE2ETests: the throwable DI mutation first, then the env
+        // set. Integrate-at-stop ON matches the proven headline arc — without it a merge is tape-only and the
+        // I3/delivery ladder walks a different (unproven-in-live) branch than the one the deterministic tiers pin.
         SetDeciderMode(useLiveModel: true);
+        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
+        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _integrateBefore);
+
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDeciderMode>().UseLiveModel = false;   // restore the shared-fixture default for siblings
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
@@ -126,7 +136,8 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (afterDrive.RunStatus == WorkflowRunStatus.Success)
                 return (RealModelOutcome.CodeFault,
                     "the run terminalized Success WITHOUT ever parking the required-PR conflict on a human — the exact vacuous-success false-green H1 exists to kill "
-                    + $"(publishes={afterDrive.PublishCount}, gateCards={afterDrive.GateCardCount})");
+                    + $"(publishes={afterDrive.PublishCount}, gateCards={afterDrive.GateCardCount}, lastDecision={afterDrive.LastDecisionKind ?? "(none)"}, "
+                    + $"forcedStopReason={afterDrive.LastStopForcedReason ?? "(none — a model-authored stop)"}, decisions=[{afterDrive.KindTrail}])");
 
             if (afterDrive.PendingActionToken is null)
                 return (RealModelOutcome.CapabilityMiss, $"the live model never drove to a gate-parked stop (runStatus={afterDrive.RunStatus}, decisions=[{afterDrive.KindTrail}]) — reported, not gating");
@@ -149,14 +160,14 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
                 return (RealModelOutcome.CodeFault, $"the run FAILED after the adjudication answer (error={final.RunError ?? "(none)"})");
 
             if (final.PendingActionToken is not null && final.PendingQuestion?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true)
-                return (RealModelOutcome.CodeFault, $"the gate RE-PARKED on the state the human already adjudicated ('{Truncate(final.PendingQuestion)}') — the released-state dead-end H1's release exists to close");
+                return (RealModelOutcome.CodeFault, $"the gate RE-PARKED on the state the human already adjudicated ('{Truncate(final.PendingQuestion)}') — the released-state dead-end H1's release exists to close (decisions=[{final.KindTrail}])");
 
             if (final.RunStatus != WorkflowRunStatus.Success)
                 return (RealModelOutcome.CapabilityMiss, $"the live model did not drive to a terminal after the answer (runStatus={final.RunStatus}, decisions=[{final.KindTrail}]) — reported, not gating");
 
             // ── The honest terminal: exactly one adjudicated re-attempt, zero pull requests, model-authored stop. ──
             if (final.PublishCount < afterDrive.PublishCount + 1)
-                return (RealModelOutcome.CodeFault, $"the answer did not buy the ONE fresh re-attempt (publishes before={afterDrive.PublishCount}, after={final.PublishCount}) — a direct release would turn 'fix it and retry' answers into silent waivers");
+                return (RealModelOutcome.CodeFault, $"the answer did not buy the ONE fresh re-attempt (publishes before={afterDrive.PublishCount}, after={final.PublishCount}; decisions=[{final.KindTrail}]) — a direct release would turn 'fix it and retry' answers into silent waivers");
 
             if (final.AnyPublishSatisfied)
                 return (RealModelOutcome.CodeFault, "a publish reported an Opened/AlreadyOpened PR against a patch-only repo — the policy guard did not hold");
