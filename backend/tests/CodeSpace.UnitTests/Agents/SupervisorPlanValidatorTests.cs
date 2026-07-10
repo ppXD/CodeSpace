@@ -68,6 +68,34 @@ public class SupervisorPlanValidatorTests
             .ShouldBe(SupervisorStopReasons.PlanInvalid);
     }
 
+    // ── H2 (strict plan identity): duplicate / blank subtask ids are structural contradictions, not tolerable dups ──
+
+    [Fact]
+    public void A_duplicate_subtask_id_is_rejected()
+    {
+        // Every downstream join (dependency gate, per-unit acceptance fold, retry lineage, merge collection) keys
+        // on the bare subtask id string — two units under one id silently alias into ONE identity, so the second's
+        // results, grade, and lineage all land on the first. A dup is a contradiction, never a "degenerate flat plan".
+        SupervisorPlanValidator.Validate(Plan(("auth", null), ("auth", null)))
+            .ShouldBe(SupervisorStopReasons.PlanInvalid, "two subtasks share the id 'auth' — every id-keyed reader would alias them into one unit");
+    }
+
+    [Fact]
+    public void A_duplicate_id_with_differing_dependencies_is_rejected_not_first_wins()
+    {
+        SupervisorPlanValidator.Validate(Plan(("a", null), ("b", new[] { "a" }), ("b", null)))
+            .ShouldBe(SupervisorStopReasons.PlanInvalid, "first-wins edge collapsing silently drops the second 'b' declaration");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_blank_subtask_id_is_rejected(string blank)
+    {
+        SupervisorPlanValidator.Validate(Plan((blank, null), ("b", null)))
+            .ShouldBe(SupervisorStopReasons.PlanInvalid, "a blank id can never be spawned, retried, depended on, or graded — it is unreachable by construction");
+    }
+
     [Fact]
     public void A_non_plan_decision_is_ignored()
     {

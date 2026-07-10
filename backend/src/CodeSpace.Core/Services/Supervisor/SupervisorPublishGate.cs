@@ -117,9 +117,13 @@ public static class SupervisorPublishGate
         PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { ForcedByPublishGate = true }, AgentJson.Options),
     };
 
+    /// <summary>Every card THIS gate parks on carries this pinned prefix — its identity on the tape (the sibling of <see cref="SupervisorDeliveryGate.QuestionPrefix"/>). Reserved: a model-authored ask may never carry it (<see cref="SupervisorAskQuestionClamp"/>).</summary>
+    public const string QuestionPrefix = "I3 publish gate: ";
+
     private static SupervisorDecision IntoAskHuman(string reason) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"I3 publish gate: {reason}" }, AgentJson.Options),
+        ServerAuthored = true,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{QuestionPrefix}{reason}" }, AgentJson.Options),
     };
 }

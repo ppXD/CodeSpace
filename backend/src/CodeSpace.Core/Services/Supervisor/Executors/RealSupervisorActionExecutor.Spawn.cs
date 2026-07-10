@@ -27,6 +27,16 @@ public sealed partial class RealSupervisorActionExecutor
         var spawn = Deserialize<SupervisorSpawnPayload>(decision.PayloadJson) ?? new SupervisorSpawnPayload();
         var subtasks = ResolvePlannedSubtasks(context);
 
+        // H2 (strict action identity): when a plan EXISTS, every spawned id must be one of ITS units — an unknown
+        // id used to silently fall through BuildAgentTask's instruction chain all the way to the WHOLE GOAL (a
+        // ghost agent re-running the entire task under a typo'd or stale-plan id, its results keyed to a unit the
+        // plan never declared). The WHOLE spawn is rejected (never a partial filter — the positional
+        // subtaskIds[i] ↔ agentResults[i] join must stay intact) with the reason + the declared universe, so the
+        // decider's next turn re-authors against real ids. A run with NO plan keeps its pre-existing free-form
+        // spawn semantics untouched (P+ plan-lineage formalizes that case).
+        if (subtasks.Count > 0 && spawn.SubtaskIds.Where(id => !subtasks.ContainsKey(id)).ToList() is { Count: > 0 } unknown)
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownSubtaskSpawnOutcome(unknown, subtasks.Keys), AgentJson.Options));
+
         // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
         // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
         // staged agents one-for-one). For each, apply the model-authored per-agent dispatch override (L4 arc B) when the
@@ -132,6 +142,27 @@ public sealed partial class RealSupervisorActionExecutor
         reason = "the retry decision named no subtaskId — a retry must name the plan-local subtask id to re-run",
     };
 
+    /// <summary>
+    /// H2: the zero-agent rejection outcome for a spawn naming ids the current plan never declared — the SAME
+    /// <c>agentRunIds</c>/<c>agentCount</c> shape a no-op spawn already emits (every "did this stage agents" reader
+    /// is unaffected), plus the rejected ids and the declared universe so the decider re-authors against REAL ids
+    /// instead of guessing. Mirrors <see cref="BuildBlockedSpawnOutcome"/>'s legible-reason precedent.
+    /// </summary>
+    internal static object BuildUnknownSubtaskSpawnOutcome(IReadOnlyList<string> unknown, IEnumerable<string> declared) => new
+    {
+        agentRunIds = Array.Empty<Guid>(),
+        agentCount = 0,
+        spawn = "rejected",
+        reason = $"the spawn named subtask id(s) the current plan never declared: [{string.Join(", ", unknown)}] — the plan's units are [{string.Join(", ", declared)}]; re-author the spawn against those ids (or re-plan first)",
+    };
+
+    /// <summary>H2: the rejection outcome for a retry naming an id the current plan never declared — without this the instruction chain fell through to the WHOLE GOAL (a ghost re-run of the entire task under a stale or typo'd id).</summary>
+    internal static object BuildUnknownSubtaskRetryOutcome(string subtaskId, IEnumerable<string> declared) => new
+    {
+        retry = "rejected",
+        reason = $"the retry named subtask id '{subtaskId}', which the current plan never declared — the plan's units are [{string.Join(", ", declared)}]; retry one of those (or re-plan first)",
+    };
+
     /// <summary>Retry: re-run ONE prior subtask as a FRESH agent run (a new Attempt), optionally with a revised instruction. Same stage-K-waits + barrier as spawn (here K = 1).</summary>
     private async Task<SupervisorExecution> ExecuteRetryAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
@@ -140,6 +171,12 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId))
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildRejectedRetryOutcome(), AgentJson.Options));
+
+        // H2 (strict action identity): a retry of an id the current plan never declared used to fall through the
+        // instruction chain to the WHOLE GOAL — a ghost re-run under a stale-plan or typo'd id. Reject with the
+        // declared universe instead (a run with NO plan keeps its pre-existing semantics; see the spawn's twin).
+        if (subtasks.Count > 0 && !subtasks.ContainsKey(retry.SubtaskId))
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownSubtaskRetryOutcome(retry.SubtaskId, subtasks.Keys), AgentJson.Options));
 
         // S1 handoff applies to a retry exactly as it does to a fresh spawn — a producer may have pushed a NEW branch
         // since this subtask's original attempt (e.g. it was itself retried), so re-resolving staging here (rather than

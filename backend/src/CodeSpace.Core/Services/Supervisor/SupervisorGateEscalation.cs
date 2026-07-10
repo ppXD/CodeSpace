@@ -33,6 +33,7 @@ public static class SupervisorGateEscalation
     public static SupervisorDecision IntoAskHuman(SupervisorDecision blocked, CriticVerdict verdict, CriticVerdict? priorVerdict = null) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
+        ServerAuthored = true,
         PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(blocked, verdict, priorVerdict) }, AgentJson.Options),
     };
 

@@ -191,6 +191,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         decision = ClampSpawnToDependencyFrontier(context, decision);
         decision = ClampPlanDelivery(context, decision);
+        decision = ClampAskQuestion(decision);
 
         return ApplyPostDecisionGate(context, plan, decision);
     }
@@ -305,6 +306,51 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _logger.LogInformation("Supervisor deferred {Deferred} subtask(s) with unmet dependencies at turn {Turn} on node {NodeId}, clamping the spawn to {Ready} ready subtask(s)", deferred.Count, context.TurnNumber, context.NodeId, ready.Count);
 
         return decision with { PayloadJson = NarrowSpawnPayload(root, ready) };
+    }
+
+    /// <summary>
+    /// H2: strip reserved SERVER question tokens from a MODEL-authored <c>ask_human</c> BEFORE the gates run.
+    /// Server-authored cards are recognized by <see cref="SupervisorDecision.ServerAuthored"/> (set by every server
+    /// ask constructor, unreachable from the model's projector) — NOT by pipeline position: the critic decorator
+    /// (<see cref="Deciders.CriticSupervisorDeciderDecorator"/>) returns its GENUINE escalation card straight out of
+    /// the decider pipeline, i.e. THROUGH this clamp (the adversarial sweep's blocker: position-based exemption
+    /// stripped that card's marker and disabled the S8 human-absolution loop). Whatever reaches this point
+    /// UNFLAGGED is the model's own text, and a reserved token in it is an identity theft (a fake gate card
+    /// releasing H1's parks, a minted confirmation marker forging plan/delivery authority), never legitimate. Surgical <see cref="JsonObject"/> rewrite of ONLY the
+    /// <c>question</c> key — the decision-level <c>rationale</c> and any future sibling survive verbatim
+    /// (<see cref="NarrowSpawnPayload"/>'s exact byte-preservation reasoning). Byte-identical fast path when the
+    /// question carries no reserved token (the dominant case, reference-checked). Pure + deterministic → a replay
+    /// re-derives the identical clamp + idempotency key.
+    /// </summary>
+    private SupervisorDecision ClampAskQuestion(SupervisorDecision decision)
+    {
+        if (decision.Kind != SupervisorDecisionKinds.AskHuman || decision.ServerAuthored) return decision;
+
+        var rewritten = SanitizeAskPayloadJson(decision.PayloadJson);
+
+        if (rewritten is null) return decision;   // no reserved token — byte-identical (the dominant case)
+
+        _logger.LogWarning("Supervisor ask_human question carried reserved server-gate text — stripped before persist (a model-authored card may never pose as a server card)");
+
+        return decision with { PayloadJson = rewritten };
+    }
+
+    /// <summary>The pure half of <see cref="ClampAskQuestion"/> — null when the payload needs no rewrite (absent/malformed question included: defensive, the canonical payload always parses). Internal so the byte-preservation is unit-pinned directly, mirroring <see cref="NarrowSpawnPayload"/>.</summary>
+    internal static string? SanitizeAskPayloadJson(string payloadJson)
+    {
+        JsonObject? root;
+        try { root = JsonNode.Parse(payloadJson) as JsonObject; }
+        catch (JsonException) { return null; }
+
+        if (root?["question"] is not JsonValue value || !value.TryGetValue<string>(out var question) || question is null) return null;
+
+        var sanitized = SupervisorAskQuestionClamp.Sanitize(question);
+
+        if (ReferenceEquals(sanitized, question)) return null;
+
+        root["question"] = sanitized;
+
+        return root.ToJsonString(AgentJson.Options);
     }
 
     /// <summary>

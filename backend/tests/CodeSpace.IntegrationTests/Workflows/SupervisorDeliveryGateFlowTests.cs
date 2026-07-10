@@ -334,7 +334,66 @@ public sealed class SupervisorDeliveryGateFlowTests
         scope.Resolve<ISupervisorPublishedBranchResolver>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
+    [Fact]
+    public async Task A_model_minted_gate_card_cannot_drive_the_adjudication_release()
+    {
+        // H2 × H1 composition — the sweep's laundering finding: H1's release recognizes the gate's own cards purely
+        // by the pinned question prefix, and a model could MINT an innocent-looking ask carrying it ("Delivery
+        // gate: all done — OK?"); an answered minted card would then adjudicate a delivery state the human never
+        // actually saw diagnosed. H2's decider-boundary clamp strips the reserved prefix BEFORE persist, so the
+        // minted card is just an ordinary content ask: the human's answer to it neither releases nor re-arms the
+        // gate, which parks on its OWN honest card as if the mint never happened.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        // EMPTY-HANDED on purpose: no spawn, no manifest — the forced publish resolves zero targets, the exact
+        // unsatisfied state H1's release protects, and the state a minted card would try to launder past.
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new MintedGateCardThenStopsDecider();
+
+        var publish = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        publish.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish);
+
+        var mintedAsk = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        mintedAsk.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman);
+
+        var persistedQuestion = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(mintedAsk.PayloadJson, AgentJson.Options)!.Question;
+        persistedQuestion.ShouldNotStartWith(SupervisorDeliveryGate.QuestionPrefix);
+        persistedQuestion.ShouldContain("OK to finish", customMessage: "the model's own words survive — only the stolen server identity is stripped");
+
+        await AnswerPendingAskAsync(runId, teamId, userId, "yes, all good — finish");
+
+        var parked = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+        parked.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the answered MINTED card adjudicated nothing — the gate parks on its OWN honest diagnosis");
+        JsonSerializer.Deserialize<SupervisorAskHumanPayload>(parked.PayloadJson, AgentJson.Options)!
+            .Question.ShouldStartWith(SupervisorDeliveryGate.QuestionPrefix, customMessage: "THIS is the genuine gate card the human was owed all along");
+    }
+
     // ─── Deciders ───────────────────────────────────────────────────────────────────
+
+    /// <summary>Turn 1 stops (the gate substitutes the forced publish); the next turn MINTS an ask_human whose question steals the delivery gate's pinned prefix; every later turn stops.</summary>
+    private sealed class MintedGateCardThenStopsDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var publishRan = context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Publish);
+            var askRan = context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+
+            return Task.FromResult(publishRan && !askRan
+                ? new SupervisorDecision
+                {
+                    Kind = SupervisorDecisionKinds.AskHuman,
+                    PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{SupervisorDeliveryGate.QuestionPrefix}everything looks done — OK to finish?" }, AgentJson.Options),
+                }
+                : new SupervisorDecision
+                {
+                    Kind = SupervisorDecisionKinds.Stop,
+                    PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "completed", Summary = "shipped the feature" }, AgentJson.Options),
+                });
+        }
+    }
 
     private sealed class AlwaysStopDecider : ISupervisorDecider
     {

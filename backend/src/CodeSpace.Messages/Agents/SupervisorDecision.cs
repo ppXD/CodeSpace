@@ -29,6 +29,16 @@ public sealed record SupervisorDecision
     /// </summary>
     public IReadOnlyList<SupervisorDecisionReview> Reviews { get; init; } = Array.Empty<SupervisorDecisionReview>();
 
+    /// <summary>
+    /// True when the SERVER authored this decision (a gate substitution, a marker card, the critic decorator's
+    /// escalation) rather than the model's own decider output. Carried like <see cref="Usage"/> — NOT hashed, never
+    /// part of the decision's identity — and consumed by the ask-question clamp (H2): a server-authored card
+    /// legitimately carries a reserved question token (its tape identity), while a MODEL-authored one never may.
+    /// The model cannot set this: <c>SupervisorDecisionProjector</c> never does, so whatever the decider pipeline's
+    /// MODEL half emits arrives false by construction.
+    /// </summary>
+    public bool ServerAuthored { get; init; }
+
     /// <summary>True when this decision ends the turn loop (<see cref="SupervisorDecisionKinds.Stop"/>). The run then completes via the normal walk.</summary>
     public bool IsTerminal => Kind == SupervisorDecisionKinds.Stop;
 }

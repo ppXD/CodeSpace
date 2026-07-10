@@ -29,6 +29,7 @@ public static class SupervisorPlanConfirmation
     public static SupervisorDecision IntoAskHuman(int planVersion, int itemCount, DeliverySpec? delivery, DeliverySpec? priorApprovedDelivery) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
+        ServerAuthored = true,
         PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(planVersion, itemCount, delivery, priorApprovedDelivery) }, AgentJson.Options),
     };
 
