@@ -16,8 +16,10 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// The S5 OBJECTIVE oracle gate (<see cref="AgentRunExecutor.GradeAcceptanceIfPresentAsync"/>) — the
 /// single-agent twin of the supervisor's per-unit fold gate. Fail-closed on a failing check or an ungradable
-/// contract; byte-identical when no contract / non-success / multi-repo (deferred); the captured work is
-/// always preserved (the STATUS tells the truth, the branch and diff stay for diagnosis).
+/// contract; byte-identical when no contract / non-success; the captured work is always preserved (the STATUS
+/// tells the truth, the branch and diff stay for diagnosis). A multi-repo result is graded PER REPO
+/// (<see cref="AgentRunExecutor.GradeMultiRepoAcceptanceAsync"/>), mirroring the supervisor lane's
+/// <c>GradeUnitAcceptanceMultiRepoAsync</c> — a contract binds the WHOLE change, not just the primary repo.
 /// </summary>
 public class AgentRunExecutorAcceptanceTests
 {
@@ -56,15 +58,84 @@ public class AgentRunExecutorAcceptanceTests
         result.Contradiction.ShouldBeNull("this early return is EXACTLY why an under-claim (Failed self-report, passing grade) can never occur in this lane — a self-reported failure is never graded at all");
     }
 
-    [Fact]
-    public async Task A_multi_repo_result_defers_exactly_like_the_supervisor_unit_gate()
-    {
-        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
+    // ── Multi-repo: graded PER REPO, mirroring the supervisor lane's per-unit multi-repo fold ─────────────
 
-        var multi = Succeeded() with { RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "other" } } };
+    [Fact]
+    public async Task A_multi_repo_result_grades_every_repo_that_produced_a_branch()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web" },
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" },
+            },
+        };
+
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
 
-        result.AcceptancePassed.ShouldBeNull("per-repo grading is a follow-on — deferred, never a blind primary-only grade");
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.AcceptancePassed.ShouldBe(true, "every repo's own check passed — the run's acceptance is no longer left null on a multi-repo result");
+        grader.Calls.ShouldBe(2, "each repo with a produced branch is graded independently");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_result_fails_closed_when_any_one_repo_fails_its_check()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = false, Detail = "exit 1" };
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web" },
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" },
+            },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed, "a contract binds the WHOLE change — one repo failing its check fails the run, exactly like a single-repo failure");
+        result.ExitReason.ShouldBe("acceptance-failed");
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceDetail.ShouldBe("repo 'api': exit 1", "the failing repo's alias is named so the failure is diagnosable");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_result_with_no_produced_branch_anywhere_and_expects_changes_false_is_a_vacuous_pass()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "docs" } },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh"), expectsChanges: false), multi, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.AcceptancePassed.ShouldBe(true, "the correctly-predicted no-diff outcome is a pass, never a failure — same rule as the single-repo path");
+        result.AcceptanceDetail.ShouldStartWith("not-applicable");
+        grader.Calls.ShouldBe(0, "there is nothing to clone in any repo");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_result_with_no_produced_branch_anywhere_fails_closed_by_default()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "docs" } },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
         grader.Calls.ShouldBe(0);
     }
 
@@ -266,6 +337,10 @@ public class AgentRunExecutorAcceptanceTests
     private sealed class FakeGrader : ISupervisorAcceptanceGrader
     {
         public BenchmarkGrade Grade { get; set; } = new() { Passed = true, Detail = "ok" };
+
+        /// <summary>Per-branch override, checked before the shared <see cref="Grade"/> — lets a multi-repo test make ONE repo's check fail while the others pass.</summary>
+        public Dictionary<string, BenchmarkGrade> GradeByBranch { get; } = new();
+
         public Exception? Throw { get; set; }
         public int Calls { get; private set; }
         public IReadOnlyList<string>? LastCommand { get; private set; }
@@ -280,7 +355,7 @@ public class AgentRunExecutorAcceptanceTests
 
             if (Throw is { } ex) throw ex;
 
-            return System.Threading.Tasks.Task.FromResult(Grade);
+            return System.Threading.Tasks.Task.FromResult(GradeByBranch.TryGetValue(branch, out var g) ? g : Grade);
         }
 
         public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)

@@ -1185,17 +1185,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (!AgentAcceptanceContract.RequiresGrade(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
-        if (result.RepositoryResults.Count > 0) return result;   // multi-repo → deferred, exactly like the supervisor's unit gate
 
         // A1 always takes precedence (the same defer the output critic honours): a run that left a decision.request
         // unanswered re-grades to NeedsReview(NeedsDecision) WITH the decision linkage at the completion choke point
         // — flunking it here first would strand the decision unlinked and skip the retry-resume loop. The answered,
-        // resumed attempt gets graded at ITS completion.
+        // resumed attempt gets graded at ITS completion. Applies to both the single- and multi-repo paths below.
         using (var ledgerScope = _scopeFactory.CreateScope())
         {
             var ledger = ledgerScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
             if (await ledger.FindBlockingDecisionIdAsync(run.Id, cancellationToken).ConfigureAwait(false) is not null) return result;
         }
+
+        if (result.RepositoryResults.Count > 0) return await GradeMultiRepoAcceptanceAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
         var spec = task.Acceptance!;
         var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
@@ -1251,6 +1252,66 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
 
         return AcceptanceFailed(result, grade.Detail);
+    }
+
+    /// <summary>
+    /// Grade a MULTI-repo run's acceptance contract against EVERY repo it actually changed — a contract binds the
+    /// WHOLE change, not just one repo, mirroring the supervisor lane's per-unit
+    /// <c>SupervisorTurnService.Rehydrate.GradeUnitAcceptanceMultiRepoAsync</c> (this executor previously deferred
+    /// a multi-repo run's grade entirely, leaving <see cref="AgentRunResult.AcceptancePassed"/> null and the run
+    /// Succeeded on self-report alone). A repo with no produced branch had nothing to verify there, so it is not a
+    /// target; a run with no targets at all falls back to <see cref="AgentAcceptanceContract.ExpectsChanges"/>'s
+    /// verdict, same as the single-repo path. All targets must pass, short-circuiting on the first failure (the
+    /// detail names the failing repo); any unexpected non-cancellation grader escape degrades to not-accepted so
+    /// the completion pipeline can never crash on a grade.
+    /// </summary>
+    private async Task<AgentRunResult> GradeMultiRepoAcceptanceAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        var spec = task.Acceptance!;
+        var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        var fullSpec = spec with { Command = command };
+        var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+
+        var targets = result.RepositoryResults.Where(r => !string.IsNullOrEmpty(r.ProducedBranch) && r.RepositoryId is not null).ToList();
+
+        if (targets.Count == 0)
+        {
+            if (!AgentAcceptanceContract.ExpectsChanges(task))
+            {
+                _logger.LogInformation("Agent run {RunId}: no diff was expected in any repo and none was produced — the acceptance contract is vacuously satisfied", run.Id);
+                return AgentAcceptanceContract.NotApplicable(result, "not-applicable: no changes were expected and none were produced");
+            }
+
+            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but no repo produced a branch to grade — failing closed", run.Id);
+            return AcceptanceFailed(result, "no-branch-or-repo");
+        }
+
+        using var scope = _scopeFactory.CreateScope();
+        var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
+
+        foreach (var target in targets)
+        {
+            BenchmarkGrade grade;
+            try
+            {
+                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Agent run {RunId}: the acceptance grade for repo '{Alias}' failed unexpectedly; recording not-accepted", run.Id, target.Alias);
+                return AcceptanceFailed(result, $"repo '{target.Alias}': grade-error: {ex.Message}");
+            }
+
+            if (!grade.Passed)
+            {
+                _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED for repo '{Alias}' ({Detail}) — re-grading the run to Failed", run.Id, target.Alias, grade.Detail);
+                return AcceptanceFailed(result, $"repo '{target.Alias}': {grade.Detail}");
+            }
+        }
+
+        _logger.LogInformation("Agent run {RunId}: the acceptance check passed for every repo", run.Id);
+
+        return result with { AcceptancePassed = true, AcceptanceDetail = "accepted" };
     }
 
     /// <summary>Whether <paramref name="result"/> carries a recorded patch this executor could grade with (S2) — a base to anchor the independent clone on, PLUS either an inline diff or an offloaded artifact reference. Absent any one of these there is genuinely nothing to apply.</summary>

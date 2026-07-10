@@ -160,6 +160,70 @@ public sealed class SupervisorAcceptanceGradeFlowTests
     }
 
     [Fact]
+    public async Task A_multi_repo_result_is_graded_per_repo_through_the_real_executor_not_left_ungraded()
+    {
+        // Before this fix, AgentRunExecutor.GradeAcceptanceIfPresentAsync deferred ENTIRELY on RepositoryResults.Count > 0
+        // — a contract-bearing multi-repo single-agent run landed Succeeded with AcceptancePassed left null, self-report
+        // only. Two REAL remotes (one per repo) prove the fix through the whole real DI-resolved executor + grader +
+        // git stack, not a fake — one repo's branch passes its check, the other's fails, and the run must fail closed.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new AcceptanceRemote();
+        await web.InitAsync();
+        await web.AddBranchWithCheckAsync("agent/web", checkExitCode: 0);
+
+        using var api = new AcceptanceRemote();
+        await api.InitAsync();
+        await api.AddBranchWithCheckAsync("agent/api", checkExitCode: 1);
+
+        var teamId = await SeedTeamAsync();
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+
+        using var scope = _fixture.BeginScope();
+        var harness = new NoOpHarness();
+        var executor = new CodeSpace.Core.Services.Agents.AgentRunExecutor(
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunService>(),
+            new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(new CodeSpace.Core.Services.Agents.IAgentHarness[] { harness }),
+            new CodeSpace.Core.Services.Agents.HarnessModelReconciler(new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(new CodeSpace.Core.Services.Agents.IAgentHarness[] { harness }), scope.Resolve<CodeSpace.Core.Services.Agents.ModelCredentials.IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Sandbox.ISandboxRunnerRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IAgentWorkspaceResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IModelCredentialResolver>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Workspace.IWorkspaceProviderRegistry>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            Array.Empty<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeSpace.Core.Services.Agents.AgentRunExecutor>.Instance);
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "no-op", Model = "test-model",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        };
+        var run = new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Status = AgentRunStatus.Succeeded, TaskJson = System.Text.Json.JsonSerializer.Serialize(task, CodeSpace.Core.Services.Agents.AgentJson.Options) };
+        var succeeded = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "web", RepositoryId = webRepoId, ProducedBranch = "agent/web" },
+                new RepositoryRunResult { Alias = "api", RepositoryId = apiRepoId, ProducedBranch = "agent/api" },
+            },
+        };
+
+        var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, succeeded, CancellationToken.None);
+
+        graded.Status.ShouldBe(AgentRunStatus.Failed, "the 'api' repo's real check exits 1 — a contract binds the WHOLE multi-repo change, so the run must fail closed rather than stay Succeeded on self-report");
+        graded.AcceptancePassed.ShouldBe(false);
+        graded.AcceptanceDetail.ShouldBe("repo 'api': tests-failed-exit-1");
+    }
+
+    [Fact]
     public async Task P3_2_a_setup_command_runs_before_the_check_in_the_same_real_workspace()
     {
         // The check only exits 0 if a file the SETUP step creates already exists — proving both that setup runs
