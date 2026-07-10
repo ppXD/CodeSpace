@@ -36,9 +36,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly ISupervisorDecisionLog _decisionLog;
     private readonly IWorkPlanChecklistService _checklists;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly CodeSpaceDbContext _db;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, CodeSpaceDbContext db)
     {
         _sessions = sessions;
         _phases = phases;
@@ -47,6 +48,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         _decisionLog = decisionLog;
         _checklists = checklists;
         _manifests = manifests;
+        _publishedBranches = publishedBranches;
         _db = db;
     }
 
@@ -151,9 +153,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>
     /// PR-6's gating signal for <see cref="RoomActionKind.OpenPullRequest"/> — null (button omitted) for a
     /// non-terminal run, so a running turn pays zero extra reads. Reads the SAME durable facts
-    /// <see cref="IRoomPullRequestService"/> itself opens a PR off (the terminal decision tape via
-    /// <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/> / <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/>),
-    /// so "can I open one" and "what does opening one actually do" can never drift.
+    /// <see cref="IRoomPullRequestService"/> itself opens a PR off (<see cref="ISupervisorPublishedBranchResolver"/>,
+    /// DC-2 — merge-derived OR ledger-direct), so "can I open one" and "what does opening one actually do" can
+    /// never drift.
     /// </summary>
     private async Task<RoomPublishState?> PublishStateAsync(Guid runId, Guid teamId, Messages.Enums.WorkflowRunStatus status, CancellationToken cancellationToken)
     {
@@ -161,10 +163,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var priorDecisions = await _decisionLog.GetTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var hasBranch = !string.IsNullOrEmpty(SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions))
-            || SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count > 0;
+        var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, cancellationToken).ConfigureAwait(false);
 
-        if (!hasBranch) return new RoomPublishState { HasPublishedBranch = false };
+        if (branches.Count == 0) return new RoomPublishState { HasPublishedBranch = false };
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var openedUrl = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })?.PullRequestUrl;

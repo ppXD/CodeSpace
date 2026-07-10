@@ -141,6 +141,15 @@ public sealed record SupervisorMergePayload
 }
 
 /// <summary>
+/// The <c>publish</c> payload (DC-2): empty by construction — <c>publish</c> is a SERVER-ONLY decision kind, never
+/// in the model's schema, always authored by <c>SupervisorPublishGate</c>'s substitution of a <c>stop</c> whose
+/// delivery contract requires an opened pull request. The executor assembles every input (which branches, the
+/// title/body) itself from durable state, mirroring <c>resolve</c>'s "the decider only chooses to attempt, never
+/// authors the content" posture — carried one step further, since the decider never even chooses this verb.
+/// </summary>
+public sealed record SupervisorPublishPayload;
+
+/// <summary>
 /// The <c>resolve</c> payload (resolver loop #379): the decider only CHOOSES to attempt resolution — the resolver
 /// task's content (which branches, which conflicted files, the build/test instruction) is assembled DETERMINISTICALLY
 /// by <c>RealSupervisorActionExecutor.Resolve</c> from the durable conflicted-merge + spawn outcomes, never by the

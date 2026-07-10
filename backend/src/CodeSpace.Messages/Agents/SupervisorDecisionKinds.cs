@@ -40,6 +40,16 @@ public static class SupervisorDecisionKinds
     /// </summary>
     public const string Resolve = "resolve";
 
+    /// <summary>
+    /// Open a pull/merge request against the run's genuinely published branch(es) (DC-2 — the universal delivery
+    /// contract). SYNCHRONOUS — the executor opens it via <c>IChangeSetService</c> + records the outcome; the node
+    /// self-advances. SERVER-ONLY: never in the model's decision schema, always authored by
+    /// <see cref="Supervisor.SupervisorPublishGate"/>'s substitution of a <c>stop</c> whose delivery contract
+    /// requires an opened PR — the model never chooses this verb, mirroring how a <see cref="Merge"/> forced by the
+    /// SAME gate is never a model choice either.
+    /// </summary>
+    public const string Publish = "publish";
+
     /// <summary>Terminate the supervisor turn loop — the run completes via the normal walk. The fail-closed force-stop verb too (a tripped bound / governance refusal stamps a Stop).</summary>
     public const string Stop = "stop";
 
@@ -54,11 +64,11 @@ public static class SupervisorDecisionKinds
     public static bool StagesAgents(string decisionKind) => decisionKind is Spawn or Retry or Resolve;
 
     /// <summary>
-    /// Whether a verb CLOSES the supervisor turn — <see cref="Stop"/> finishes the loop, <see cref="Merge"/> synthesizes
-    /// then self-advances to a stop, <see cref="AskHuman"/> parks on a human. <see cref="Spawn"/> / <see cref="Retry"/> /
-    /// <see cref="Resolve"/> stage agents (mid-work) and <see cref="Plan"/> opens a round, so NONE of them close a turn.
-    /// The single "did this verb end the turn" classifier — a tape whose last decision is none of these never reached a
-    /// clean close (e.g. the decision loop crashed mid-LLM-call before it could persist its next verb).
+    /// Whether a verb CLOSES the supervisor turn — <see cref="Stop"/> finishes the loop, <see cref="Merge"/> / <see cref="Publish"/>
+    /// synthesize or deliver then self-advance to a stop, <see cref="AskHuman"/> parks on a human. <see cref="Spawn"/> /
+    /// <see cref="Retry"/> / <see cref="Resolve"/> stage agents (mid-work) and <see cref="Plan"/> opens a round, so NONE
+    /// of them close a turn. The single "did this verb end the turn" classifier — a tape whose last decision is none of
+    /// these never reached a clean close (e.g. the decision loop crashed mid-LLM-call before it could persist its next verb).
     /// </summary>
-    public static bool ClosesTurn(string decisionKind) => decisionKind is Stop or Merge or AskHuman;
+    public static bool ClosesTurn(string decisionKind) => decisionKind is Stop or Merge or Publish or AskHuman;
 }

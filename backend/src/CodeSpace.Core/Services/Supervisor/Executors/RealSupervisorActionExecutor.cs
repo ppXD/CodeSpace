@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Plans;
+using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
@@ -52,6 +53,8 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IBranchIntegrator _integrator;
     private readonly IAgentWorkspaceResolver _workspaces;
     private readonly IPublishManifestStore _manifests;
+    private readonly ISupervisorPublishedBranchResolver _publishedBranches;
+    private readonly IChangeSetService _changeSets;
     private readonly ILLMClientRegistry _llm;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
@@ -61,7 +64,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, IEnumerable<IPublishGuard> publishGuards, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IChangeSetService changeSets, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, IEnumerable<IPublishGuard> publishGuards, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -72,6 +75,8 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _integrator = integrator;
         _workspaces = workspaces;
         _manifests = manifests;
+        _publishedBranches = publishedBranches;
+        _changeSets = changeSets;
         _llm = llm;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
@@ -87,6 +92,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Merge => ExecuteMergeAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Resolve => ExecuteResolveAsync(decision, context, cancellationToken),
+        SupervisorDecisionKinds.Publish => ExecutePublishAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.AskHuman => ExecuteAskHumanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Stop => Task.FromResult(ExecuteStop(decision)),
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),

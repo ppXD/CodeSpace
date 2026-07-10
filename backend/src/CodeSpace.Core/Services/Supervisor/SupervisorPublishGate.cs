@@ -30,6 +30,15 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// gate. An UNVERIFIED resolve is likewise out of scope: its work was never accepted (the resolver loop's own
 /// withhold contract already excludes it from any merge), so I3 lets that stop through as-is rather than
 /// auto-merging a recovery attempt that already failed its own verification.</para>
+///
+/// <para><b>DC-2 — deliver-at-stop:</b> once "published" is true (either rung above) and the stop carries a summary,
+/// the run's own <see cref="Messages.Agents.SupervisorTurnContext.DeliverySpec"/> is checked: when it requires an
+/// opened pull request, a <c>publish</c> decision (server-only, never model-authored — see
+/// <see cref="SupervisorDecisionKinds.Publish"/>) is substituted the FIRST time, mirroring <see cref="ServerAuthoredMerge"/>'s
+/// same-turn-execute / next-turn-recheck shape; the next stop attempt reads that decision's own recorded outcome
+/// (<see cref="SupervisorOutcome.ReadPublishAttempt"/>) — at least one opened PR lets the stop through, zero out of
+/// at least one target substitutes <c>ask_human</c> naming why, rather than retrying forever. No delivery contract
+/// (or one that never asked for a PR) is a no-op — byte-identical to pre-DC-2.</para>
 /// </summary>
 public static class SupervisorPublishGate
 {
@@ -45,7 +54,7 @@ public static class SupervisorPublishGate
 
         if (published)
             return HasSummary(decision)
-                ? null
+                ? GateDelivery(context, priorDecisions)
                 : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
         var frontier = SupervisorOutcome.FindUnpublishedFrontier(priorDecisions);
@@ -90,7 +99,9 @@ public static class SupervisorPublishGate
         // can still show up as Pushed in the ledger — the same "局部綠≠整合綠" bar every other door to the head already
         // enforces (SupervisorOutcome.IsAcceptanceRejected, shared with the merge + resolver doors) must apply here too.
         if (frontierResults.Any(r => !SupervisorOutcome.IsAcceptanceRejected(r) && context.PublishedAgentRunIds.Contains(r.AgentRunId)))
-            return HasSummary(decision) ? null : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
+            return HasSummary(decision)
+                ? GateDelivery(context, priorDecisions)
+                : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
         if (attemptedMerge is null) return ServerAuthoredMerge();   // first attempt — auto-integrate-at-stop
 
@@ -101,6 +112,59 @@ public static class SupervisorPublishGate
 
     private static SupervisorDecision AskHumanForUnpublishedMerge(string? reason) =>
         IntoAskHuman($"the run has accepted work that could not be published ({reason ?? "the integration did not produce a published branch"}) — a human must resolve this before the run can complete");
+
+    /// <summary>
+    /// DC-2 — once the run's work is genuinely published (either rung above), check the delivery contract itself:
+    /// no contract, or one that never asked for a PR, is a no-op. Otherwise substitute a server-authored
+    /// <c>publish</c> the FIRST time (mirroring <see cref="ServerAuthoredMerge"/>'s shape exactly); re-check a LATER
+    /// attempt's own recorded outcome next time through. The anchor is "the latest agent-staging or merge decision"
+    /// (not the frontier — delivery is a whole-run concern, not one frontier's) so a publish attempt from BEFORE
+    /// fresh work or a fresh merge is correctly treated as stale and re-attempted against the NOW-current branches.
+    ///
+    /// <para>The EFFECTIVE contract is read off the latest <c>plan</c> decision's own already-clamped
+    /// <c>delivery</c> field (<see cref="SupervisorOutcome.ReadPlanDelivery"/>) — DC-1's <c>ClampPlanDelivery</c>
+    /// already merges the operator's own <see cref="Messages.Agents.SupervisorTurnContext.DeliverySpec"/> with the
+    /// model's OWN proposal (operator wins per field when it names one, the model's proposal fills any gap the
+    /// operator never named) and persists that merged result onto the plan. Reading <c>context.DeliverySpec</c>
+    /// directly would see ONLY the operator's raw pre-declared config — silently dropping a model that proposed
+    /// "open a PR when done" with no operator contract at all, even though DC-1's own confirmation card already
+    /// told the human that PR would open. Falls back to <c>context.DeliverySpec</c> only for the degenerate case of
+    /// no plan decision existing yet (never happens once "published" is true — spawn/retry/resolve all require a
+    /// prior plan — but stays a safe, cheap fallback rather than a null-reference risk).</para>
+    /// </summary>
+    private static SupervisorDecision? GateDelivery(SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        var latestPlan = SupervisorPlanConfirmation.LatestPlanDecision(priorDecisions);
+        var delivery = SupervisorOutcome.ReadPlanDelivery(latestPlan?.PayloadJson) ?? context.DeliverySpec;
+
+        if (delivery?.OpenPullRequest != true) return null;
+
+        var lastWorkOrMergeSequence = priorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind) || d.DecisionKind == SupervisorDecisionKinds.Merge)
+            .Select(d => d.Sequence)
+            .DefaultIfEmpty(-1)
+            .Max();
+
+        var attemptedPublish = priorDecisions
+            .Where(d => d.DecisionKind == SupervisorDecisionKinds.Publish && d.Sequence > lastWorkOrMergeSequence)
+            .OrderByDescending(d => d.Sequence)
+            .FirstOrDefault();
+
+        if (attemptedPublish is null) return ServerAuthoredPublish();
+
+        var attempt = SupervisorOutcome.ReadPublishAttempt(attemptedPublish.OutcomeJson);
+
+        return attempt is { AnySucceeded: true } ? null : AskHumanForFailedDelivery(attempt);
+    }
+
+    private static SupervisorDecision AskHumanForFailedDelivery(SupervisorPublishAttemptOutcome? attempt) =>
+        IntoAskHuman($"the run's delivery contract requires an opened pull request but it could not be opened ({attempt?.Reasons.FirstOrDefault() ?? "the attempt produced no pull request"}) — a human must resolve this before the run can complete");
+
+    private static SupervisorDecision ServerAuthoredPublish() => new()
+    {
+        Kind = SupervisorDecisionKinds.Publish,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorPublishPayload(), AgentJson.Options),
+    };
 
     private static bool HasSummary(SupervisorDecision decision) => !string.IsNullOrWhiteSpace(ReadStopSummaryFromPayload(decision.PayloadJson));
 

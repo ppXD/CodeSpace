@@ -271,6 +271,142 @@ public class SupervisorPublishGateTests
         SupervisorPublishGate.Validate(context, StopDecision("")).ShouldBeNull("an unverified resolution is out of I3's scope entirely — including its summary requirement");
     }
 
+    // ── DC-2: deliver-at-stop — the delivery contract's own PR-open requirement ────────
+
+    [Fact]
+    public void A_published_run_with_no_delivery_contract_passes_through_untouched()
+    {
+        var context = Context(
+            delivery: null,
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")));
+
+        SupervisorPublishGate.Validate(context, StopDecision("shipped it")).ShouldBeNull("no delivery contract at all — byte-identical to pre-DC-2");
+    }
+
+    [Fact]
+    public void A_published_run_whose_contract_never_asked_for_a_pr_passes_through_untouched()
+    {
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = false },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")));
+
+        SupervisorPublishGate.Validate(context, StopDecision("shipped it")).ShouldBeNull("the operator's own contract never requested a PR — nothing more for I3 to check");
+    }
+
+    [Fact]
+    public void A_published_run_whose_contract_requires_a_pr_substitutes_a_server_authored_publish_the_first_time()
+    {
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped it"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish, "the delivery contract demands a PR the run has not yet attempted to open");
+
+        JsonSerializer.Deserialize<SupervisorPublishPayload>(substituted.PayloadJson, AgentJson.Options).ShouldNotBeNull("the publish decision carries no input — the executor assembles everything from durable state");
+    }
+
+    [Fact]
+    public void The_ledger_direct_published_shortcut_also_triggers_a_delivery_check()
+    {
+        var agentRunId = Guid.NewGuid();
+        var context = Context(
+            published: new[] { agentRunId },
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped it"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish, "run 96695645's own motivating scenario — a ledger-direct publish with a delivery contract must still auto-open a PR");
+    }
+
+    [Fact]
+    public void A_successful_prior_publish_attempt_lets_the_stop_through()
+    {
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")),
+            Decision(SupervisorDecisionKinds.Publish, 3, PublishOutcome(opened: new[] { "primary" }, failed: Array.Empty<string>())));
+
+        SupervisorPublishGate.Validate(context, StopDecision("shipped it")).ShouldBeNull("the publish attempt already opened a PR — the stop proceeds");
+    }
+
+    [Fact]
+    public void A_failed_prior_publish_attempt_parks_to_ask_human_naming_the_reason()
+    {
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")),
+            Decision(SupervisorDecisionKinds.Publish, 3, PublishOutcome(opened: Array.Empty<string>(), failed: new[] { "the provider rate-limited the request" })));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped it"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the publish attempt failed — I3 never retries a delivery attempt forever, it parks");
+
+        var question = JsonSerializer.Deserialize<SupervisorAskHumanPayload>(substituted.PayloadJson, AgentJson.Options)!.Question;
+        question.ShouldContain("rate-limited", Case.Insensitive, "the park names WHY delivery failed");
+    }
+
+    [Fact]
+    public void A_partial_multi_repo_publish_success_still_lets_the_stop_through()
+    {
+        // ChangeSetService's own failure-isolation philosophy: one repo's PR failing never sinks a sibling repo's
+        // genuinely delivered PR — at least one opened PR is a real delivery worth completing the run over.
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")),
+            Decision(SupervisorDecisionKinds.Publish, 3, PublishOutcome(opened: new[] { "frontend" }, failed: new[] { "backend: 403" })));
+
+        SupervisorPublishGate.Validate(context, StopDecision("shipped it")).ShouldBeNull("at least one repo delivered — a partial failure is still a real delivery");
+    }
+
+    [Fact]
+    public void A_model_only_proposed_delivery_contract_with_no_operator_config_still_triggers_publish()
+    {
+        // Sweep-found defect: GateDelivery originally read ONLY context.DeliverySpec (the operator's raw
+        // pre-declared config), never the plan's own EFFECTIVE contract DC-1's ClampPlanDelivery already persists
+        // (which merges in the model's OWN proposal when the operator declared nothing at all). DC-1's confirmation
+        // card already tells the human "this will open a PR" off that SAME persisted plan field — the gate must
+        // honor it, not silently drop it.
+        var context = Context(
+            delivery: null,
+            PlanDecisionWithDelivery(0, """{"openPullRequest":true}"""),
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped it"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish, "the model's own proposed delivery contract, with no operator config at all, must still trigger the auto-open");
+    }
+
+    [Fact]
+    public void Fresh_work_after_a_publish_attempt_re_triggers_a_fresh_publish_rather_than_trusting_the_stale_attempt()
+    {
+        var context = Context(
+            delivery: new DeliverySpec { OpenPullRequest = true },
+            Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", integratedBranch: "codespace/integration/x")),
+            Decision(SupervisorDecisionKinds.Publish, 3, PublishOutcome(opened: new[] { "primary" }, failed: Array.Empty<string>())),
+            Decision(SupervisorDecisionKinds.Retry, 4, SpawnOutcome(hasWork: true)),
+            Decision(SupervisorDecisionKinds.Merge, 5, MergeOutcome("Clean", integratedBranch: "codespace/integration/y")));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("shipped more"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish, "fresh work + a fresh merge landed AFTER the old publish attempt — that attempt no longer covers the CURRENT branch");
+    }
+
     // ── (7): every non-stop decision is always untouched ───────────────────────────────
 
     [Theory]
@@ -293,14 +429,28 @@ public class SupervisorPublishGateTests
 
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) => Context(published: null, prior);
 
-    private static SupervisorTurnContext Context(IReadOnlyCollection<Guid>? published, params SupervisorPriorDecision[] prior) => new()
+    private static SupervisorTurnContext Context(IReadOnlyCollection<Guid>? published, params SupervisorPriorDecision[] prior) => Context(published, delivery: null, prior);
+
+    private static SupervisorTurnContext Context(DeliverySpec? delivery, params SupervisorPriorDecision[] prior) => Context(published: null, delivery, prior);
+
+    private static SupervisorTurnContext Context(IReadOnlyCollection<Guid>? published, DeliverySpec? delivery, params SupervisorPriorDecision[] prior) => new()
     {
         Goal = "ship", SupervisorRunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), NodeId = "sup", TurnNumber = prior.Length + 1, PriorDecisions = prior,
         PublishedAgentRunIds = published is null ? new HashSet<Guid>() : new HashSet<Guid>(published),
+        DeliverySpec = delivery,
     };
 
     private static SupervisorPriorDecision Decision(string kind, long seq, string? outcomeJson) =>
         new() { Id = Guid.NewGuid(), Sequence = seq, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
+
+    /// <summary>A terminal <c>plan</c> decision whose PAYLOAD already carries the effective (server-clamped) <c>delivery</c> object — <see cref="SupervisorOutcome.ReadPlanDelivery"/> reads the payload, never the outcome, for this field.</summary>
+    private static SupervisorPriorDecision PlanDecisionWithDelivery(long seq, string deliveryJson) =>
+        new()
+        {
+            Id = Guid.NewGuid(), Sequence = seq, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = $$"""{"goal":"g","subtasks":[],"delivery":{{deliveryJson}}}""",
+            OutcomeJson = """{"planned":[],"count":0}""",
+        };
 
     private static SupervisorDecision StopDecision(string summary, IReadOnlyList<string>? acceptanceCommand = null) => new()
     {
@@ -327,6 +477,9 @@ public class SupervisorPublishGateTests
 
     private static string MergeOutcome(string integrationStatus, string? integratedBranch, string? reason = null) =>
         JsonSerializer.Serialize(new { merged = Array.Empty<object>(), count = 0, integration = new { status = integrationStatus, integratedBranch, reason } }, AgentJson.Options);
+
+    private static string PublishOutcome(IReadOnlyList<string> opened, IReadOnlyList<string> failed) =>
+        JsonSerializer.Serialize(new { publish = new { opened = opened.Select(alias => new { alias, url = $"https://example.test/{alias}", number = 1 }), failed = failed.Select(error => new { alias = "repo", error }) } }, AgentJson.Options);
 
     private static string ResolveOutcomeWithBranch(string summary, string producedBranch)
     {

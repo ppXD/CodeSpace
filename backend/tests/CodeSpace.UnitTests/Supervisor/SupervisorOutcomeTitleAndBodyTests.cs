@@ -1,24 +1,22 @@
-using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
-namespace CodeSpace.UnitTests.Sessions.Room;
+namespace CodeSpace.UnitTests.Supervisor;
 
 /// <summary>
-/// 🟢 Unit: <see cref="RoomPullRequestService.DeriveTitleAndBody"/> is a pure function over the decision tape (no DB) —
-/// pinned directly (InternalsVisibleTo) rather than only through the DB-heavy integration coverage the rest of the
-/// service needs (WorkflowRun/Repository/PublishManifest reads).
+/// 🟢 Unit: <see cref="SupervisorOutcome.DeriveTitleAndBody"/> is a pure function over the decision tape (no DB) —
+/// shared by the Room's Open-PR action AND DC-2's server-authored <c>publish</c> decision.
 /// </summary>
 [Trait("Category", "Unit")]
-public class RoomPullRequestServiceTests
+public class SupervisorOutcomeTitleAndBodyTests
 {
     [Fact]
     public void Title_is_the_stop_summarys_first_line_and_body_is_the_summary_in_full()
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"Fix the flaky retry timer"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Fix the flaky retry timer");
         body.ShouldBe("Fix the flaky retry timer");
@@ -29,7 +27,7 @@ public class RoomPullRequestServiceTests
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"Fix the flaky retry timer\n\n- widened the backoff window\n- added a regression test"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Fix the flaky retry timer");
         body.ShouldBe("Fix the flaky retry timer\n\n- widened the backoff window\n- added a regression test");
@@ -41,7 +39,7 @@ public class RoomPullRequestServiceTests
         var longLine = new string('x', 150);
         var decisions = new[] { StopDecision($$"""{"outcome":"completed","summary":"{{longLine}}"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.Length.ShouldBe(100);
         body!.Length.ShouldBe(150);
@@ -52,7 +50,7 @@ public class RoomPullRequestServiceTests
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes");
         body.ShouldBeNull();
@@ -65,7 +63,7 @@ public class RoomPullRequestServiceTests
         // reachable tape has no stop row) — must never throw, just degrade to the generic framing.
         var decisions = Array.Empty<SupervisorPriorDecision>();
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes");
         body.ShouldBeNull();
@@ -79,7 +77,7 @@ public class RoomPullRequestServiceTests
         // this guards against was never exercised by any existing case.
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"   \nthe real content is on the second line"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes", "the first line trims to nothing — the title must fall back, never ship a blank PR title");
         body.ShouldBe("   \nthe real content is on the second line", "the body is never touched by the title's fallback — it carries the summary verbatim");
@@ -94,7 +92,7 @@ public class RoomPullRequestServiceTests
             StopDecision("""{"outcome":"completed","summary":"the real final summary"}""", sequence: 2),
         };
 
-        var (title, _) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, _) = SupervisorOutcome.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("the real final summary");
     }

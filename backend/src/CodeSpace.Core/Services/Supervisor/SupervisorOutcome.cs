@@ -464,6 +464,20 @@ public static class SupervisorOutcome
     public static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
 
     /// <summary>
+    /// EVERY agent-run id this run's staging (spawn/retry/resolve) decisions folded an objectively REJECTED
+    /// (<see cref="IsAcceptanceRejected"/>) result for, across the WHOLE tape — DC-2's ledger-direct branch resolver
+    /// needs the run-wide set (not one frontier's), since it can surface a contributor from any earlier round that
+    /// never went through a later merge. Pure + replay-deterministic.
+    /// </summary>
+    public static IReadOnlySet<Guid> RejectedAgentRunIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => ReadAgentResults(d.OutcomeJson))
+            .Where(IsAcceptanceRejected)
+            .Select(r => r.AgentRunId)
+            .ToHashSet();
+
+    /// <summary>
     /// The FOLDED result for one specific agent-run id, searched across every staging (spawn/retry/resolve) decision
     /// in the tape — A2 (P4-2)'s read of "what did THIS unit's prior attempt actually do" (its self-report×grade
     /// <see cref="SupervisorAgentResult.Contradiction"/>, its resolved <see cref="SupervisorAgentResult.Model"/>) so a
@@ -643,6 +657,60 @@ public static class SupervisorOutcome
                 ConflictedFiles = conflictedFiles,
                 PreservedBranches = preservedBranches,
             };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Title = the stop summary's first line (I3 guarantees a completed, published run has a non-empty one — the
+    /// model's own account of what it did); body = the summary in full. Falls back to a generic title/no body for
+    /// the rare terminal shape with no stop decision (e.g. a server-forced stop that still had published work from
+    /// an earlier turn). Shared by the Room's Open-PR action AND DC-2's server-authored <c>publish</c> decision —
+    /// one framing, never two competing PR titles for the same run.
+    /// </summary>
+    public static (string Title, string? Body) DeriveTitleAndBody(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        var stop = priorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
+        var summary = stop is null ? null : ReadStopSummary(stop.OutcomeJson);
+
+        if (string.IsNullOrWhiteSpace(summary)) return ("Merge agent changes", null);
+
+        var firstLine = summary.Split('\n', 2)[0].Trim();
+        var title = firstLine.Length > 100 ? firstLine[..100].TrimEnd() : firstLine;
+
+        return (title.Length > 0 ? title : "Merge agent changes", summary);
+    }
+
+    /// <summary>
+    /// Read the on-disk PUBLISH block a <c>publish</c> outcome records (DC-2) into the compact, gate-visible
+    /// <see cref="SupervisorPublishAttemptOutcome"/> — null when the outcome carries no <c>publish</c> object or
+    /// it's malformed. <see cref="SupervisorPublishGate"/> re-checks this on the NEXT stop attempt to tell "already
+    /// delivered" from "attempted and failed" apart.
+    /// </summary>
+    public static SupervisorPublishAttemptOutcome? ReadPublishAttempt(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("publish", out var publish) || publish.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var openedCount = publish.TryGetProperty("opened", out var opened) && opened.ValueKind == JsonValueKind.Array ? opened.GetArrayLength() : 0;
+
+            var reasons = new List<string>();
+
+            if (publish.TryGetProperty("failed", out var failedArr) && failedArr.ValueKind == JsonValueKind.Array)
+                foreach (var f in failedArr.EnumerateArray())
+                    if (f.ValueKind == JsonValueKind.Object && f.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.String && err.GetString() is { Length: > 0 } reason)
+                        reasons.Add(reason);
+
+            return new SupervisorPublishAttemptOutcome { AnySucceeded = openedCount > 0, Reasons = reasons };
         }
         catch (JsonException)
         {
