@@ -418,6 +418,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // a model choice governance should evaluate, it is the server enforcing a correctness floor.
         if (SupervisorPublishGate.Validate(context, decision) is { } published) return published;
 
+        // DC-2b (deliver-at-stop enforcement): runs strictly AFTER I3 — a stop it lets through is already
+        // genuinely publishing accepted work, so this gate only asks whether the delivery contract ALSO wants a
+        // pull request, and whether that is authorized (never a model proposal alone).
+        if (SupervisorDeliveryGate.Validate(context, decision) is { } delivered) return delivered;
+
         return GateSideEffectingDecision(context, decision);
     }
 

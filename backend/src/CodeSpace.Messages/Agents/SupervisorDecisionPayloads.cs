@@ -141,6 +141,25 @@ public sealed record SupervisorMergePayload
 }
 
 /// <summary>
+/// The <c>publish</c> payload (DC-2b) — SERVER-AUTHORED ONLY, never model-authored (mirrors <see cref="SupervisorMergePayload.ForcedByPublishGate"/>'s "server substitution" shape).
+/// </summary>
+public sealed record SupervisorPublishPayload
+{
+    /// <summary>
+    /// The REJECTED stop's own model-authored summary, carried forward from <see cref="Supervisor.SupervisorDeliveryGate"/>'s
+    /// substitution. <c>SupervisorTurnService.ApplyPostDecisionGate</c> returns this <c>publish</c> decision IN
+    /// PLACE of that stop, so the stop's payload never reaches the durable tape — without this field, the PR
+    /// title/body deriver could never recover the model's own account of the work on the (common) FIRST forced
+    /// publish, since <c>context.PriorDecisions</c> at execution time is this turn's REHYDRATED-BEFORE-TURN tape,
+    /// which by construction cannot contain a decision this SAME turn is still deciding. Null-omitted when the
+    /// rejected stop carried none (the title/body deriver then falls back to scanning an OLDER persisted stop —
+    /// e.g. Room's own post-terminal call, which always reads the run's TRUE final stop).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StopSummary { get; init; }
+}
+
+/// <summary>
 /// The <c>resolve</c> payload (resolver loop #379): the decider only CHOOSES to attempt resolution — the resolver
 /// task's content (which branches, which conflicted files, the build/test instruction) is assembled DETERMINISTICALLY
 /// by <c>RealSupervisorActionExecutor.Resolve</c> from the durable conflicted-merge + spawn outcomes, never by the

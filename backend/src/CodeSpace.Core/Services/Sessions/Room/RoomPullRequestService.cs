@@ -1,11 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Agents.Publish;
-using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows;
-using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,30 +9,24 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 
 /// <inheritdoc cref="IRoomPullRequestService"/>
 /// <remarks>
-/// Resolves WHAT to open a PR against off the SAME reader the I3 publish gate + the Room's own publish-state
-/// projection use (<see cref="ISupervisorPublishedBranchResolver"/>, DC-3 — merge-derived OR ledger-direct) — never
-/// a second, competing notion of "the run's branch". Idempotent PER (alias, branch): a repeat call for an alias
-/// whose recorded <see cref="PublishManifest.Branch"/> matches the CURRENT target reuses that PR rather than
-/// opening a duplicate — but a later turn's merge advancing the same alias to a genuinely different (turn-scoped)
-/// branch is treated as needing a FRESH PR, never silently pointed at the earlier turn's now-abandoned one. A
-/// single-repo run is folded into the SAME multi-repo <see cref="IChangeSetService"/> path as a one-element set —
-/// one honesty-invariant code path for both shapes, not two.
+/// A thin Room-facing wrapper (Rule 16): resolves the run's terminal status + terminal decision tape, then
+/// delegates the actual "open a PR against the published branch(es)" work to the shared, repo-agnostic
+/// <see cref="ISupervisorPullRequestOpener"/> (DC-2b — extracted so the supervisor's own server-authored
+/// <c>publish</c> decision can drive the SAME core from a LIVE turn context). This class owns ONLY the
+/// terminal-only entry contract PR-6 established: a 400 when the run is still in progress, or when nothing
+/// resolves — never a silent empty result (the opener itself never throws; that contract is THIS caller's own).
 /// </remarks>
 public sealed class RoomPullRequestService : IRoomPullRequestService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ISupervisorDecisionLog _ledger;
-    private readonly IPublishManifestStore _manifests;
-    private readonly ISupervisorPublishedBranchResolver _publishedBranches;
-    private readonly IChangeSetService _changeSets;
+    private readonly ISupervisorPullRequestOpener _opener;
 
-    public RoomPullRequestService(CodeSpaceDbContext db, ISupervisorDecisionLog ledger, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IChangeSetService changeSets)
+    public RoomPullRequestService(CodeSpaceDbContext db, ISupervisorDecisionLog ledger, ISupervisorPullRequestOpener opener)
     {
         _db = db;
         _ledger = ledger;
-        _manifests = manifests;
-        _publishedBranches = publishedBranches;
-        _changeSets = changeSets;
+        _opener = opener;
     }
 
     public async Task<RoomPullRequestResult> OpenAsync(Guid workflowRunId, Guid teamId, Guid? actorUserId, CancellationToken cancellationToken)
@@ -56,14 +46,14 @@ public sealed class RoomPullRequestService : IRoomPullRequestService, IScopedDep
 
         var priorDecisions = await _ledger.GetTerminalDecisionsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var targets = await _publishedBranches.ResolveAsync(workflowRunId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
+        var result = await _opener.OpenAsync(workflowRunId, teamId, priorDecisions, primaryRepositoryId: null, targetBranchOverride: null, currentTurnStopSummary: null, actorUserId, cancellationToken).ConfigureAwait(false);
 
-        if (targets.Count == 0)
+        if (result.PullRequests.Count == 0)
         {
-            // Sweep-found: the resolver returns empty BOTH when nothing was ever published AND when a merge-derived
-            // branch genuinely exists but its owning repository couldn't be resolved (a degraded terminal output
-            // with no repositoryId despite an integratedBranch) — the pure tape reads still distinguish the two,
-            // so the message stays as specific as it was before this reader was unified onto the shared resolver.
+            // Sweep-found (DC-3): the resolver returns empty BOTH when nothing was ever published AND when a
+            // merge-derived branch genuinely exists but its owning repository couldn't be resolved (a degraded
+            // terminal output with no repositoryId despite an integratedBranch) — the pure tape reads still
+            // distinguish the two, so the message stays as specific as it was before this reader was unified.
             var publishedButUnresolvable = !string.IsNullOrEmpty(SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions))
                 || SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count > 0;
 
@@ -72,97 +62,6 @@ public sealed class RoomPullRequestService : IRoomPullRequestService, IScopedDep
                 : "This run has no published branch to open a pull request from.");
         }
 
-        var degraded = targets.Where(t => t.RepositoryId is null)
-            .Select(t => new RoomPullRequestOpened { Alias = t.Alias, Disposition = RoomPullRequestDisposition.Failed, Error = "no resolvable repository id for this repo" })
-            .ToList();
-
-        var resolvable = targets.Where(t => t.RepositoryId is not null).ToList();
-
-        var existing = await _manifests.ListForWorkflowRunAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
-        var openedByAlias = existing.Where(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 }).ToDictionary(m => m.RepositoryAlias);
-
-        // The idempotency key is (alias, branch) — NOT alias alone. An integration branch is turn-scoped
-        // (codespace/integration/{runId}/turn{N}), so a LATER merge in the SAME run genuinely produces a
-        // DIFFERENT branch for the SAME alias; reusing an earlier turn's PR here would silently point the user at
-        // abandoned work while claiming the run's CURRENT frontier is already handled. A branch mismatch is
-        // treated as "needs opening" — the upsert below overwrites the stale row with the fresh branch + PR.
-        bool AlreadyOpenForCurrentBranch(SupervisorRepositoryBranch t) => openedByAlias.TryGetValue(t.Alias, out var manifest) && manifest.Branch == t.SourceBranch;
-
-        var alreadyOpened = resolvable.Where(AlreadyOpenForCurrentBranch)
-            .Select(t => ProjectAlreadyOpened(t, openedByAlias[t.Alias]))
-            .ToList();
-
-        var toOpen = resolvable.Where(t => !AlreadyOpenForCurrentBranch(t)).ToList();
-
-        if (toOpen.Count == 0)
-            return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).ToList() };
-
-        var (title, body) = DeriveTitleAndBody(priorDecisions);
-
-        var spec = new ChangeSetPullRequestSpec
-        {
-            Title = title,
-            Body = body,
-            Repositories = toOpen.Select(t => new ChangeSetPullRequest { RepositoryId = t.RepositoryId!.Value, SourceBranch = t.SourceBranch, TargetBranch = t.TargetBranch }).ToList(),
-        };
-
-        var result = await _changeSets.OpenPullRequestsAsync(teamId, spec, actorUserId, cancellationToken).ConfigureAwait(false);
-
-        var freshlyOpened = new List<RoomPullRequestOpened>(toOpen.Count);
-
-        for (var i = 0; i < toOpen.Count; i++)
-            freshlyOpened.Add(await ProjectAndRecordAsync(workflowRunId, teamId, toOpen[i], result.PullRequests[i], cancellationToken).ConfigureAwait(false));
-
-        return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(freshlyOpened).ToList() };
-    }
-
-    private static RoomPullRequestOpened ProjectAlreadyOpened(SupervisorRepositoryBranch target, PublishManifest manifest) => new()
-    {
-        RepositoryId = target.RepositoryId,
-        Alias = target.Alias,
-        Disposition = RoomPullRequestDisposition.AlreadyOpened,
-        Number = manifest.PullRequestNumber,
-        Url = manifest.PullRequestUrl,
-    };
-
-    /// <summary>Project one ChangeSet outcome into the Room's shape, and — only for a genuinely OPENED PR — record it onto the alias's PublishManifest row so a repeat call reuses it (I2: no second, competing notion of "did this alias already get a PR").</summary>
-    private async Task<RoomPullRequestOpened> ProjectAndRecordAsync(Guid workflowRunId, Guid teamId, SupervisorRepositoryBranch target, ChangeSetPullRequestOutcome outcome, CancellationToken cancellationToken)
-    {
-        if (outcome.Disposition != ChangeSetPullRequestDisposition.Opened)
-            return new RoomPullRequestOpened
-            {
-                RepositoryId = target.RepositoryId,
-                Alias = target.Alias,
-                Disposition = outcome.Disposition == ChangeSetPullRequestDisposition.Skipped ? RoomPullRequestDisposition.Skipped : RoomPullRequestDisposition.Failed,
-                Error = outcome.Error,
-            };
-
-        await _manifests.UpsertForIntegrationAsync(new PublishManifestUpsert
-        {
-            TeamId = teamId,
-            WorkflowRunId = workflowRunId,
-            RepositoryAlias = target.Alias,
-            RepositoryId = target.RepositoryId,
-            Branch = target.SourceBranch,
-            PublishStateValue = PublishState.Pushed,
-            PullRequestNumber = outcome.Number,
-            PullRequestUrl = outcome.Url,
-        }, cancellationToken).ConfigureAwait(false);
-
-        return new RoomPullRequestOpened { RepositoryId = target.RepositoryId, Alias = target.Alias, Disposition = RoomPullRequestDisposition.Opened, Number = outcome.Number, Url = outcome.Url };
-    }
-
-    /// <summary>Title = the stop summary's first line (I3 guarantees a completed, published run has a non-empty one — the model's own account of what it did); body = the summary in full. Falls back to a generic title/no body for the rare terminal shape with no stop decision (e.g. a server-forced stop that still had published work from an earlier turn). Internal (not private) so the framing is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
-    internal static (string Title, string? Body) DeriveTitleAndBody(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
-    {
-        var stop = priorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
-        var summary = stop is null ? null : SupervisorOutcome.ReadStopSummary(stop.OutcomeJson);
-
-        if (string.IsNullOrWhiteSpace(summary)) return ("Merge agent changes", null);
-
-        var firstLine = summary.Split('\n', 2)[0].Trim();
-        var title = firstLine.Length > 100 ? firstLine[..100].TrimEnd() : firstLine;
-
-        return (title.Length > 0 ? title : "Merge agent changes", summary);
+        return result;
     }
 }
