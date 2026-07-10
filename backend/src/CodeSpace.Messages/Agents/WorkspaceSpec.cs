@@ -130,6 +130,17 @@ public sealed record WorkspaceRepositorySpec
     public string? Ref { get; init; }
 
     /// <summary>
+    /// S1 — the EXACT commit this workspace materializes at. When set, the clone is FULL (a shallow tip may not
+    /// contain the pin) and the working tree is checked out at THIS sha after cloning <see cref="Ref"/>'s branch
+    /// context; a missing/unreachable pin fails the provision LOUD (never a silent tip fallback — the pin exists
+    /// so the planner, the reviewers, and every parallel agent see the SAME immutable base, and a pin that cannot
+    /// be honoured is a freshness violation, not a suggestion). Null (the default) → the tip of <see cref="Ref"/>,
+    /// byte-identical to before this field existed (null-omitted from the serialized spec).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PinnedSha { get; init; }
+
+    /// <summary>
     /// True when <see cref="Ref"/> is a SOFT, session-inherited prior branch — set ONLY by the session-continuity
     /// projection (never by an authored spec). When true and the prior branch was pruned on the remote, the resolver
     /// carries the default branch as the clone fallback (the run survives a merged-PR-deleted branch). False (the

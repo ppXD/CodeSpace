@@ -251,6 +251,62 @@ public sealed class LocalGitWorkspaceProviderTests
 
     // ─── Change capture ──────────────────────────────────────────────────────
 
+    // ── S1: PinnedSha — the immutable-base substrate ─────────────────────────────────
+
+    [Fact]
+    public async Task A_pinned_sha_materializes_the_exact_historical_commit_not_the_tip()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "version-A");
+        var pin = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await WriteAndCommitAsync(origin.Path, "file.txt", "version-B");   // the tip moves on
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), PinnedSha = pin }), CancellationToken.None);
+
+        (await File.ReadAllTextAsync(Path.Combine(handle.Directory, "file.txt"))).Trim()
+            .ShouldBe("version-A", "the pin wins over the tip — every participant sees the SAME immutable base");
+    }
+
+    [Fact]
+    public async Task A_pinned_workspace_diffs_against_the_pin_not_the_tip()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "version-A");
+        var pin = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await WriteAndCommitAsync(origin.Path, "file.txt", "version-B");
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), PinnedSha = pin }), CancellationToken.None);
+
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "agent.txt"), "the agent's own work");
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.ChangedFiles.ShouldBe(new[] { "agent.txt" }, customMessage: "the diff base is the PIN — version-B's tip change never bleeds into the captured patch");
+        changes.Patch.ShouldContain("the agent's own work");
+        changes.Patch.ShouldNotContain("version-B", customMessage: "provenance: the capture describes the agent's work over the pinned base, not a tip the agent never saw");
+    }
+
+    [Fact]
+    public async Task A_missing_pinned_sha_fails_the_provision_loud_naming_the_pin()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "content");
+
+        const string bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+        var ex = await Should.ThrowAsync<WorkspaceException>(() => NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), PinnedSha = bogus }), CancellationToken.None));
+
+        ex.Message.ShouldContain(bogus, customMessage: "the pin is a freshness guarantee — a stale/unpushed pin fails LOUD, never a silent tip fallback");
+    }
+
     [Fact]
     public async Task Captures_edits_new_files_and_deletions_as_a_diff()
     {
@@ -800,6 +856,17 @@ public sealed class LocalGitWorkspaceProviderTests
         await File.WriteAllTextAsync(Path.Combine(dir, file), content);
         await RunGitAsync(dir, "add", ".");
         await RunGitAsync(dir, "commit", "-m", "seed");
+    }
+
+    private static async Task<string> GitStdoutAsync(string workdir, params string[] args)
+    {
+        var result = await new LocalProcessRunner().RunAsync(
+            new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+
+        if (result.Status != SandboxStatus.Success)
+            throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+
+        return result.Stdout.Trim();
     }
 
     private static async Task RunGitAsync(string workdir, params string[] args)

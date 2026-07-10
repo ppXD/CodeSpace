@@ -27,5 +27,5 @@ public interface IAgentWorkspaceResolver
     /// transient prior produced branch, so the resolved request carries the default branch as a clone fallback if that
     /// branch was pruned; false (every other caller — authored refs, the acceptance grader, integrate) keeps it HARD.
     /// </summary>
-    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false);
+    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false, string? pinnedSha = null);
 }
