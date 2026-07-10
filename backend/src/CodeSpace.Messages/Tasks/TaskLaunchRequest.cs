@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks;
@@ -69,6 +70,9 @@ public sealed record TaskLaunchRequest
 
     /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv baked into the supervisor node's <c>acceptanceChecks</c>, enforced at the terminal stop. Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
+    /// <summary>DC-2a: the operator's OWN pre-declared delivery preference — baked into the supervisor node's <c>deliverySpec</c>, PER FIELD authoritative over the model's plan-time proposal. Null ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    public DeliverySpec? DeliverySpec { get; init; }
 
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision (Deep only) — baked into the supervisor node so every turn + replay reads it. <see cref="ReviewMode.None"/> (the default) ⇒ no critic (byte-identical). Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;

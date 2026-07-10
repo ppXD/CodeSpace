@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -552,6 +553,46 @@ public class TaskLaunchFlowTests
         {
             jobClient.AutoExecute = true;
         }
+    }
+
+    [Fact]
+    public async Task A_deep_launch_bakes_the_operators_declared_delivery_contract_into_the_supervisor_snapshot()
+    {
+        // DC-2a: the operator's own pre-declared DeliverySpec must bind through the command path → TaskBuildContext
+        // → the supervisor node's deliverySpec config, PER FIELD authoritative over the model's own plan-time
+        // proposal. An explicit false must bake too (it is a boxed non-null bool, distinct from "unset").
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+            DeliverySpec = new DeliverySpec { OpenPullRequest = false, TargetBranch = "release" },
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+        var delivery = ReadSupervisorDeliverySpec(run.DefinitionSnapshotJson!);
+        delivery.ShouldNotBeNull();
+        delivery!.Value.GetProperty("openPullRequest").GetBoolean().ShouldBe(false, "an explicit false must bake, not be dropped as if unset");
+        delivery.Value.GetProperty("targetBranch").GetString().ShouldBe("release");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_with_no_delivery_declaration_omits_the_key_entirely()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+        });
+
+        var run = await LoadRunAsync(result.RunId);
+
+        ReadSupervisorDeliverySpec(run.DefinitionSnapshotJson!).ShouldBeNull("no operator declaration ⇒ omitted ⇒ the model's own plan-time proposal stands untouched — byte-identical to before DC-2a");
     }
 
     [Fact]
@@ -1718,6 +1759,15 @@ public class TaskLaunchFlowTests
         if (!sup.GetProperty("config").TryGetProperty("acceptanceCriteria", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
 
         return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
+    }
+
+    /// <summary>Reads the supervisor node's <c>deliverySpec</c> object out of the frozen snapshot (DC-2a). Null when the key is absent (the operator declared no preference at all).</summary>
+    private static JsonElement? ReadSupervisorDeliverySpec(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("deliverySpec", out var value) ? value.Clone() : null;
     }
 
     /// <summary>Reads the supervisor node's agentProfile.integrateBranches out of the frozen snapshot. Null when the key is absent (the default — defers to the ambient flag).</summary>

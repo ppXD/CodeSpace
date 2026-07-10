@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks;
@@ -68,4 +69,7 @@ public sealed record TaskBuildContext
 
     /// <summary>The credentialed-model ROW the decision critic runs on — baked into the node's <c>reviewerModelId</c>. Null ⇒ omitted ⇒ the critic auto-picks the team brain. Only consulted when <see cref="DecisionReviewMode"/> is not None.</summary>
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>DC-2a: the operator's OWN pre-declared delivery preference — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>deliverySpec</c>, PER FIELD authoritative over the model's plan-time proposal (<c>SupervisorDeliveryClamp</c> enforces this at plan-persist time). Null ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    public DeliverySpec? DeliverySpec { get; init; }
 }

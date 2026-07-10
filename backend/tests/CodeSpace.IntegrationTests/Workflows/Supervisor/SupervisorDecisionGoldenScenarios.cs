@@ -344,7 +344,7 @@ public static class SupervisorDecisionGoldenScenarios
     /// <summary>The S3 gate's own confirmation card, already ANSWERED — built from the production card builder (so the question is exactly what the gate injects) with a FIXED token for byte-stable prompts.</summary>
     private static SupervisorPriorDecision ConfirmationAnswered(string answer)
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2, delivery: null);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2, delivery: null, priorApprovedDelivery: null);
         var outcome = JsonSerializer.Serialize(new { question = "confirm plan v1", askHumanToken = "fixed-confirmation-token", answer }, AgentJson.Options);
 
         return PriorDecision(SupervisorDecisionKinds.AskHuman, 1, card.PayloadJson, outcome);

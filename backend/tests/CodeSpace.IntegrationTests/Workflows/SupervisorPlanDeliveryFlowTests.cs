@@ -97,14 +97,75 @@ public sealed class SupervisorPlanDeliveryFlowTests
         question.ShouldContain("automatically open a pull request against main", customMessage: "the operator must see the side-effecting delivery behaviour BEFORE approving the plan");
     }
 
+    [Fact]
+    public async Task A_replan_that_drops_an_already_approved_pull_request_flags_the_revocation_in_its_own_card()
+    {
+        // DC-2a downgrade-delta: NO operator declaration is in play (an operator's own true is permanently sticky
+        // per SupervisorDeliveryClamp, so a downgrade can only meaningfully originate from the MODEL changing its
+        // own mind between plan versions). v1 proposes + gets approved; v2 proposes nothing — its OWN confirmation
+        // card must flag that the already-approved PR is being revoked, not silently drop it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var conversationId = Guid.NewGuid();
+        var goalConfig = new SupervisorGoalConfig { Goal = Goal, RequirePlanConfirmation = true };
+
+        var proposesPr = new AlwaysPlanDecider(new DeliverySpec { OpenPullRequest = true, TargetBranch = "main" });
+        var proposesNothing = new AlwaysPlanDecider(delivery: null);
+
+        await RunTurnAsync(runId, teamId, proposesPr, goalConfig, conversationId);              // turn 1: plan v1 (proposes true)
+        await RunTurnAsync(runId, teamId, proposesPr, goalConfig, conversationId);              // turn 2: the gate injects v1's card
+        await ApproveLatestConfirmationCardAsync(runId, teamId);
+        await RunTurnAsync(runId, teamId, proposesNothing, goalConfig, conversationId);         // turn 3: release v1 → decider authors v2 (proposes nothing)
+        await RunTurnAsync(runId, teamId, proposesNothing, goalConfig, conversationId);         // turn 4: the gate injects v2's OWN card
+
+        var latestAsk = await LatestAskHumanAsync(runId, teamId);
+        var question = SupervisorOutcome.ReadAskHumanQuestion(latestAsk.OutcomeJson)!;
+        question.ShouldContain("plan v2");
+        question.ShouldContain("REVOKES", customMessage: "v2 silently drops v1's already-approved PR — the card must flag it before the operator approves the weaker plan");
+    }
+
     // ─── Drive a real turn ─────────────────────────────────────────────────────────
 
-    private async Task RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig)
+    private async Task RunTurnAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig, Guid? conversationId = null)
     {
         using var scope = _fixture.BeginScope();
         var service = NewTurnService(scope, decider);
-        await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
+        await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId, goalConfig, CancellationToken.None);
     }
+
+    /// <summary>
+    /// 🟡 Medium-mock (Rule 12): directly folds an "approve" answer onto the tape's latest ask_human decision —
+    /// the test-side stand-in for the operator's checklist click, at the SAME abstraction level as this file's
+    /// OWN direct <c>RunTurnAsync</c> turn-driving (every test here bypasses the engine + real wait/resume; this
+    /// helper is consistent with that, not a new degradation). Deliberately skips <c>WorkflowRunWait</c> /
+    /// <c>IWorkflowResumeService</c> entirely — that plumbing (resolve-by-token → <c>FoldAskHumanAnswer</c>) is
+    /// covered end-to-end elsewhere (<c>SupervisorPlanConfirmationFlowTests</c>'s real-engine approve/re-plan
+    /// arcs); this test isolates <see cref="SupervisorPlanConfirmation.LastApprovedDelivery"/> + the redesigned
+    /// <c>DeliverySummary</c> rendering, which need only a correctly-shaped tape, not the wait machinery that
+    /// produces it. Safe against <c>FoldAskHumanAnswer</c>'s own rehydrate re-fold: it is a no-op pass-through
+    /// when the card's token has no matching RESOLVED <c>WorkflowRunWait</c> row (there is none here), so the
+    /// answer written below is never clobbered on the next <c>RunTurnAsync</c>.
+    /// </summary>
+    private async Task ApproveLatestConfirmationCardAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var latest = await LatestAskHumanRowAsync(db, runId, teamId);
+
+        latest.OutcomeJson = SupervisorOutcome.FoldAnswerOnto(latest.OutcomeJson, "approve");
+        await db.SaveChangesAsync(CancellationToken.None);
+    }
+
+    private async Task<Core.Persistence.Entities.SupervisorDecisionRecord> LatestAskHumanAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await LatestAskHumanRowAsync(scope.Resolve<CodeSpaceDbContext>(), runId, teamId);
+    }
+
+    private static async Task<Core.Persistence.Entities.SupervisorDecisionRecord> LatestAskHumanRowAsync(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
+        await db.SupervisorDecisionRecord
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .OrderByDescending(d => d.Sequence).FirstAsync();
 
     private async Task<string> LatestPlanPayloadAsync(Guid runId, Guid teamId)
     {

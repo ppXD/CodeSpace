@@ -72,6 +72,15 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "acceptanceChecks": { "type": "array", "items": { "type": "string" }, "description": "The operator acceptance FLOOR — an argv (e.g. [\"sh\",\"check.sh\"]) run against the run's reviewable head at the terminal stop. Mandatory when set: a non-zero exit fails the stop and withholds the reviewable branch, so success can't be declared on an unverified head." },
                 "acceptanceCriteria": { "type": "array", "items": { "type": "string" }, "description": "Free-text acceptance CRITERIA the operator wants met (e.g. \"tests pass\", \"PR opened\") — rendered into the decider prompt as the definition of done the supervisor targets. NOT executed (unlike acceptanceChecks, which is an argv floor)." },
                 "requirePlanConfirmation": { "type": "boolean", "description": "When true, every AUTHORED plan version parks the run on a confirmation card before any agent is created — an approving answer releases execution; any other answer is revision feedback the supervisor folds into a revised plan. Off (the default) = fully autonomous planning." },
+                "deliverySpec": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "DC-2a: the operator's OWN pre-declared delivery preference (the Universal Delivery Contract) — PER FIELD authoritative over anything the model proposes on its plan. Leave empty to let the model's own plan-time proposal stand.",
+                  "properties": {
+                    "openPullRequest": { "type": "boolean", "description": "Whether this run should automatically open a pull request once its work is published. An explicit false survives even a model proposing true." },
+                    "targetBranch": { "type": "string", "description": "The branch a requested pull request should target. Leave empty for the bound repository's own default branch." }
+                  }
+                },
                 "agentProfile": {
                   "type": "object",
                   "additionalProperties": false,

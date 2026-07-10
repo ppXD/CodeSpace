@@ -24,7 +24,7 @@ public class SupervisorPlanConfirmationTests
     [Fact]
     public void IntoAskHuman_authors_a_marker_carrying_question_naming_the_version_and_size()
     {
-        var decision = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 2, itemCount: 3, delivery: null);
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(planVersion: 2, itemCount: 3, delivery: null, priorApprovedDelivery: null);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman);
 
@@ -39,18 +39,18 @@ public class SupervisorPlanConfirmationTests
     [InlineData(true)]
     public void IntoAskHuman_is_deterministic_for_a_replayed_turn(bool viaCard)
     {
-        var a = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
-        var b = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
+        var a = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null, null);
+        var b = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null, null);
 
         (viaCard ? a.PayloadJson : a.Kind).ShouldBe(viaCard ? b.PayloadJson : b.Kind, "a crash-replay must re-derive byte-identical card bytes → the same idempotency key");
     }
 
-    // ── DC-1: the card names any side-effecting delivery contract before the operator approves ──
+    // ── DC-1/DC-2a: the card names the EFFECTIVE delivery contract before the operator approves ──
 
     [Fact]
     public void IntoAskHuman_names_an_auto_opened_pull_request_and_its_target_branch()
     {
-        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true, TargetBranch = "release" });
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true, TargetBranch = "release" }, priorApprovedDelivery: null);
 
         var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
         question.ShouldContain("automatically open a pull request against release", customMessage: "the operator must see the side-effecting behaviour BEFORE approving the plan");
@@ -59,24 +59,103 @@ public class SupervisorPlanConfirmationTests
     [Fact]
     public void IntoAskHuman_names_the_default_branch_when_none_was_specified()
     {
-        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true });
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = true }, priorApprovedDelivery: null);
 
         var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
         question.ShouldContain("the repository's default branch");
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData(false)]
-    public void IntoAskHuman_names_nothing_extra_when_no_pr_would_open(bool? openPullRequest)
+    [Fact]
+    public void IntoAskHuman_names_nothing_extra_when_no_contract_exists_on_either_side()
     {
-        var delivery = openPullRequest is null ? null : new DeliverySpec { OpenPullRequest = openPullRequest };
-
-        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, delivery);
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, delivery: null, priorApprovedDelivery: null);
 
         var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
-        question.ShouldNotContain("pull request", customMessage: "no contract, or an explicit don't-open, is the safe default — it needs no extra confirmation attention");
+        question.ShouldNotContain("pull request", customMessage: "no contract at all is byte-identical to pre-DC-1 — it needs no extra confirmation attention");
         question.ShouldContain(SupervisorPlanConfirmation.ConfirmationMarker, customMessage: "the marker must still be intact regardless of the delivery summary");
+    }
+
+    [Fact]
+    public void IntoAskHuman_states_an_explicit_decline_instead_of_rendering_nothing()
+    {
+        // Requirement (b): an explicit "don't open a PR" must be VISIBLE on the card — a silent "" would let the
+        // card promise nothing while the actual stop behaviour explicitly withholds the PR.
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(1, 2, new DeliverySpec { OpenPullRequest = false }, priorApprovedDelivery: null);
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldContain("will NOT automatically open a pull request", customMessage: "an explicit decline must be named, not silently omitted");
+    }
+
+    [Fact]
+    public void IntoAskHuman_flags_a_revocation_when_a_replan_drops_an_already_approved_pull_request()
+    {
+        // The prior plan's PR was approved; THIS plan proposes nothing — the card must flag the downgrade instead
+        // of silently letting the operator believe the earlier promise still stands.
+        var priorApproved = new DeliverySpec { OpenPullRequest = true, TargetBranch = "main" };
+
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(2, 1, delivery: null, priorApprovedDelivery: priorApproved);
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldContain("REVOKES", customMessage: "the operator must see the downgrade BEFORE approving the weaker plan");
+    }
+
+    [Fact]
+    public void IntoAskHuman_prefers_naming_the_current_pr_over_the_revocation_when_the_replan_restores_it()
+    {
+        // A plan that itself opens a PR again is not a revocation, even with a prior approval sitting behind it.
+        var priorApproved = new DeliverySpec { OpenPullRequest = true, TargetBranch = "main" };
+
+        var decision = SupervisorPlanConfirmation.IntoAskHuman(3, 1, new DeliverySpec { OpenPullRequest = true, TargetBranch = "main" }, priorApprovedDelivery: priorApproved);
+
+        var question = JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("question").GetString()!;
+        question.ShouldContain("automatically open a pull request against main");
+        question.ShouldNotContain("REVOKES");
+    }
+
+    // ── LastApprovedDelivery: the running "was in effect" baseline a downgrade compares against ──
+
+    [Fact]
+    public void LastApprovedDelivery_is_null_when_nothing_was_ever_approved() =>
+        SupervisorPlanConfirmation.LastApprovedDelivery(Array.Empty<SupervisorPriorDecision>()).ShouldBeNull();
+
+    [Fact]
+    public void LastApprovedDelivery_ignores_the_latest_plan_which_has_no_card_yet()
+    {
+        var priors = new[] { PlanWithDelivery(true) };
+
+        SupervisorPlanConfirmation.LastApprovedDelivery(priors).ShouldBeNull("the current plan's own contract is not yet approved by anything — it must never count as the baseline");
+    }
+
+    [Fact]
+    public void LastApprovedDelivery_commits_the_plans_delivery_once_its_card_is_approved()
+    {
+        var priors = new[] { PlanWithDelivery(true), ConfirmationCard(answer: "approve") };
+
+        var approved = SupervisorPlanConfirmation.LastApprovedDelivery(priors);
+        approved.ShouldNotBeNull();
+        approved!.OpenPullRequest.ShouldBe(true);
+    }
+
+    [Fact]
+    public void LastApprovedDelivery_never_commits_a_rejected_plans_delivery()
+    {
+        var priors = new[] { PlanWithDelivery(true), ConfirmationCard(answer: "revise: smaller steps") };
+
+        SupervisorPlanConfirmation.LastApprovedDelivery(priors).ShouldBeNull("a rejected plan's contract was never in effect");
+    }
+
+    [Fact]
+    public void LastApprovedDelivery_tracks_the_most_recently_approved_version_across_multiple_replans()
+    {
+        var priors = new[]
+        {
+            PlanWithDelivery(true), ConfirmationCard(answer: "approve"),
+            PlanWithDelivery(false), ConfirmationCard(answer: "approve"),
+        };
+
+        var approved = SupervisorPlanConfirmation.LastApprovedDelivery(priors);
+        approved.ShouldNotBeNull();
+        approved!.OpenPullRequest.ShouldBe(false, "the SECOND approval is the current baseline — it supersedes the first");
     }
 
     // ── LatestPlanDecision ──
@@ -237,18 +316,22 @@ public class SupervisorPlanConfirmationTests
 
     private static SupervisorPriorDecision Plan() => Decision(SupervisorDecisionKinds.Plan, "{\"goal\":\"g\",\"subtasks\":[]}", outcomeJson: "{}");
 
+    /// <summary>A Plan decision whose own (already-clamped, DC-1 shape) payload carries a delivery contract — mirrors what <c>ClampPlanDelivery</c> freezes onto a real plan's payload before persist.</summary>
+    private static SupervisorPriorDecision PlanWithDelivery(bool openPullRequest) =>
+        Decision(SupervisorDecisionKinds.Plan, $"{{\"goal\":\"g\",\"subtasks\":[],\"delivery\":{{\"openPullRequest\":{(openPullRequest ? "true" : "false")}}}}}", outcomeJson: "{}");
+
     private static SupervisorPriorDecision Spawn() => Decision(SupervisorDecisionKinds.Spawn, "{\"subtaskIds\":[\"sa\"]}", outcomeJson: "{}");
 
     private static SupervisorPriorDecision ConfirmationCard(string? answer = null)
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null, null);
         return Decision(card.Kind, card.PayloadJson, AskOutcome(answer));
     }
 
     /// <summary>The DEGRADED no-surface card: marker-carrying payload, but the outcome recorded neither a wait token nor an answer (RealSupervisorActionExecutor's no-conversation self-advance).</summary>
     private static SupervisorPriorDecision DegradedConfirmationCard()
     {
-        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null);
+        var card = SupervisorPlanConfirmation.IntoAskHuman(1, 2, null, null);
         return Decision(card.Kind, card.PayloadJson, JsonSerializer.Serialize(new { question = "q", askHuman = "no-conversation", answer = (string?)null }));
     }
 
