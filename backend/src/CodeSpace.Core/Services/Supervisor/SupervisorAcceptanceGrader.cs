@@ -129,38 +129,20 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         if (cloneResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
 
-        // Model-authored setup/acceptance commands run INSIDE this clone next — strip the tokened origin the same way
-        // the shared workspace provider does for the branch-grading path, so no credential persists in .git/config
-        // for those commands to read. Best-effort: the clone already succeeded, so this never fails the grade.
-        await StripTokenFromRemoteAsync(clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+        // Model-authored setup/acceptance commands run INSIDE this clone next — strip the tokened origin via the
+        // SAME shared helper LocalGitWorkspaceProvider's own branch-grading path uses (LocalGitWorkspaceProvider.
+        // StripTokenFromRemoteAsync — one implementation, not a second copy that could drift), so no credential
+        // persists in .git/config for those commands to read. Best-effort: the clone already succeeded, so this
+        // never fails the grade. Guarded on a present token, mirroring MaterializeAsync's own call site exactly —
+        // a public repo with no credential has nothing to strip.
+        if (!string.IsNullOrEmpty(clone.Token))
+            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(DefaultRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 
         var checkoutResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
             new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
 
         if (checkoutResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"base revision {baseSha} not found in the repository: {LocalGitWorkspaceProvider.Redact(Summarize(checkoutResult.Stderr), clone.Token)}");
-    }
-
-    /// <summary>
-    /// Rewrite origin to the tokenless URL so the cloned <c>.git/config</c> never persists credentials for the
-    /// setup/acceptance command to read. Mirrors <c>LocalGitWorkspaceProvider.StripTokenFromRemoteAsync</c> exactly:
-    /// if the rewrite fails, remove the origin remote outright — grading never pushes, so origin isn't needed after
-    /// clone. Only when both fail do we log an error; the clone is discarded after grading either way.
-    /// </summary>
-    private async Task StripTokenFromRemoteAsync(string cleanUrl, string directory, CancellationToken cancellationToken)
-    {
-        var rewrite = await _runners.Resolve(DefaultRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
-
-        if (rewrite.Status == SandboxStatus.Success) return;
-
-        var remove = await _runners.Resolve(DefaultRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "remote", "remove", "origin" }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
-
-        if (remove.Status == SandboxStatus.Success)
-            _logger.LogWarning("Token strip via set-url failed (exit {ExitCode}); removed the origin remote so no credential persists in .git/config", rewrite.ExitCode);
-        else
-            _logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
     }
 
     /// <summary>Apply <paramref name="patch"/> onto the already-checked-out <paramref name="directory"/> — NO stage, NO commit, NO push (this grade is read-only by construction; the clone is discarded after grading either way). Mirrors <c>LocalGitBranchIntegrator</c>'s own apply step (<c>git apply --3way</c>) minus <c>--index</c>, since nothing here is ever committed. Returns null on success, else <c>git</c>'s stderr.</summary>
