@@ -53,6 +53,14 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) =>
         UpsertAsync(PublishManifestKind.Integration, agentRunId: null, input, cancellationToken);
 
+    /// <summary>
+    /// Never add <c>CreatedBy</c>/<c>CreatedBy</c>-derived fields to either <c>ExecuteUpdateAsync</c>'s
+    /// <c>SetProperty</c> list below. Both are bulk SQL updates that bypass <c>SaveChangesAsync</c>/
+    /// <c>CodeSpaceDbContext.ApplyAuditFields</c> entirely — <c>CreatedBy</c> currently survives an update ONLY
+    /// because it is absent from the list, which is exactly what <c>IHumanTouchReader.RoomOpenedPullRequestCountsAsync</c>
+    /// relies on to tell a human-initiated PR-open from a system-authored one. Adding it here would silently let a
+    /// later system write reassign a row's actor and misclassify a genuine human touch.
+    /// </summary>
     private async Task UpsertAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;

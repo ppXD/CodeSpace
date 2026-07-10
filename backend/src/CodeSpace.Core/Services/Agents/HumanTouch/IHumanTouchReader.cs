@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -10,13 +11,14 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents.HumanTouch;
 
 /// <summary>
-/// The bulk "did this run ever stop to ask a human anything" read — joining the FOUR durable places a human touch
+/// The bulk "did this run ever stop to ask a human anything" read — joining the FIVE durable places a human touch
 /// can be recorded: an <c>ask_human</c> <see cref="Supervisor.SupervisorDecisionKinds.AskHuman"/>
 /// <c>SupervisorDecisionRecord</c> (agent-grain, keyed directly on <c>SupervisorRunId</c>, which IS the
 /// <c>WorkflowRunId</c>); an approval-parked MCP tool call — either a plain side-effecting call or a
 /// <c>decision.request</c> row — in <c>ToolCallLedger</c> (agent-grain, joined through <c>AgentRun.WorkflowRunId</c>
-/// since the ledger has no <c>WorkflowRunId</c> of its own); and a <c>flow.wait_approval</c> / <c>flow.decision</c>
-/// node's <c>WorkflowRunWait</c> row (node-grain, joined through <c>WorkflowRun.TeamId</c> for tenancy).
+/// since the ledger has no <c>WorkflowRunId</c> of its own); a <c>flow.wait_approval</c> / <c>flow.decision</c>
+/// node's <c>WorkflowRunWait</c> row (node-grain, joined through <c>WorkflowRun.TeamId</c> for tenancy); and a
+/// human-initiated pull-request open recorded on <c>PublishManifest</c> (<see cref="RoomOpenedPullRequestCountsAsync"/>).
 ///
 /// <para>Every kind is filtered to a GENUINE human touch, never merely "a park occurred": an <c>ask_human</c>
 /// decision that was REJECTED (blank question) or DEGRADED (no usable conversation) self-advances without ever
@@ -56,9 +58,10 @@ public sealed class HumanTouchReader : IHumanTouchReader, IScopedDependency
         var askHumanCounts = await AskHumanCountsAsync(workflowRunIds, teamId, cancellationToken).ConfigureAwait(false);
         var approvalCounts = await ApprovalCountsAsync(workflowRunIds, teamId, cancellationToken).ConfigureAwait(false);
         var nodeWaitCounts = await NodeWaitCountsAsync(workflowRunIds, teamId, cancellationToken).ConfigureAwait(false);
+        var pullRequestCounts = await RoomOpenedPullRequestCountsAsync(workflowRunIds, teamId, cancellationToken).ConfigureAwait(false);
 
         return workflowRunIds
-            .Select(id => (id, count: askHumanCounts.GetValueOrDefault(id) + approvalCounts.GetValueOrDefault(id) + nodeWaitCounts.GetValueOrDefault(id)))
+            .Select(id => (id, count: askHumanCounts.GetValueOrDefault(id) + approvalCounts.GetValueOrDefault(id) + nodeWaitCounts.GetValueOrDefault(id) + pullRequestCounts.GetValueOrDefault(id)))
             .Where(x => x.count > 0)
             .ToDictionary(x => x.id, x => x.count);
     }
@@ -120,6 +123,40 @@ public sealed class HumanTouchReader : IHumanTouchReader, IScopedDependency
         return rows
             .Where(r => IsGenuineHumanNodeWait(r.WaitKind, r.Status, r.PayloadJson))
             .GroupBy(r => r.RunId)
+            .ToDictionary(g => g.Key, g => g.Count());
+    }
+
+    /// <summary>
+    /// A pull request opened through the Room's "Open PR" action (<c>RoomPullRequestService.OpenAsync</c>) — the
+    /// FIFTH durable touch, and the one the M-1 sweep left uncounted: an operator clicking that button is a genuine
+    /// human touch, but it posts no <c>ask_human</c> row, no approval, and no node wait, so it was invisible to the
+    /// other three sources. Recorded on <see cref="PublishManifest"/> (<see cref="PublishManifestKind.Integration"/>,
+    /// <see cref="PublishManifest.PullRequestNumber"/> set) — <c>CreatedBy</c> is the discriminator, NOT the mere
+    /// presence of a PR number. On the row's FIRST write (a genuinely new PR), EF's audit stamping
+    /// (<c>CodeSpaceDbContext.ApplyAuditFields</c>, the tracked-entity <c>SaveChangesAsync</c> insert path) sets
+    /// <c>CreatedBy</c> to the real authenticated <c>ICurrentUser</c> for a Room-initiated, HTTP-request-scoped
+    /// call, and to <see cref="SystemUsers.SeederId"/> (<c>BackgroundSeederUser</c>) for anything running outside
+    /// an HTTP context — a background job, a recurring job, or a future server-authored deliver-at-stop PR-open.
+    /// On a LATER update to the same row (e.g. a rebind to a genuinely different turn-scoped branch),
+    /// <c>PublishManifestStore.UpsertAsync</c> uses a bulk <c>ExecuteUpdateAsync</c> that bypasses
+    /// <c>SaveChangesAsync</c>/<c>ApplyAuditFields</c> ENTIRELY — <c>CreatedBy</c> survives only because its
+    /// <c>SetProperty</c> list never assigns it, not because of any audit-field guard. A future edit that adds
+    /// <c>CreatedBy</c> to that list would silently defeat this discriminator; don't. This keys on WHO opened it,
+    /// not on whether a PR exists, so a server-side open is correctly never counted here.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, int>> RoomOpenedPullRequestCountsAsync(IReadOnlyCollection<Guid> workflowRunIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId
+                && m.WorkflowRunId != null && workflowRunIds.Contains(m.WorkflowRunId.Value)
+                && m.Kind == PublishManifestKind.Integration
+                && m.PullRequestNumber != null
+                && m.CreatedBy != SystemUsers.SeederId)
+            .Select(m => m.WorkflowRunId!.Value)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows
+            .GroupBy(id => id)
             .ToDictionary(g => g.Key, g => g.Count());
     }
 
