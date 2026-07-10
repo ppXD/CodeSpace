@@ -47,6 +47,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds,
             AcceptanceCriteria = request.AcceptanceCriteria,
             AcceptanceChecks = request.AcceptanceChecks,
+            DeliverySpec = request.DeliverySpec,
             RequirePlanConfirmation = request.RequirePlanConfirmation,
             PlannerReviewMode = request.PlannerReviewMode,
             DecisionReviewMode = request.DecisionReviewMode,

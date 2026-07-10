@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -134,6 +135,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // harness default ⇒ byte-identical. Closes the gap where a launched pool was dropped on the supervisor lane.
         AddIfPresent(config, "allowedTools", context.AgentProfile?.AllowedTools is { Count: > 0 } tools ? tools.ToList() : null);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
+        // DC-2a: the operator's OWN pre-declared delivery preference — PER FIELD authoritative over the model's
+        // plan-time proposal (SupervisorDeliveryClamp enforces this at plan-persist time). Omitted when the
+        // operator named none (byte-identical to before DC-2a — the model's own proposal stands untouched).
+        AddIfPresent(config, "deliverySpec", BuildDeliverySpec(context.DeliverySpec));
 
         return JsonSerializer.SerializeToElement(config);
     }
@@ -164,6 +169,19 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The output-review critic for each spawned agent — None ⇒ omitted (the enum int) ⇒ byte-identical.
         AddIfPresent(map, "outputReviewMode", profile.OutputReviewMode == ReviewMode.None ? (object?)null : (int)profile.OutputReviewMode);
         AddIfPresent(map, "reviewerModelId", profile.ReviewerModelId?.ToString());
+
+        return map.Count > 0 ? map : null;
+    }
+
+    /// <summary>The nested deliverySpec object — the operator's pre-declared delivery preference, field-for-field onto the ConfigSchema keys. Null (omitted) when the operator named no preference at all, so the model's own plan-time proposal stands untouched. <see cref="DeliverySpec.OpenPullRequest"/> bakes even when explicitly FALSE (a boxed <c>bool</c> is non-null) — an operator's "don't open a PR" must survive baking exactly like an explicit "do".</summary>
+    private static Dictionary<string, object?>? BuildDeliverySpec(DeliverySpec? spec)
+    {
+        if (spec == null) return null;
+
+        var map = new Dictionary<string, object?>();
+
+        AddIfPresent(map, "openPullRequest", spec.OpenPullRequest);
+        AddIfPresent(map, "targetBranch", NullIfBlank(spec.TargetBranch));
 
         return map.Count > 0 ? map : null;
     }

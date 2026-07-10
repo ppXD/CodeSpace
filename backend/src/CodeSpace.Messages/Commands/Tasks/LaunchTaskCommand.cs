@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
@@ -135,6 +136,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
 
     /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv (e.g. ["sh","check.sh"]) run against the run's reviewable head at the terminal stop; a non-zero exit fails the stop and withholds the branch. DISTINCT from the free-text <see cref="AcceptanceCriteria"/> (prompt-rendered, never executed). Null / empty ⇒ omitted ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
+    /// <summary>
+    /// Deep/supervisor only: the operator's OWN pre-declared delivery preference (DC-2a — the Universal Delivery
+    /// Contract's operator-pre-declaration authorization path) — PER FIELD authoritative over anything the
+    /// model proposes on its plan (<c>SupervisorDeliveryClamp</c> enforces this at plan-persist time). Null (the
+    /// default) ⇒ omitted ⇒ the model's own plan-time proposal (if any) stands untouched ⇒ byte-identical to
+    /// before this field existed. Inert on a non-supervisor projection.
+    /// </summary>
+    public DeliverySpec? DeliverySpec { get; init; }
 
     /// <summary>
     /// The agent working-directory mode in a MULTI-repo workspace, in wire vocabulary: <c>"workspace"</c> (cwd = the

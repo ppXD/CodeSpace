@@ -239,8 +239,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // never the model's raw unclamped proposal, since ClampPlanDelivery already ran before this turn persisted.
         var latestPlan = SupervisorPlanConfirmation.LatestPlanDecision(context.PriorDecisions);
         var delivery = SupervisorOutcome.ReadPlanDelivery(latestPlan?.PayloadJson);
+        var priorApprovedDelivery = SupervisorPlanConfirmation.LastApprovedDelivery(context.PriorDecisions);
 
-        return SupervisorPlanConfirmation.IntoAskHuman(current.Version, CountPlanItems(current.ItemsJson), delivery);
+        return SupervisorPlanConfirmation.IntoAskHuman(current.Version, CountPlanItems(current.ItemsJson), delivery, priorApprovedDelivery);
     }
 
     /// <summary>

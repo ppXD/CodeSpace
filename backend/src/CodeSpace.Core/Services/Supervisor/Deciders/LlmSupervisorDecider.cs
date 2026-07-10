@@ -445,6 +445,27 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine();
         }
 
+        // DC-2a: the operator's OWN pre-declared delivery preference — tell the model WHY a delivery proposal it
+        // authors may be overridden, so it stops re-proposing an already-vetoed contract turn after turn. Only
+        // an OPERATOR declaration renders here (never the model's own prior proposal, which needs no explaining
+        // to itself). Three independent per-field cases, mirroring SupervisorDeliveryClamp's own per-field
+        // precedence: OpenPullRequest can be pinned true/false OR left null (the operator only pinned the
+        // branch, leaving open/don't-open to the model) — null must NEVER collapse into "false", else the model
+        // is told a veto the operator never declared. Neither field set ⇒ no block ⇒ byte-identical prompt.
+        if (context.DeliverySpec is { } delivery && (delivery.OpenPullRequest != null || !string.IsNullOrWhiteSpace(delivery.TargetBranch)))
+        {
+            builder.AppendLine("The operator pre-declared a delivery preference — it is FINAL and cannot be overridden by any plan you author:");
+
+            if (delivery.OpenPullRequest == true)
+                builder.AppendLine($"- Automatically open a pull request against {(string.IsNullOrWhiteSpace(delivery.TargetBranch) ? "the repository's default branch" : delivery.TargetBranch)} once the work is published.");
+            else if (delivery.OpenPullRequest == false)
+                builder.AppendLine("- Do NOT automatically open a pull request.");
+            else
+                builder.AppendLine($"- If you do propose opening a pull request, target {delivery.TargetBranch}.");
+
+            builder.AppendLine();
+        }
+
         // An independent critic reviewed the previous draft of THIS turn's decision and asked for a revision. Fold its
         // critique in so the model improves the decision. Set ONLY on the critic decorator's one bounded re-decide
         // (null on the first decide ⇒ byte-identical prompt).

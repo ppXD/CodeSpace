@@ -100,7 +100,7 @@ public class AskAnswerFactsSourceTests
         var log = new FakeSupervisorDecisionLog();
 
         // A REAL confirmation card's payload — built by the production gate so the marker can't drift.
-        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, Core.Services.Supervisor.SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2, delivery: null).PayloadJson, "{}");
+        log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.AskHuman, Core.Services.Supervisor.SupervisorPlanConfirmation.IntoAskHuman(planVersion: 1, itemCount: 2, delivery: null, priorApprovedDelivery: null).PayloadJson, "{}");
 
         var facts = await new AskAnswerFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
 

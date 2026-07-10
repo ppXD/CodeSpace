@@ -67,6 +67,41 @@ public class SupervisorDeciderTests
         prompt.ShouldContain(SupervisorDecisionKinds.Plan, Case.Insensitive, "the prior plan is folded into the prompt so the decider can spawn over it");
     }
 
+    // ── DC-2a: the operator's pre-declared DeliverySpec is told to the model, so it stops re-proposing a vetoed contract ──
+
+    [Fact]
+    public void The_prompt_tells_the_model_the_operators_declared_true_and_its_target_branch()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { DeliverySpec = new DeliverySpec { OpenPullRequest = true, TargetBranch = "release" } });
+
+        prompt.ShouldContain("FINAL");
+        prompt.ShouldContain("Automatically open a pull request against release");
+    }
+
+    [Fact]
+    public void The_prompt_tells_the_model_the_operators_declared_false()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { DeliverySpec = new DeliverySpec { OpenPullRequest = false } });
+
+        prompt.ShouldContain("Do NOT automatically open a pull request");
+    }
+
+    [Fact]
+    public void The_prompt_omits_the_delivery_block_when_the_operator_declared_nothing() =>
+        LlmSupervisorDecider.BuildUserPromptForTest(Context()).ShouldNotContain("delivery preference", Case.Insensitive);
+
+    [Fact]
+    public void The_prompt_never_fabricates_a_decline_when_the_operator_only_pinned_a_target_branch()
+    {
+        // SupervisorDeliveryClamp.Clamp lets the operator pin ONLY TargetBranch and leave OpenPullRequest to the
+        // model (per-field independence). OpenPullRequest null must NOT collapse into "false" — that would tell
+        // the model a veto the operator never declared, wrongly suppressing a PR it would otherwise propose.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { DeliverySpec = new DeliverySpec { TargetBranch = "release" } });
+
+        prompt.ShouldNotContain("Do NOT automatically open a pull request", customMessage: "the operator expressed no opinion on OpenPullRequest — it must not read as an explicit decline");
+        prompt.ShouldContain("release", customMessage: "the operator's branch pin should still reach the model somehow");
+    }
+
     // ── P1e compaction ladder: a re-planned run renders only the LATEST plan full; superseded plans collapse to a digest ──
 
     [Fact]

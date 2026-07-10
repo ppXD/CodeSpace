@@ -25,12 +25,47 @@ public static class SupervisorPlanConfirmation
     /// <summary>The marker phrase EVERY plan-confirmation question carries — the stable, load-bearing tail the gate matches to recognise its OWN card (vs a content ask_human or an approval card). Pinned by a unit test so a reword is a visible decision.</summary>
     public const string ConfirmationMarker = "Reply 'approve' to run this plan, or describe the changes you want.";
 
-    /// <summary>Build the confirmation ask_human for the run's current plan version. Deterministic given (version, itemCount, delivery) — a replayed turn re-derives the same card bytes → the same idempotency key.</summary>
-    public static SupervisorDecision IntoAskHuman(int planVersion, int itemCount, DeliverySpec? delivery) => new()
+    /// <summary>Build the confirmation ask_human for the run's current plan version. Deterministic given (version, itemCount, delivery, priorApprovedDelivery) — a replayed turn re-derives the same card bytes → the same idempotency key.</summary>
+    public static SupervisorDecision IntoAskHuman(int planVersion, int itemCount, DeliverySpec? delivery, DeliverySpec? priorApprovedDelivery) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(planVersion, itemCount, delivery) }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(planVersion, itemCount, delivery, priorApprovedDelivery) }, AgentJson.Options),
     };
+
+    /// <summary>
+    /// The delivery contract of the MOST RECENTLY APPROVED plan version — the baseline a fresh confirmation card
+    /// compares the CURRENT plan's contract against, so a re-plan that WEAKENS an already-approved automatic pull
+    /// request is flagged as a downgrade instead of silently vanishing. A forward scan: each Plan decision's own
+    /// (already server-clamped, per <see cref="Supervisor.SupervisorDeliveryClamp"/>) delivery becomes the
+    /// candidate baseline; it commits ONLY when the very next confirmation card for it is answered with approval
+    /// — a REJECTED plan's contract never counts as "was in effect," and the tape's own latest plan (which has no
+    /// card yet at gate time) is naturally excluded. Never re-reads <see cref="SupervisorTurnContext.DeliverySpec"/>:
+    /// once the operator declares a field, <see cref="Supervisor.SupervisorDeliveryClamp"/> makes that field
+    /// permanently sticky in every future plan's own clamp, so an operator-declared value can never register as a
+    /// downgrade — comparing the approved baseline alone is sufficient.
+    /// </summary>
+    public static DeliverySpec? LastApprovedDelivery(IReadOnlyList<SupervisorPriorDecision> priors)
+    {
+        DeliverySpec? candidate = null;
+        DeliverySpec? approved = null;
+
+        foreach (var decision in priors)
+        {
+            if (decision.DecisionKind == SupervisorDecisionKinds.Plan)
+            {
+                candidate = SupervisorOutcome.ReadPlanDelivery(decision.PayloadJson);
+                continue;
+            }
+
+            if (!IsConfirmationCard(decision)) continue;
+
+            var answer = SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson);
+
+            if (answer != null && Approves(answer)) approved = candidate;
+        }
+
+        return approved;
+    }
 
     /// <summary>
     /// The tape's LATEST plan decision, or null when none exists — DC-1's own read for anything that needs the
@@ -154,22 +189,35 @@ public static class SupervisorPlanConfirmation
         return -1;
     }
 
-    /// <summary>The confirmation question naming the plan version + size + (DC-1) any side-effecting delivery contract, so the operator knows EVERYTHING they are approving before opening the checklist — including a pull request the run would open automatically on completion.</summary>
-    private static string QuestionFor(int planVersion, int itemCount, DeliverySpec? delivery) =>
-        $"The supervisor authored plan v{planVersion} with {itemCount} step(s).{DeliverySummary(delivery)} Review the plan checklist, then confirm. {ConfirmationMarker}";
+    /// <summary>The confirmation question naming the plan version + size + (DC-1/DC-2a) the effective delivery contract, so the operator knows EVERYTHING they are approving before opening the checklist — including a pull request the run would open automatically on completion, that it explicitly will NOT, or that this plan revokes an already-approved one.</summary>
+    private static string QuestionFor(int planVersion, int itemCount, DeliverySpec? delivery, DeliverySpec? priorApprovedDelivery) =>
+        $"The supervisor authored plan v{planVersion} with {itemCount} step(s).{DeliverySummary(delivery, priorApprovedDelivery)} Review the plan checklist, then confirm. {ConfirmationMarker}";
 
     /// <summary>
-    /// DC-1 — a leading-space sentence naming the ONE side-effecting delivery contract behavior (opening a PR)
-    /// this plan would trigger automatically, or empty when the contract carries nothing side-effecting. An
-    /// explicit "don't open a PR" (<c>OpenPullRequest == false</c>) renders nothing extra — that direction is
-    /// the safe default, not a new side effect the operator needs flagged before approving.
+    /// DC-1/DC-2a — a leading-space sentence naming the effective delivery contract this plan carries, so the
+    /// card never promises silence on a behavior the actual stop will diverge from. Three cases, in priority
+    /// order: (1) the plan itself opens a PR — name the target branch; (2) the plan does NOT open one but an
+    /// EARLIER plan version's PR was already approved — flag the REVOCATION explicitly, since silently dropping
+    /// it would let the operator approve a checklist believing the prior promise still stands; (3) the plan
+    /// explicitly declines with no prior approval to revoke — state the decline (requirement b: an explicit
+    /// <c>false</c> must render something, not nothing). No contract at all on either side ⇒ empty (byte-identical
+    /// to pre-DC-1).
     /// </summary>
-    private static string DeliverySummary(DeliverySpec? delivery)
+    private static string DeliverySummary(DeliverySpec? delivery, DeliverySpec? priorApprovedDelivery)
     {
-        if (delivery?.OpenPullRequest != true) return "";
+        if (delivery?.OpenPullRequest == true)
+        {
+            var branch = string.IsNullOrWhiteSpace(delivery.TargetBranch) ? "the repository's default branch" : delivery.TargetBranch;
 
-        var branch = string.IsNullOrWhiteSpace(delivery.TargetBranch) ? "the repository's default branch" : delivery.TargetBranch;
+            return $" On completion it will automatically open a pull request against {branch}.";
+        }
 
-        return $" On completion it will automatically open a pull request against {branch}.";
+        if (priorApprovedDelivery?.OpenPullRequest == true)
+            return " This REVOKES the automatic pull request an earlier plan version already had approved — it will NOT open on completion unless a future plan restores it.";
+
+        if (delivery?.OpenPullRequest == false)
+            return " It will NOT automatically open a pull request on completion.";
+
+        return "";
     }
 }
