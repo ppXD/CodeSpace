@@ -1,24 +1,23 @@
-using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
-namespace CodeSpace.UnitTests.Sessions.Room;
+namespace CodeSpace.UnitTests.Supervisor;
 
 /// <summary>
-/// 🟢 Unit: <see cref="RoomPullRequestService.DeriveTitleAndBody"/> is a pure function over the decision tape (no DB) —
+/// 🟢 Unit: <see cref="SupervisorPullRequestOpener.DeriveTitleAndBody"/> is a pure function over the decision tape (no DB) —
 /// pinned directly (InternalsVisibleTo) rather than only through the DB-heavy integration coverage the rest of the
-/// service needs (WorkflowRun/Repository/PublishManifest reads).
+/// opener needs (WorkflowRun/Repository/PublishManifest reads).
 /// </summary>
 [Trait("Category", "Unit")]
-public class RoomPullRequestServiceTests
+public class SupervisorPullRequestOpenerTests
 {
     [Fact]
     public void Title_is_the_stop_summarys_first_line_and_body_is_the_summary_in_full()
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"Fix the flaky retry timer"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Fix the flaky retry timer");
         body.ShouldBe("Fix the flaky retry timer");
@@ -29,7 +28,7 @@ public class RoomPullRequestServiceTests
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"Fix the flaky retry timer\n\n- widened the backoff window\n- added a regression test"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Fix the flaky retry timer");
         body.ShouldBe("Fix the flaky retry timer\n\n- widened the backoff window\n- added a regression test");
@@ -41,7 +40,7 @@ public class RoomPullRequestServiceTests
         var longLine = new string('x', 150);
         var decisions = new[] { StopDecision($$"""{"outcome":"completed","summary":"{{longLine}}"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.Length.ShouldBe(100);
         body!.Length.ShouldBe(150);
@@ -52,7 +51,7 @@ public class RoomPullRequestServiceTests
     {
         var decisions = new[] { StopDecision("""{"outcome":"completed"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes");
         body.ShouldBeNull();
@@ -65,7 +64,7 @@ public class RoomPullRequestServiceTests
         // reachable tape has no stop row) — must never throw, just degrade to the generic framing.
         var decisions = Array.Empty<SupervisorPriorDecision>();
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes");
         body.ShouldBeNull();
@@ -79,7 +78,7 @@ public class RoomPullRequestServiceTests
         // this guards against was never exercised by any existing case.
         var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"   \nthe real content is on the second line"}""") };
 
-        var (title, body) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("Merge agent changes", "the first line trims to nothing — the title must fall back, never ship a blank PR title");
         body.ShouldBe("   \nthe real content is on the second line", "the body is never touched by the title's fallback — it carries the summary verbatim");
@@ -94,9 +93,42 @@ public class RoomPullRequestServiceTests
             StopDecision("""{"outcome":"completed","summary":"the real final summary"}""", sequence: 2),
         };
 
-        var (title, _) = RoomPullRequestService.DeriveTitleAndBody(decisions);
+        var (title, _) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions);
 
         title.ShouldBe("the real final summary");
+    }
+
+    // ── DC-2b: currentTurnStopSummary — the live-turn substitution's own rejected-stop summary ──
+
+    [Fact]
+    public void The_current_turns_stop_summary_is_used_when_the_tape_has_no_persisted_stop_at_all()
+    {
+        // The common first-forced-publish shape: THIS turn's stop was rejected-and-substituted, so it never
+        // reached the tape — priorDecisions alone would fall back to the generic title without this parameter.
+        var (title, body) = SupervisorPullRequestOpener.DeriveTitleAndBody(Array.Empty<SupervisorPriorDecision>(), currentTurnStopSummary: "Fixed the flaky retry timer");
+
+        title.ShouldBe("Fixed the flaky retry timer");
+        body.ShouldBe("Fixed the flaky retry timer");
+    }
+
+    [Fact]
+    public void The_current_turns_stop_summary_wins_over_an_older_persisted_stop_on_the_tape()
+    {
+        var decisions = new[] { StopDecision("""{"outcome":"no-decision","summary":"an earlier abandoned stop"}""") };
+
+        var (title, _) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions, currentTurnStopSummary: "the real current summary");
+
+        title.ShouldBe("the real current summary");
+    }
+
+    [Fact]
+    public void A_blank_current_turn_stop_summary_falls_back_to_scanning_the_tape()
+    {
+        var decisions = new[] { StopDecision("""{"outcome":"completed","summary":"Room's own post-terminal read"}""") };
+
+        var (title, _) = SupervisorPullRequestOpener.DeriveTitleAndBody(decisions, currentTurnStopSummary: "");
+
+        title.ShouldBe("Room's own post-terminal read", "Room never passes a live-turn summary — blank must defer to the tape scan, not win as an empty title");
     }
 
     private static SupervisorPriorDecision StopDecision(string outcomeJson, long sequence = 1) => new()

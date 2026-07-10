@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -662,6 +663,20 @@ public static class SupervisorOutcome
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Read a <c>publish</c> decision's recorded outcome (DC-2b) — the SAME <see cref="RoomPullRequestResult"/> shape
+    /// the Room's own Open-PR action returns, serialized VERBATIM as the outcome's whole root object (no other keys
+    /// to preserve, unlike <see cref="ReadIntegration"/>'s narrow-edit shape). Null when absent/malformed or the
+    /// outcome is not a publish decision's.
+    /// </summary>
+    public static RoomPullRequestResult? ReadPublishResult(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try { return JsonSerializer.Deserialize<RoomPullRequestResult>(outcomeJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>

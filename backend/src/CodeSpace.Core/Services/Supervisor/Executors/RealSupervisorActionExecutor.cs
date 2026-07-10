@@ -59,9 +59,10 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     // The publish guard chain (Order ascending), the SAME registry AgentRunExecutor's per-agent push evaluates —
     // so an integration's push respects the identical repo policy / credential floor. Sorted once at construction.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
+    private readonly ISupervisorPullRequestOpener _pullRequestOpener;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, IEnumerable<IPublishGuard> publishGuards, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, IEnumerable<IPublishGuard> publishGuards, ISupervisorPullRequestOpener pullRequestOpener, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -77,6 +78,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _harnesses = harnesses;
         _workPlans = workPlans;
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
+        _pullRequestOpener = pullRequestOpener;
         _logger = logger;
     }
 
@@ -87,6 +89,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Merge => ExecuteMergeAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Resolve => ExecuteResolveAsync(decision, context, cancellationToken),
+        SupervisorDecisionKinds.Publish => ExecutePublishAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.AskHuman => ExecuteAskHumanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Stop => Task.FromResult(ExecuteStop(decision)),
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),
