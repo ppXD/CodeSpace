@@ -391,7 +391,7 @@ public class SupervisorAcceptanceGraderTests
 
         public bool SoftFallback { get; private set; }
 
-        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false)
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false, string? pinnedSha = null)
         {
             RepositoryId = repositoryId; TeamId = teamId; Ref = @ref; SoftFallback = softFallback;
             if (_throwOnResolve != null) throw _throwOnResolve;

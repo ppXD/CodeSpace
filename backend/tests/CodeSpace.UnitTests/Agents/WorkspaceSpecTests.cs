@@ -46,6 +46,45 @@ public class WorkspaceSpecTests
     // ── WorkspaceSpec.FromAuthoredRepos: the multi-repo authoring projection ──────────
 
     [Fact]
+    public void PinnedSha_round_trips_the_related_repositories_projection_shape()
+    {
+        // S1: a pin dropped in the serialize→parse round-trip would be the silent tip fallback the pin forbids.
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Write, PinnedSha = "abc123def456" } };
+
+        var serialized = System.Text.Json.JsonSerializer.SerializeToElement(Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.SerializeRelatedRepositories(related));
+        var parsed = Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.ParseRelatedRepositories(serialized);
+
+        parsed.Single().PinnedSha.ShouldBe("abc123def456");
+    }
+
+    [Fact]
+    public void A_null_pin_is_omitted_from_the_serialized_related_shape_byte_identical()
+    {
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Write } };
+
+        var entry = Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.SerializeRelatedRepositories(related)!.Single();
+
+        entry.ContainsKey("pinnedSha").ShouldBeFalse("no pin ⇒ no key ⇒ the persisted shape stays byte-identical to before the field existed");
+    }
+
+    [Theory]
+    [InlineData("abc123", "abc123")]                 // short id OK
+    [InlineData("  ABC123DEF  ", "abc123def")]       // trimmed + lowercased
+    public void ValidatePinnedSha_normalizes_valid_ids(string raw, string expected)
+    {
+        Core.Services.Agents.Workspace.RepositoryWorkspaceResolver.ValidatePinnedSha(raw).ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("--pathspec-from-file=x")]   // flag-shaped garbage must never reach the git argv
+    [InlineData("main")]                      // a branch NAME is not a pin — the pin's contract is an exact commit
+    [InlineData("abc")]                       // too short to be a commit id
+    public void ValidatePinnedSha_rejects_non_commit_ids_loud(string raw)
+    {
+        Should.Throw<Core.Services.Agents.Workspace.WorkspaceException>(() => Core.Services.Agents.Workspace.RepositoryWorkspaceResolver.ValidatePinnedSha(raw));
+    }
+
+    [Fact]
     public void FromAuthoredRepos_returns_null_with_no_related_repos_so_single_repo_stays_byte_identical()
     {
         WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), primaryRef: null, Array.Empty<WorkspaceRepositorySpec>())

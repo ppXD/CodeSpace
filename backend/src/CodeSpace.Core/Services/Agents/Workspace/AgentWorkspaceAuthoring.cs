@@ -43,8 +43,10 @@ public static class AgentWorkspaceAuthoring
             // A session-inherited related ref carries refSoftFallback:true (set by SerializeRelatedRepositories); an
             // authored related repo never does ⇒ stays HARD (fail loud if its ref is gone).
             var refSoftFallback = element.TryGetProperty("refSoftFallback", out var softEl) && softEl.ValueKind == JsonValueKind.True;
+            // S1: the immutable-base pin round-trips too — dropping it here would be the silent tip fallback the pin forbids.
+            var pinnedSha = element.TryGetProperty("pinnedSha", out var pinEl) && pinEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(pinEl.GetString()) ? pinEl.GetString() : null;
 
-            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref, RefSoftFallback = refSoftFallback });
+            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref, RefSoftFallback = refSoftFallback, PinnedSha = pinnedSha });
         }
 
         return list;
@@ -90,6 +92,9 @@ public static class AgentWorkspaceAuthoring
                 // SOFT so the clone falls back to the default branch if it was pruned (parity with the primary baseRef).
                 entry["refSoftFallback"] = true;
             }
+
+            // S1: the pin survives the projection round-trip (omitted when null — byte-identical to before).
+            if (!string.IsNullOrWhiteSpace(r.PinnedSha)) entry["pinnedSha"] = r.PinnedSha;
 
             return entry;
         }).ToList();

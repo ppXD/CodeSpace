@@ -51,7 +51,7 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
 
         foreach (var repo in spec.Repositories)
         {
-            var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref, repo.RefSoftFallback).ConfigureAwait(false)
+            var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref, repo.RefSoftFallback, repo.PinnedSha).ConfigureAwait(false)
                 ?? throw new WorkspaceException($"Repository {repo.RepositoryId} could not be resolved.");
 
             provisions.Add(new WorkspaceRepositoryProvision { Alias = repo.Alias, CloneRequest = clone, Path = repo.Path, Access = repo.Access, IsPrimary = repo.IsPrimary });
@@ -64,7 +64,7 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
     internal static WorkspaceSpec? CanonicalWorkspace(AgentTask task) =>
         task.Workspace ?? (task.RepositoryId is { } id ? WorkspaceSpec.FromRepository(id) : null);
 
-    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false)
+    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false, string? pinnedSha = null)
     {
         var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -88,7 +88,23 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
             DefaultRef = softFallback && requestedRef is not null && !string.Equals(requestedRef, repo.DefaultBranch, StringComparison.Ordinal) ? repo.DefaultBranch : null,
             Token = token,
             TokenUsername = token is null ? null : TokenUsernameFor(repo.ProviderInstance.Provider),
+            // S1: the immutable base pin — validated to a hex commit id (4-40 chars) so garbage can never reach the
+            // git argv as a flag-shaped positional, then forced through a full clone + hard checkout by the provider.
+            PinnedSha = ValidatePinnedSha(pinnedSha),
         };
+    }
+
+    /// <summary>Null for blank; a trimmed 4-40 lowercase-hex commit id otherwise — anything else fails LOUD (the pin's contract is an EXACT commit; a malformed pin is a caller bug, and rejecting it here also keeps flag-shaped garbage out of the git argv).</summary>
+    internal static string? ValidatePinnedSha(string? pinnedSha)
+    {
+        if (string.IsNullOrWhiteSpace(pinnedSha)) return null;
+
+        var trimmed = pinnedSha.Trim().ToLowerInvariant();
+
+        if (trimmed.Length is < 4 or > 40 || !trimmed.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            throw new WorkspaceException($"the pinned base commit '{pinnedSha.Trim()}' is not a valid git commit id (4-40 hex chars) — the pin's contract is an EXACT commit, so a malformed pin fails the provision loud");
+
+        return trimmed;
     }
 
     private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
