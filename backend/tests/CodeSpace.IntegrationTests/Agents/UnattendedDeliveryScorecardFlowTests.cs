@@ -240,6 +240,39 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
+    public async Task A_room_opened_pull_request_counts_as_a_human_touch()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        // A real ICurrentUser scope — mirrors RoomPullRequestService.OpenAsync running inside an authenticated
+        // HTTP request, whose SaveChangesAsync stamps CreatedBy with the REAL clicking user (CodeSpaceDbContext.
+        // ApplyAuditFields), never SystemUsers.SeederId.
+        await SeedIntegrationPullRequestManifestAsync(teamId, runId, actorUserId: userId);
+
+        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        run.HumanTouches.ShouldBe(1, "a human clicking Room's Open-PR action is a genuine touch, even though it posts no ask_human card, approval, or node wait");
+        run.UnattendedSolvedWithDelivery.ShouldBeFalse("a human-assisted delivery must never score as unattended");
+    }
+
+    [Fact]
+    public async Task A_system_recorded_pull_request_with_no_human_actor_does_not_count_as_a_touch()
+    {
+        // The discriminator is WHO opened it, not whether a PR number exists — a background/engine-authored write
+        // (no HTTP context, e.g. a future server-side deliver-at-stop) stamps CreatedBy = SystemUsers.SeederId via
+        // BackgroundSeederUser, and must NOT be miscounted as a human touch the way a bare PullRequestNumber check
+        // would.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedIntegrationPullRequestManifestAsync(teamId, runId, actorUserId: null);
+
+        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        run.HumanTouches.ShouldBe(0, "a system-authored PR-open must not be counted as human involvement");
+        run.UnattendedSolvedWithDelivery.ShouldBeTrue("a genuinely unattended delivery — including its PR — must still score unattended");
+    }
+
+    [Fact]
     public async Task A_flow_wait_approval_node_resolution_is_unconditionally_a_human_touch()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -416,6 +449,34 @@ public class UnattendedDeliveryScorecardFlowTests
             AcceptanceState = acceptance,
             PublishStateValue = publishState,
             PullRequestNumber = prNumber,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// A SECOND Integration-kind manifest row (a distinct alias, so it doesn't collide with <see cref="SeedManifestAsync"/>'s
+    /// "primary" row) carrying a PR — seeded through a scope whose <c>ICurrentUser</c> is EITHER a real actor
+    /// (<paramref name="actorUserId"/> non-null, mirroring a Room-clicked open) OR the ambient default (null,
+    /// mirroring a background/system write) — so <c>CodeSpaceDbContext.ApplyAuditFields</c> stamps <c>CreatedBy</c>
+    /// exactly as the real <c>RoomPullRequestService.OpenAsync</c> vs. a future server-authored open would.
+    /// </summary>
+    private async Task SeedIntegrationPullRequestManifestAsync(Guid teamId, Guid runId, Guid? actorUserId)
+    {
+        using var scope = actorUserId is { } uid ? _fixture.BeginScopeAs(uid, teamId, Roles.Admin) : _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Kind = PublishManifestKind.Integration,
+            WorkflowRunId = runId,
+            RepositoryAlias = "pr-touch-probe",
+            AcceptanceState = PublishAcceptanceState.NotApplicable,
+            PublishStateValue = PublishState.Pushed,
+            PullRequestNumber = 7,
+            PullRequestUrl = "https://example.test/pr/7",
         });
 
         await db.SaveChangesAsync();
