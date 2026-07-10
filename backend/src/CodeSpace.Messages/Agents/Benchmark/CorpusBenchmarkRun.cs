@@ -30,6 +30,12 @@ public sealed record CorpusBenchmarkRun
 
     /// <summary>The solve-rate comparison over <see cref="Results"/>, per-mode, on the existing scorecard shape (success = the objective grade PASSED, not the run merely finishing).</summary>
     public required AgentRunScorecard Scorecard { get; init; }
+
+    /// <summary>M1a — the immutable identity of the suite this run measured (<see cref="EvalSuiteManifest.Version"/>), so any percentage claim names EXACTLY what it was measured over. Null only on legacy shapes.</summary>
+    public string? SuiteVersion { get; init; }
+
+    /// <summary>M1a — EVERY suite cell classified into the four-state vocabulary over the FIXED denominator (an errored/unreached cell is <see cref="CorpusCellState.InfraUnknown"/>, never dropped from the divisor). Each cell is @1: the FIRST authorized attempt's outcome — no best-of-N, no retry, no seed-picking. Null only on legacy shapes.</summary>
+    public IReadOnlyList<CorpusCellOutcome>? Cells { get; init; }
 }
 
 /// <summary>One (task,mode) pair the corpus runner could not execute (an infra fault during fixture staging or the run) — kept so a flaky pair is visible without aborting the whole corpus or polluting the solve-rate.</summary>

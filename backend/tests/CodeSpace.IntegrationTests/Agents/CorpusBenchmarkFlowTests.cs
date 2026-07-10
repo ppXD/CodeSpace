@@ -69,6 +69,50 @@ public sealed class CorpusBenchmarkFlowTests
         run.Results.ShouldAllBe(r => r.ReviseRounds == 0, "critic-off baseline ⇒ zero revise rounds on every pair (the control arm)");
         run.Results.ShouldAllBe(r => !string.IsNullOrEmpty(r.ExitReason), "the terminal ExitReason is projected from the run's ResultJson, never blank");
         run.Results.ShouldAllBe(r => r.ExitReason != "output-flagged", "no critic ran ⇒ no pair is critic-flagged");
+
+        // M1a — the run names its suite and classifies EVERY cell over the FIXED denominator: a clean all-ran
+        // corpus yields all-Unsolved cells (the no-op CLI never fixes anything), full evaluator health, and the
+        // exact frozen suite version the unit pin freezes.
+        run.SuiteVersion.ShouldBe(EvalSuite.ManifestFor(corpus).Version, "every percentage claim names EXACTLY the suite it measured");
+        run.Cells!.Count.ShouldBe(expectedPairs, "the FIXED denominator: every (task × mode) cell classified");
+        run.Cells!.ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "graded-but-not-passed cells are honest Unsolved — never dropped, never infra");
+        EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(1.0, "a cleanly-run corpus has a fully healthy instrument");
+    }
+
+    [Fact]
+    public async Task An_errored_pair_still_occupies_its_cell_as_InfraUnknown_with_the_denominator_fixed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new NoopBenchmarkCli();
+        var teamId = await SeedTeamAsync();
+
+        // A one-task corpus whose fixture ref does not exist: staging throws → the pair is recorded errored.
+        // M1a's point: that cell must STILL be counted — as InfraUnknown — never silently dropped from the divisor.
+        var corpus = new[]
+        {
+            SeedBenchmarkCorpus.Tasks[0],
+            SeedBenchmarkCorpus.Tasks[0] with { Id = "ghost-fixture", FixtureRef = "no-such-fixture-" + Guid.NewGuid().ToString("N")[..8] },
+        };
+
+        CorpusBenchmarkRun run;
+        using (var scope = _fixture.BeginScope())
+            run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(corpus, teamId, selection: null, CancellationToken.None);
+
+        var expectedCells = corpus.Sum(t => t.Modes.Count);
+
+        run.Errored.ShouldNotBeEmpty("the ghost fixture cannot stage — an infra fault, loudly recorded");
+        run.Cells!.Count.ShouldBe(expectedCells, "the denominator NEVER shrinks — an errored cell is a cell");
+
+        var score = EvalSuite.Score(run.Cells!);
+        score.InfraUnknown.ShouldBe(2, "the ghost task's two mode-cells classify as InfraUnknown");
+        score.Unsolved.ShouldBe(2, "the good task's two cells graded honestly Unsolved (the no-op CLI fixed nothing)");
+        score.Total.ShouldBe(expectedCells);
+        score.EvaluatorHealth.ShouldBe(0.5, "a sick instrument is VISIBLE — half the cells carry no capability verdict — never silently healthy via a shrunken divisor");
+
+        // The pre-M1a shape (scorecard over graded results only) reported the SAME rate with or without the ghost
+        // task; the fixed-denominator score cannot — the infra-dead cells occupy their slots in the divisor.
+        run.Scorecard.Overall.Total.ShouldBe(2, "the legacy scorecard still sees only the graded pairs — exactly the shrinking-divisor shape M1a's Cells replace for percentage claims");
     }
 
     private async Task<Guid> SeedTeamAsync()
