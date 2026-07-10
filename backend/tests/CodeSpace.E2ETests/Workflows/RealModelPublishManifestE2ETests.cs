@@ -252,14 +252,14 @@ public sealed class RealModelPublishManifestE2ETests
         return credId;
     }
 
-    /// <summary>Seed a Repository bound to a PAT Credential so the clone carries a push token (an anonymous clone short-circuits the push to null by design) — a file:// remote ignores the token itself, but LocalGitWorkspaceProvider still requires ONE to take the authenticated push path. Mirrors <see cref="AgentBranchPushFlowTests.SeedBoundRepositoryAsync"/>.</summary>
+    /// <summary>Seed a Repository bound to a PAT Credential so the clone carries a push token (an anonymous clone short-circuits the push to null by design) — a file:// remote ignores the token itself, but LocalGitWorkspaceProvider still requires ONE to take the authenticated push path. Mirrors <see cref="AgentBranchPushFlowTests.SeedBoundRepositoryAsync"/>. Runs once PER best-of-N attempt under the SAME team, so the ProviderInstance BaseUrl must be per-call unique or the retry collides with attempt 1's row on the (TeamId, Provider, BaseUrl) unique index — turning a would-be-absorbed transient miss into a hard DbUpdateException.</summary>
     private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrl, string defaultBranch, RepositoryPublishMode publishMode = RepositoryPublishMode.Branch)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var instanceId = Guid.NewGuid();
-        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = "https://local" });
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = $"https://local-{instanceId:N}" });
 
         var serializer = scope.Resolve<ICredentialPayloadSerializer>();
         var encryptor = scope.Resolve<IPayloadEncryptor>();
