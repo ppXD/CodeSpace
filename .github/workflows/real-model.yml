@@ -427,11 +427,11 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
-          # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
-          # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
-          # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
-          # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
-          CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
+      # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
+      # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
+      # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
+      # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
+      CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
       # Force the real agent UNCONFINED (a non-existent bwrap binary → BubblewrapSandbox probe degrades to "unavailable"),
       # and disable the prlimit caps (caps=0 → ProcessRlimits.Wrap returns the command unchanged → no RLIMIT_NPROC kill on
       # a shared host). Safe: REQUIRE_SANDBOX is unset, the benchmark edits trusted offline fixtures, and real confinement
@@ -535,11 +535,11 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
-          # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
-          # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
-          # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
-          # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
-          CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
+      # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
+      # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
+      # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
+      # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
+      CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-extended-benchmark-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
