@@ -32,6 +32,11 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
 
     public async Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
     {
+        // M1a: the suite's immutable identity + FIXED cell universe are derived BEFORE anything runs, so the
+        // denominator can never shrink to whatever happened to survive — a cell the loop never reaches is still
+        // a cell (InfraUnknown), and the version names exactly what any reported percentage was measured over.
+        var manifest = EvalSuite.ManifestFor(corpus);
+
         var results = new List<BenchmarkResult>();
         var errored = new List<CorpusBenchmarkError>();
 
@@ -44,6 +49,8 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
             Results = results,
             Errored = errored,
             Scorecard = BenchmarkScorecard.Compute(results),
+            SuiteVersion = manifest.Version,
+            Cells = EvalSuite.Classify(manifest, results, errored),
         };
     }
 

@@ -51,6 +51,8 @@ public sealed class RealModelBenchmarkCorpusE2ETests
     /// too), so a single corpus run clears it with margin — yet it is a genuine non-trivial solve-rate claim, not "solved
     /// ≥1". Raise it as the model's reliability is confirmed across runs; lower only if a dispatch shows it borderline.</summary>
     private const double MinSolveRate = 0.5;
+    /// <summary>M1a — the instrument-health floor: below this share of capability-verdict cells the run is an evaluator fault (infra skip to FIX), never a capability verdict.</summary>
+    private const double MinEvaluatorHealth = 0.9;
 
     private readonly PostgresFixture _fixture;
 
@@ -92,20 +94,21 @@ public sealed class RealModelBenchmarkCorpusE2ETests
             // instead of counting as an attempted-but-unsolved task, inflating the reported rate. The scorecard's own
             // Total already counts every TERMINAL pair (Succeeded/Failed/TimedOut/NeedsReview/Cancelled) and its
             // Succeeded already means "the grader passed" (BenchmarkScorecard.ToOutcome), not merely "the CLI exited 0".
-            var overall = run.Scorecard.Overall;
-            var ran = run.Results.Count;
+            // M1a — the FIXED-denominator four-state score: every suite cell is classified (an errored/unreached
+            // cell is InfraUnknown, never dropped from the divisor), and the reported percentage names the exact
+            // suite version it was measured over. Evaluator health is judged FIRST and separately: a sick
+            // instrument (too many infra-dead cells) is an infra skip that must be FIXED, never a capability red
+            // and never a silently shrunken denominator — while a healthy instrument's solve rate is a genuine
+            // capability verdict over the WHOLE suite.
+            var score = EvalSuite.Score(run.Cells!);
 
-            // No pair reached a TERMINAL state at all (every pair errored during staging/execution — an infra fault,
-            // never a capability verdict). Mirrors the whole-loop's all-agents-failed classification: a gateway
-            // outage must not red the lane as a false CapabilityMiss.
-            if (overall.Total == 0)
-                throw new AgentExecutionInfraException($"no benchmark pair reached a terminal state — ran={ran}, errored={run.Errored.Count} (gateway/execution infra, not a capability miss)");
+            if (score.EvaluatorHealth < MinEvaluatorHealth)
+                throw new AgentExecutionInfraException(
+                    $"the benchmark instrument itself is sick — evaluator health {score.EvaluatorHealth:P0} (infra-dead cells {score.InfraUnknown}/{score.Total}) below the {MinEvaluatorHealth:P0} floor on suite {run.SuiteVersion}; fix the evaluator, never read this as capability");
 
-            // Total ≥ 1 → a genuine capability verdict: of every pair that ran to a terminal state (TimedOut/Failed
-            // included), did the agent SOLVE at least the floor?
-            var rate = overall.SuccessRate;
+            var rate = score.SolveRateOverSuite;
             var outcome = rate >= MinSolveRate ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss;   // GATING FLOOR — short of the floor REDs the blessed wire (CapabilityMiss)
-            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {overall.Succeeded}/{overall.Total} ({rate:P0}) vs floor {MinSolveRate:P0} → {outcome} over {SeedBenchmarkCorpus.Tasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}");
+            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {score.Solved}/{score.Total} ({rate:P0}, FIXED denominator) vs floor {MinSolveRate:P0} → {outcome} on suite {run.SuiteVersion} — solved={score.Solved}, unsolved={score.Unsolved}, infraUnknown={score.InfraUnknown}, evaluatorHealth={score.EvaluatorHealth:P0}");
         }, attempts: 1);
     }
 
