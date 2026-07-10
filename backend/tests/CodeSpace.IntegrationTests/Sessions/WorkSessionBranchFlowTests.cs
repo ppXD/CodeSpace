@@ -296,6 +296,47 @@ public class WorkSessionBranchFlowTests
     }
 
     [Fact]
+    public async Task A_fresh_launch_with_an_operator_pinned_BaseBranch_clones_at_it_as_a_HARD_ref()
+    {
+        // H3: BaseBranch had a complete write chain (LaunchTaskCommand → TaskLaunchRequest → seed providers →
+        // TaskLaunchSeed) and ZERO readers — an operator pinning a branch silently got the default. The pin must
+        // reach the frozen agent node as a HARD ref (no baseRefFromSession soft marker: a missing pinned branch
+        // fails LOUD at clone, never a silent default-branch fallback).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var result = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Fix the login bug on the release line", RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
+            BaseBranch = "release/2.x",
+        });
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("release/2.x", "the operator's pin must survive launch → seed → projection → the frozen node");
+
+        var agent = await ReadAgentNodeAsync(result.RunId);
+        agent.GetProperty("inputs").TryGetProperty("baseRefFromSession", out _)
+            .ShouldBeFalse("an operator pin is HARD — only a SESSION-inherited transient branch carries the soft fallback marker");
+    }
+
+    [Fact]
+    public async Task Continue_outranks_the_operator_pinned_BaseBranch()
+    {
+        // The prior turn's produced branch carries the thread's own work — cloning the pinned base instead would
+        // silently discard every prior turn. The pin governs the FRESH launch only.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoId = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedCodeTurnAsync(teamId, sessionId, 1, repoId, "run-1/x");
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoId, "Keep going") with { BaseBranch = "release/2.x" });
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-1/x", "session continuity wins — the thread's own work lives on the prior produced branch");
+    }
+
+    [Fact]
     public async Task Branch_resolver_returns_the_most_recent_branch_for_the_repo()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

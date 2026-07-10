@@ -134,16 +134,21 @@ internal static class AgentNodeMapping
         // threads a per-entry ref onto the relatedRepositories shape (omitted per entry when none, byte-identical).
         AddIfPresent(inputs, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(context.AgentProfile?.RelatedRepositories, baseRefs));
 
-        // …and clone the PRIMARY repo at its prior produced branch. Only meaningful with a primary repo; absent ⇒
-        // omitted ⇒ the repo's default branch (byte-identical to a fresh launch).
+        // …and clone the PRIMARY repo at its prior produced branch, else at the operator's launch-pinned BaseBranch
+        // (H3 — the field had a complete write chain down to TaskLaunchSeed and ZERO readers, so an operator pinning
+        // a branch silently got the default). Precedence: a CONTINUED turn's session ref first (the prior produced
+        // branch carries the thread's own work — cloning the original base would discard every prior turn), the
+        // operator's pin second, the repo default last. Only meaningful with a primary repo; absent ⇒ omitted ⇒ the
+        // repo's default branch (byte-identical).
         if (repositoryId is { } primaryId)
         {
             var primaryBaseRef = BaseRefFor(baseRefs, primaryId);
-            AddIfPresent(inputs, "baseRef", primaryBaseRef);
+            AddIfPresent(inputs, "baseRef", primaryBaseRef ?? NullIfBlank(context.Seed.BaseBranch));
 
             // The primary baseRef came from the SESSION base-refs map (a transient prior produced branch), so mark it
             // SOFT — the clone falls back to the default branch if it was pruned (a merged PR deletes it). Set only
-            // alongside an actual baseRef; an author-pinned baseRef never carries this ⇒ stays a HARD ref (fail loud).
+            // alongside a SESSION baseRef; the operator's pin (and an author-pinned baseRef) never carries this ⇒
+            // stays a HARD ref — a missing pinned branch fails LOUD, never a silent default-branch fallback.
             if (primaryBaseRef is not null) inputs["baseRefFromSession"] = true;
         }
 

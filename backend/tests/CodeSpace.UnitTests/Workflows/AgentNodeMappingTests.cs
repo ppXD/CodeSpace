@@ -166,4 +166,59 @@ public class AgentNodeMappingTests
         inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("no map ⇒ no per-repo ref");
         inputs.TryGetProperty("baseRefFromSession", out _).ShouldBeFalse("no baseRef ⇒ no soft marker (an author-set baseRef stays HARD) — byte-identical");
     }
+
+    // ── H3: the operator's fresh-launch BaseBranch was a write-only dead-end (verified: a complete write chain
+    //    down to TaskLaunchSeed.BaseBranch, ZERO readers) — an operator pinning a branch got the default silently. ──
+
+    [Fact]
+    public void BuildAgentInputs_pins_the_operators_launch_BaseBranch_as_a_HARD_ref()
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(baseRefs: null) with
+        {
+            Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = "release/2.x" },
+        });
+
+        inputs.GetProperty("baseRef").GetString().ShouldBe("release/2.x", "the operator explicitly pinned the branch — it must reach the clone");
+        inputs.TryGetProperty("baseRefFromSession", out _).ShouldBeFalse("an operator pin is a HARD ref: a missing branch must fail LOUD, never silently fall back to the default");
+        inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("the pin applies to the PRIMARY only — related repos keep their default branches");
+    }
+
+    [Fact]
+    public void BuildAgentInputs_session_continuity_outranks_the_launch_BaseBranch()
+    {
+        // A CONTINUED turn's prior produced branch carries the thread's own work — cloning the operator's original
+        // base instead would silently discard every prior turn. The pin applies to the FRESH launch only.
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, string> { [Primary] = "run-1/primary" }) with
+        {
+            Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = "release/2.x" },
+        });
+
+        inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary");
+        inputs.GetProperty("baseRefFromSession").GetBoolean().ShouldBeTrue("the session ref keeps its SOFT marker — pruned prior branches still fall back");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildAgentInputs_treats_a_blank_launch_BaseBranch_as_absent(string blank)
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(baseRefs: null) with
+        {
+            Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = blank },
+        });
+
+        inputs.TryGetProperty("baseRef", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void BuildAgentInputs_ignores_the_launch_BaseBranch_when_no_primary_repo_is_bound()
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(new TaskBuildContext
+        {
+            Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = "release/2.x" },
+            Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent },
+        });
+
+        inputs.TryGetProperty("baseRef", out _).ShouldBeFalse("an analysis-only run has nothing to clone — the pin is meaningless without a repo");
+    }
 }
