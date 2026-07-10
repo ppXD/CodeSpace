@@ -52,7 +52,7 @@ export function LibraryPage() {
         <div className="lib-tabrow">
           <div className="ct-tabs">
             <span className="ct-tab lib-tab-static" data-active="true">
-              Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{totalAgents + totalSkills}</span> : null}
+              Agents &amp; skills{hasPacks ? <span className="ct-tab-c">{countLabel(totalAgents, totalSkills)}</span> : null}
             </span>
           </div>
           <div className="lib-tabrow-actions">
