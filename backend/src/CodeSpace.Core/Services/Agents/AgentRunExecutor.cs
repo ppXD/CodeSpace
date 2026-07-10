@@ -1017,15 +1017,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// is nothing to record (no workspace, empty diff) — an empty-diff run leaves no manifest row (nothing to
     /// publish or park). Best-effort: a manifest-write failure is logged and never flips the run's outcome, mirroring
     /// every other capture/push step's posture — the captured diff still lives on the result row either way.
+    /// A multi-repo run's contract binds the WHOLE change (<see cref="GradeMultiRepoAcceptanceAsync"/> grades every
+    /// repo and short-circuits on the first failure into ONE aggregate verdict) — every repo's row carries that SAME
+    /// <see cref="AgentRunResult.AcceptancePassed"/>, never a hardcoded null, so the north-star scorecard's
+    /// per-manifest <c>AcceptanceState</c> read sees a multi-repo grade exactly like a single-repo one.
+    /// Internal (not private) so this wiring is unit-pinned directly (InternalsVisibleTo), not only through a full
+    /// executor run.
     /// </summary>
-    private async Task PersistPublishManifestAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    internal async Task PersistPublishManifestAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
     {
         try
         {
             if (result.RepositoryResults.Count > 0)
             {
                 foreach (var repo in result.RepositoryResults)
-                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, acceptancePassed: null), cancellationToken).ConfigureAwait(false);
+                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
 
                 return;
             }
@@ -1263,7 +1269,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// target; a run with no targets at all falls back to <see cref="AgentAcceptanceContract.ExpectsChanges"/>'s
     /// verdict, same as the single-repo path. All targets must pass, short-circuiting on the first failure (the
     /// detail names the failing repo); any unexpected non-cancellation grader escape degrades to not-accepted so
-    /// the completion pipeline can never crash on a grade.
+    /// the completion pipeline can never crash on a grade. Matching its supervisor-lane twin's own documented scope
+    /// trim, S2's per-repo PATCH fallback is deliberately NOT extended here — a multi-repo target with no produced
+    /// branch anywhere falls straight to the ExpectsChanges verdict above, never a per-repo patch-based grade.
     /// </summary>
     private async Task<AgentRunResult> GradeMultiRepoAcceptanceAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
     {
