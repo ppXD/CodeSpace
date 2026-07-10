@@ -99,6 +99,54 @@ public class SupervisorDeliveryGateTests
         JsonSerializer.Deserialize<SupervisorPublishPayload>(substituted.PayloadJson, AgentJson.Options)!.StopSummary.ShouldBe("done");
     }
 
+    // ── DC-2d: the substituted publish carries the SAME TargetBranch the card showed ──
+
+    [Fact]
+    public void The_forced_publish_carries_the_confirmed_plans_own_target_branch()
+    {
+        // DC-2d sweep finding: the card (SupervisorPlanConfirmation.DeliverySummary) names the PLAN's own clamped
+        // TargetBranch, but execution used to read ONLY the operator's raw launch-time spec — a model-proposed
+        // branch the operator never set would show on the card, then silently vanish at execution. The gate must
+        // resolve the SAME plan payload the card read from and hand it to the executor explicitly.
+        var context = Context(deliverySpec: null, Plan(1, openPullRequest: true, targetBranch: "release"), ConfirmationCard(answer: "approve"));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish);
+        JsonSerializer.Deserialize<SupervisorPublishPayload>(substituted.PayloadJson, AgentJson.Options)!.TargetBranch.ShouldBe("release");
+    }
+
+    [Fact]
+    public void The_forced_publish_falls_back_to_the_operators_own_target_branch_when_the_plan_named_none()
+    {
+        var context = Context(new DeliverySpec { OpenPullRequest = true, TargetBranch = "staging" }, Plan(1, openPullRequest: true, targetBranch: null));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        JsonSerializer.Deserialize<SupervisorPublishPayload>(substituted!.PayloadJson, AgentJson.Options)!.TargetBranch.ShouldBe("staging");
+    }
+
+    [Fact]
+    public void The_forced_publish_never_leaks_a_rejected_newer_plans_target_branch_when_an_older_plan_is_still_the_approved_baseline()
+    {
+        // Post-merge adversarial-sweep finding: EffectiveDelivery used to read TargetBranch off the tape's LATEST
+        // plan regardless of confirmation — but authorization (IsAuthorized) checks LastApprovedDelivery, which
+        // can be an OLDER, genuinely approved plan. A later plan revision proposing a DIFFERENT branch that gets
+        // REJECTED must never have its branch leak into the opened PR — the branch must come from the SAME source
+        // that authorized the publish in the first place.
+        var context = Context(deliverySpec: null,
+            Plan(1, openPullRequest: true, targetBranch: "release"),
+            ConfirmationCard(answer: "approve"),
+            Plan(2, openPullRequest: true, targetBranch: "staging"),
+            ConfirmationCard(answer: "revise: smaller steps please"));
+
+        var substituted = SupervisorDeliveryGate.Validate(context, StopDecision());
+
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Publish, "the OLDER plan's approval still authorizes — a later REJECTED revision doesn't revoke it");
+        JsonSerializer.Deserialize<SupervisorPublishPayload>(substituted.PayloadJson, AgentJson.Options)!.TargetBranch
+            .ShouldBe("release", "the branch must come from the ONE approved card, never a later rejected proposal");
+    }
+
     // ── A prior publish attempt already ran ───────────────────────────────────────────
 
     [Theory]
@@ -218,12 +266,17 @@ public class SupervisorDeliveryGateTests
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) => Context(deliverySpec: null, prior);
 
     /// <summary>A Plan decision whose own PAYLOAD (not outcome) carries a delivery contract — <c>ReadPlanDelivery</c> reads the PAYLOAD (the model's authored — here already-clamped — proposal), mirroring what <c>ClampPlanDelivery</c> freezes onto a real plan before persist.</summary>
-    private static SupervisorPriorDecision Plan(long sequence, bool openPullRequest) => new()
+    private static SupervisorPriorDecision Plan(long sequence, bool openPullRequest, string? targetBranch = null)
     {
-        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
-        PayloadJson = $"{{\"goal\":\"g\",\"subtasks\":[],\"delivery\":{{\"openPullRequest\":{(openPullRequest ? "true" : "false")}}}}}",
-        OutcomeJson = "{}",
-    };
+        var delivery = new DeliverySpec { OpenPullRequest = openPullRequest, TargetBranch = targetBranch };
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = "g", Delivery = delivery }, AgentJson.Options),
+            OutcomeJson = "{}",
+        };
+    }
 
     /// <summary>The S3 confirmation card: its QUESTION (marker-carrying) lives on the PAYLOAD, its ANSWER on the outcome — mirroring <see cref="SupervisorPlanConfirmation.IntoAskHuman"/>'s real shape.</summary>
     private static SupervisorPriorDecision ConfirmationCard(string? answer) => new()

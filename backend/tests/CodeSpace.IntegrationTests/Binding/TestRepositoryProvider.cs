@@ -61,14 +61,38 @@ public sealed class TestRemoteHookStore
     }
 }
 
+/// <summary>
+/// DC-2d — records every <c>OpenPullRequestAsync</c> call's input so a test can assert WHAT REACHED THE PROVIDER
+/// (e.g. the actual <see cref="OpenPullRequestInput.TargetBranch"/>), not just the outcome disposition —
+/// <see cref="RoomPullRequestOpened"/> carries no branch field, so this is the only observation point. Singleton
+/// per fixture, mirroring <see cref="TestRemoteHookStore"/>'s identical rationale.
+/// </summary>
+public sealed class TestPullRequestOpenCapture
+{
+    private readonly object _lock = new();
+    private readonly List<OpenPullRequestInput> _calls = new();
+
+    public OpenPullRequestInput? Last { get { lock (_lock) { return _calls.LastOrDefault(); } } }
+
+    public void Record(OpenPullRequestInput input)
+    {
+        lock (_lock) { _calls.Add(input); }
+    }
+}
+
 public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
     public static readonly IReadOnlyList<string> RootEntryNames = new[] { "src", "README.md" };
 
     private readonly TestRemoteHookStore _hookStore;
+    private readonly TestPullRequestOpenCapture _pullRequestOpens;
 
-    public TestRepositoryProvider(TestRemoteHookStore hookStore) { _hookStore = hookStore; }
+    public TestRepositoryProvider(TestRemoteHookStore hookStore, TestPullRequestOpenCapture pullRequestOpens)
+    {
+        _hookStore = hookStore;
+        _pullRequestOpens = pullRequestOpens;
+    }
 
     public ProviderKind Kind => ProviderKind.Git;
 
@@ -126,8 +150,11 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
 
     // Echoes the acting credential's id back as the created PR's ExternalId (same trick as the review
     // echo) so a test can assert WHICH credential opened it (actor vs connection). Reflects the input.
-    public Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken) =>
-        Task.FromResult(new RemotePullRequest
+    public Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
+    {
+        _pullRequestOpens.Record(input);
+
+        return Task.FromResult(new RemotePullRequest
         {
             ExternalId = context.Credential.Id.ToString(),
             Number = 777,
@@ -141,6 +168,7 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             UpdatedDate = DateTimeOffset.UnixEpoch,
             WebUrl = $"https://test.local/{repository.FullPath}/-/merge_requests/777"
         });
+    }
 
     // Echoes the acting credential's id back as the merge result's Sha so a test can assert WHICH credential merged.
     public Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken) =>

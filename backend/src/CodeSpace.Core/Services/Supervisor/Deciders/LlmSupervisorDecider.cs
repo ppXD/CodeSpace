@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
@@ -653,7 +654,45 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        // DC-2d — publish is SERVER-AUTHORED ONLY (SupervisorDeliveryGate substitutes it; the decider never
+        // chooses it), so without an explicit explanation here the model would see an unexplained "publish" entry
+        // on the tape and might wonder whether IT made that choice. Names the per-target disposition plainly.
+        if (prior.DecisionKind == SupervisorDecisionKinds.Publish)
+        {
+            AppendPublishOutcome(builder, prior);
+            return;
+        }
+
         builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>Names WHY a publish entry exists (the delivery contract required it, never the model's own choice) plus each target's disposition, so a later turn understands what happened without parsing the raw outcome jsonb.</summary>
+    private static void AppendPublishOutcome(StringBuilder builder, SupervisorPriorDecision prior)
+    {
+        builder.AppendLine("- publish (server-opened a pull request because the delivery contract required it — you did not choose this):");
+
+        var pullRequests = SupervisorOutcome.ReadPublishResult(prior.OutcomeJson)?.PullRequests ?? Array.Empty<RoomPullRequestOpened>();
+
+        if (pullRequests.Count == 0)
+        {
+            builder.AppendLine("    (no targets resolved)");
+            return;
+        }
+
+        foreach (var pr in pullRequests)
+        {
+            var label = string.IsNullOrEmpty(pr.Alias) ? "primary" : pr.Alias;
+            var detail = pr.Disposition switch
+            {
+                RoomPullRequestDisposition.Opened => $"opened #{pr.Number} ({pr.Url})",
+                RoomPullRequestDisposition.AlreadyOpened => $"already open #{pr.Number} ({pr.Url})",
+                RoomPullRequestDisposition.Skipped => $"skipped — {pr.Error}",
+                RoomPullRequestDisposition.Failed => $"FAILED — {pr.Error}",
+                _ => pr.Disposition.ToString(),
+            };
+
+            builder.AppendLine($"    {label}: {detail}");
+        }
     }
 
     /// <summary>Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted (retry within the cap, or stop and leave the conflict for a human).</summary>

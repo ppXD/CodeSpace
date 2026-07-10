@@ -43,7 +43,9 @@ public static class SupervisorDeliveryGate
     {
         if (decision.Kind != SupervisorDecisionKinds.Stop) return null;
 
-        if (EffectiveOpenPullRequest(context) != true) return null;
+        var effective = EffectiveDelivery(context);
+
+        if (effective?.OpenPullRequest != true) return null;
 
         if (!IsAuthorized(context))
             return IntoAskHuman("the delivery contract requires opening a pull request, but it was never confirmed by a human or pre-declared by the operator — approve the plan once more, or open it manually from Room");
@@ -51,7 +53,7 @@ public static class SupervisorDeliveryGate
         var latestPublish = context.PriorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Publish);
 
         if (latestPublish is null || StateChangedSince(context.PriorDecisions, latestPublish.Sequence))
-            return ServerAuthoredPublish(decision);
+            return ServerAuthoredPublish(decision, effective.TargetBranch);
 
         var failed = (SupervisorOutcome.ReadPublishResult(latestPublish.OutcomeJson)?.PullRequests ?? Array.Empty<RoomPullRequestOpened>())
             .Where(p => p.Disposition == RoomPullRequestDisposition.Failed)
@@ -67,17 +69,41 @@ public static class SupervisorDeliveryGate
         priorDecisions.Any(d => d.Sequence > sequence && (d.DecisionKind == SupervisorDecisionKinds.Merge || SupervisorDecisionKinds.StagesAgents(d.DecisionKind)));
 
     /// <summary>
-    /// The contract's effective <c>OpenPullRequest</c> — the LATEST plan's own ALREADY-CLAMPED delivery
-    /// (<see cref="SupervisorOutcome.ReadPlanDelivery"/>, frozen once at plan-persist time by
-    /// <see cref="SupervisorTurnService.ClampPlanDelivery"/> from the model's raw proposal + the operator's own
-    /// contract), falling back to the operator's own declaration directly when no plan exists at all (defensive —
-    /// every real run plans first). Null (no contract on either side) ⇒ null, never a fabricated true/false.
+    /// The EFFECTIVE delivery contract, read PER FIELD from a DIFFERENT source per field — deliberately, NOT the
+    /// same single read for both:
+    /// <list type="bullet">
+    ///   <item><c>OpenPullRequest</c> keeps ITS pre-existing "does the contract want one" semantics — the
+    ///   LATEST plan's own already-clamped proposal (<see cref="SupervisorOutcome.ReadPlanDelivery"/>), even
+    ///   UNCONFIRMED, falling back to the operator's own declaration when no plan exists at all. This is
+    ///   intentionally permissive: <see cref="IsAuthorized"/> separately gates whether that "want" is
+    ///   ACTIONABLE, so a bare unapproved proposal here only ever routes to the ask_human park below, never to a
+    ///   PR.</item>
+    ///   <item><c>TargetBranch</c> is sourced from WHICHEVER of <see cref="IsAuthorized"/>'s two paths actually
+    ///   authorized this publish — SAME precedence, ① checked first. Path ② (the operator's OWN declaration
+    ///   authorizes regardless of plan-confirmation state) trusts the operator's own declared branch first,
+    ///   falling back to the LATEST plan's proposal — the operator already agreed to auto-open a PR without a
+    ///   human separately confirming a branch, so the model's current plan preference stands. Path ① (a plan was
+    ///   actually CONFIRMED) must use THAT approved plan's own branch specifically
+    ///   (<see cref="SupervisorPlanConfirmation.LastApprovedDelivery"/>) — NEVER the tape's latest plan directly.
+    ///   Adversarial-sweep finding (DC-2d, post-merge review): an earlier draft read TargetBranch off the LATEST
+    ///   plan regardless of approval, which let a REJECTED later plan revision's proposed branch leak into the
+    ///   opened PR even while authorization rested on an OLDER, genuinely approved plan naming a DIFFERENT
+    ///   branch — landing work against a branch nobody ever approved.</item>
+    /// </list>
+    /// Null (no contract on either side, on either field) ⇒ null, never a fabricated value.
     /// </summary>
-    private static bool? EffectiveOpenPullRequest(SupervisorTurnContext context)
+    private static DeliverySpec? EffectiveDelivery(SupervisorTurnContext context)
     {
         var latestPlan = SupervisorPlanConfirmation.LatestPlanDecision(context.PriorDecisions);
+        var latestPlanDelivery = SupervisorOutcome.ReadPlanDelivery(latestPlan?.PayloadJson);
 
-        return SupervisorOutcome.ReadPlanDelivery(latestPlan?.PayloadJson)?.OpenPullRequest ?? context.DeliverySpec?.OpenPullRequest;
+        var openPullRequest = latestPlanDelivery?.OpenPullRequest ?? context.DeliverySpec?.OpenPullRequest;
+
+        var targetBranch = context.DeliverySpec?.OpenPullRequest == true
+            ? context.DeliverySpec?.TargetBranch ?? latestPlanDelivery?.TargetBranch
+            : SupervisorPlanConfirmation.LastApprovedDelivery(context.PriorDecisions)?.TargetBranch;
+
+        return openPullRequest is null && targetBranch is null ? null : new DeliverySpec { OpenPullRequest = openPullRequest, TargetBranch = targetBranch };
     }
 
     /// <summary>Path ① (a plan naming a PR was actually CONFIRMED) OR path ② (the operator pre-declared it themselves) — a pure model proposal with neither satisfies nothing.</summary>
@@ -85,11 +111,11 @@ public static class SupervisorDeliveryGate
         context.DeliverySpec?.OpenPullRequest == true
         || SupervisorPlanConfirmation.LastApprovedDelivery(context.PriorDecisions)?.OpenPullRequest == true;
 
-    /// <summary>Carries the REJECTED stop's own summary forward — see <see cref="SupervisorPublishPayload.StopSummary"/>'s doc for why the executor can't otherwise recover it.</summary>
-    private static SupervisorDecision ServerAuthoredPublish(SupervisorDecision rejectedStop) => new()
+    /// <summary>Carries the REJECTED stop's own summary forward — see <see cref="SupervisorPublishPayload.StopSummary"/>'s doc for why the executor can't otherwise recover it — plus the SAME effective <paramref name="targetBranch"/> the card showed, so the executor never re-derives it independently.</summary>
+    private static SupervisorDecision ServerAuthoredPublish(SupervisorDecision rejectedStop, string? targetBranch) => new()
     {
         Kind = SupervisorDecisionKinds.Publish,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorPublishPayload { StopSummary = ReadStopSummaryFromPayload(rejectedStop.PayloadJson) }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorPublishPayload { StopSummary = ReadStopSummaryFromPayload(rejectedStop.PayloadJson), TargetBranch = targetBranch }, AgentJson.Options),
     };
 
     /// <summary>The model's OWN authored summary off a stop decision's payload — best-effort (null when absent/malformed), mirroring <see cref="SupervisorPublishGate"/>'s identical private reader (I3 reads the SAME field for its own summary-required check).</summary>
