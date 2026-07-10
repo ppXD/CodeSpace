@@ -222,6 +222,28 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             .ToList();
     }
 
+    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab's own source_branch filter. OPEN only — a bind-or-create check that found an
+            // already-MERGED/CLOSED MR and returned it as if freshly "Opened" would misreport a done or
+            // rejected change as still pending review. Naming why create failed against an inactive MR is a
+            // different, diagnostic concern this method does not serve.
+            var query = new MergeRequestQuery { SourceBranch = sourceBranch, State = GitLabMergeRequestState.opened, PerPage = 1 };
+            var mr = client.GetMergeRequest(projectId).Get(query).FirstOrDefault();
+
+            if (mr is null) return Task.FromResult<RemotePullRequest?>(null);
+
+            var labelColors = TryFetchProjectLabelColors(client, projectId);
+            return Task.FromResult<RemotePullRequest?>(ToRemotePullRequest(mr, labelColors));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RemotePullRequest> GetPullRequestAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -239,23 +261,43 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), _ =>
+        try
         {
-            var projectId = int.Parse(repository.ExternalId);
-
-            // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
-            // the event normalizer maps that back to PullRequestState.Draft on read.
-            var mr = client.GetMergeRequest(projectId).Create(new MergeRequestCreate
+            return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), _ =>
             {
-                SourceBranch = input.SourceBranch,
-                TargetBranch = input.TargetBranch,
-                Title = input.Draft ? $"Draft: {input.Title}" : input.Title,
-                Description = input.Body,
-            });
+                var projectId = int.Parse(repository.ExternalId);
 
-            // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
-            return Task.FromResult(ToRemotePullRequestDetail(mr, EmptyLabelColors));
-        }, cancellationToken).ConfigureAwait(false);
+                // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
+                // the event normalizer maps that back to PullRequestState.Draft on read.
+                var mr = client.GetMergeRequest(projectId).Create(new MergeRequestCreate
+                {
+                    SourceBranch = input.SourceBranch,
+                    TargetBranch = input.TargetBranch,
+                    Title = input.Draft ? $"Draft: {input.Title}" : input.Title,
+                    Description = input.Body,
+                });
+
+                // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
+                return Task.FromResult(ToRemotePullRequestDetail(mr, EmptyLabelColors));
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProviderApiException ex) when (ex.StatusCode is >= 400 and < 500)
+        {
+            // DC-2c (bind-or-create idempotency): GitLab returns a 4xx (typically 409 Conflict) when a merge
+            // request already exists for this exact source/target branch pair — this repo is GitLab-primary, so
+            // this rung is the one that actually matters day to day. Rather than trust a specific status code
+            // (unverified from source; GitLab's own docs say 409 but this stays robust either way), ask directly:
+            // if an OPEN MR for this source branch exists AND targets the SAME base this create asked for, this
+            // create was a harmless repeat — bind to it instead of failing. A mismatched target branch is NOT
+            // the same request — never silently bind to the wrong base. Found nothing, or a target mismatch →
+            // the failure was real → rethrow it untouched. Scoped to 4xx — a 5xx that exhausted retries is an
+            // infra outage, not a duplicate-branch signal.
+            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, cancellationToken).ConfigureAwait(false);
+
+            if (existing is not null && existing.TargetBranch == input.TargetBranch) return existing;
+
+            throw;
+        }
     }
 
     public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)

@@ -21,6 +21,18 @@ public interface IPullRequestCatalogCapability : IProviderCapability
     Task<IReadOnlyList<RemotePullRequest>> ListPullRequestsAsync(ProviderContext context, RemoteRepository repository, PullRequestState? stateFilter, int page, int perPage, CancellationToken cancellationToken);
 
     /// <summary>
+    /// DC-2c — the OPEN PR/MR whose source (head) branch is <paramref name="sourceBranch"/>, or null when none
+    /// exists. Uses the provider's OWN native branch filter (GitHub's <c>PullRequestRequest.Head</c>, GitLab's
+    /// <c>MergeRequestQuery.SourceBranch</c>) rather than paging through <see cref="ListPullRequestsAsync"/> and
+    /// filtering client-side — a repo with many open PRs would otherwise need an unbounded scan for the ONE we
+    /// actually care about. <see cref="IPullRequestWriteCapability.OpenPullRequestAsync"/>'s own bind-or-create
+    /// idempotency check calls this as its fallback on a duplicate-branch create failure — the caller ALSO
+    /// verifies the found PR's target branch matches the create request's before binding to it, since this
+    /// method itself filters only on the source branch.
+    /// </summary>
+    Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Fetch a single PR with its full body + diff stats. <paramref name="number"/> is the
     /// per-repo number shown to users (#42 on GitHub, !42 on GitLab) — NOT the global
     /// <see cref="RemotePullRequest.ExternalId"/>. Returns null when the PR doesn't exist
