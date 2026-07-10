@@ -349,18 +349,32 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// dropping origin is safe. Only when both fail do we log an error; the workspace janitor is the final
     /// backstop. The clone already succeeded, so this never fails the run.
     /// </summary>
-    private async Task StripTokenFromRemoteAsync(string cleanUrl, string directory, CancellationToken cancellationToken)
+    private Task StripTokenFromRemoteAsync(string cleanUrl, string directory, CancellationToken cancellationToken) =>
+        StripTokenFromRemoteAsync(_runners.Resolve(Kind), CloneTimeoutSeconds, _logger, cleanUrl, directory, cancellationToken);
+
+    /// <summary>
+    /// The SHARED implementation of <see cref="StripTokenFromRemoteAsync(string, string, CancellationToken)"/> —
+    /// internal static (like <see cref="BuildAuthenticatedUrl"/>/<see cref="Redact"/>) so any OTHER caller that
+    /// clones an authenticated URL directly (bypassing this provider's own <see cref="MaterializeAsync"/>, e.g.
+    /// <c>SupervisorAcceptanceGrader.CloneAtBaseAsync</c>, which must clone at an arbitrary base SHA rather than a
+    /// named ref) reuses the EXACT same strip-then-fallback-to-remove logic — a security-sensitive path must have
+    /// exactly one implementation, never two copies that can silently drift apart.
+    /// </summary>
+    internal static async Task StripTokenFromRemoteAsync(ISandboxRunner runner, int timeoutSeconds, ILogger logger, string cleanUrl, string directory, CancellationToken cancellationToken)
     {
-        var rewrite = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }, cancellationToken).ConfigureAwait(false);
+        Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args) =>
+            runner.RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = timeoutSeconds }, cancellationToken);
+
+        var rewrite = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }).ConfigureAwait(false);
 
         if (rewrite.Status == SandboxStatus.Success) return;
 
-        var remove = await RunGitAsync(new[] { "-C", directory, "remote", "remove", "origin" }, cancellationToken).ConfigureAwait(false);
+        var remove = await RunGitAsync(new[] { "-C", directory, "remote", "remove", "origin" }).ConfigureAwait(false);
 
         if (remove.Status == SandboxStatus.Success)
-            _logger.LogWarning("Token strip via set-url failed (exit {ExitCode}); removed the origin remote so no credential persists in .git/config", rewrite.ExitCode);
+            logger.LogWarning("Token strip via set-url failed (exit {ExitCode}); removed the origin remote so no credential persists in .git/config", rewrite.ExitCode);
         else
-            _logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
+            logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
     }
 
     private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken) =>

@@ -63,6 +63,67 @@ public sealed class LocalGitWorkspaceProviderTests
     public void Redact_is_a_noop_without_a_token() =>
         LocalGitWorkspaceProvider.Redact("nothing to hide here", null).ShouldBe("nothing to hide here");
 
+    // ─── Shared token-strip helper (also reused by SupervisorAcceptanceGrader.CloneAtBaseAsync — one
+    //     implementation for a security-sensitive path, so its own fallback ladder is pinned directly here
+    //     rather than only indirectly through the full clone flow, which never exercises a set-url FAILURE) ───
+
+    [Fact]
+    public async Task StripToken_succeeds_via_set_url_without_touching_the_remote_further()
+    {
+        var runner = new ScriptedStripRunner(setUrlSucceeds: true, removeSucceeds: true);
+
+        await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(runner, 60, NullLogger<LocalGitWorkspaceProvider>.Instance, "https://host/r.git", "/tmp/x", CancellationToken.None);
+
+        runner.Invocations.Count.ShouldBe(1, "a successful set-url never falls through to remove — the happy path issues exactly one git call");
+        runner.Invocations[0].Args.ShouldBe(new[] { "-C", "/tmp/x", "remote", "set-url", "origin", "https://host/r.git" });
+    }
+
+    [Fact]
+    public async Task StripToken_falls_back_to_removing_the_remote_when_set_url_fails()
+    {
+        var runner = new ScriptedStripRunner(setUrlSucceeds: false, removeSucceeds: true);
+
+        await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(runner, 60, NullLogger<LocalGitWorkspaceProvider>.Instance, "https://host/r.git", "/tmp/x", CancellationToken.None);
+
+        runner.Invocations.Count.ShouldBe(2, "set-url failing must trigger exactly one fallback attempt");
+        runner.Invocations[1].Args.ShouldBe(new[] { "-C", "/tmp/x", "remote", "remove", "origin" });
+    }
+
+    [Fact]
+    public async Task StripToken_never_throws_even_when_both_set_url_and_remove_fail()
+    {
+        // The clone already succeeded by the time this runs — a credential-leak we FAILED to close must never
+        // fail the grade/workspace-prep outright (the janitor is the documented final backstop).
+        var runner = new ScriptedStripRunner(setUrlSucceeds: false, removeSucceeds: false);
+
+        await Should.NotThrowAsync(() =>
+            LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(runner, 60, NullLogger<LocalGitWorkspaceProvider>.Instance, "https://host/r.git", "/tmp/x", CancellationToken.None));
+
+        runner.Invocations.Count.ShouldBe(2);
+    }
+
+    private sealed class ScriptedStripRunner : ISandboxRunner
+    {
+        private readonly bool _setUrlSucceeds;
+        private readonly bool _removeSucceeds;
+
+        public ScriptedStripRunner(bool setUrlSucceeds, bool removeSucceeds) { _setUrlSucceeds = setUrlSucceeds; _removeSucceeds = removeSucceeds; }
+
+        public string Kind => "local";
+        public List<SandboxSpec> Invocations { get; } = new();
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocations.Add(spec);
+
+            var succeeds = spec.Args.Contains("set-url") ? _setUrlSucceeds : _removeSucceeds;
+
+            return Task.FromResult(succeeds
+                ? new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" }
+                : new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "git error" });
+        }
+    }
+
     // ─── Real clone mechanics ────────────────────────────────────────────────
 
     [Fact]

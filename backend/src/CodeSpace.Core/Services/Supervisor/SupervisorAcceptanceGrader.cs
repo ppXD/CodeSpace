@@ -129,6 +129,15 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         if (cloneResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
 
+        // Model-authored setup/acceptance commands run INSIDE this clone next — strip the tokened origin via the
+        // SAME shared helper LocalGitWorkspaceProvider's own branch-grading path uses (LocalGitWorkspaceProvider.
+        // StripTokenFromRemoteAsync — one implementation, not a second copy that could drift), so no credential
+        // persists in .git/config for those commands to read. Best-effort: the clone already succeeded, so this
+        // never fails the grade. Guarded on a present token, mirroring MaterializeAsync's own call site exactly —
+        // a public repo with no credential has nothing to strip.
+        if (!string.IsNullOrEmpty(clone.Token))
+            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(DefaultRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+
         var checkoutResult = await _runners.Resolve(DefaultRunnerKind).RunAsync(
             new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
 
