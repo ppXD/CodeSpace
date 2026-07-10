@@ -155,11 +155,14 @@ public static class SupervisorTrajectoryEnvironments
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
-            // BOTH subtasks fail on the first spawn; each RETRY recovers one. Integration is CLEAN only once BOTH have been
-            // retried — so the brain must retry twice, and a premature merge (before both are recovered) is INCOMPLETE.
-            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.BothFailed(d, seq),
+            // BOTH subtasks fail on the FIRST spawn; any ACTIVE RE-DISPATCH recovers them — the retry verb OR a fresh
+            // re-spawn of the failed units. An earlier draft made EVERY spawn fail forever, which is not production-
+            // faithful (a re-spawn is a legitimate fresh attempt that can succeed) — the 2026-07-10 live run showed a
+            // real model looping spawn-recovery into a fabricated fail-loop until the turn cap (M0). The BAR is
+            // unchanged: both units must be actively recovered, and a premature merge stays INCOMPLETE.
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.CountSpawns(priors) == 0 ? TrajectoryOutcomes.BothFailed(d, seq) : TrajectoryOutcomes.AllSucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
-            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 || TrajectoryOutcomes.CountSpawns(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
             _ => TrajectoryOutcomes.Handled(d, seq),
@@ -242,6 +245,10 @@ internal static class TrajectoryOutcomes
 
     public static int CountRetries(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Retry);
+
+    /// <summary>Terminal spawn dispatches on the tape — the multi-failure env treats the SECOND-and-later spawn as an active recovery re-dispatch (production-faithful: a fresh attempt can succeed).</summary>
+    public static int CountSpawns(IReadOnlyList<SupervisorPriorDecision> priors) =>
+        priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Spawn);
 
     private static SupervisorPriorDecision Prior(SupervisorDecision d, long seq, string outcomeJson) =>
         new() { Id = Guid.Empty, Sequence = seq, DecisionKind = d.Kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = d.PayloadJson, OutcomeJson = outcomeJson };
