@@ -235,6 +235,30 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         grade.Detail.ShouldContain("clone-failed");
     }
 
+    [Fact]
+    public async Task The_patch_grade_clone_never_exposes_the_repo_credential_to_the_model_authored_command()
+    {
+        // The acceptance command runs EXACTLY where a model-authored setup/check command runs — so the command itself
+        // is the probe: grep exits 0 (→ grade would PASS) iff the credential is still readable in the grading clone's
+        // .git/config. The branch-grading path already strips the tokened origin after clone (LocalGitWorkspaceProvider.
+        // StripTokenFromRemoteAsync); the patch-anchored clone bypasses that provider and must scrub the same way.
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var baseSha = await remote.HeadShaAsync("main");
+        var patch = await remote.BuildPatchAsync();
+
+        var grade = await GradePatchAsync(repoId, teamId, baseSha, patch, command: new[] { "sh", "-c", "grep -rq integration-token .git/" });
+
+        grade.Passed.ShouldBeFalse("a model-authored acceptance/setup command must never be able to read the repo credential from the grading clone");
+        grade.Detail.ShouldBe("tests-failed-exit-1", "the probe must fail because the token is GONE — not because the clone/apply pipeline broke");
+    }
+
     // ─── Helpers ───
 
     private async Task<BenchmarkGrade> GradeAsync(Guid repoId, Guid teamId, string branch, IReadOnlyList<string>? command = null, int timeoutSeconds = 60, IReadOnlyList<string>? setupCommand = null)
@@ -242,6 +266,13 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         using var scope = _fixture.BeginScope();   // resolving the grader from DI proves it auto-registers
         return await scope.Resolve<ISupervisorAcceptanceGrader>()
             .GradeAsync(repoId, teamId, branch, new SupervisorAcceptanceSpec { Command = command ?? new[] { "sh", "check.sh" }, SetupCommand = setupCommand }, timeoutSeconds, CancellationToken.None);
+    }
+
+    private async Task<BenchmarkGrade> GradePatchAsync(Guid repoId, Guid teamId, string baseSha, string patch, IReadOnlyList<string> command, int timeoutSeconds = 60)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<ISupervisorAcceptanceGrader>()
+            .GradePatchAsync(repoId, teamId, baseSha, patch, patchArtifactId: null, new SupervisorAcceptanceSpec { Command = command }, timeoutSeconds, CancellationToken.None);
     }
 
     private async Task<Guid> SeedTeamAsync()
@@ -339,12 +370,34 @@ public sealed class SupervisorAcceptanceGradeFlowTests
             await Git(_seed, "checkout", "main");
         }
 
+        /// <summary>The seed clone's HEAD SHA for <paramref name="branch"/> — the base a patch-anchored grade clones at.</summary>
+        public Task<string> HeadShaAsync(string branch) => GitRead(_seed, "rev-parse", branch);
+
+        /// <summary>A real, applyable patch (git-diff shape, index lines included) touching README.md — built by dirtying the seed worktree and restoring it, so the remote itself is untouched. Untrimmed: <c>git apply</c> treats a stripped trailing newline as a corrupt patch.</summary>
+        public async Task<string> BuildPatchAsync()
+        {
+            await File.AppendAllTextAsync(Path.Combine(_seed, "README.md"), "patched\n");
+            var diff = await GitReadRaw(_seed, "diff");
+            await Git(_seed, "checkout", "--", "README.md");
+            return diff;
+        }
+
         private static async Task Config(string dir)
         {
             await Git(dir, "config", "user.email", "test@codespace.dev");
             await Git(dir, "config", "user.name", "Test");
             await Git(dir, "config", "commit.gpgsign", "false");
         }
+
+        /// <summary>For output whose exact bytes matter (a patch) — no trimming.</summary>
+        private static async Task<string> GitReadRaw(string workdir, params string[] args)
+        {
+            var result = await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+            if (result.Status != SandboxStatus.Success) throw new InvalidOperationException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr}");
+            return result.Stdout;
+        }
+
+        private static async Task<string> GitRead(string workdir, params string[] args) => (await GitReadRaw(workdir, args)).Trim();
 
         private static async Task Git(string workdir, params string[] args)
         {
