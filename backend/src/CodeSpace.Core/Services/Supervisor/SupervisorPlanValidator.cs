@@ -32,10 +32,19 @@ public static class SupervisorPlanValidator
         try { subtasks = JsonSerializer.Deserialize<SupervisorPlanPayload>(decision.PayloadJson, AgentJson.Options)?.Subtasks ?? Array.Empty<SupervisorPlannedSubtask>(); }
         catch (JsonException) { return null; }
 
-        // The declared subtask universe (duplicate ids collapse — a dup is a degenerate flat-plan case, not this gate's concern).
+        // H2 (strict plan identity): a BLANK id is unreachable by construction (it can never be spawned, retried,
+        // depended on, or graded), and a DUPLICATE id aliases two units into ONE identity for every id-keyed
+        // reader — WORSE, the readers even disagree on which unit wins (SupervisorDependencyGate.DependsOnBySubtask
+        // is first-wins while ResolvePlannedSubtasks is last-wins), so a dup's results, grade, and lineage land
+        // inconsistently across joins. Both are structural contradictions the model must re-plan, exactly like a
+        // dangling reference — never "a degenerate flat-plan case".
+        if (subtasks.Any(s => string.IsNullOrWhiteSpace(s.Id))) return SupervisorStopReasons.PlanInvalid;
+
         var declared = subtasks.Select(s => s.Id).ToHashSet();
 
-        // The edge set, keyed by subtask (first id wins on a dup, mirroring SupervisorDependencyGate). No DependsOn anywhere ⇒ a flat plan ⇒ trivially valid.
+        if (declared.Count != subtasks.Count) return SupervisorStopReasons.PlanInvalid;
+
+        // The edge set, keyed by subtask. No DependsOn anywhere ⇒ a flat plan ⇒ trivially valid.
         var edges = new Dictionary<string, IReadOnlyList<string>>();
 
         foreach (var subtask in subtasks)

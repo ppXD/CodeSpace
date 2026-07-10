@@ -27,6 +27,7 @@ public static class SupervisorApprovalRequest
     public static SupervisorDecision IntoAskHuman(SupervisorDecision gated) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
+        ServerAuthored = true,
         PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(gated) }, AgentJson.Options),
     };
 

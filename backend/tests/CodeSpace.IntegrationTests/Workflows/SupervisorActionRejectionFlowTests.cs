@@ -82,6 +82,59 @@ public sealed class SupervisorActionRejectionFlowTests
         execution.OutcomeJson.ShouldBe(RejectedAskHumanJson);
     }
 
+    // ── H2 (strict action identity): ids the current plan never declared are rejected, never ghost-run ──
+
+    [Fact]
+    public async Task A_retry_naming_an_id_the_plan_never_declared_is_rejected_naming_the_declared_universe()
+    {
+        // Pre-H2 this fell through BuildAgentTask's instruction chain to the WHOLE GOAL — a ghost agent re-running
+        // the entire task under a typo'd or stale-plan id.
+        using var scope = _fixture.BeginScope();
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(RetryDecision("authh"), ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownSubtaskRetryOutcome("authh", new[] { "auth", "ui" }), AgentJson.Options));
+        execution.ParkedAgentWaitCount.ShouldBe(0, "the rejection is synchronous — no ghost agent is ever staged");
+    }
+
+    [Fact]
+    public async Task A_spawn_naming_an_undeclared_id_rejects_the_WHOLE_spawn_never_a_partial_fan_out()
+    {
+        using var scope = _fixture.BeginScope();
+
+        var spawn = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { "auth", "ghost" } }, AgentJson.Options),
+        };
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(spawn, ContextWithPlan("auth", "ui"), CancellationToken.None);
+
+        execution.OutcomeJson.ShouldBe(JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildUnknownSubtaskSpawnOutcome(new[] { "ghost" }, new[] { "auth", "ui" }), AgentJson.Options),
+            "a partial filter would desync the positional subtaskIds[i] ↔ agentResults[i] join — the whole decision is rejected with the reason");
+        execution.ParkedAgentWaitCount.ShouldBe(0, "zero agents staged — including for the ids that WERE valid");
+    }
+
+    private static SupervisorTurnContext ContextWithPlan(params string[] subtaskIds) => new()
+    {
+        Goal = "ship the feature", NodeId = "sup", TurnNumber = 2,
+        PriorDecisions = new[]
+        {
+            new SupervisorPriorDecision
+            {
+                Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    goal = "g",
+                    subtasks = subtaskIds.Select(id => new { id, title = id, instruction = $"do {id}" }),
+                }, AgentJson.Options),
+                OutcomeJson = "{}",
+            },
+        },
+    };
+
     private static readonly string RejectedRetryJson = JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedRetryOutcome(), AgentJson.Options);
     private static readonly string RejectedAskHumanJson = JsonSerializer.Serialize(RealSupervisorActionExecutor.RejectedAskHumanOutcome, AgentJson.Options);
 

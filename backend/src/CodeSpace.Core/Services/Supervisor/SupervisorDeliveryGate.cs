@@ -210,6 +210,7 @@ public static class SupervisorDeliveryGate
     private static SupervisorDecision IntoAskHuman(string reason) => new()
     {
         Kind = SupervisorDecisionKinds.AskHuman,
+        ServerAuthored = true,
         PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = $"{QuestionPrefix}{reason}" }, AgentJson.Options),
     };
 }
