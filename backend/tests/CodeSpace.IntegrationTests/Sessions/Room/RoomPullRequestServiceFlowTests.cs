@@ -106,6 +106,34 @@ public sealed class RoomPullRequestServiceFlowTests
     }
 
     [Fact]
+    public async Task A_ledger_direct_published_run_opens_a_PR_end_to_end_with_no_merge_at_all()
+    {
+        // DC-3 (sweep-found coverage gap): run 96695645's own motivating scenario driven all the way through the
+        // REAL OpenAsync — not just the gating flag (RoomProjector.PublishStateAsync is covered separately). A
+        // single accepted agent's own pushed PublishManifest row, no merge/integration decision on the tape at all.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
+
+        var result = await OpenAsync(runId, teamId);
+
+        var opened = result.PullRequests.Single();
+        opened.Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+        opened.RepositoryId.ShouldBe(repoId);
+        opened.Number.ShouldBe(777);
+
+        var manifest = await IntegrationManifestRowAsync(runId, teamId);
+        manifest.Branch.ShouldBe("codespace/agent/fix");
+        manifest.PullRequestNumber.ShouldBe(777);
+
+        (await ManifestRowCountAsync(runId, teamId)).ShouldBe(2, "the pre-existing Agent-kind row plus the freshly-recorded Integration-kind row");
+    }
+
+    [Fact]
     public async Task A_run_still_in_progress_throws_even_with_a_published_branch_already_on_the_tape()
     {
         // Hidden-dependency sweep finding: a supervisor run sits Suspended BETWEEN turns even after an earlier
@@ -322,6 +350,13 @@ public sealed class RoomPullRequestServiceFlowTests
         return rows.Single();
     }
 
+    private async Task<PublishManifest> IntegrationManifestRowAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var rows = await scope.Resolve<IPublishManifestStore>().ListForWorkflowRunAsync(runId, teamId, CancellationToken.None);
+        return rows.Single(m => m.Kind == PublishManifestKind.Integration);
+    }
+
     private async Task<int> ManifestRowCountAsync(Guid runId, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
@@ -396,6 +431,29 @@ public sealed class RoomPullRequestServiceFlowTests
         var outcome = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch, appliedCount = 1, reason = (string?)null, excludedAgents = Array.Empty<string>() } }, AgentJson.Options);
 
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Merge, outcome);
+    }
+
+    /// <summary>Hand-seeds a TERMINAL spawn decision with one folded agent result — the P0-5 ledger-direct branch resolver's tape read.</summary>
+    private async Task SeedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = new[] { "a.txt" } };
+        var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome);
+    }
+
+    /// <summary>Hand-seeds the P0-5 ledger-direct Agent-kind manifest row — a genuinely pushed branch with no merge/integration decision anywhere on the tape.</summary>
+    private async Task SeedAgentManifestAsync(Guid runId, Guid teamId, Guid agentRunId, Guid repositoryId, string branch)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+        {
+            TeamId = teamId, WorkflowRunId = runId, RepositoryAlias = "primary", RepositoryId = repositoryId,
+            Branch = branch, ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+        }, CancellationToken.None);
     }
 
     /// <summary>Hand-seeds a TERMINAL multi-repo Merge decision's <c>repositories[]</c> outcome — the shape <c>RealSupervisorActionExecutor.ProjectRepoBlock</c> emits, which <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/> reads. A null repository id models a degraded capture (no resolvable repo).</summary>

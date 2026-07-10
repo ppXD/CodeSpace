@@ -296,6 +296,7 @@ public sealed class SupervisorPublishGateFlowTests
         scope.Resolve<Core.Services.Workflows.Lifecycle.IRunRecordLogger>(),
         scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
         scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(),
+        scope.Resolve<Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private sealed record SupervisorDecisionRecordSnapshot(string Kind, string PayloadJson, string? OutcomeJson);
