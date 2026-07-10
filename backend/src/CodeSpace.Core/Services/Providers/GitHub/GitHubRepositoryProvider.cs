@@ -126,6 +126,25 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), async _ =>
+        {
+            // GitHub's own head filter (owner:branch). OPEN only — a bind-or-create check that found an
+            // already-MERGED/CLOSED PR and returned it as if freshly "Opened" would misreport a done or
+            // rejected change as still pending review. Naming why create failed against an inactive PR is a
+            // different, diagnostic concern this method does not serve.
+            var request = new PullRequestRequest { State = ItemStateFilter.Open, Head = $"{repository.NamespacePath}:{sourceBranch}" };
+            var options = new ApiOptions { PageCount = 1, PageSize = 1, StartPage = 1 };
+
+            var prs = await client.PullRequest.GetAllForRepository(repository.NamespacePath, repository.Name, request, options).ConfigureAwait(false);
+
+            return prs.Select(ToRemotePullRequest).FirstOrDefault();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RemotePullRequest> GetPullRequestAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -269,14 +288,35 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), async _ =>
+        try
         {
-            // GitHub: head = source branch, base = target branch. Draft is honoured when the repo plan allows it.
-            var newPr = new NewPullRequest(input.Title, input.SourceBranch, input.TargetBranch) { Body = input.Body, Draft = input.Draft };
-            var created = await client.PullRequest.Create(repository.NamespacePath, repository.Name, newPr).ConfigureAwait(false);
+            return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), async _ =>
+            {
+                // GitHub: head = source branch, base = target branch. Draft is honoured when the repo plan allows it.
+                var newPr = new NewPullRequest(input.Title, input.SourceBranch, input.TargetBranch) { Body = input.Body, Draft = input.Draft };
+                var created = await client.PullRequest.Create(repository.NamespacePath, repository.Name, newPr).ConfigureAwait(false);
 
-            return ToRemotePullRequestDetail(created);
-        }, cancellationToken).ConfigureAwait(false);
+                return ToRemotePullRequestDetail(created);
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProviderApiException ex) when (ex.StatusCode is >= 400 and < 500)
+        {
+            // DC-2c (bind-or-create idempotency): GitHub returns 422 both for "a PR already exists for these
+            // branches" AND for other validation failures (identical branches, no diff) — indistinguishable from
+            // the status code alone. Rather than guess, ask directly: if an OPEN PR for this source branch
+            // exists AND targets the SAME base this create asked for, this create was a harmless repeat (a
+            // crash between a PRIOR successful create and the caller recording it, or a genuine double-call) —
+            // bind to it instead of failing. A mismatched target branch is NOT the same request (e.g. a later
+            // retry that changed its target) — never silently bind to the wrong base. Found nothing, or a
+            // target mismatch → the 422 was a real validation failure → rethrow it untouched. Scoped to 4xx —
+            // a 5xx that exhausted retries is an infra outage, not a duplicate-branch signal; binding on that
+            // could fabricate a false success out of an unrelated PR for the same branch.
+            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, cancellationToken).ConfigureAwait(false);
+
+            if (existing is not null && existing.TargetBranch == input.TargetBranch) return existing;
+
+            throw;
+        }
     }
 
     public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)

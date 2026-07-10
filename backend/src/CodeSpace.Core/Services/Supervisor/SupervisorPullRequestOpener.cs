@@ -136,7 +136,15 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
         Url = manifest.PullRequestUrl,
     };
 
-    /// <summary>Project one ChangeSet outcome into the shared shape, and — only for a genuinely OPENED PR — record it onto the alias's PublishManifest row so a repeat call reuses it (I2: no second, competing notion of "did this alias already get a PR").</summary>
+    /// <summary>
+    /// Project one ChangeSet outcome into the shared shape, and — only for a genuinely OPENED PR — record it onto
+    /// the alias's PublishManifest row so a repeat call reuses it (I2: no second, competing notion of "did this
+    /// alias already get a PR"). DC-2c: the crash window this comment used to flag (provider create succeeds,
+    /// but a crash before THIS upsert lands strands a real PR every retry then reports Failed against) is closed
+    /// at the PROVIDER layer instead of here — <c>GitHubRepositoryProvider</c>/<c>GitLabRepositoryProvider</c>'s
+    /// own <c>OpenPullRequestAsync</c> now binds to an already-existing PR/MR for the same branch on a duplicate
+    /// create failure, so a retry's outcome still reports <c>Opened</c> and reaches this upsert.
+    /// </summary>
     private async Task<RoomPullRequestOpened> ProjectAndRecordAsync(Guid workflowRunId, Guid teamId, SupervisorRepositoryBranch target, ChangeSetPullRequestOutcome outcome, CancellationToken cancellationToken)
     {
         if (outcome.Disposition != ChangeSetPullRequestDisposition.Opened)

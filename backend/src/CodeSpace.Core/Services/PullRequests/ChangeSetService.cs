@@ -92,7 +92,13 @@ public sealed class ChangeSetService : IChangeSetService, IScopedDependency
         ProviderRateLimitedException => "the provider rate-limited the request; try again later.",
         ProviderApiException { StatusCode: 403 } api => $"{api.ProviderKind} refused it — the identity lacks write permission on this repository.",
         ProviderApiException { StatusCode: 404 } api => $"{api.ProviderKind} couldn't find the repository or a branch.",
-        ProviderApiException { StatusCode: 422 } api => $"{api.ProviderKind} rejected it — the branches may be identical or a PR may already exist for them.",
+        // DC-2c: 422 (GitHub) / 409 (GitLab) both cover "a PR/MR already exists for these branches" — the
+        // PROVIDER's own OpenPullRequestAsync already tries to bind to that existing one first (see
+        // GitHubRepositoryProvider/GitLabRepositoryProvider), so reaching this line means EITHER the branches
+        // were genuinely identical/empty, OR the bind attempt itself found nothing (a rare race — the duplicate
+        // was closed/deleted between the failed create and the bind lookup).
+        ProviderApiException { StatusCode: 422 } api => $"{api.ProviderKind} rejected it — the branches may be identical, or a PR exists for them that this attempt could not find.",
+        ProviderApiException { StatusCode: 409 } api => $"{api.ProviderKind} rejected it as a conflict — a PR/MR may exist for these branches that this attempt could not find.",
         ProviderApiException api => $"{api.ProviderKind} returned HTTP {api.StatusCode}.",
         // The service's own validation messages (missing title, identical branches, repo not found) are benign + useful.
         InvalidOperationException => ex.Message,
