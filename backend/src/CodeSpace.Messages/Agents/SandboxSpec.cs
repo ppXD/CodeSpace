@@ -108,6 +108,13 @@ public sealed record ConfigHomeFile
     public required string RelativePath { get; init; }
 
     public required string Content { get; init; }
+
+    /// <summary>
+    /// True for a file the harness's own config invokes by direct command path (e.g. the Stop-hook script wired as
+    /// <c>"$CLAUDE_CONFIG_DIR"/hooks/…</c>) — the shell execs the FILE, so it needs +x or the invocation dies with
+    /// exit 126 and the hook silently never runs. False (default) for plain config/content files.
+    /// </summary>
+    public bool IsExecutable { get; init; }
 }
 
 /// <summary>
