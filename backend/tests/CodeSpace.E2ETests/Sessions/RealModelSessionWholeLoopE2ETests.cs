@@ -132,7 +132,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         {
             var credential = new ResolvedModelCredential { Provider = Provider, BaseUrl = baseUrl!.TrimEnd('/'), ApiKey = apiKey! };
             var registry = new LLMClientRegistry(new ILLMClient[] { new Core.Services.Workflows.Llm.Anthropic.AnthropicClient(SharedHttp), new Core.Services.Workflows.Llm.OpenAi.OpenAiClient(SharedHttp) });
-            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary(), new E2ETapeStore());
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary(), new E2ETapeStore(), new CodeSpace.IntegrationTests.Workflows.Supervisor.NullRepoGrounding());
 
             var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
             var score = SupervisorDecisionEval.Score(scenario, decision);

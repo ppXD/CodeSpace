@@ -31,14 +31,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     private readonly IAgentDefinitionService _agentDefinitions;
 
     private readonly ISupervisorTapeSummaryStore _tapeSummaries;
+    private readonly Workflows.Planning.IRepoGroundingProvider _grounding;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions, ISupervisorTapeSummaryStore tapeSummaries)
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions, ISupervisorTapeSummaryStore tapeSummaries, Workflows.Planning.IRepoGroundingProvider grounding)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
         _agentDefinitions = agentDefinitions;
         _tapeSummaries = tapeSummaries;
+        _grounding = grounding;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -68,6 +70,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // [digest + recent tail] instead of the whole tape, so a once-compacted run STAYS under the window.
         if (context.TapeSummary is null && await _tapeSummaries.GetAsync(context.SupervisorRunId, context.TeamId, cancellationToken).ConfigureAwait(false) is { } persisted)
             context = context with { TapeSummary = persisted };
+
+        // S2 (G1) — ground the brain in the repository's ACTUAL top-level tree, listed at the run's immutable base
+        // pin (S1), so what it plans over is the SAME tree every spawned agent + the grounded reviewer materialize.
+        // Fail-soft (the provider folds every failure to null) and carried on the context so every prompt path —
+        // compaction retry, invalid-plan reprompt, budget-raise retry — renders the identical section.
+        if (context.RepoGrounding is null && context.AgentProfile?.RepositoryId is { } groundRepoId)
+            context = context with { RepoGrounding = await _grounding.BuildGroundingAsync(groundRepoId, context.TeamId, context.AgentProfile?.PinnedSha, cancellationToken).ConfigureAwait(false) };
 
         StructuredLLMCompletion completion;
         try
@@ -436,6 +445,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"Goal: {context.Goal}");
         builder.AppendLine($"Turn: {context.TurnNumber}");
         builder.AppendLine();
+
+        // S2 (G1): the repository's real top-level tree at the run's immutable base — the brain plans over what IS,
+        // not what it imagines. Null (no repo / grounding unavailable) ⇒ no block ⇒ byte-identical prompt.
+        if (!string.IsNullOrWhiteSpace(context.RepoGrounding))
+        {
+            builder.AppendLine(context.RepoGrounding.Trim());
+            builder.AppendLine();
+        }
 
         // The operator's acceptance criteria — the definition of done the supervisor must target (a yardstick, NOT an
         // executable check). Null / empty ⇒ no block ⇒ byte-identical prompt.

@@ -497,7 +497,7 @@ public class WorkflowPlannerTests
         // null repositoryId returns before any DB/provider use — db is never dereferenced, so null! is safe here.
         var provider = new RepoGroundingProvider(db: null!, registry: null!, scopeChecker: null!, logger: NullLogger<RepoGroundingProvider>.Instance);
 
-        var grounding = await provider.BuildGroundingAsync(repositoryId: null, teamId: Guid.NewGuid(), CancellationToken.None);
+        var grounding = await provider.BuildGroundingAsync(repositoryId: null, teamId: Guid.NewGuid(), reference: null, CancellationToken.None);
 
         grounding.ShouldBeNull();
     }
@@ -697,7 +697,7 @@ public class WorkflowPlannerTests
         public Guid SeenTeamId { get; private set; }
         public int Invocations { get; private set; }
 
-        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, CancellationToken cancellationToken)
+        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken)
         {
             Invocations++;
             SeenRepositoryId = repositoryId;

@@ -43,7 +43,9 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
 
         // Service-level grounding (most generic — every planner backend consumes request.GroundingContext). Team
         // from request.TeamId (sourced from ICurrentTeam upstream, never the wire); a repo outside the team → null.
-        var grounding = await _grounding.BuildGroundingAsync(request.RepositoryId, request.TeamId, cancellationToken).ConfigureAwait(false);
+        // reference: null — this lane authors a REUSABLE definition; a pin belongs to a RUN (resolved at ITS
+        // launch), so baking one here would permanently stale-pin every future run of the definition.
+        var grounding = await _grounding.BuildGroundingAsync(request.RepositoryId, request.TeamId, reference: null, cancellationToken).ConfigureAwait(false);
 
         var plan = await _planner.PlanAsync(request with { GroundingContext = grounding }, cancellationToken).ConfigureAwait(false);
 
