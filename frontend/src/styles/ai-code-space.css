@@ -24,6 +24,16 @@
   --good: #5BA17A;
   --warn: #C97C3F;
   --danger: #C0623D;
+  /* Workflow node tones — one muted, warm-compatible hue per node category so every node on the canvas
+     reads by colour + icon at a glance (left rail + icon chip). "start" reuses the brand accent; "tool" is
+     the neutral fallback that any unmapped/plugin category lands on. */
+  --wf-start: var(--accent);  --wf-start-soft: var(--accent-soft);
+  --wf-ai: #6E56A6;           --wf-ai-soft: #ECE6F5;
+  --wf-git: #3E8E63;          --wf-git-soft: #E3F1E9;
+  --wf-flow: #3F6BB0;         --wf-flow-soft: #E6ECF7;
+  --wf-human: #BF8330;        --wf-human-soft: #F7ECD6;
+  --wf-tool: #837A6B;         --wf-tool-soft: #ECE8DE;
+  --wf-end: #7A766E;          --wf-end-soft: #ECEAE3;
   --radius: 8px;
   --radius-sm: 6px;
   --radius-lg: 12px;
@@ -3273,7 +3283,7 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-rf-loop-icon {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent);
+  width: 22px; height: 22px; border-radius: 6px; background: var(--tone-soft); color: var(--tone);
 }
 .acs-root .wf-rf-loop-title { font-weight: 600; }
 .acs-root .wf-rf-loop-ref { color: var(--muted); }
@@ -3284,18 +3294,25 @@ textarea:-webkit-autofill {
   background: var(--accent); border: 1.5px solid var(--panel);
 }
 .acs-root .wf-rf-resize-line { border-color: var(--accent); border-width: 1px; opacity: 0.55; }
+/* Per-tone colour: `data-tone` (from nodeTone in WorkflowNode.tsx) maps a node's category to a hue,
+   exposed as --tone / --tone-soft so the rail + icon chip stay ONE DRY rule. An unmapped tone keeps the
+   neutral default on the first line, so a new/plugin node still paints sanely with no rule added here. */
+.acs-root .wf-rf-node, .acs-root .wf-rf-loop, .acs-root .wf-rf-fanout-node { --tone: var(--wf-tool); --tone-soft: var(--wf-tool-soft); }
+.acs-root [data-tone="start"] { --tone: var(--wf-start); --tone-soft: var(--wf-start-soft); }
+.acs-root [data-tone="ai"]    { --tone: var(--wf-ai);    --tone-soft: var(--wf-ai-soft); }
+.acs-root [data-tone="git"]   { --tone: var(--wf-git);   --tone-soft: var(--wf-git-soft); }
+.acs-root [data-tone="flow"]  { --tone: var(--wf-flow);  --tone-soft: var(--wf-flow-soft); }
+.acs-root [data-tone="human"] { --tone: var(--wf-human); --tone-soft: var(--wf-human-soft); }
+.acs-root [data-tone="tool"]  { --tone: var(--wf-tool);  --tone-soft: var(--wf-tool-soft); }
+.acs-root [data-tone="end"]   { --tone: var(--wf-end);   --tone-soft: var(--wf-end-soft); }
 .acs-root .wf-rf-node-bar {
-  position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent);
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tone);
   border-top-left-radius: 8px; border-bottom-left-radius: 8px;
 }
-.acs-root .wf-rf-node[data-kind="trigger"]  .wf-rf-node-bar { background: var(--accent); }
-.acs-root .wf-rf-node[data-kind="terminal"] .wf-rf-node-bar { background: #7A766E; }
-.acs-root .wf-rf-node[data-kind="regular"]  .wf-rf-node-bar { background: transparent; }
 .acs-root .wf-rf-node-icon {
-  width: 24px; height: 24px; border-radius: 5px; display: grid; place-items: center;
-  background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); flex-shrink: 0;
+  width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center;
+  background: var(--tone-soft); border: 1px solid transparent; color: var(--tone); flex-shrink: 0;
 }
-.acs-root .wf-rf-node[data-kind="trigger"]  .wf-rf-node-icon { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .acs-root .wf-rf-node-body { min-width: 0; flex: 1; }
 .acs-root .wf-rf-node-title { font-weight: 600; font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acs-root .wf-rf-node-ref   { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
