@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Slugs;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
@@ -302,31 +303,13 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
     {
         var baseSlug = DeriveValidSlug(name);
 
-        // Prefetch every Working slug that could be a candidate. A candidate is baseSlug or a `-N` variant whose base
-        // is baseSlug TRIMMED to keep the suffix under the 64-char cap; the shortest such trim is ~58 chars (DeriveSlug
-        // never emits consecutive hyphens, so TrimEnd drops at most one), so a 50-char prefix is a prefix of baseSlug
-        // AND of every trimmed variant. Probing on it (vs the full baseSlug) covers the truncation case too; the exact
-        // `taken.Contains(candidate)` check below keeps it precise (any over-matched unrelated slug is simply ignored).
-        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
-
         var taken = (await _db.AgentDefinition.AsNoTracking()
-            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null && a.Slug.StartsWith(probe))
+            .Where(a => a.TeamId == teamId && a.Scope == DefinitionScope.Working && a.DeletedDate == null && a.Slug.StartsWith(SlugDeduper.ProbePrefix(baseSlug)))
             .Select(a => a.Slug)
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
 
-        if (!taken.Contains(baseSlug)) return baseSlug;
-
-        for (var n = 2; n < 10000; n++)
-        {
-            var suffix = $"-{n}";
-            var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
-            var candidate = trimmed + suffix;
-
-            if (!taken.Contains(candidate)) return candidate;
-        }
-
-        throw new InvalidOperationException($"Could not derive a free handle from '{name}' — too many existing variants of '{baseSlug}'.");
+        return SlugDeduper.DeriveAvailable(baseSlug, taken);
     }
 
     private async Task SaveCreateAsync(AgentDefinition agent, string slug, string requestedName, CancellationToken cancellationToken)
@@ -374,29 +357,7 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
     /// Returns empty when no character survives (the caller throws). Public + static so it's unit-tested
     /// directly and reused by the import slice for authored-style handles.
     /// </summary>
-    public static string DeriveSlug(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
-
-        var sb = new System.Text.StringBuilder(name.Length);
-        var lastWasHyphen = true;   // suppresses a leading hyphen
-        foreach (var c in name)
-        {
-            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
-            {
-                sb.Append(char.ToLowerInvariant(c));
-                lastWasHyphen = false;
-            }
-            else if (!lastWasHyphen)
-            {
-                sb.Append('-');
-                lastWasHyphen = true;
-            }
-        }
-
-        var result = sb.ToString().TrimEnd('-');
-        return result.Length <= 64 ? result : result[..64].TrimEnd('-');
-    }
+    public static string DeriveSlug(string name) => Slug.Slugify(name);
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
