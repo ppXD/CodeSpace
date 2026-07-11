@@ -94,16 +94,22 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
     // "one of: approve, reject" instead of an opaque string and wire its branch against a real key.
     const actionKeys = node.typeKey === "flow.wait_action" ? resolveWaitActionKeys(definition, node) : null;
 
+    const nodeName = node.label || manifest?.displayName || node.typeKey;
+
     for (const key of outputKeys) {
       const showsActionKeys = actionKeys != null && key.name === "action";
+      const path = `nodes.${nodeId}.outputs.${key.name}`;
       suggestions.push({
-        path: `nodes.${nodeId}.outputs.${key.name}`,
-        label: `nodes.${nodeId}.outputs.${key.name}`,
+        path,
+        // Lead with a human "Node → output" headline instead of the raw ref path; the path is demoted to
+        // the description so it stays visible + discoverable. Insertion is unaffected — the picker builds
+        // the {{ref}} chip from `path`, never `label` — so this is display-only and non-breaking.
+        label: `${nodeName} → ${key.name}`,
         category: "node",
         type: key.type,
         description: showsActionKeys
           ? `Clicked action — one of: ${actionKeys.join(", ")}`
-          : `From "${node.label || manifest?.displayName || node.typeKey}"`,
+          : path,
       });
     }
   }
@@ -118,17 +124,17 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
     suggestions.push(
       {
         path: `nodes.${sourceId}.outputs.error.message`,
-        label: `nodes.${sourceId}.outputs.error.message`,
+        label: `${from} → error message`,
         category: "node",
         type: "string",
-        description: `Failure message from "${from}" (error branch)`,
+        description: `nodes.${sourceId}.outputs.error.message`,
       },
       {
         path: `nodes.${sourceId}.outputs.error.node`,
-        label: `nodes.${sourceId}.outputs.error.node`,
+        label: `${from} → failing node`,
         category: "node",
         type: "string",
-        description: `The id of the node that failed`,
+        description: `nodes.${sourceId}.outputs.error.node`,
       },
     );
   }

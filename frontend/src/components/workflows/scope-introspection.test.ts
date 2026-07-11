@@ -230,3 +230,32 @@ describe("introspectScope — {{item}} / {{index}} in a map body", () => {
     expect(paths).toEqual(["item", "index"]);
   });
 });
+
+describe("introspectScope — human labels (display-only, ref preserved)", () => {
+  const find = (nodeId: string, path: string) =>
+    introspectScope({ definition, currentNodeId: nodeId, manifestByType }).find((s) => s.path === path);
+
+  it("labels a node output 'Node → key' but keeps the raw ref path for insertion", () => {
+    const s = find("normalNext", "nodes.a.outputs.value");
+    expect(s?.label).toBe("regular.a → value");            // human headline
+    expect(s?.path).toBe("nodes.a.outputs.value");          // inserted {{ref}} unchanged — non-breaking
+    expect(s?.description).toBe("nodes.a.outputs.value");    // raw path demoted to the sub-line, still discoverable
+  });
+
+  it("labels the error output 'Node → error message' with the ref preserved", () => {
+    const s = find("handler", "nodes.a.outputs.error.message");
+    expect(s?.label).toBe("regular.a → error message");
+    expect(s?.path).toBe("nodes.a.outputs.error.message");
+  });
+
+  it("prefers the node's user label over the type name in the headline (ref stays id-based)", () => {
+    const withLabel: WorkflowDefinition = {
+      ...definition,
+      nodes: definition.nodes.map((n) => (n.id === "a" ? { ...n, label: "Planner" } : n)),
+    };
+    const s = introspectScope({ definition: withLabel, currentNodeId: "normalNext", manifestByType })
+      .find((x) => x.path === "nodes.a.outputs.value");
+    expect(s?.label).toBe("Planner → value");               // "Planner → value", not the type key
+    expect(s?.path).toBe("nodes.a.outputs.value");           // ref still the stable id path
+  });
+});
