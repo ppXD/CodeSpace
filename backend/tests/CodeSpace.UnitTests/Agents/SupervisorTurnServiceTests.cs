@@ -160,6 +160,52 @@ public class SupervisorTurnServiceTests
         result.TerminalReason.ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable, "no surface to adjudicate on ⇒ the DISTINCT honest diagnosis, never a misleading bare NoProgress");
     }
 
+    [Fact]
+    public async Task An_unanswered_gate_card_on_the_tape_fuses_the_forced_stop_back_to_its_honest_terminal()
+    {
+        // The ask-once fuse (scan F1): a DEGRADED gate ask (no usable surface — recorded terminal with a null
+        // answer) proves this run cannot park. Without the fuse the gated forced stop would re-substitute the
+        // same unanswerable ask forever — the forced stop was such a run's ONLY terminal backstop. Driven at the
+        // ChooseDecisionAsync seam: the unit harness has no db for rehydrate's ask-token resolution, so the
+        // degraded card is appended onto the rehydrated context directly (the same PriorDecisions the gates read).
+        var ledger = new FakeSupervisorDecisionLog();
+
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
+
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
+
+        var goalConfig = DeliveryGoalConfig();
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), NullLogger<SupervisorTurnService>.Instance);
+
+        var context = await service.RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig, CancellationToken.None);
+        // The gate's own card, already degraded once: terminal, question pinned to the gate prefix, NO answer.
+        context = context with { ConversationId = Guid.NewGuid(), PriorDecisions = context.PriorDecisions.Append(AskPrior(99, $$"""{"question":"{{SupervisorDeliveryGate.QuestionPrefix}}unanswerable"}""", "{}")).ToList() };
+
+        var decision = await service.ChooseDecisionAsync(context, SupervisorGoalPlan.From(goalConfig), depth: 0, CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop, "one degraded ask is the limit — the run must still terminate");
+        SupervisorOutcome.ReadStopReason(decision.PayloadJson).ShouldBe(SupervisorStopReasons.NoProgress, "the fuse restores the bound's own honest reason");
+    }
+
+    [Fact]
+    public async Task A_depth_capped_run_is_never_gated_into_delivering()
+    {
+        // Scan M2: a depth-capped run is an ILLEGALLY NESTED one refused at turn 0 — its obligations belong to the
+        // parent. Gating it would let a run that should never have taken a single decision open PRs, and (with no
+        // conversation) erase DepthCapExceeded behind DeliveryAdjudicationUnavailable in the scorecard.
+        var ledger = new FakeSupervisorDecisionLog();
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), NullLogger<SupervisorTurnService>.Instance);
+
+        var goalConfig = DeliveryGoalConfig();
+        var context = await service.RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig, CancellationToken.None);
+
+        var decision = await service.ChooseDecisionAsync(context, SupervisorGoalPlan.From(goalConfig), depth: SupervisorLane.MaxSupervisorDepth, CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        SupervisorOutcome.ReadStopReason(decision.PayloadJson).ShouldBe(SupervisorStopReasons.DepthCapExceeded, "the illegal-nesting diagnosis survives untouched — never a substituted publish/ask");
+    }
+
     /// <summary>The operator's own launch-time PR requirement — the delivery gate's authorized path ②.</summary>
     private static SupervisorGoalConfig DeliveryGoalConfig() => new()
     {

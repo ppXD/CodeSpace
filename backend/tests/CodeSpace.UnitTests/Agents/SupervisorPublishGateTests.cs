@@ -146,6 +146,19 @@ public class SupervisorPublishGateTests
     }
 
     [Fact]
+    public void A_forced_stop_is_exempt_from_the_summary_requirement()
+    {
+        // requireSummary:false is the FORCED-stop bar (GateForcedStop): a bound authored the stop, not the model —
+        // its recorded reason IS the explanation, and parking a published run on "provide a summary" no human owes
+        // would ask forever. The publish-or-park ladder itself still applies to forced stops unchanged.
+        var agentRunId = Guid.NewGuid();
+        var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId)));
+
+        SupervisorPublishGate.Validate(context, StopDecision(""), requireSummary: false)
+            .ShouldBeNull("the raw-push shortcut arm honours the forced-stop exemption");
+    }
+
+    [Fact]
     public void A_different_agents_publication_never_satisfies_a_different_frontiers_i3_check()
     {
         // The published set must be checked against THIS frontier's own contributor, never any agent the run

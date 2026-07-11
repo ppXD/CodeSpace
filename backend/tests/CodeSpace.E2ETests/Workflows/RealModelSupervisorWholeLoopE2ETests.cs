@@ -581,10 +581,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         // Check 1: re-validate EVERY persisted stop against the tape as it stood immediately before that row. A
         // real violation here means the LIVE production gate let an accepted-unpublished stop through for real.
+        // A FORCED stop (its payload carries a `reason` — model stops carry outcome/summary instead) re-validates
+        // with the SAME requireSummary:false the runtime gate applies to it: a bound authored it, so "no summary"
+        // is legal for it by design, and auditing it at the model-stop bar would red a legalized behaviour.
         foreach (var stop in stops)
         {
             var priorToThisStop = priorDecisions.Where(d => d.Sequence < stop.Sequence).ToList();
-            var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson });
+            var isForcedStop = SupervisorOutcome.ReadStopReason(stop.PayloadJson) is not null;
+            var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson }, requireSummary: !isForcedStop);
 
             gateVerdict.ShouldBeNull($"a Stop decision (sequence {stop.Sequence}) was actually PERSISTED as a genuine stop, but SupervisorPublishGate.Validate says it should have been rewritten to '{gateVerdict?.Kind}' — I3 did not hold for this real run.");
         }
