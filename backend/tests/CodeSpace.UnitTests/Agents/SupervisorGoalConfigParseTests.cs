@@ -46,4 +46,18 @@ public class SupervisorGoalConfigParseTests
         config.ShouldNotBeNull();
         config!.DecisionReviewMode.ShouldBe(ReviewMode.None);
     }
+
+    [Fact]
+    public void The_primary_repository_is_read_from_the_nested_agent_profile()
+    {
+        // P0.3: the schema nests repositoryId under agentProfile (there is no flat top-level key), so the run's
+        // repositoryId OUTPUT must be read from here — not a flat lookup that always yields null/empty.
+        var repoId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+
+        var config = AgentSupervisorNode.ReadGoalConfig(Bag(new { goal = "ship it", agentProfile = new { repositoryId = repoId } }));
+
+        config.ShouldNotBeNull();
+        config!.AgentProfile.ShouldNotBeNull();
+        config.AgentProfile!.RepositoryId.ShouldBe(repoId);
+    }
 }

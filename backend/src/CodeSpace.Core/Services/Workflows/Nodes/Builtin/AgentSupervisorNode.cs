@@ -141,7 +141,10 @@ public sealed class AgentSupervisorNode : INodeRuntime
         var goalConfig = ReadGoalConfig(context.Config);
         var goal = ReadString(context.Config, "goal");
         var conversationId = ReadOptionalGuid(context.Config, "conversationId");
-        var repositoryId = ReadOptionalGuid(context.Config, "repositoryId");
+        // The primary repo lives on the nested agentProfile (see the ConfigSchema) — there is NO flat top-level
+        // repositoryId key, so reading one always yielded null and this run's repositoryId OUTPUT was always empty.
+        // Read it from agentProfile so the output echoes the configured primary repo (agent-spawn binding is separate).
+        var repositoryId = goalConfig?.AgentProfile?.RepositoryId;
 
         // Durable re-entry guard (the spawn/retry async barrier): a PRIOR turn may have staged K AgentRun waits
         // that are still in flight. The spawn decision is already a SETTLED ledger row, so a naive rehydrate
