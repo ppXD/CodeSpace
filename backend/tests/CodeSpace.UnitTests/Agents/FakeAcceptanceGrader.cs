@@ -38,4 +38,18 @@ internal sealed class FakeAcceptanceGrader : ISupervisorAcceptanceGrader
         if (_throw != null) throw _throw;
         return Task.FromResult(_grade);
     }
+
+    /// <summary>S3: the baseline grade — configurable independently of the candidate grade (a differential needs the two to disagree); defaults to the candidate grade.</summary>
+    public BenchmarkGrade? BaseGrade { get; set; }
+
+    public int BaseCallCount { get; private set; }
+    public (Guid RepositoryId, Guid TeamId, string BaseSha)? LastBaseCall { get; private set; }
+
+    public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        BaseCallCount++;
+        LastBaseCall = (repositoryId, teamId, baseSha);
+        if (_throw != null) throw _throw;
+        return Task.FromResult(BaseGrade ?? _grade);
+    }
 }

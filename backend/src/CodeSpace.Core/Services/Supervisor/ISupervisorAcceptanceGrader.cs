@@ -38,4 +38,15 @@ public interface ISupervisorAcceptanceGrader
     /// legible detail (fail-closed), mirroring <see cref="GradeAsync"/>'s contract exactly.
     /// </summary>
     Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// S3 — grade the BASE tree itself: clone <paramref name="repositoryId"/> at <paramref name="baseSha"/>
+    /// (team-scoped, detached — the S1 immutable base every participant materialized) and run the SAME oracle with
+    /// NO candidate work applied. The baseline-health capture V0+'s differential rides: a candidate failing a check
+    /// the base ALREADY failed is not a regression, and a candidate passing a check the base failed is a FIX worth
+    /// crediting. Fail-closed like its siblings — an ungradable base yields a failed grade with a legible detail
+    /// (the recorded detail's <c>clone-failed:</c>/<c>grade-error:</c> prefixes let a typed consumer separate
+    /// infra-unknown from a genuine baseline failure until F0's dispositions land).
+    /// </summary>
+    Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 }

@@ -436,6 +436,9 @@ public class AgentRunExecutorAcceptanceTests
 
             return System.Threading.Tasks.Task.FromResult(Grade);
         }
+
+        public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+            Task.FromResult(new BenchmarkGrade { Passed = true, Detail = "baseline-tests-passed" });
     }
 
     /// <summary>Records every upsert (never persists — an in-memory list is enough to assert the AcceptanceState wiring). Shares the SAME <see cref="FakeGrader"/> the executor's DI scope resolves, so <see cref="NewExecutorWithManifests"/> can script per-branch grades exactly like <see cref="NewExecutor"/>'s callers do.</summary>

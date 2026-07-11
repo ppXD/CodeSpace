@@ -489,6 +489,9 @@ public sealed partial class SupervisorTurnService
 
         var graded = new List<SupervisorAgentResult>(results.Count);
         var anyGraded = false;
+        // S3: one baseline capture per (repo, base, command) within this fold — parallel units off the SAME S1 base
+        // share one measurement instead of re-cloning per unit.
+        var baselines = new Dictionary<string, BenchmarkGrade>(StringComparer.Ordinal);
 
         for (var i = 0; i < results.Count; i++)
         {
@@ -525,10 +528,20 @@ public sealed partial class SupervisorTurnService
                 grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
 
+            // S3 baseline health: the SAME oracle against the unit's BASE tree (its manifest's recorded BaseSha —
+            // the S1 pin every participant materialized), captured beside the candidate grade. Single-repo units
+            // only (the multi-repo per-repo baseline is a named follow-up, mirroring this fold's own S2 scope trim);
+            // a unit with no recorded base is simply not baselined (null-omitted, byte-identical).
+            var baseline = results[i].RepositoryResults.Count == 0
+                ? await CaptureUnitBaselineAsync(results[i], subtaskId, repoOverrides, goalConfig, fullSpec, baselines, teamId, cancellationToken).ConfigureAwait(false)
+                : null;
+
             graded.Add(results[i] with
             {
                 AcceptancePassed = grade.Passed,
                 AcceptanceDetail = grade.Detail,
+                BaselinePassed = baseline?.Passed,
+                BaselineDetail = baseline?.Detail,
                 // P4-1: unlike the single-agent lane (which only ever grades a would-be Succeeded result), THIS fold
                 // grades every staged unit regardless of its own row status — a unit can genuinely self-report
                 // "Failed" while its check passes (an under-claim), so both directions are reachable here.
@@ -587,6 +600,43 @@ public sealed partial class SupervisorTurnService
         {
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
             return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+        }
+    }
+
+    /// <summary>
+    /// S3 — capture the unit's BASELINE health: the SAME oracle the candidate was just graded with, run against the
+    /// unit's recorded BASE tree (its manifest's <c>BaseSha</c> — the S1 immutable base) with no candidate work
+    /// applied. Memoized per (repo, base, command) within one fold pass so parallel units off the same base share
+    /// one measurement. Null (no baseline recorded) when the unit has no repo or its manifest records no base —
+    /// never a throw: the grader is fail-closed, and an unexpected escape here degrades to an unmeasured baseline
+    /// (the candidate grade must never be stranded by its own baseline's failure).
+    /// </summary>
+    private async Task<BenchmarkGrade?> CaptureUnitBaselineAsync(SupervisorAgentResult result, string? subtaskId, IReadOnlyDictionary<string, Guid> repoOverrides, SupervisorGoalConfig? goalConfig, SupervisorAcceptanceSpec spec, Dictionary<string, BenchmarkGrade> baselines, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
+                               ?? goalConfig?.AgentProfile?.RepositoryId;
+
+            if (repositoryId is null) return null;
+
+            var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(manifest?.BaseSha)) return null;
+
+            var key = $"{repositoryId}@{manifest!.BaseSha}#{string.Join('\u001f', spec.Command ?? Array.Empty<string>())}";
+
+            if (baselines.TryGetValue(key, out var memoized)) return memoized;
+
+            var grade = await _acceptanceGrader.GradeBaseAsync(repositoryId.Value, teamId, manifest.BaseSha!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            baselines[key] = grade;
+            return grade;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Baseline capture for agent {AgentRunId} failed unexpectedly; the unit records no baseline", result.AgentRunId);
+            return null;
         }
     }
 

@@ -1053,6 +1053,9 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             return Task.FromResult(_grade);
         }
 
+        public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+            Task.FromResult(new BenchmarkGrade { Passed = true, Detail = "baseline-tests-passed" });
+
         private void Capture()
         {
             var scope = CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current;
@@ -1089,6 +1092,9 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
         }
+
+        public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+            Task.FromResult(new BenchmarkGrade { Passed = true, Detail = "baseline-tests-passed" });
     }
 
     /// <summary>Returns a SEQUENCE of grades (one per call) + records each call's command — lets a C1 test assert the AND across the two stop gates graded in order (operator floor then model).</summary>
@@ -1116,5 +1122,8 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             Kinds.Add(spec.Kind ?? BenchmarkGradingKind.TestsPass);
             return Task.FromResult(_grades.Count > 0 ? _grades.Dequeue() : new BenchmarkGrade { Passed = true, Detail = "default" });
         }
+
+        public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+            Task.FromResult(new BenchmarkGrade { Passed = true, Detail = "baseline-tests-passed" });
     }
 }

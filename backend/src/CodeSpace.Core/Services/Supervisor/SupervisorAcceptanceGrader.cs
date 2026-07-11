@@ -116,6 +116,35 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
+    public async Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-base-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            var clone = await _workspaceResolver.ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false)
+                ?? throw new WorkspaceException($"Repository {repositoryId} resolved to no clone request for baseline grading.");
+
+            await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
+
+            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Baseline grading could not clone {RepositoryId} at base {BaseSha}; recording clone-failed", repositoryId, baseSha);
+            return Failed($"clone-failed: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Baseline grading could not run the check for {RepositoryId} at base {BaseSha}; recording grade-error", repositoryId, baseSha);
+            return Failed($"grade-error: {ex.Message}");
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
     /// <summary>Full clone (no <c>--branch</c> — a base SHA is not a ref name the shared provider's clone can accept) then a detached checkout of the exact base. Throws <see cref="WorkspaceException"/> (redacted) on either git failure.</summary>
     private async Task CloneAtBaseAsync(WorkspaceRequest clone, string baseSha, string directory, CancellationToken cancellationToken)
     {
