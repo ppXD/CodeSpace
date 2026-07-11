@@ -12,7 +12,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [
     // TanStack Router plugin must run before @vitejs/plugin-react.
-    TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
+    // Colocated route tests (*.test.tsx next to the route) are not routes — exclude them from the
+    // generated tree so the plugin doesn't warn about a missing Route export.
+    TanStackRouterVite({ target: "react", autoCodeSplitting: true, routeFileIgnorePattern: "\\.test\\.[tj]sx?$" }),
     react(),
     tailwindcss(),
   ],
