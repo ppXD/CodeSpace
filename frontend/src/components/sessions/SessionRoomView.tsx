@@ -85,7 +85,7 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamS
     return () => clearInterval(t);
   }, []);
 
-  const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
+  const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: runId } });
 
   const turnCount = room.blocks.filter((b) => b.type === "assistant_turn").length;
   const startedAt = room.blocks.map((b) => ("at" in b ? b.at : null)).find(Boolean) as string | undefined;

@@ -156,6 +156,8 @@ export interface UpdateWorkflowInput {
 
 export interface WorkflowRunSummary {
   id: string;
+  /** Team-scoped sequential number — the run's clean-URL handle (`/runs/{runNumber}`). */
+  runNumber: number;
   /** Parent workflow id for an authored run; `null` for a snapshot / task run (it has no parent workflow). */
   workflowId: string | null;
   workflowVersion: number | null;
@@ -363,6 +365,8 @@ export interface WorkflowRunWaitInfo {
 
 export interface WorkflowRunDetail {
   id: string;
+  /** Team-scoped sequential number — the run's clean-URL handle (`/runs/{runNumber}`). */
+  runNumber: number;
   workflowId: string;
   workflowVersion: number;
   /** Sourced from run_request.source_type. */
@@ -645,7 +649,8 @@ export const workflowsApi = {
   summarizeTeamRuns: (filter: RunListFilterInput | undefined, todayStartIso: string) =>
     fetchJson<RunSummary>(`/api/workflows/runs/summary?${buildRunListParams(filter, 1)}&today=${encodeURIComponent(todayStartIso)}`),
 
-  getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
+  /** Resolve one run by ref — its team-scoped run number (clean URL) or GUID (legacy link). */
+  getRun: (ref: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${encodeURIComponent(ref)}`),
 
   /** The lineage's attempt ladder (original + every rerun fork) — drives the run-detail attempt switcher. */
   getRunAttempts: (runId: string) => fetchJson<RunAttemptsResponse>(`/api/workflows/runs/${runId}/attempts`),

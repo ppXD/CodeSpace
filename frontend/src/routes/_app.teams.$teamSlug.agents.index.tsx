@@ -192,7 +192,7 @@ function AgentsListPage() {
           surface="chat"
           autofill={{ agentDefinitionId: launchAgentId }}
           onClose={() => setLaunchAgentId(null)}
-          onLaunched={(runId) => { setLaunchAgentId(null); navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } }); }}
+          onLaunched={(runId) => { setLaunchAgentId(null); navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: runId } }); }}
         />
       )}
     </section>
