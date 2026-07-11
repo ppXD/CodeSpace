@@ -89,13 +89,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         var baseRefs = await ResolveBaseRefsAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
 
         // S1: the launch's immutable base vector — each repo's tip commit resolved ONCE, over the same git transport
-        // the clones use, so the planner, the grounded plan reviewer, and every dispatched agent materialize the SAME
-        // base even when the remote advances mid-run. Session-soft + URL-less repos stay unpinned (resolver contract).
-        // Resolved ONLY for the projections that consume it (single-agent + plan-map) — the supervisor lane neither
-        // reads pins nor Seed.BaseBranch yet (PR③ threads it), so it must not pay for, or fail on, an unused vector.
-        var pinnedShas = route.ProjectionKind is TaskProjectionKinds.SingleAgent or TaskProjectionKinds.PlanMapSynth or TaskProjectionKinds.PlanMapDynamic
-            ? await _basePins.ResolveVectorAsync(request.TeamId, seed, profile, baseRefs, cancellationToken).ConfigureAwait(false)
-            : null;
+        // the clones use, so the planner, the grounded plan reviewer, and every dispatched agent (including every
+        // supervisor spawn) materialize the SAME base even when the remote advances mid-run. Session-soft + URL-less
+        // repos stay unpinned (resolver contract). Every repo-consuming projection reads it now — single-agent +
+        // plan-map thread it through agent inputs, the supervisor through its baked agentProfile.
+        var pinnedShas = await _basePins.ResolveVectorAsync(request.TeamId, seed, profile, baseRefs, cancellationToken).ConfigureAwait(false);
 
         // Deep/Auto: the supervisor's brain model — the operator's pinned "Brain model" chip when set + usable, else
         // self-resolved so the decider has one instead of stopping turn-1. Inert (null) for every non-supervisor

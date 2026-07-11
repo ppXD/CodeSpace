@@ -443,6 +443,49 @@ public class SupervisorBuildAgentTaskTests
     private static AgentTask BuildWithSpec(SupervisorTurnContext context, SupervisorAgentDispatch spec) =>
         RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, spec.SubtaskId, spec.GoalOverride, context, spec);
 
+    // ── S1: the launch base pin — every spawn materializes the SAME immutable base. ──────────
+
+    [Fact]
+    public void The_profiles_launch_pin_materializes_on_every_spawned_workspace()
+    {
+        var repoId = Guid.NewGuid();
+        var context = new SupervisorTurnContext { Goal = "ship", AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId, PinnedSha = "abc123def456" } };
+
+        var first = Build(context);
+        var second = Build(context);
+
+        first.Workspace.ShouldNotBeNull("a pin needs an explicit spec — a null Workspace would clone the default TIP and silently drop it");
+        first.Workspace!.Repositories.Single().PinnedSha.ShouldBe("abc123def456");
+        second.Workspace!.Repositories.Single().PinnedSha.ShouldBe("abc123def456", "two parallel spawns materialize the SAME immutable base — the exact drift S1 kills");
+    }
+
+    [Fact]
+    public void A_dependency_handoff_ref_outranks_the_launch_pin()
+    {
+        var repoId = Guid.NewGuid();
+        var context = new SupervisorTurnContext { Goal = "ship", AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId, PinnedSha = "abc123def456" } };
+
+        var task = RealSupervisorActionExecutor.BuildTaskWithGoal("continue on the dependency's branch", context, primaryRef: "codespace/agent/dep");
+
+        var primary = task.Workspace!.Repositories.Single();
+        primary.Ref.ShouldBe("codespace/agent/dep");
+        primary.PinnedSha.ShouldBeNull("continuing work rides the prior attempt's branch — the launch base cannot express that continuation (the session-soft rule, applied to handoffs)");
+    }
+
+    [Fact]
+    public void A_dispatch_primary_override_never_inherits_the_profiles_pin()
+    {
+        var primary = Guid.NewGuid();
+        var api = Guid.NewGuid();
+        var context = BoundContext(primary, apiWrite: api, sdkRead: Guid.NewGuid());
+        context = context with { AgentProfile = context.AgentProfile! with { PinnedSha = "abc123def456" } };
+
+        var task = BuildWithSpec(context, new SupervisorAgentDispatch { SubtaskId = SubtaskId, RepositoryId = api });
+
+        task.RepositoryId.ShouldBe(api);
+        task.Workspace!.Repositories.Single(r => r.IsPrimary).PinnedSha.ShouldBeNull("the vector was resolved for the LAUNCH's primary — a different repo must not wear another repo's commit");
+    }
+
     /// <summary>A context whose profile binds a primary (write) + api (write) + sdk (read) — the operator bound set the per-agent clamp validates against.</summary>
     private static SupervisorTurnContext BoundContext(Guid primary, Guid apiWrite, Guid sdkRead) => new()
     {

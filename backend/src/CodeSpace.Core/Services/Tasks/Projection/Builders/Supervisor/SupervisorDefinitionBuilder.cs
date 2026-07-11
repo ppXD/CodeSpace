@@ -134,7 +134,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the
         // harness default ⇒ byte-identical. Closes the gap where a launched pool was dropped on the supervisor lane.
         AddIfPresent(config, "allowedTools", context.AgentProfile?.AllowedTools is { Count: > 0 } tools ? tools.ToList() : null);
-        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
+        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile, context.PinnedShas));
         // DC-2a: the operator's OWN pre-declared delivery preference — PER FIELD authoritative over the model's
         // plan-time proposal (SupervisorDeliveryClamp enforces this at plan-persist time). Omitted when the
         // operator named none (byte-identical to before DC-2a — the model's own proposal stands untouched).
@@ -144,17 +144,21 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     }
 
     /// <summary>The nested agentProfile object — the resolved profile field-for-field onto the ConfigSchema keys. Null (omitted) when the profile is absent or all-null, so a bare supervisor spawns the codex-cli / Standard / no-repo default.</summary>
-    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile)
+    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile, IReadOnlyDictionary<Guid, string>? pinnedShas)
     {
         if (profile == null) return null;
 
         var map = new Dictionary<string, object?>();
 
         AddIfPresent(map, "repositoryId", profile.RepositoryId?.ToString());
+        // S1: the launch base pin for the primary — every agent this supervisor spawns materializes the SAME commit,
+        // so two parallel spawns can never land on different trees. Omitted when unpinned (byte-identical).
+        AddIfPresent(map, "pinnedSha", profile.RepositoryId is { } primaryId && pinnedShas is { } pins && pins.TryGetValue(primaryId, out var pin) ? pin : null);
         // Multi-repo: each spawned agent ALSO clones these (the supervisor config's relatedRepositories — the SAME
         // {repositoryId, alias?, access?} shape the agent.code node gets, via the ONE shared serializer). Omitted
-        // when none, so a single-repo / analysis-only supervisor spawn is byte-identical.
-        AddIfPresent(map, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(profile.RelatedRepositories));
+        // when none, so a single-repo / analysis-only supervisor spawn is byte-identical. S1: each entry carries its
+        // own launch pin too (omitted per entry when unpinned).
+        AddIfPresent(map, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(profile.RelatedRepositories, pinnedShas: pinnedShas));
         AddIfPresent(map, "harness", NullIfBlank(profile.Harness));
         AddIfPresent(map, "model", NullIfBlank(profile.Model));
         AddIfPresent(map, "agentDefinitionId", profile.AgentDefinitionId?.ToString());

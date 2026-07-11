@@ -165,6 +165,8 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
                 WorkflowRunId = context.SupervisorRunId,
                 NodeId = context.NodeId,
                 ReviewerModelId = context.ReviewerModelId,
+                // S1: the reviewer verifies the plan against the SAME immutable base every spawned agent materializes.
+                PinnedSha = context.AgentProfile?.PinnedSha,
             }, cancellationToken).ConfigureAwait(false)
             : CriticVerdict.ReviewFailed(mode, "agent-reviewer: not requested");
 

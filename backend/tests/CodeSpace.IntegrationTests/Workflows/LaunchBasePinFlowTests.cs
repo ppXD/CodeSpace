@@ -103,21 +103,37 @@ public class LaunchBasePinFlowTests
     }
 
     [Fact]
-    public async Task A_deep_launch_skips_the_vector_entirely_until_the_supervisor_lane_consumes_pins()
+    public async Task A_deep_launch_bakes_the_pin_into_the_supervisor_profile_and_fails_loud_on_a_bogus_BaseBranch()
     {
-        // The supervisor projection reads neither pins nor Seed.BaseBranch yet (the follow-up threads it) — so a
-        // deep launch must not pay for, or FAIL on, a vector it would drop on the floor. A bogus BaseBranch that
-        // would fail a single-agent launch loud must leave the deep launch untouched.
+        // S1 PR③: the supervisor lane consumes the vector — every spawned agent materializes the launch base, so
+        // the deep launch resolves it too (and an operator BaseBranch that doesn't exist now fails THIS launch loud,
+        // exactly like the single-agent lane).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         using var _pauseExec = PauseAutoExecute();
 
         using var remote = new GitRemote();
-        await remote.SeedAsync("v1");
+        var tip = await remote.SeedAsync("v1");
         var repoId = await SeedCloneableRepositoryAsync(teamId, remote.Url);
 
-        var result = await LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep, BaseBranch = "release/9.x" });
+        var result = await LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep });
 
-        result.RunId.ShouldNotBe(Guid.Empty, "the deep lane never resolves the vector, so the bogus authored ref cannot fail its launch");
+        (await ReadSupervisorProfilePinAsync(result.RunId)).ShouldBe(tip, "the vector bakes into the supervisor node's agentProfile — every spawn reads the same frozen pin");
+
+        var ex = await Should.ThrowAsync<WorkspaceException>(() => LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep, BaseBranch = "release/9.x" }));
+        ex.Message.ShouldContain("release/9.x");
+    }
+
+    /// <summary>Reads the projected supervisor node's <c>agentProfile.pinnedSha</c> out of the frozen definition snapshot (null when absent ⇒ unpinned).</summary>
+    private async Task<string?> ReadSupervisorProfilePinAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        var sup = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.Clone()
+            .GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("typeKey").GetString() == "agent.supervisor");
+
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("pinnedSha", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     }
 
     [Fact]

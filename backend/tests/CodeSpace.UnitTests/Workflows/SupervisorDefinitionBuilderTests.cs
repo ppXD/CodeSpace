@@ -197,6 +197,27 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
+    public void The_launch_base_pin_bakes_onto_the_agent_profile_and_each_related_entry()
+    {
+        // S1: every agent this supervisor spawns must materialize the SAME immutable base — the vector bakes into
+        // the frozen node config (primary pinnedSha + per related entry), so every turn + replay reads the same pins.
+        var repoId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var profile = new ResolvedAgentProfile { RepositoryId = repoId, RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = apiId, Access = WorkspaceAccess.Write } } };
+
+        var pinned = Builder.Build(Context(profile) with { PinnedShas = new Dictionary<Guid, string> { [repoId] = "aaa111aaa111", [apiId] = "bbb222bbb222" } })
+            .Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        pinned.GetProperty("pinnedSha").GetString().ShouldBe("aaa111aaa111");
+        pinned.GetProperty("relatedRepositories")[0].GetProperty("pinnedSha").GetString().ShouldBe("bbb222bbb222", "each related entry carries ITS OWN pin — no bleed");
+
+        var unpinned = Builder.Build(Context(profile)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        unpinned.TryGetProperty("pinnedSha", out _).ShouldBeFalse("no vector ⇒ no key (byte-identical to before S1)");
+        unpinned.GetProperty("relatedRepositories")[0].TryGetProperty("pinnedSha", out _).ShouldBeFalse();
+    }
+
+    [Fact]
     public void Supervisor_config_stamps_each_related_repo_so_a_deep_multi_repo_launch_is_not_a_silent_drop()
     {
         // The deep (supervisor) path's analogue of the agent.code node's relatedRepositories — each spawned agent

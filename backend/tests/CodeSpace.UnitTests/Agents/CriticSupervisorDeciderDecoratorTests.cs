@@ -414,6 +414,7 @@ public class CriticSupervisorDeciderDecoratorTests
         sent.WorkflowRunId.ShouldBe(context.SupervisorRunId, "the reviewer run lands on the supervisor run's cell");
         sent.NodeId.ShouldBe(context.NodeId);
         sent.ReviewerModelId.ShouldBe(context.ReviewerModelId);
+        sent.PinnedSha.ShouldBe(context.AgentProfile!.PinnedSha, "S1: the reviewer must judge the plan against the SAME immutable base every spawned agent materializes");
         sent.Goal.ShouldContain("ship the feature", customMessage: "the goal is the yardstick");
         sent.Goal.ShouldContain("tests pass", customMessage: "the acceptance criteria ride the yardstick");
         sent.PlanArtifact.ShouldContain(SupervisorDecisionKinds.Plan, customMessage: "the rendered decision is the artifact under review");
@@ -613,7 +614,7 @@ public class CriticSupervisorDeciderDecoratorTests
         PlanReviewMode = planMode,
         ReviewerAgent = true,
         ReviewerModelId = Guid.NewGuid(),
-        AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repositoryId },
+        AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repositoryId, PinnedSha = "abc123def456" },   // S1: the launch base pin rides the profile into the reviewer
         AcceptanceCriteria = new[] { "tests pass" },
     };
 }
