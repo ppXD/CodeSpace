@@ -23,19 +23,33 @@ const ATTENTION_LIMIT = 50;
  * fire / is the system working" at a glance and arm a filter; the board below is where you act (Needs attention),
  * watch (Live), or scan (Recent). Each run opens the same Run Room. Polled while anything is still live.
  */
-/** URL search contract for the cockpit. Only the agent scope is deep-linkable today (the Agents roster's "View runs"
- *  drill-down seeds it); the rest of the scope stays local bar state. Extra keys can join here as more surfaces link in. */
-type RunsSearch = { agentDefinitionIds?: string[] };
+/** The cockpit's status/time lens as a URL value (the non-null CockpitFilter members). */
+type CockpitLens = Exclude<CockpitFilter, null>;
+const COCKPIT_LENSES: readonly CockpitLens[] = ["attention", "live", "failed", "today"];
+
+/** URL search contract for the cockpit. The agent scope seeds the bar (Agents roster "View runs" drill-down); the
+ *  lens + history page are deep-linkable so a cockpit VIEW is shareable / bookmarkable. Default lens (none) and page
+ *  (1) are omitted for a clean URL. The rest of the bar scope stays local state — extra keys can join here later. */
+type RunsSearch = { agentDefinitionIds?: string[]; lens?: CockpitLens; historyPage?: number };
+
+/** Parse + whitelist the cockpit URL search — invalid lenses and the default page (1) drop for a clean URL. Exported for unit test. */
+export function validateRunsSearch(search: Record<string, unknown>): RunsSearch {
+  const raw = search.agentDefinitionIds;
+  const ids = Array.isArray(raw)
+    ? raw.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : typeof raw === "string" && raw ? [raw] : [];
+  const lens = COCKPIT_LENSES.find((l) => l === search.lens);
+  const page = typeof search.historyPage === "number" && search.historyPage > 1 ? Math.floor(search.historyPage) : undefined;
+  return {
+    ...(ids.length ? { agentDefinitionIds: ids } : {}),
+    ...(lens ? { lens } : {}),
+    ...(page ? { historyPage: page } : {}),
+  };
+}
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/runs/")({
   component: TeamRunsPage,
-  validateSearch: (search: Record<string, unknown>): RunsSearch => {
-    const raw = search.agentDefinitionIds;
-    const ids = Array.isArray(raw)
-      ? raw.filter((x): x is string => typeof x === "string" && x.length > 0)
-      : typeof raw === "string" && raw ? [raw] : [];
-    return ids.length ? { agentDefinitionIds: ids } : {};
-  },
+  validateSearch: validateRunsSearch,
 });
 
 function TeamRunsPage() {
@@ -47,8 +61,13 @@ function TeamRunsPage() {
   // so the Agents roster's "View runs" lands pre-filtered to that persona; the bar owns it thereafter.
   const [scope, setScope] = useState<RunListFilterInput>(() =>
     search.agentDefinitionIds?.length ? { agentDefinitionIds: search.agentDefinitionIds } : {});
-  const [filter, setFilter] = useState<CockpitFilter>(null);
-  const [historyPage, setHistoryPage] = useState(1);
+
+  // Lens + history page are URL-driven so a cockpit view is shareable / bookmarkable and Back/Forward work.
+  const filter: CockpitFilter = search.lens ?? null;
+  const historyPage = search.historyPage ?? 1;
+  const patchSearch = (patch: Partial<RunsSearch>) =>
+    navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug }, search: (prev) => ({ ...prev, ...patch }) });
+  const setHistoryPage = (p: number) => patchSearch({ historyPage: p <= 1 ? undefined : p });
   // A session-less run has no Session room to navigate to, so it opens its raw detail in a modal OVER this list (the
   // list stays mounted behind it, closing returns you to the exact same scroll/page). null = no run open.
   const [modalRunId, setModalRunId] = useState<string | null>(null);
@@ -88,11 +107,15 @@ function TeamRunsPage() {
 
   // ── Render-time derivations (no hooks below this line). ──
   const changeScope = (next: RunListFilterInput) => { setScope(next); setHistoryPage(1); };
-  const toggleFilter = (f: CockpitFilter) => setFilter((cur) => (cur === f ? null : f));
+  const toggleFilter = (f: CockpitFilter) => patchSearch({ lens: filter === f ? undefined : (f ?? undefined) });
 
   // A shrunk History result set can strand the page past the end (no rows, no pager) — snap it back once known.
   const historyPages = Math.max(1, Math.ceil((history.data?.totalCount ?? 0) / HISTORY_PAGE_SIZE));
-  if (history.data && historyPage > historyPages) setHistoryPage(historyPages);
+  // Clamp an out-of-range page (e.g. the result set shrank under a filter) — in an effect, since the setter now
+  // navigates. Guarded by the > check so it can't loop.
+  useEffect(() => {
+    if (history.data && historyPage > historyPages) setHistoryPage(historyPages);
+  }, [history.data, historyPage, historyPages]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const phasesByRun = new Map<string, RunPhasesResponse>();
   liveIds.forEach((id, i) => { const d = livePhases[i]?.data; if (d) phasesByRun.set(id, d); });
