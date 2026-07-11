@@ -1,5 +1,5 @@
 import { Outlet, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { resolveTeamByUrlSlug, teamToUrlSlug, useMe } from "@/hooks/use-me";
 
@@ -31,20 +31,20 @@ function TeamScopeLayout() {
   const me = useMe();
   const navigate = useNavigate();
 
-  const teams = me.data?.teams ?? [];
+  const teams = useMemo(() => me.data?.teams ?? [], [me.data]);
   // resolveTeamByUrlSlug also handles the special `personal` alias so URLs like
   // /teams/personal/... map to whichever team has kind === "Personal".
   const matched = resolveTeamByUrlSlug(teams, teamSlug);
 
-  // Sync the header to THIS URL's team, then remember which team we synced so the outlet gate
-  // below only opens once localStorage actually points at it. Effect (not render-time write)
-  // keeps render pure; the gate is what guarantees no child query fires under a stale team id.
-  const [syncedTeamId, setSyncedTeamId] = useState<string | null>(null);
-  useEffect(() => {
-    if (!matched) return;
+  // Point the X-Team-Id header at THIS URL's team BEFORE any child route mounts and fires a
+  // team-scoped query. A guarded, idempotent write of a value derived purely from the URL — the
+  // outlet gate below reads it back in the same render, so no effect (and no cascading re-render)
+  // is needed. Rendering children before the header matches is the wrong-team-deep-link bug: their
+  // queries would fire under whatever team id was last in localStorage (another tab, a stale
+  // session), and the backend would serve THAT team's data because the caller is a member of it.
+  if (matched && localStorage.getItem(ACTIVE_TEAM_STORAGE_KEY) !== matched.id) {
     localStorage.setItem(ACTIVE_TEAM_STORAGE_KEY, matched.id);
-    setSyncedTeamId(matched.id);
-  }, [matched]);
+  }
 
   // Unknown / inaccessible slug → bounce to the first team the user has. No teams at all is
   // the empty-account edge case; we leave them on a blank screen (better than a redirect loop).
@@ -58,10 +58,10 @@ function TeamScopeLayout() {
   // /me loaded but the slug names no team we can see → the effect above is redirecting.
   if (me.data && !matched) return null;
 
-  // Hold at a placeholder until /me resolves the slug AND the header is synced to it. On the
-  // common in-team navigation the id is already synced, so this never shows; it only gates the
-  // cold deep-link / second-tab window where the previous team's id is still in localStorage.
-  if (!matched || syncedTeamId !== matched.id) {
+  // Hold at a placeholder until /me resolves the slug AND the header points at this team (the write
+  // above ran this render, so on the common path this is already true and never shows; it only gates
+  // the cold deep-link / second-tab window where the previous team's id is still in localStorage).
+  if (!matched || localStorage.getItem(ACTIVE_TEAM_STORAGE_KEY) !== matched.id) {
     return (
       <section className="ct">
         <div className="ct-body"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>
