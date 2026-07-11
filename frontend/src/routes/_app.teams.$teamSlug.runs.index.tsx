@@ -7,7 +7,7 @@ import { CockpitBoard } from "@/components/workflows/CockpitBoard";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
 import { RunFilterBar } from "@/components/workflows/RunFilterBar";
-import { summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
+import { BAR_DIMS, summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunSummary, useTeamRunsHistory } from "@/hooks/use-workflows";
 
@@ -27,24 +27,33 @@ const ATTENTION_LIMIT = 50;
 type CockpitLens = Exclude<CockpitFilter, null>;
 const COCKPIT_LENSES: readonly CockpitLens[] = ["attention", "live", "failed", "today"];
 
-/** URL search contract for the cockpit. The agent scope seeds the bar (Agents roster "View runs" drill-down); the
- *  lens + history page are deep-linkable so a cockpit VIEW is shareable / bookmarkable. Default lens (none) and page
- *  (1) are omitted for a clean URL. The rest of the bar scope stays local state — extra keys can join here later. */
-type RunsSearch = { agentDefinitionIds?: string[]; lens?: CockpitLens; historyPage?: number };
+/** One bar dimension key (runKinds / repositoryIds / projectIds / actorIds / agentDefinitionIds). */
+type BarDim = (typeof BAR_DIMS)[number];
 
-/** Parse + whitelist the cockpit URL search — invalid lenses and the default page (1) drop for a clean URL. Exported for unit test. */
-export function validateRunsSearch(search: Record<string, unknown>): RunsSearch {
-  const raw = search.agentDefinitionIds;
-  const ids = Array.isArray(raw)
+/** URL search contract for the cockpit. The WHOLE bar scope (every {@link BAR_DIMS} dimension) plus the status/time
+ *  lens and history page are deep-linkable, so a filtered cockpit VIEW is fully shareable / bookmarkable and Back /
+ *  Forward reproduce it exactly. Empty dimensions, the default lens (none) and page (1) are omitted for a clean URL. */
+type RunsSearch = Partial<Record<BarDim, string[]>> & { lens?: CockpitLens; historyPage?: number };
+
+/** Parse a URL value (a single string or a repeated array) into a clean, non-empty id list. */
+function parseIds(raw: unknown): string[] {
+  return Array.isArray(raw)
     ? raw.filter((x): x is string => typeof x === "string" && x.length > 0)
     : typeof raw === "string" && raw ? [raw] : [];
+}
+
+/** Parse + whitelist the cockpit URL search — empty scope dimensions, invalid lenses and the default page (1) drop for a clean URL. Exported for unit test. */
+export function validateRunsSearch(search: Record<string, unknown>): RunsSearch {
+  const out: RunsSearch = {};
+  for (const d of BAR_DIMS) {
+    const ids = parseIds(search[d]);
+    if (ids.length) out[d] = ids;
+  }
   const lens = COCKPIT_LENSES.find((l) => l === search.lens);
+  if (lens) out.lens = lens;
   const page = typeof search.historyPage === "number" && search.historyPage > 1 ? Math.floor(search.historyPage) : undefined;
-  return {
-    ...(ids.length ? { agentDefinitionIds: ids } : {}),
-    ...(lens ? { lens } : {}),
-    ...(page ? { historyPage: page } : {}),
-  };
+  if (page) out.historyPage = page;
+  return out;
 }
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/runs/")({
@@ -57,10 +66,10 @@ function TeamRunsPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   // The bar's server-side scope filter (which kind / repo / project / actor / agent); the cards below are the
-  // orthogonal client-side status/time lens over whatever this scope returns. Seeded once from the URL's agent scope
-  // so the Agents roster's "View runs" lands pre-filtered to that persona; the bar owns it thereafter.
-  const [scope, setScope] = useState<RunListFilterInput>(() =>
-    search.agentDefinitionIds?.length ? { agentDefinitionIds: search.agentDefinitionIds } : {});
+  // orthogonal client-side status/time lens over whatever this scope returns. Derived from the URL (no local state)
+  // so the whole scope is shareable / bookmarkable and a pasted link or Back/Forward reproduces it exactly.
+  const scope: RunListFilterInput = {};
+  BAR_DIMS.forEach((d) => { if (search[d]?.length) scope[d] = search[d]; });
 
   // Lens + history page are URL-driven so a cockpit view is shareable / bookmarkable and Back/Forward work.
   const filter: CockpitFilter = search.lens ?? null;
@@ -106,7 +115,13 @@ function TeamRunsPage() {
   const livePhases = useLiveRunsPhases(liveIds);
 
   // ── Render-time derivations (no hooks below this line). ──
-  const changeScope = (next: RunListFilterInput) => { setScope(next); setHistoryPage(1); };
+  // Writing the scope to the URL resets History to page 1 (a shrunk result set shouldn't strand you past its end) —
+  // both in ONE navigation. The bar only ever sets BAR_DIMS keys, so patch exactly those (empty → dropped).
+  const changeScope = (next: RunListFilterInput) => {
+    const patch: Partial<RunsSearch> = { historyPage: undefined };
+    BAR_DIMS.forEach((d) => { patch[d] = next[d]?.length ? next[d] : undefined; });
+    patchSearch(patch);
+  };
   const toggleFilter = (f: CockpitFilter) => patchSearch({ lens: filter === f ? undefined : (f ?? undefined) });
 
   // A shrunk History result set can strand the page past the end (no rows, no pager) — snap it back once known.
