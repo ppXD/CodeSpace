@@ -36,13 +36,13 @@ public sealed class AgentCodeNode : INodeRuntime
 
     public NodeManifest Manifest { get; } = new()
     {
-        DisplayName = "Run coding agent",
+        DisplayName = "Run agent",
         Category = "Agent",
         Kind = NodeKind.Regular,
         CanSuspend = true,
         IsRerunnableWhenSuspendable = true,   // D7-5: the SOLE opt-in — a re-run map branch re-stages a FRESH AgentRun under the branch's iteration key (mechanically identical to the shipped original-run map durable resume). Not side-effecting, so it re-runs with NO human gate ("execute-again").
         IconKey = "agent",
-        Description = "Runs a coding agent (Codex, Claude Code, …) as a step. Streams its progress live; the run's result becomes this node's output.",
+        Description = "Runs an AI agent (Codex, Claude Code, …) as a step. Streams its progress live; the run's result becomes this node's output.",
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",

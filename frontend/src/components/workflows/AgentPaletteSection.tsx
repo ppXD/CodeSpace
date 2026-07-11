@@ -13,8 +13,8 @@ export const AGENT_DRAG_MIME = "application/x-workflow-agent";
 
 /**
  * "Agents" palette section — lists the team's Agent personas as draggable items next to the generic
- * node Steps. Picking or dragging one drops a Run-coding-agent (agent.code) node pre-bound to that
- * persona, so its prompt + model become the run's defaults; the generic "Run coding agent" node stays
+ * node Steps. Picking or dragging one drops a Run-agent (agent.code) node pre-bound to that
+ * persona, so its prompt + model become the run's defaults; the generic "Run agent" node stays
  * in Steps for inline runs. Hidden entirely when no agent.code node is registered or the team has no
  * personas yet.
  */
@@ -37,7 +37,7 @@ export function AgentPaletteSection({ enabled, onAdd }: AgentPaletteSectionProps
           draggable
           onClick={() => onAdd(a.id)}
           onDragStart={(e) => { e.dataTransfer.setData(AGENT_DRAG_MIME, a.id); e.dataTransfer.effectAllowed = "move"; }}
-          title={`Add a Run coding agent step bound to @${a.slug}\nClick to add · Drag to position`}
+          title={`Add a Run agent step bound to @${a.slug}\nClick to add · Drag to position`}
         >
           <span className="wf-palette-item-icon"><Ic.Bot size={16} /></span>
           <span className="wf-palette-item-body">
