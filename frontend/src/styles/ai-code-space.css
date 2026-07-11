@@ -4180,8 +4180,6 @@ textarea:-webkit-autofill {
 .acs-root .wf-relrepo-row { position: relative; display: flex; flex-direction: column; gap: 9px; padding: 12px 34px 12px 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); }
 .acs-root .wf-relrepo-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .acs-root .wf-relrepo-flabel { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.acs-root .wf-relrepo-grid { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: start; }
-.acs-root .wf-relrepo-access { padding-right: 22px; cursor: pointer; }
 .acs-root .wf-relrepo-remove { position: absolute; top: 9px; right: 9px; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel); color: var(--muted); cursor: pointer; }
 .acs-root .wf-relrepo-remove:hover { border-color: var(--danger); color: var(--danger); }
 .acs-root .wf-relrepo-add { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border: 1px dashed var(--line-2); border-radius: 8px; background: transparent; color: var(--accent); font-family: inherit; font-size: 12px; cursor: pointer; }

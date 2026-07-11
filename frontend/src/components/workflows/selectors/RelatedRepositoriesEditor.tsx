@@ -162,6 +162,16 @@ function RelatedRepoRow({
       </button>
 
       <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel">Project</span>
+        <SearchSelect
+          options={projects.map((p) => ({ id: p.id, label: p.name }))}
+          value={projectId ? [projectId] : []}
+          onChange={(ids) => onPickProject(ids[0] ?? "")}
+          placeholder="All projects"
+        />
+      </div>
+
+      <div className="wf-relrepo-field">
         <span className="wf-relrepo-flabel">Repository</span>
         <SearchSelect
           options={visibleRepos.map((r) => ({ id: r.id, label: r.fullPath }))}
@@ -169,26 +179,6 @@ function RelatedRepoRow({
           onChange={(ids) => onPickRepo(ids[0] ?? "")}
           placeholder="Pick a repository…"
         />
-      </div>
-
-      <div className="wf-relrepo-grid">
-        <div className="wf-relrepo-field">
-          <span className="wf-relrepo-flabel">Project filter</span>
-          <SearchSelect
-            options={projects.map((p) => ({ id: p.id, label: p.name }))}
-            value={projectId ? [projectId] : []}
-            onChange={(ids) => onPickProject(ids[0] ?? "")}
-            placeholder="All projects"
-          />
-        </div>
-
-        <div className="wf-relrepo-field">
-          <span className="wf-relrepo-flabel">Access</span>
-          <select className="wf-form-input wf-relrepo-access" value={entry.access ?? "read"} onChange={(e) => onChangeAccess(e.target.value === "write" ? "write" : "read")} aria-label="Access">
-            <option value="read">Read (context)</option>
-            <option value="write">Write</option>
-          </select>
-        </div>
       </div>
 
       <div className="wf-relrepo-field">
@@ -201,6 +191,14 @@ function RelatedRepoRow({
           placeholder="auto (repo-2, repo-3, …)"
           aria-label="Alias"
         />
+      </div>
+
+      <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel">Access</span>
+        <select className="wf-form-input" value={entry.access ?? "read"} onChange={(e) => onChangeAccess(e.target.value === "write" ? "write" : "read")} aria-label="Access">
+          <option value="read">Read (context)</option>
+          <option value="write">Write</option>
+        </select>
       </div>
     </div>
   );
