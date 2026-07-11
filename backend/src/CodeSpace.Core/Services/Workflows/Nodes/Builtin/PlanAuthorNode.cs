@@ -253,8 +253,16 @@ public sealed class PlanAuthorNode : INodeRuntime
     private static Guid? ReadGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id) ? id : null;
 
-    private static ReviewMode ReadReviewMode(IReadOnlyDictionary<string, JsonElement> config) =>
-        config.TryGetValue("reviewMode", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var mode) && Enum.IsDefined(typeof(ReviewMode), mode)
-            ? (ReviewMode)mode
-            : ReviewMode.None;
+    // Tolerant of a STRING-encoded review mode ("1") as well as a JSON number: the editor stores every enum as a
+    // string (SchemaForm's {{ref}} unification), so a Number-only read would drop it and silently revert to Off.
+    internal static ReviewMode ReadReviewMode(IReadOnlyDictionary<string, JsonElement> config)
+    {
+        if (!config.TryGetValue("reviewMode", out var value)) return ReviewMode.None;
+
+        int? mode = value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n) ? n
+            : value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var s) ? s
+            : null;
+
+        return mode is { } m && Enum.IsDefined(typeof(ReviewMode), m) ? (ReviewMode)m : ReviewMode.None;
+    }
 }

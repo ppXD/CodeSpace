@@ -446,8 +446,18 @@ public sealed class AgentCodeNode : INodeRuntime
     private static Guid? ReadOptionalGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         Guid.TryParse(ReadOptionalString(bag, key), out var id) ? id : null;
 
-    private static int? ReadInt(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
-        bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
+    /// <summary>
+    /// Read an optional integer config value — tolerant of a STRING-encoded number ("1") as well as a JSON number.
+    /// The editor stores every enum as a string (SchemaForm's {{ref}} unification), so an integer enum like
+    /// outputReviewMode arrives as "1"; a Number-only read would drop it and silently revert the field to its default.
+    /// </summary>
+    internal static int? ReadInt(IReadOnlyDictionary<string, JsonElement> bag, string key)
+    {
+        if (!bag.TryGetValue(key, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)) return n;
+        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var s)) return s;
+        return null;
+    }
 
     /// <summary>Reads the autonomy tier (case-insensitive); absent / unrecognized → the safe <see cref="AgentAutonomyLevel.Standard"/> default.</summary>
     private static AgentAutonomyLevel ReadAutonomyLevel(IReadOnlyDictionary<string, JsonElement> bag) =>
