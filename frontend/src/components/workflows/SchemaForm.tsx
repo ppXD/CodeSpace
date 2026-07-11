@@ -4,12 +4,13 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
 
 import type { ScopeSuggestion } from "./scope-introspection";
-import { AgentSelector } from "./selectors/AgentSelector";
+import { AgentMultiSelector, AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
 import { CredentialedModelMultiSelector, CredentialedModelSelector } from "./selectors/CredentialedModelSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
+import { RelatedRepositoriesEditor } from "./selectors/RelatedRepositoriesEditor";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
@@ -460,12 +461,10 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
         />
       );
     case "agent":
-      return (
-        <AgentSelector
-          value={typeof value === "string" ? value : ""}
-          onChange={(next) => onChange(next === "" ? undefined : next)}
-        />
-      );
+      // Array field → multi-persona chips (e.g. the supervisor's allowedAgentDefinitionIds); scalar → single.
+      return schema.type === "array"
+        ? <AgentMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
+        : <AgentSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
     case "harness":
       return (
         <HarnessSelector
@@ -489,6 +488,11 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />
       );
+    case "relatedRepositories":
+      // The { repositoryId, alias?, access }[] multi-repo editor — a project→repo cascade per row with an
+      // auto alias, instead of the generic array editor's raw repo-id text boxes. Handles the array shape
+      // itself; empty ⇒ undefined so the key drops (single-repo byte-identical).
+      return <RelatedRepositoriesEditor value={value} onChange={(next) => onChange(next)} />;
     case "trigger.repositories":
       // List editor for the { repositoryId, labels? }[] shape used by PR-trigger
       // activation configs. The selector handles legacy { repositoryId, labels? }

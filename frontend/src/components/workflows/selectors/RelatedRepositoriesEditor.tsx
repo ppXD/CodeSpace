@@ -4,6 +4,8 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
 import { useRepositories } from "@/hooks/use-repositories";
 
+import { SearchSelect } from "./SearchSelect";
+
 /**
  * agent.run "Add related repositories" editor (multi-repo PR5). Authors the ADDITIONAL repos an agent's
  * workspace clones alongside the primary (the `repositoryId` row above it) — the way to make a coordinated
@@ -94,9 +96,8 @@ export function RelatedRepositoriesEditor({ value, onChange }: RelatedRepositori
   };
 
   return (
-    <div className="wf-trigger-repos" data-testid="related-repositories-editor">
-      <div className="wf-trigger-repos-card">
-        {entries.map((entry, idx) => (
+    <div className="wf-relrepo" data-testid="related-repositories-editor">
+      {entries.map((entry, idx) => (
           <RelatedRepoRow
             key={idx}
             entry={entry}
@@ -111,14 +112,13 @@ export function RelatedRepositoriesEditor({ value, onChange }: RelatedRepositori
           />
         ))}
 
-        <button type="button" className="wf-trigger-repos-add" onClick={addRow}>
-          <Ic.Plus size={11} />
-          <span>Add related repository</span>
-        </button>
-      </div>
+      <button type="button" className="wf-relrepo-add" onClick={addRow}>
+        <Ic.Plus size={11} />
+        <span>Add related repository</span>
+      </button>
 
       {entries.length === 0 && (
-        <div className="wf-trigger-repos-hint">
+        <div className="wf-relrepo-hint">
           <span aria-hidden="true">ⓘ</span>
           <span>No related repositories — a single-repo run.</span>
         </div>
@@ -156,51 +156,49 @@ function RelatedRepoRow({
   }, [repositories, projectId]);
 
   return (
-    <div className="wf-trigger-repos-row" data-testid="related-repositories-row">
-      <div className="wf-trigger-repos-row-controls">
-        <label className="wf-trigger-repos-field">
-          <span className="wf-trigger-repos-field-label">Project:</span>
-          <select className="wf-trigger-repos-select" value={projectId} onChange={(e) => onPickProject(e.target.value)} aria-label="Project">
-            <option value="">All projects</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
+    <div className="wf-relrepo-row" data-testid="related-repositories-row">
+      <button type="button" className="wf-relrepo-remove" onClick={onRemove} aria-label="Remove related repository" title="Remove">
+        <Ic.X size={11} />
+      </button>
 
-        <label className="wf-trigger-repos-field">
-          <span className="wf-trigger-repos-field-label">Repository:</span>
-          <select className="wf-trigger-repos-select" value={entry.repositoryId} onChange={(e) => onPickRepo(e.target.value)} aria-label="Repository">
-            <option value="">Pick a repository…</option>
-            {visibleRepos.map((r) => (
-              <option key={r.id} value={r.id}>{r.fullPath}</option>
-            ))}
-          </select>
-        </label>
-
-        <label className="wf-trigger-repos-field">
-          <span className="wf-trigger-repos-field-label">Access:</span>
-          <select className="wf-trigger-repos-select" value={entry.access ?? "read"} onChange={(e) => onChangeAccess(e.target.value === "write" ? "write" : "read")} aria-label="Access">
-            <option value="read">Read (context)</option>
-            <option value="write">Write</option>
-          </select>
-        </label>
-
-        <button type="button" className="wf-trigger-repos-remove" onClick={onRemove} aria-label="Remove related repository" title="Remove">
-          <Ic.X size={10} />
-        </button>
+      <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel">Project</span>
+        <SearchSelect
+          options={projects.map((p) => ({ id: p.id, label: p.name }))}
+          value={projectId ? [projectId] : []}
+          onChange={(ids) => onPickProject(ids[0] ?? "")}
+          placeholder="All projects"
+        />
       </div>
 
-      <div className="wf-trigger-repos-row-labels">
-        <span className="wf-trigger-repos-field-label" title="The short name + mount folder for this repo (e.g. 'api')">Alias:</span>
+      <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel">Repository</span>
+        <SearchSelect
+          options={visibleRepos.map((r) => ({ id: r.id, label: r.fullPath }))}
+          value={entry.repositoryId ? [entry.repositoryId] : []}
+          onChange={(ids) => onPickRepo(ids[0] ?? "")}
+          placeholder="Pick a repository…"
+        />
+      </div>
+
+      <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel" title="The short name + mount folder for this repo (e.g. 'api')">Alias</span>
         <input
           type="text"
-          className="wf-trigger-repos-label-input"
+          className="wf-form-input"
           value={entry.alias ?? ""}
           onChange={(e) => onChangeAlias(e.target.value)}
           placeholder="auto (repo-2, repo-3, …)"
           aria-label="Alias"
         />
+      </div>
+
+      <div className="wf-relrepo-field">
+        <span className="wf-relrepo-flabel">Access</span>
+        <select className="wf-form-input" value={entry.access ?? "read"} onChange={(e) => onChangeAccess(e.target.value === "write" ? "write" : "read")} aria-label="Access">
+          <option value="read">Read (context)</option>
+          <option value="write">Write</option>
+        </select>
       </div>
     </div>
   );

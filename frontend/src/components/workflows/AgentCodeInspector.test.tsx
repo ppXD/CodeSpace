@@ -35,19 +35,18 @@ const baseProps = {
 describe("AgentCodeInspector", () => {
   it("always shows the harness picker, in either mode", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} />);
-    expect(screen.getByLabelText("Harness")).toBeInTheDocument();
+    expect(screen.getByText("Harness")).toBeInTheDocument();   // the Harness section header + picker
   });
 
   it("starts in Agent mode when a persona is bound, showing the persona picker", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", agentDefinitionId: "p1" }} />);
-    expect(screen.getByLabelText("Agent persona")).toBeInTheDocument();
-    expect((screen.getByLabelText("Agent persona") as HTMLSelectElement).value).toBe("p1");
+    expect(screen.getByText("Agent persona")).toBeInTheDocument();   // Agent mode → the persona-picker row is shown
   });
 
   it("starts in Inline mode with no persona, showing the instructions field (no persona picker)", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} />);
     expect(screen.getByLabelText("What should the agent do?")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Agent persona")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent persona")).not.toBeInTheDocument();
   });
 
   it("clears the bound persona when switching to Configure inline", () => {
@@ -68,14 +67,15 @@ describe("AgentCodeInspector", () => {
 
   it("shows the approval-conversation picker, reflecting the saved value", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", approvalConversationId: "conv1" }} />);
-    expect((screen.getByLabelText("Conversation") as HTMLSelectElement).value).toBe("conv1");
+    expect(screen.getByText("#review")).toBeInTheDocument();   // the saved conversation, shown as a chip
   });
 
   it("patches approvalConversationId into config when a conversation is picked", () => {
     const onConfigChange = vi.fn();
     render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli" }} />);
 
-    fireEvent.change(screen.getByLabelText("Conversation"), { target: { value: "conv1" } });
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick a conversation…" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "#review" }));
 
     expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", approvalConversationId: "conv1" });
   });

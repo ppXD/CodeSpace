@@ -4,9 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { ModelCredentialSelector } from "./ModelCredentialSelector";
 
 /**
- * The credential picker lists the team's ACTIVE model credentials (name + provider), saving the id; the
- * empty option means "fall back to the team/operator default". When given `providers` (the harness's
- * drivable set), it shows only matching credentials. Hook mocked: useModelCredentials.
+ * The credential picker (`x-selector: "modelCredential"`) renders the shared SearchSelect combobox, listing
+ * ACTIVE credentials (name · provider) and saving the id; empty = the team/operator default. With `providers`
+ * it shows only drivable credentials, and a now-incompatible saved credential stays visible (flagged). Hook
+ * mocked: useModelCredentials.
  */
 vi.mock("@/hooks/use-model-credentials", () => ({
   useModelCredentials: () => ({
@@ -24,27 +25,26 @@ describe("ModelCredentialSelector", () => {
     const onChange = vi.fn();
     render(<ModelCredentialSelector value="" onChange={onChange} />);
 
-    expect(screen.getByRole("option", { name: "Team Anthropic (Anthropic)" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Old key (OpenAI)" })).not.toBeInTheDocument();   // revoked → hidden
-    expect(screen.getByRole("option", { name: "Team / operator default" })).toBeInTheDocument();
+    fireEvent.focus(screen.getByRole("textbox", { name: "Team / operator default" }));
+    expect(screen.getByRole("option", { name: /Team Anthropic/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Old key/ })).not.toBeInTheDocument();   // revoked → hidden
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "c1" } });
+    fireEvent.mouseDown(screen.getByRole("option", { name: /Team Anthropic/ }));
     expect(onChange).toHaveBeenCalledWith("c1");
   });
 
   it("filters to the harness's drivable providers", () => {
     render(<ModelCredentialSelector value="" onChange={() => {}} providers={["Anthropic", "Custom"]} />);
 
-    expect(screen.getByRole("option", { name: "Team Anthropic (Anthropic)" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Team OpenAI (OpenAI)" })).not.toBeInTheDocument();   // OpenAI not drivable here
+    fireEvent.focus(screen.getByRole("textbox", { name: "Team / operator default" }));
+    expect(screen.getByRole("option", { name: /Team Anthropic/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Team OpenAI/ })).not.toBeInTheDocument();   // OpenAI not drivable here
   });
 
   it("keeps a now-incompatible saved credential visible but flagged, never silently blanked", () => {
     render(<ModelCredentialSelector value="c2" onChange={() => {}} providers={["Anthropic"]} />);
 
-    // c2 is OpenAI but the harness only drives Anthropic — shown flagged so the field still reflects the saved value.
-    const flagged = screen.getByRole("option", { name: /Team OpenAI \(OpenAI\) — incompatible/ });
-    expect(flagged).toBeInTheDocument();
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("c2");
+    // c2 (OpenAI) shows as a chip even though the harness drives only Anthropic — flagged, never blanked.
+    expect(screen.getByText(/Team OpenAI — incompatible with this harness/)).toBeInTheDocument();
   });
 });
