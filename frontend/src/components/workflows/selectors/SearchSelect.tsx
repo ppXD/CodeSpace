@@ -97,6 +97,7 @@ export function SearchSelect({ options, value, onChange, multi = false, loading 
           aria-label={placeholder}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIndex(0); }}
           onFocus={() => setOpen(true)}
+          onClick={() => setOpen(true)}
           onBlur={() => setOpen(false)}
           onKeyDown={onKeyDown}
         />

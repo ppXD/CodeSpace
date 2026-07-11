@@ -3640,7 +3640,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-userpick-tag-x { display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: none; background: none; color: var(--ink-2); cursor: pointer; border-radius: 999px; }
 .acs-root .wf-userpick-tag-x:hover { color: var(--ink); background: rgba(0,0,0,.06); }
 .acs-root .wf-userpick-input { flex: 1 1 90px; min-width: 90px; border: none; background: none; outline: none; font-size: 11.5px; color: var(--ink); padding: 2px; }
-.acs-root .wf-userpick-pop { display: flex; flex-direction: column; max-height: 196px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,.10); padding: 4px; }
+.acs-root .wf-userpick-pop { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; display: flex; flex-direction: column; max-height: 196px; overflow-y: auto; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(20,15,8,.16); padding: 4px; }
 .acs-root .wf-userpick-opt { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px; border: none; border-radius: 6px; background: none; color: var(--ink); font-size: 12px; text-align: left; cursor: pointer; }
 .acs-root .wf-userpick-opt[data-active="true"], .acs-root .wf-userpick-opt:hover { background: var(--accent-soft); }
 .acs-root .wf-userpick-opt-av { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; font-size: 10px; font-weight: 600; flex: none; }
@@ -3731,7 +3731,7 @@ textarea:-webkit-autofill {
 .mdl .wf-userpick-tag-x { display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: none; background: none; color: var(--ink-2); cursor: pointer; border-radius: 999px; }
 .mdl .wf-userpick-tag-x:hover { color: var(--ink); background: rgba(0,0,0,.06); }
 .mdl .wf-userpick-input { flex: 1 1 90px; min-width: 90px; border: none; background: none; outline: none; font-size: 11.5px; color: var(--ink); padding: 2px; }
-.mdl .wf-userpick-pop { display: flex; flex-direction: column; max-height: 196px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,.10); padding: 4px; }
+.mdl .wf-userpick-pop { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30; display: flex; flex-direction: column; max-height: 196px; overflow-y: auto; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(20,15,8,.16); padding: 4px; }
 .mdl .wf-userpick-opt { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px; border: none; border-radius: 6px; background: none; color: var(--ink); font-size: 12px; text-align: left; cursor: pointer; }
 .mdl .wf-userpick-opt[data-active="true"], .mdl .wf-userpick-opt:hover { background: var(--accent-soft); }
 .mdl .wf-userpick-opt-av { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 999px; font-size: 10px; font-weight: 600; flex: none; }
@@ -4173,6 +4173,20 @@ textarea:-webkit-autofill {
   display: flex; align-items: center; gap: 6px;
   font-size: 10.5px; color: var(--muted); line-height: 1.4;
 }
+
+/* ── Related repositories: one framed card per repo — Repository up top, Project filter + Access paired,
+   Alias below, Remove in the corner. Vertical so the comboboxes + their overlay popovers have room. ─── */
+.acs-root .wf-relrepo { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .wf-relrepo-row { position: relative; display: flex; flex-direction: column; gap: 9px; padding: 12px 34px 12px 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); }
+.acs-root .wf-relrepo-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.acs-root .wf-relrepo-flabel { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.acs-root .wf-relrepo-grid { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: start; }
+.acs-root .wf-relrepo-access { padding-right: 22px; cursor: pointer; }
+.acs-root .wf-relrepo-remove { position: absolute; top: 9px; right: 9px; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel); color: var(--muted); cursor: pointer; }
+.acs-root .wf-relrepo-remove:hover { border-color: var(--danger); color: var(--danger); }
+.acs-root .wf-relrepo-add { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; border: 1px dashed var(--line-2); border-radius: 8px; background: transparent; color: var(--accent); font-family: inherit; font-size: 12px; cursor: pointer; }
+.acs-root .wf-relrepo-add:hover { border-color: var(--accent); background: var(--accent-soft); }
+.acs-root .wf-relrepo-hint { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); line-height: 1.4; }
 
 /* ── Outputs hint card (Provides section in inspector) ──────────────────────── */
 .acs-root .wf-outputs-hint { display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
