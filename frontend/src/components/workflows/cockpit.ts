@@ -120,3 +120,7 @@ export function summarizeToday(runs: readonly WorkflowRunSummary[], nowMs: numbe
 
 /** The cockpit filter — which card is "armed", narrowing the zones below. `null` shows the full board. */
 export type CockpitFilter = "attention" | "live" | "failed" | "today" | null;
+
+/** The entity/scope dimensions the run filter bar controls — the single source of truth shared by the bar and the
+ *  cockpit's URL search contract, so a filtered view is fully deep-linkable. Every dimension is a string-id array. */
+export const BAR_DIMS = ["runKinds", "repositoryIds", "projectIds", "actorIds", "agentDefinitionIds"] as const;

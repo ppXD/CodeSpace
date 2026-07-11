@@ -6,6 +6,7 @@ import { useRepositories } from "@/hooks/use-repositories";
 import { useTeamMembers } from "@/hooks/use-team-members";
 
 import { FilterSelect, type FilterOption } from "./FilterSelect";
+import { BAR_DIMS } from "./cockpit";
 
 /** Coarse origin kinds offered in the bar — the user-meaningful run_kind tokens (child runs never reach the index). */
 const KIND_OPTIONS: FilterOption[] = [
@@ -15,9 +16,6 @@ const KIND_OPTIONS: FilterOption[] = [
   { value: "replay", label: "Replay" },
   { value: "schedule", label: "Schedule" },
 ];
-
-/** The entity/scope dimensions the bar controls (the cards own the status/time lens) — used for the active-count + Clear. */
-const BAR_DIMS = ["runKinds", "repositoryIds", "projectIds", "actorIds", "agentDefinitionIds"] as const;
 
 /**
  * The runs filter bar — the entity/scope lens over the team's runs (which kind · which repo · which project · who

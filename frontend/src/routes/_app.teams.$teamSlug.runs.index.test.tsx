@@ -34,6 +34,19 @@ describe("runs cockpit deep-link", () => {
     expect(router.state.location.search).toMatchObject({ lens: "failed", historyPage: 2 });
   });
 
+  it("carries the full bar scope (kind + repo) through the real router", async () => {
+    stubFetch({
+      "/api/workflows/runs/summary": { live: 0, failed: 0, suspended: 0, suspendedNeedingReview: 0, today: 0 },
+      "/api/workflows/runs": [],
+      "/api/users/me": me,
+    });
+
+    const { router } = await renderRoute("/teams/acme/runs?runKinds=task&repositoryIds=r1&lens=live");
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/teams/acme/runs"));
+    expect(router.state.location.search).toMatchObject({ runKinds: ["task"], repositoryIds: ["r1"], lens: "live" });
+  });
+
   describe("validateRunsSearch whitelist", () => {
     it("keeps a valid lens and a page > 1", () => {
       expect(validateRunsSearch({ lens: "failed", historyPage: 3 })).toEqual({ lens: "failed", historyPage: 3 });
@@ -46,6 +59,15 @@ describe("runs cockpit deep-link", () => {
     it("parses agentDefinitionIds from a single string or array", () => {
       expect(validateRunsSearch({ agentDefinitionIds: "agent-1" })).toEqual({ agentDefinitionIds: ["agent-1"] });
       expect(validateRunsSearch({ agentDefinitionIds: ["a", "", "b"] })).toEqual({ agentDefinitionIds: ["a", "b"] });
+    });
+
+    it("keeps every bar scope dimension (single or array)", () => {
+      expect(validateRunsSearch({ runKinds: ["task"], repositoryIds: ["r1"], projectIds: "p1", actorIds: ["u1"], agentDefinitionIds: ["a1"] }))
+        .toEqual({ runKinds: ["task"], repositoryIds: ["r1"], projectIds: ["p1"], actorIds: ["u1"], agentDefinitionIds: ["a1"] });
+    });
+
+    it("drops an unknown search key entirely", () => {
+      expect(validateRunsSearch({ bogusKey: ["x"], repositoryIds: ["r1"] })).toEqual({ repositoryIds: ["r1"] });
     });
   });
 });
