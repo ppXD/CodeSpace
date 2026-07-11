@@ -131,8 +131,8 @@ function ProjectsListPage() {
                 <tr
                   key={p.id}
                   onClick={() => navigate({
-                    to: "/teams/$teamSlug/projects/$projectId",
-                    params: { teamSlug, projectId: p.id },
+                    to: "/teams/$teamSlug/projects/$projectSlug",
+                    params: { teamSlug, projectSlug: p.slug },
                   })}
                 >
                   <td>
@@ -168,11 +168,13 @@ function ProjectsListPage() {
       {addOpen && (
         <AddProjectModal
           onClose={() => setAddOpen(false)}
-          onCreated={(projectId) => {
+          onCreated={(newProjectId) => {
             setAddOpen(false);
+            // Create returns only the id; navigate by it as the ref — the detail page's
+            // by-ref resolver canonicalises the GUID URL to the slug URL on arrival.
             navigate({
-              to: "/teams/$teamSlug/projects/$projectId",
-              params: { teamSlug, projectId },
+              to: "/teams/$teamSlug/projects/$projectSlug",
+              params: { teamSlug, projectSlug: newProjectId },
             });
           }}
         />

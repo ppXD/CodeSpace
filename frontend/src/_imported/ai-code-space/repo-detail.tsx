@@ -94,8 +94,8 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   // returned RepositoryDetail yet — guard at the call site, not here.
   const goToProjects = () =>
     navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug } });
-  const goToParentProject = (projectId: string) =>
-    navigate({ to: "/teams/$teamSlug/projects/$projectId", params: { teamSlug, projectId } });
+  const goToParentProject = (projectSlug: string) =>
+    navigate({ to: "/teams/$teamSlug/projects/$projectSlug", params: { teamSlug, projectSlug } });
 
   // Fire the PR-counts call as soon as the repo loads — not when the user clicks
   // into the Pull-requests tab. Two benefits:
@@ -188,7 +188,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   // the DTO contract level, but a still-running old backend (no /me restart
   // yet) could return undefined. Fall back to just "Projects / {repo.name}"
   // in that case rather than rendering an empty middle crumb.
-  const hasParentProject = !!repo.projectId && !!repo.projectName;
+  const hasParentProject = !!repo.projectId && !!repo.projectSlug && !!repo.projectName;
 
   return (
     <section className="rd">
@@ -198,7 +198,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
           <span className="sep">/</span>
           {hasParentProject && (
             <>
-              <a onClick={() => goToParentProject(repo.projectId)}>{repo.projectName}</a>
+              <a onClick={() => goToParentProject(repo.projectSlug)}>{repo.projectName}</a>
               <span className="sep">/</span>
             </>
           )}
@@ -212,7 +212,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
                 if for some reason the project link is unavailable. */}
             <button
               className="rd-back"
-              onClick={() => hasParentProject ? goToParentProject(repo.projectId) : goToProjects()}
+              onClick={() => hasParentProject ? goToParentProject(repo.projectSlug) : goToProjects()}
               title={hasParentProject ? `Back to ${repo.projectName}` : "Back to projects"}
             >
               <Ic.ChevronLeft size={15} />

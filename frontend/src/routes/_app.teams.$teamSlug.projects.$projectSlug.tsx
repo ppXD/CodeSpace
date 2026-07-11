@@ -15,7 +15,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { useQueryClient } from "@tanstack/react-query";
 
-export const Route = createFileRoute("/_app/teams/$teamSlug/projects/$projectId")({
+export const Route = createFileRoute("/_app/teams/$teamSlug/projects/$projectSlug")({
   validateSearch: (raw: Record<string, unknown>): { tab?: ProjectTab } => {
     if (typeof raw.tab === "string") {
       const lower = raw.tab.toLowerCase();
@@ -45,13 +45,35 @@ type ProjectTab = "repositories" | "variables";
  * with this project pre-selected as the bind target.
  */
 function ProjectDetailPage() {
-  const { teamSlug, projectId } = Route.useParams();
+  const { teamSlug, projectSlug } = Route.useParams();
   const { tab: tabParam } = Route.useSearch();
   const tab: ProjectTab = tabParam ?? "repositories";
 
   const navigate = useNavigate();
-  const projectQuery = useProject(projectId);
-  const reposQuery = useRepositories({ projectId });
+
+  // The URL segment is a ref — the canonical slug, or a legacy GUID from an old bookmark.
+  // The by-ref endpoint resolves either; we then read the real project id off the resolved
+  // row for every id-keyed operation below (repos, variables, move, unbind).
+  const projectQuery = useProject(projectSlug);
+  const projectId = projectQuery.data?.id;
+
+  // Canonicalise a legacy-GUID (or wrong-case) URL to the slug URL, preserving ?tab=. The
+  // content is already correct — we resolved by ref — so this only tidies the address bar.
+  useEffect(() => {
+    const resolved = projectQuery.data;
+    if (resolved && resolved.slug !== projectSlug) {
+      navigate({
+        to: "/teams/$teamSlug/projects/$projectSlug",
+        params: { teamSlug, projectSlug: resolved.slug },
+        search: tabParam ? { tab: tabParam } : {},
+        replace: true,
+      });
+    }
+  }, [projectQuery.data, projectSlug, teamSlug, tabParam, navigate]);
+
+  // Wait for the resolved id before listing repos — otherwise the slug would go up as a
+  // project filter the backend can't match, or an "all repos" fetch would fire during resolve.
+  const reposQuery = useRepositories({ projectId, enabled: !!projectId });
   const providerInstances = useProviderInstances();
   const credentials = useCredentials();
   const allProjects = useProjects();
@@ -73,12 +95,13 @@ function ProjectDetailPage() {
 
   const setTab = (next: ProjectTab) =>
     navigate({
-      to: "/teams/$teamSlug/projects/$projectId",
-      params: { teamSlug, projectId },
+      to: "/teams/$teamSlug/projects/$projectSlug",
+      params: { teamSlug, projectSlug },
       search: next === "repositories" ? {} : { tab: next },
     });
 
   const askUnbind = async (r: RepositorySummary) => {
+    if (!projectId) return;
     const ok = await confirm({
       title: `Remove ${r.fullPath} from this project?`,
       message: "It stays available to any other project that uses it; its remote webhook is removed only when no project uses it anymore. The repo on the provider isn't touched.",
@@ -271,7 +294,7 @@ function ProjectDetailPage() {
         <div className="ct-body">
           <VariableTablePanel
             scope="Project"
-            projectId={projectId}
+            projectId={project.id}
             refPrefix={`project.${project.slug}`}
             title={`Variables — ${project.name}`}
             subtitle={`Shared across every workflow that references project.${project.slug}.*. Secrets are AES-256-GCM encrypted and never returned by the API.`}
@@ -281,14 +304,14 @@ function ProjectDetailPage() {
         </div>
       )}
 
-      {addRepoOpen && <AddRepoModal onClose={() => setAddRepoOpen(false)} presetProjectId={projectId} />}
+      {addRepoOpen && <AddRepoModal onClose={() => setAddRepoOpen(false)} presetProjectId={project.id} />}
       {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
 
       {moveTarget && (
         <MoveRepositoryModal
           repository={moveTarget}
-          currentProjectId={projectId}
-          allProjects={(allProjects.data ?? []).filter(p => p.id !== projectId)}
+          currentProjectId={project.id}
+          allProjects={(allProjects.data ?? []).filter(p => p.id !== project.id)}
           onClose={() => setMoveTarget(null)}
         />
       )}

@@ -9,7 +9,7 @@ import { fetchJson } from "./request";
  *
  * REST surface:
  *   GET    /api/projects                       → list summaries
- *   GET    /api/projects/{projectId}           → single
+ *   GET    /api/projects/{idOrSlug}            → single (resolves a GUID or the team-unique slug)
  *   POST   /api/projects                       → create (returns { id })
  *   PUT    /api/projects/{projectId}           → rename / re-describe (slug immutable)
  *   DELETE /api/projects/{projectId}           → soft-delete (cascades variables)
@@ -17,7 +17,8 @@ import { fetchJson } from "./request";
 export const projectsApi = {
   list: () => fetchJson<ProjectSummary[]>("/api/projects"),
 
-  get: (projectId: string) => fetchJson<ProjectSummary>(`/api/projects/${projectId}`),
+  /** Resolve one project by ref — either its GUID (legacy link) or team-unique slug (clean URL). */
+  get: (ref: string) => fetchJson<ProjectSummary>(`/api/projects/${encodeURIComponent(ref)}`),
 
   create: (input: CreateProjectInput) =>
     fetchJson<{ id: string }>("/api/projects", {
