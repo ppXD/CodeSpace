@@ -72,11 +72,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             context = context with { TapeSummary = persisted };
 
         // S2 (G1) — ground the brain in the repository's ACTUAL top-level tree, listed at the run's immutable base
-        // pin (S1), so what it plans over is the SAME tree every spawned agent + the grounded reviewer materialize.
-        // Fail-soft (the provider folds every failure to null) and carried on the context so every prompt path —
-        // compaction retry, invalid-plan reprompt, budget-raise retry — renders the identical section.
+        // pin (S1), falling back to the operator's launch-pinned branch (never a silently drifting default tip when
+        // the operator named a branch) — so what it plans over is the SAME tree every spawned agent + the grounded
+        // reviewer materialize. Fail-soft AND fail-fast (the provider folds every failure/timeout to null within its
+        // own 15s bound). Fetched once per decide; the rare decorator paths (a critic re-decide, a transient retry)
+        // re-fetch with the same bound — cross-turn caching of the immutable pinned tree is a named follow-up.
         if (context.RepoGrounding is null && context.AgentProfile?.RepositoryId is { } groundRepoId)
-            context = context with { RepoGrounding = await _grounding.BuildGroundingAsync(groundRepoId, context.TeamId, context.AgentProfile?.PinnedSha, cancellationToken).ConfigureAwait(false) };
+        {
+            var groundRef = context.AgentProfile?.PinnedSha is { } pin && !string.IsNullOrWhiteSpace(pin) ? pin : context.AgentProfile?.BaseRef;
+            context = context with { RepoGrounding = await _grounding.BuildGroundingAsync(groundRepoId, context.TeamId, groundRef, cancellationToken).ConfigureAwait(false) };
+        }
 
         StructuredLLMCompletion completion;
         try
