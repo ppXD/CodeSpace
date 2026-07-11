@@ -137,6 +137,9 @@ public sealed record SupervisorAgentProfile
     /// <summary>The repository each spawned agent clones into its workspace (the executor clones it). Null → no workspace (analysis-only). The supervisor node has no inputs, so this is authored on the profile, not bound from a trigger. The PRIMARY repo when <see cref="RelatedRepositories"/> are also authored.</summary>
     public Guid? RepositoryId { get; init; }
 
+    /// <summary>S1 — the launch-resolved base pin for <see cref="RepositoryId"/>: the EXACT commit every spawned agent materializes, so two parallel spawns can never land on different trees when the remote advances mid-run. Null → the tip at each spawn's own clone time (legacy). A dependency-staging handoff ref (a prior attempt's produced branch) outranks it — continuing work rides the prior branch, not the launch base.</summary>
+    public string? PinnedSha { get; init; }
+
     /// <summary>
     /// Multi-repo (resolver loop #379, S7): the authored <c>relatedRepositories</c> array — each
     /// <c>{repositoryId, alias?, access?}</c> — that each spawned agent ALSO clones alongside the primary

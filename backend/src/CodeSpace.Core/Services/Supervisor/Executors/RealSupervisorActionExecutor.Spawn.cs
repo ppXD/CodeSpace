@@ -643,7 +643,11 @@ public sealed partial class RealSupervisorActionExecutor
             // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it). The operator's
             // multi-repo cwd mode rides the profile (null/Auto → byte-identical). primaryRef (S1 handoff) overrides the
             // clone ref to a dependency's own branch/integration branch; null → the byte-identical default-branch clone.
-            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryRef),
+            // S1: the launch base pin applies ONLY when this spawn clones the PROFILE's own primary (a dispatch that
+            // overrode the primary pins nothing — the vector was resolved for the launch's repo, not the override) and
+            // ONLY without a handoff ref (continuing work rides the prior attempt's branch, which a pin cannot express).
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryRef,
+                primaryPinnedSha: primaryRef is null && repositoryId == profile?.RepositoryId ? NullIfBlank(profile?.PinnedSha) : null),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             // The profile's wall-clock cap, in the agent.code node's vocabulary: positive caps the run, an explicit ≤0
