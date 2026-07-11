@@ -51,6 +51,24 @@ public class AgentSupervisorManifestCopyTests
         props.GetProperty("approvalPolicy").GetProperty("x-enumLabels").GetProperty("none").GetString().ShouldBe("Autonomous");
     }
 
+    // The dense supervisor form is sectioned via x-group — every top-level field must belong to a section
+    // declared in x-sections, so the grouped layout has no stray "More" bucket. Presentation-only.
+    [Fact]
+    public void Every_top_level_field_is_grouped_into_a_declared_section()
+    {
+        var config = Config();
+
+        var sections = new HashSet<string?>();
+        foreach (var s in config.GetProperty("x-sections").EnumerateArray()) sections.Add(s.GetString());
+        sections.Count.ShouldBe(4);
+
+        foreach (var prop in config.GetProperty("properties").EnumerateObject())
+        {
+            prop.Value.TryGetProperty("x-group", out var group).ShouldBeTrue($"top-level field '{prop.Name}' has no x-group");
+            sections.ShouldContain(group.GetString(), $"'{prop.Name}' is in a section not listed in x-sections");
+        }
+    }
+
     /// <summary>
     /// Yields every (jsonPath, schema) in the tree that declares an "enum" — recursing into object
     /// "properties" and array "items" so nested fields (agentProfile.autonomyLevel, relatedRepositories'
