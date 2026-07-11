@@ -236,6 +236,96 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     }
 
     [Fact]
+    public async Task A_crashing_baseline_never_strands_the_candidate_grade()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: "codespace/agent/one")));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: "codespace/agent/one", baseSha: "deadbeef", patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" }) { ThrowOnBase = new InvalidOperationException("baseline exploded") };
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        var unit = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        unit.AcceptancePassed.ShouldBe(true, "the candidate verdict must never be stranded by its own baseline's failure");
+        unit.BaselinePassed.ShouldBeNull("an exploded capture records NO baseline — fail-soft, never fail-closed onto the unit");
+    }
+
+    [Fact]
+    public async Task An_infra_failed_candidate_grade_skips_the_baseline_entirely()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: "codespace/agent/one")));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: "codespace/agent/one", baseSha: "deadbeef", patchArtifactId: null);
+
+        // The candidate grade itself was INFRA (the clone never ran) — a second clone of the same unreachable repo
+        // would waste a full grade budget for an unusable differential pair.
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "clone-failed: fatal: could not read" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.BaseCalls.ShouldBeEmpty("an unmeasured candidate has nothing to differentiate — skip the baseline");
+    }
+
+    [Fact]
+    public async Task Same_command_different_oracle_kind_never_shares_a_baseline()
+    {
+        // Scan M1: the memo key is the FULL spec identity — Kind routes a different oracle, so two subtasks sharing
+        // an argv off the same base still measure different contracts.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentA = Guid.NewGuid();
+        var agentB = Guid.NewGuid();
+
+        var planPayload = JsonSerializer.Serialize(new
+        {
+            goal = Goal,
+            subtasks = new object[]
+            {
+                new { id = "s1", title = "s1", instruction = "do s1", acceptance = new { command = Check } },
+                new { id = "s2", title = "s2", instruction = "do s2", acceptance = new { command = Check, kind = "ArtifactPresent" } },
+            },
+        }, AgentJson.Options);
+        await SeedPlanAsync(runId, teamId, sequence: 1, planPayload);
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1","s2"]}""", SpawnOutcome(Unit(agentA, producedBranch: "codespace/agent/a"), Unit(agentB, producedBranch: "codespace/agent/b")));
+        await SeedManifestAsync(teamId, agentA, repoId, branch: "codespace/agent/a", baseSha: "deadbeef", patchArtifactId: null);
+        await SeedManifestAsync(teamId, agentB, repoId, branch: "codespace/agent/b", baseSha: "deadbeef", patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.BaseCalls.Count.ShouldBe(2, "same base + same argv but a DIFFERENT oracle kind ⇒ two measurements, never a shared verdict");
+    }
+
+    [Fact]
+    public async Task An_unbaselined_units_persisted_outcome_omits_the_baseline_keys_byte_identically()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: "codespace/agent/one")));
+        // no manifest ⇒ no baseline
+
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" }));
+
+        var outcome = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson!;
+        outcome.ShouldNotContain("baselinePassed", customMessage: "null-omitted means OMITTED — a spurious null key would break the folds' byte-identity contract on every ungraded unit");
+        outcome.ShouldNotContain("baselineDetail");
+    }
+
+    [Fact]
     public async Task A_unit_without_a_recorded_base_folds_no_baseline()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -748,9 +838,13 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         /// <summary>S3: the baseline grade — configurable so a differential test can make base and candidate disagree.</summary>
         public BenchmarkGrade BaseGrade { get; set; } = new() { Passed = true, Detail = "baseline-tests-passed" };
 
+        /// <summary>When set, GradeBaseAsync throws — proves the candidate grade survives its own baseline's crash.</summary>
+        public Exception? ThrowOnBase { get; set; }
+
         public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
             BaseCalls.Add((repositoryId, baseSha, spec.Command));
+            if (ThrowOnBase != null) throw ThrowOnBase;
             return Task.FromResult(BaseGrade);
         }
     }
