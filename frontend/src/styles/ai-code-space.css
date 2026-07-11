@@ -2406,6 +2406,15 @@ textarea:-webkit-autofill {
   font-size: 10px; color: var(--muted-2); padding: 0 4px;
   line-height: 1.5;
 }
+.acs-root .wf-palette-search {
+  width: 100%; box-sizing: border-box; margin: 0;
+  padding: 6px 10px; border-radius: 7px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--ink);
+  font-family: inherit; font-size: 12px;
+  transition: border-color .12s ease, background .12s ease;
+}
+.acs-root .wf-palette-search::placeholder { color: var(--muted-2); }
+.acs-root .wf-palette-search:focus { outline: none; border-color: var(--accent); background: var(--panel); }
 
 .acs-root .wf-palette-item {
   display: flex; align-items: center; gap: 8px; width: 100%;

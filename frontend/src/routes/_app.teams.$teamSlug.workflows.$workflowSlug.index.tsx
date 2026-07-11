@@ -282,6 +282,19 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   const [edges, setEdges] = useState<Edge[]>(() => definitionToRfEdges(workflow.definition));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [unsaved, setUnsaved] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  // Palette grouped by the same category "tone" nodes are coloured by (nodeToneFor), narrowed by the
+  // search box (name / type / description / category). Body-start markers are auto-created, never added.
+  const paletteGroups = useMemo(() => {
+    const q = paletteQuery.trim().toLowerCase();
+    const matches = (m: NodeManifestDto) =>
+      !q || m.displayName.toLowerCase().includes(q) || m.typeKey.toLowerCase().includes(q)
+      || (m.description ?? "").toLowerCase().includes(q) || m.category.toLowerCase().includes(q);
+    const visible = manifests.filter((m) => !isBodyStartTypeKey(m.typeKey) && matches(m));
+    return PALETTE_GROUPS
+      .map((g) => ({ ...g, items: visible.filter((m) => nodeToneFor(m) === g.tone) }))
+      .filter((g) => g.items.length > 0);
+  }, [manifests, paletteQuery]);
   // The node picker opened by a node's "+" — anchored at the click point, sourced from `fromId`.
   const [addMenu, setAddMenu] = useState<{ at: { x: number; y: number }; fromId: string } | null>(null);
   // A node's "+" was clicked → select it (so the new node auto-links from it) and open the picker.
@@ -951,15 +964,24 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
         {/* Left palette */}
         <aside className="wf-palette">
           <div className="wf-palette-h">Nodes</div>
+          <input
+            className="wf-palette-search"
+            type="search"
+            placeholder="Search nodes…"
+            value={paletteQuery}
+            onChange={(e) => setPaletteQuery(e.target.value)}
+            aria-label="Search node types"
+          />
           <div className="wf-palette-hint">Click to add · Drag for precise placement</div>
           {manifests.length === 0 && <div className="wf-palette-empty">No node types loaded.</div>}
-          <PaletteSection title="Triggers"  manifests={manifests.filter((m) => m.kind === "Trigger")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
-          {/* "Loop" is a Step too; "flow.loop_start" is the loop's internal body-entry marker, added
-              automatically with a Loop — never hand-dragged, so it's filtered out of the palette. */}
-          <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || isContainerKind(m.kind)) && !isBodyStartTypeKey(m.typeKey))}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
-          {/* Team personas as draggable items — each drops a Run-coding-agent node pre-bound to it. */}
-          <AgentPaletteSection enabled={manifestByType.has("agent.code")} onAdd={onAddAgent} />
-          <PaletteSection title="Endpoints" manifests={manifests.filter((m) => m.kind === "Terminal")} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
+          {manifests.length > 0 && paletteGroups.length === 0 && (
+            <div className="wf-palette-empty">No nodes match “{paletteQuery.trim()}”.</div>
+          )}
+          {paletteGroups.map((g) => (
+            <PaletteSection key={g.tone} title={g.label} manifests={g.items} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
+          ))}
+          {/* Team personas — each drops a Run-coding-agent node pre-bound to it. Hidden while searching. */}
+          {!paletteQuery.trim() && <AgentPaletteSection enabled={manifestByType.has("agent.code")} onAdd={onAddAgent} />}
         </aside>
 
         <div className="wf-resize" role="separator" aria-orientation="vertical" aria-label="Resize palette" onPointerDown={(e) => startResize("palette", e)} />
@@ -1138,6 +1160,21 @@ function InspectorEmptyHint() {
 }
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
+
+/**
+ * Palette groups, in display order, keyed on the node "tone" (nodeToneFor) so each group's rows share
+ * the colour they carry on the canvas. A node lands in a group purely by its manifest category/kind, so a
+ * new/plugin node slots in automatically — an unmapped category falls to "tool" (Tools).
+ */
+const PALETTE_GROUPS: ReadonlyArray<{ tone: string; label: string }> = [
+  { tone: "start", label: "Triggers" },
+  { tone: "ai", label: "AI & Agents" },
+  { tone: "flow", label: "Flow & Data" },
+  { tone: "git", label: "Git" },
+  { tone: "human", label: "Human" },
+  { tone: "tool", label: "Tools" },
+  { tone: "end", label: "Endpoints" },
+];
 
 function PaletteSection({ title, manifests, onAdd, disabledOf }: {
   title: string;
