@@ -1,5 +1,5 @@
 import { Outlet, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { resolveTeamByUrlSlug, teamToUrlSlug, useMe } from "@/hooks/use-me";
 
@@ -12,11 +12,13 @@ import { resolveTeamByUrlSlug, teamToUrlSlug, useMe } from "@/hooks/use-me";
  *      If it doesn't match anything in the user's `/me` response, silently
  *      redirect to their default team — same intent as GitHub's "you can't
  *      see this repo, here's where you can go" bounce.
- *   2. Sync `localStorage.activeTeamId` to the URL-matched team's UUID so
- *      the api/client.ts + api/request.ts X-Team-Id middleware sees the
- *      right team for every backend call. The URL is the source of truth;
- *      localStorage is just the transport for the HTTP header injector
- *      until we have a cleaner way to thread it through.
+ *   2. Point the X-Team-Id header (api/client.ts + api/request.ts read it from
+ *      `localStorage.activeTeamId`) at the URL-matched team, and GATE the outlet
+ *      until that's in sync. The URL is the source of truth. Rendering children
+ *      before the header matches this URL's team is the wrong-team-deep-link bug:
+ *      their queries would fire under whatever team id was last in localStorage
+ *      (another tab, a stale session), and the backend would serve THAT team's
+ *      data because the caller is a legitimate member of it.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug")({
   component: TeamScopeLayout,
@@ -34,35 +36,38 @@ function TeamScopeLayout() {
   // /teams/personal/... map to whichever team has kind === "Personal".
   const matched = resolveTeamByUrlSlug(teams, teamSlug);
 
-  // Effect — not beforeLoad — because /me data lives in React Query and we want
-  // it cached + reactive. beforeLoad would force a fetch on every route hit.
+  // Sync the header to THIS URL's team, then remember which team we synced so the outlet gate
+  // below only opens once localStorage actually points at it. Effect (not render-time write)
+  // keeps render pure; the gate is what guarantees no child query fires under a stale team id.
+  const [syncedTeamId, setSyncedTeamId] = useState<string | null>(null);
   useEffect(() => {
-    if (!me.data) return; // still loading; effect re-runs when it lands
+    if (!matched) return;
+    localStorage.setItem(ACTIVE_TEAM_STORAGE_KEY, matched.id);
+    setSyncedTeamId(matched.id);
+  }, [matched]);
 
-    if (!matched) {
-      // Unknown / inaccessible slug → bounce to the first team the user has.
-      // No teams at all is the empty-account edge case; we leave them on a
-      // blank screen (better than a redirect loop) and the parent layout
-      // will eventually catch this via the /me UI.
-      const fallback = teams[0];
-      if (fallback) {
-        // Phase 3.0 — Projects is the primary nav row; route stale-slug bounces
-        // there instead of the retired /repositories list.
-        navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug: teamToUrlSlug(fallback) }, replace: true });
-      }
-      return;
-    }
+  // Unknown / inaccessible slug → bounce to the first team the user has. No teams at all is
+  // the empty-account edge case; we leave them on a blank screen (better than a redirect loop).
+  useEffect(() => {
+    if (!me.data || matched) return;
+    const fallback = teams[0];
+    // Phase 3.0 — Projects is the primary nav row; stale-slug bounces there.
+    if (fallback) navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug: teamToUrlSlug(fallback) }, replace: true });
+  }, [matched, me.data, teams, navigate]);
 
-    // Sync the localStorage value the X-Team-Id header injector reads.
-    if (localStorage.getItem(ACTIVE_TEAM_STORAGE_KEY) !== matched.id) {
-      localStorage.setItem(ACTIVE_TEAM_STORAGE_KEY, matched.id);
-    }
-  }, [matched, me.data, navigate, teams]);
+  // /me loaded but the slug names no team we can see → the effect above is redirecting.
+  if (me.data && !matched) return null;
 
-  // While /me is loading or the redirect-from-unknown-slug effect hasn't run
-  // yet, render the outlet anyway — the X-Team-Id header may be missing on the
-  // very first request burst, but the components that fire those requests are
-  // gated on the matched team's data downstream. Trade-off: a brief flash of
-  // "no data" before the slug→id mapping lands. Acceptable for a sub-second window.
+  // Hold at a placeholder until /me resolves the slug AND the header is synced to it. On the
+  // common in-team navigation the id is already synced, so this never shows; it only gates the
+  // cold deep-link / second-tab window where the previous team's id is still in localStorage.
+  if (!matched || syncedTeamId !== matched.id) {
+    return (
+      <section className="ct">
+        <div className="ct-body"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div>
+      </section>
+    );
+  }
+
   return <Outlet />;
 }
