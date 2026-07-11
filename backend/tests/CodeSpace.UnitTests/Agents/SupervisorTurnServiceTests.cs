@@ -103,6 +103,69 @@ public class SupervisorTurnServiceTests
         result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
     }
 
+    // ── A FORCED stop is still a stop: the publish/delivery gates apply to it exactly as to a model-authored one.
+    //    Live evidence (run 29131608121's delivery-gate E2E): a no-progress forced stop under an operator-required
+    //    PR contract terminalized Success with publishes=0/gateCards=0 — the exact vacuous success H1 kills. ──
+
+    [Fact]
+    public async Task A_no_progress_forced_stop_under_a_required_delivery_contract_is_gated_not_terminalized()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
+
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), NullLogger<SupervisorTurnService>.Instance);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: Guid.NewGuid(), goalConfig: DeliveryGoalConfig(), CancellationToken.None);
+
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "no publish has run yet under the operator's PR contract — the FORCED stop must be rejected-and-substituted by the delivery gate exactly like a model-authored stop, never terminalize around it");
+    }
+
+    [Fact]
+    public async Task A_forced_stop_over_an_unsatisfied_publish_parks_on_the_delivery_gates_own_card()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
+
+        // The latest publish ran and found NOTHING to open a PR from — unsatisfied, and never satisfied by absence (H1).
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
+
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), NullLogger<SupervisorTurnService>.Instance);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: Guid.NewGuid(), goalConfig: DeliveryGoalConfig(), CancellationToken.None);
+
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.AskHuman, "an unsatisfied contract at a FORCED stop parks for adjudication — the human decides, not the bound");
+        JsonDocument.Parse(ledger.Rows[^1].PayloadJson).RootElement.GetProperty("question").GetString()!
+            .ShouldStartWith(SupervisorDeliveryGate.QuestionPrefix, customMessage: "the park is the delivery gate's OWN card, so H1's answered-release machinery applies to it unchanged");
+    }
+
+    [Fact]
+    public async Task A_forced_stop_over_an_unsatisfied_publish_with_no_conversation_stops_with_the_delivery_diagnosis()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+
+        for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
+
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
+
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), NullLogger<SupervisorTurnService>.Instance);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: DeliveryGoalConfig(), CancellationToken.None);
+
+        result.IsFinished.ShouldBeTrue();
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.DeliveryAdjudicationUnavailable, "no surface to adjudicate on ⇒ the DISTINCT honest diagnosis, never a misleading bare NoProgress");
+    }
+
+    /// <summary>The operator's own launch-time PR requirement — the delivery gate's authorized path ②.</summary>
+    private static SupervisorGoalConfig DeliveryGoalConfig() => new()
+    {
+        Goal = "goal", AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid() }, DeliverySpec = new DeliverySpec { OpenPullRequest = true },
+    };
+
     [Fact]
     public void An_answered_escalation_card_resets_the_no_progress_streak()
     {
