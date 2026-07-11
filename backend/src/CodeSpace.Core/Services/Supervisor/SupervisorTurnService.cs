@@ -164,7 +164,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
-        if (preBound != null) return ForcedStop(preBound);
+        if (preBound != null) return GateForcedStop(context, preBound);
 
         // D4c-2: BEFORE the delivery decider, drain this run's blocked child decisions — the arbiter auto-answers the
         // ones it is confident about (within the fail-closed floor) and leaves the rest in the cross-grain queue for a
@@ -438,7 +438,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // reports PlanInvalid first). Pure → a re-entry re-derives the same stop.
         var planInvalid = SupervisorPlanValidator.Validate(decision);
 
-        if (planInvalid != null) return ForcedStop(planInvalid);
+        if (planInvalid != null) return GateForcedStop(context, planInvalid);
 
         // S3 structural floor: a spawn/retry while the latest plan stands REJECTED is refused — the operator's
         // revision feedback demands a REVISED plan version first, and prompt-following is not a guarantee. Pure
@@ -447,7 +447,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         {
             _logger.LogWarning("Supervisor tried to {Kind} while the latest plan stands REJECTED at turn {Turn} on node {NodeId} — refusing (a rejected plan may never be executed)", decision.Kind, context.TurnNumber, context.NodeId);
 
-            return ForcedStop(SupervisorStopReasons.RejectedPlanSpawnRefused);
+            return GateForcedStop(context, SupervisorStopReasons.RejectedPlanSpawnRefused);
         }
 
         var postBound = SupervisorBounds.PostDecision(context, plan, decision);
@@ -455,9 +455,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // P3.5 — the cost cap is the one bound with a per-run figure worth citing (which cap, how much over/left,
         // broken down by lane) — every other bound's reason is already fully self-explanatory as a bare string.
         if (postBound == SupervisorStopReasons.CostCapReached)
-            return ForcedStop(postBound, Deciders.SupervisorBudgetRecitation.Summary(plan.MaxCostUsd!.Value, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
+            return GateForcedStop(context, postBound, Deciders.SupervisorBudgetRecitation.Summary(plan.MaxCostUsd!.Value, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
 
-        if (postBound != null) return ForcedStop(postBound);
+        if (postBound != null) return GateForcedStop(context, postBound);
 
         // I3 (publish-or-park): a stop that would terminalize accepted-but-unpublished work is rejected and
         // substituted BEFORE governance — the substitution (a server-authored merge, or an ask_human park) is not
@@ -470,6 +470,29 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         if (SupervisorDeliveryGate.Validate(context, decision) is { } delivered) return delivered;
 
         return GateSideEffectingDecision(context, decision);
+    }
+
+    /// <summary>
+    /// A FORCED stop is still a STOP — the run's publish/delivery obligations do not evaporate because the server,
+    /// rather than the model, chose to stop. Applies the stop-shaped legs of the post-decision gate (I3 publish, then
+    /// DC-2b delivery — the same order <see cref="ApplyPostDecisionGate"/> runs them in for a model-authored stop) to
+    /// every bound/refusal forced stop. Live evidence for the hole this closes (run 29131608121's delivery-gate E2E):
+    /// a no-progress forced stop under an operator-required PR contract terminalized SUCCESS with publishes=0 and
+    /// gateCards=0 — the exact vacuous success H1 exists to kill, reachable because the pre-bound early return and
+    /// the post-gate's own ForcedStop arms all bypassed both gates. Deliberately NOT applied to
+    /// <see cref="ForceStopAsync"/> (ModelPlaneUnavailable — parking a brain-outage run on a delivery card belongs to
+    /// the park-don't-die arc) or to <c>PlanConfirmationUnavailable</c> (its more precise no-surface diagnosis would
+    /// be replaced by the gate's generic one for zero behavioural gain — no agent ever ran, so nothing is deliverable).
+    /// </summary>
+    private SupervisorDecision GateForcedStop(SupervisorTurnContext context, string reason, string? detail = null)
+    {
+        var stop = ForcedStop(reason, detail);
+
+        // requireSummary: false — a bound authored this stop, not the model; its recorded reason IS the explanation.
+        if (SupervisorPublishGate.Validate(context, stop, requireSummary: false) is { } published) return published;
+        if (SupervisorDeliveryGate.Validate(context, stop) is { } delivered) return delivered;
+
+        return stop;
     }
 
     /// <summary>
@@ -503,7 +526,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         {
             _logger.LogWarning("Supervisor governance DENIED a {Kind} decision at turn {Turn} (policy {Policy}) — forcing terminal stop", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
 
-            return ForcedStop(SupervisorStopReasons.GovernanceDenied);
+            return GateForcedStop(context, SupervisorStopReasons.GovernanceDenied);
         }
 
         _logger.LogInformation("Supervisor governance requires approval for a {Kind} decision at turn {Turn} (policy {Policy}) — parking for a human before the side effect", decision.Kind, context.TurnNumber, context.ApprovalPolicy);

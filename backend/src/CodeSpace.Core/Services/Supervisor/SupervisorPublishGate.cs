@@ -33,8 +33,8 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public static class SupervisorPublishGate
 {
-    /// <summary>Null (proceed with the decision as authored) unless <paramref name="decision"/> is a <c>stop</c> I3 must reject-and-substitute — see the class doc for the ladder.</summary>
-    public static SupervisorDecision? Validate(SupervisorTurnContext context, SupervisorDecision decision)
+    /// <summary>Null (proceed with the decision as authored) unless <paramref name="decision"/> is a <c>stop</c> I3 must reject-and-substitute — see the class doc for the ladder. <paramref name="requireSummary"/> is false for a FORCED stop (a bound/refusal authored it, not the model — its recorded reason IS the explanation, and parking a published run on "provide a summary" no human owes would ask forever); the publish-or-park ladder itself applies to forced stops unchanged.</summary>
+    public static SupervisorDecision? Validate(SupervisorTurnContext context, SupervisorDecision decision, bool requireSummary = true)
     {
         if (decision.Kind != SupervisorDecisionKinds.Stop) return null;
 
@@ -44,7 +44,7 @@ public static class SupervisorPublishGate
             || SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count > 0;
 
         if (published)
-            return HasSummary(decision)
+            return !requireSummary || HasSummary(decision)
                 ? null
                 : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
@@ -90,7 +90,7 @@ public static class SupervisorPublishGate
         // can still show up as Pushed in the ledger — the same "局部綠≠整合綠" bar every other door to the head already
         // enforces (SupervisorOutcome.IsAcceptanceRejected, shared with the merge + resolver doors) must apply here too.
         if (frontierResults.Any(r => !SupervisorOutcome.IsAcceptanceRejected(r) && context.PublishedAgentRunIds.Contains(r.AgentRunId)))
-            return HasSummary(decision) ? null : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
+            return !requireSummary || HasSummary(decision) ? null : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
         if (attemptedMerge is null) return ServerAuthoredMerge();   // first attempt — auto-integrate-at-stop
 

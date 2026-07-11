@@ -276,6 +276,59 @@ public sealed class SupervisorDeliveryGateFlowTests
         stop.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "still policy-blocked after the adjudicated re-check — the answer stands as the interim waiver, the run completes");
     }
 
+    [Fact]
+    public async Task A_no_progress_forced_stop_cannot_terminalize_around_the_delivery_contract()
+    {
+        // Run 29131608121's live evidence: a brain that never stops gets FORCE-stopped by the no-progress bound,
+        // and that forced stop used to terminalize SUCCESS around BOTH gates (publishes=0, gateCards=0) under an
+        // operator-required PR contract — the exact vacuous success H1 kills. A forced stop is still a stop: the
+        // bound turn must come out as the gate's substituted server publish, and the EVENTUAL stop is honest.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/fix");
+
+        var goalConfig = GoalConfig(repoId, new DeliverySpec { OpenPullRequest = true });
+        var decider = new AlwaysPlanDecider();   // NEVER stops — only the bound can end this run
+
+        // Drive result-less plan turns until the no-progress bound trips; the bound turn must surface as the
+        // delivery gate's substituted PUBLISH, never a terminal NoProgress stop.
+        var last = await DriveUntilAsync(runId, teamId, decider, goalConfig, conversationId, d => d.DecisionKind != SupervisorDecisionKinds.Plan);
+        last.DecisionKind.ShouldBe(SupervisorDecisionKinds.Publish, "the FORCED stop is rejected-and-substituted exactly like a model-authored one");
+
+        var opened = JsonSerializer.Deserialize<RoomPullRequestResult>(last.OutcomeJson!, AgentJson.Options)!.PullRequests.Single();
+        opened.Disposition.ShouldBe(RoomPullRequestDisposition.Opened, "the operator's contract is genuinely delivered before the run may end");
+
+        // The published PR changed nothing about the brain — it still only plans; the NEXT bound trip finds the
+        // contract satisfied and the forced stop finally terminalizes with its honest reason.
+        last = await DriveUntilAsync(runId, teamId, decider, goalConfig, conversationId, d => d.DecisionKind != SupervisorDecisionKinds.Plan);
+        last.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop, "with the contract satisfied the bound stop passes both gates");
+        SupervisorOutcome.ReadStopReason(last.PayloadJson).ShouldBe(SupervisorStopReasons.NoProgress, "the honest bound reason survives the gating untouched");
+    }
+
+    /// <summary>Drive turns (bounded well past the no-progress cap) until <paramref name="until"/> matches — the bound itself must end the plan streak, so a runaway loop here fails loud instead of spinning.</summary>
+    private async Task<SupervisorPriorDecision> DriveUntilAsync(Guid runId, Guid teamId, ISupervisorDecider decider, SupervisorGoalConfig goalConfig, Guid conversationId, Func<SupervisorPriorDecision, bool> until)
+    {
+        for (var turn = 0; turn <= SupervisorLane.DefaultMaxNoProgressDecisions + 2; turn++)
+        {
+            var last = await RunTurnAsync(runId, teamId, decider, goalConfig, conversationId: conversationId);
+            if (until(last)) return last;
+        }
+
+        throw new InvalidOperationException($"the no-progress bound never tripped within {SupervisorLane.DefaultMaxNoProgressDecisions + 3} turns — the guard itself regressed");
+    }
+
+    /// <summary>A brain that NEVER stops — every turn authors another result-less plan, so only the no-progress bound can end the run.</summary>
+    private sealed class AlwaysPlanDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision { Kind = SupervisorDecisionKinds.Plan, PayloadJson = """{"subtasks":[{"id":"t1","goal":"g"}]}""" });
+    }
+
     /// <summary>A real conversation channel — without one the ask executor degrades (no card, no wait), so the park could never be answered.</summary>
     private async Task<Guid> SeedConversationAsync(Guid teamId, Guid userId)
     {
