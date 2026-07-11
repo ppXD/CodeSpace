@@ -164,7 +164,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
-        if (preBound != null) return GateForcedStop(context, preBound);
+        // Only the NO-PROGRESS bound is gated: its run genuinely worked and may owe a publish/PR. A DEPTH-capped
+        // run is an ILLEGALLY NESTED one refused at turn 0 — its obligations belong to the parent, and gating it
+        // would let a run that should never have taken a single decision open PRs (adversarial-scan M2).
+        if (preBound == SupervisorStopReasons.NoProgress) return GateForcedStop(context, preBound);
+
+        if (preBound != null) return ForcedStop(preBound);
 
         // D4c-2: BEFORE the delivery decider, drain this run's blocked child decisions — the arbiter auto-answers the
         // ones it is confident about (within the fail-closed floor) and leaves the rest in the cross-grain queue for a
@@ -489,10 +494,33 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         var stop = ForcedStop(reason, detail);
 
         // requireSummary: false — a bound authored this stop, not the model; its recorded reason IS the explanation.
-        if (SupervisorPublishGate.Validate(context, stop, requireSummary: false) is { } published) return published;
-        if (SupervisorDeliveryGate.Validate(context, stop) is { } delivered) return delivered;
+        var substituted = SupervisorPublishGate.Validate(context, stop, requireSummary: false)
+            ?? SupervisorDeliveryGate.Validate(context, stop);
 
-        return stop;
+        if (substituted is null) return stop;
+
+        // Ask-once fuse (adversarial-scan F1): an UNANSWERED gate card already on the tape proves the ask machinery
+        // could not park this run — a working surface parks until answered and never re-enters this loop; only the
+        // no-surface DEGRADED ask self-advances with a null answer and re-trips the bound. Re-substituting would
+        // loop forever, because the forced stop was such a run's ONLY terminal backstop before the gates applied to
+        // it — after one degraded ask it must remain so.
+        if (substituted.Kind == SupervisorDecisionKinds.AskHuman && HasUnansweredGateCard(context)) return stop;
+
+        return substituted;
+    }
+
+    /// <summary>An UNANSWERED card from either stop gate (I3 publish / DC-2b delivery, recognized by their pinned question prefixes) among the decided prior decisions — the degraded-ask signature the fuse above keys on.</summary>
+    private static bool HasUnansweredGateCard(SupervisorTurnContext context) =>
+        context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman
+            && SupervisorOutcome.ReadAskHumanAnswer(d.OutcomeJson) is null
+            && ReadAskQuestion(d.PayloadJson) is { } question
+            && (question.StartsWith(SupervisorPublishGate.QuestionPrefix, StringComparison.Ordinal) || question.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal)));
+
+    private static string? ReadAskQuestion(string? payloadJson)
+    {
+        if (payloadJson is null) return null;
+        try { return JsonSerializer.Deserialize<SupervisorAskHumanPayload>(payloadJson, AgentJson.Options)?.Question; }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>
@@ -526,7 +554,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         {
             _logger.LogWarning("Supervisor governance DENIED a {Kind} decision at turn {Turn} (policy {Policy}) — forcing terminal stop", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
 
-            return GateForcedStop(context, SupervisorStopReasons.GovernanceDenied);
+            // Deliberately UNGATED (adversarial-scan m1): Deny's contract is "fail closed, NO side effect" — the
+            // gates would substitute a server-authored merge/publish, i.e. exactly the side effects Deny forbids.
+            return ForcedStop(SupervisorStopReasons.GovernanceDenied);
         }
 
         _logger.LogInformation("Supervisor governance requires approval for a {Kind} decision at turn {Turn} (policy {Policy}) — parking for a human before the side effect", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
