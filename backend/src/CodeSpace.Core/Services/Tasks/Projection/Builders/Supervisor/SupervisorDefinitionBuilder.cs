@@ -76,7 +76,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         var config = new Dictionary<string, object?>
         {
             // A continuing turn's thread-context is prepended to the supervisor's goal (its planning prompt) the SAME
-            // way the agent.code projections inject it, so the supervisor plans the follow-up against prior work.
+            // way the agent.run projections inject it, so the supervisor plans the follow-up against prior work.
             ["goal"] = AgentNodeMapping.ComposeGoal(context.Seed.Goal, context.GroundingContext),
             ["approvalPolicy"] = context.Route.Caps.RequiresApproval ? "spawns" : "none",
         };
@@ -159,7 +159,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // clone the default branch and ask the provider to materialize a commit from a branch it never fetched.
         AddIfPresent(map, "baseRef", profile.RepositoryId is not null ? NullIfBlank(baseRef) : null);
         // Multi-repo: each spawned agent ALSO clones these (the supervisor config's relatedRepositories — the SAME
-        // {repositoryId, alias?, access?} shape the agent.code node gets, via the ONE shared serializer). Omitted
+        // {repositoryId, alias?, access?} shape the agent.run node gets, via the ONE shared serializer). Omitted
         // when none, so a single-repo / analysis-only supervisor spawn is byte-identical. S1: each entry carries its
         // own launch pin too (omitted per entry when unpinned).
         AddIfPresent(map, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(profile.RelatedRepositories, pinnedShas: pinnedShas));

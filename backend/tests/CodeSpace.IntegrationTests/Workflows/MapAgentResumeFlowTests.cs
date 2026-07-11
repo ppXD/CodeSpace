@@ -19,10 +19,10 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// THE join the review flagged untested: the headline planner+parallel-agents flow with a REAL <c>agent.code</c>
-/// body INSIDE a <c>flow.map</c>. Mirrors <see cref="ParallelAgentResumeFlowTests"/> (the proven real-agent.code
+/// THE join the review flagged untested: the headline planner+parallel-agents flow with a REAL <c>agent.run</c>
+/// body INSIDE a <c>flow.map</c>. Mirrors <see cref="ParallelAgentResumeFlowTests"/> (the proven real-agent.run
 /// top-level parallel-resume test) but the two agents are the map's per-element branches. A 2-element flow.map
-/// whose body is the REAL <c>agent.code</c> node fans out → both branches park REAL <c>AgentRun</c> waits under
+/// whose body is the REAL <c>agent.run</c> node fans out → both branches park REAL <c>AgentRun</c> waits under
 /// <c>&lt;mapId&gt;#0</c> / <c>&lt;mapId&gt;#1</c> → each resumes via the REAL completion notifier
 /// (<see cref="WorkflowResumeAgentRunCompletionNotifier"/> / <see cref="IWorkflowResumeService.ResumeOnWaitCompletionAsync"/>).
 /// Pins: results[] ORDERED by element index; exactly-once per branch (each AgentRun consumed once + the
@@ -47,7 +47,7 @@ public class MapAgentResumeFlowTests
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverAgentCodeDefinition());
-        // Two elements → two parallel map branches, each running the REAL agent.code body.
+        // Two elements → two parallel map branches, each running the REAL agent.run body.
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
 
         var jobClient = ResolveJobClient();
@@ -56,7 +56,7 @@ public class MapAgentResumeFlowTests
 
         try
         {
-            // ── Pass 1: both branches' agent.code nodes park in one map wave → two AgentRun waits, run Suspended. ──
+            // ── Pass 1: both branches' agent.run nodes park in one map wave → two AgentRun waits, run Suspended. ──
             await RunEngineAsync(runId);
 
             using (var verify = _fixture.BeginScope())
@@ -231,7 +231,7 @@ public class MapAgentResumeFlowTests
     [Fact]
     public async Task A_map_fan_out_exceeding_the_per_team_cap_surfaces_over_cap_branches_as_clean_failures_while_sub_cap_branches_run()
     {
-        // THE D4a end-to-end honesty check: a flow.map fans out MORE agent.code branches than the per-team
+        // THE D4a end-to-end honesty check: a flow.map fans out MORE agent.run branches than the per-team
         // in-flight cap allows. The over-cap branches must FAIL CLEANLY (the admission rejection wrapped into a
         // node failure, routed via the map's continue-on-error) — NOT crash the run — while the sub-cap branch
         // legitimately parks its real AgentRun. Sequential branch staging (maxParallelism 1) + cap 1 makes the
@@ -284,7 +284,7 @@ public class MapAgentResumeFlowTests
     [Fact]
     public async Task Each_map_branch_agent_run_is_stamped_with_its_own_cell_iteration_key()
     {
-        // D4 correlation spine: N agent.code branches under ONE map node used to be INDISTINGUISHABLE in the
+        // D4 correlation spine: N agent.run branches under ONE map node used to be INDISTINGUISHABLE in the
         // agent-run store — every branch shared (WorkflowRunId, NodeId). Now each AgentRun carries its owning
         // CELL's iteration key (<mapId>#<i>) — byte-identical to the value the engine stamps on that branch's
         // WorkflowRunWait + workflow_run_node cell — so a branch's agent run is addressable, and a future
@@ -336,7 +336,7 @@ public class MapAgentResumeFlowTests
     public async Task A_loop_body_agent_run_is_stamped_with_its_loop_iteration_cell_key()
     {
         // Companion to the map crown-jewel — the AgentRun.IterationKey doc + migration both claim loop coverage.
-        // A flow.loop body's agent.code parks its AgentRun under the loop's iteration cell <loopId>#<i>, proving
+        // A flow.loop body's agent.run parks its AgentRun under the loop's iteration cell <loopId>#<i>, proving
         // the SAME engine threading (SuspendNodeAsync → CreateAsync) covers loop iterations, not just map branches.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, LoopOverAgentCodeDefinition());
@@ -348,7 +348,7 @@ public class MapAgentResumeFlowTests
 
         try
         {
-            await RunEngineAsync(runId);   // iteration 0's agent.code parks one AgentRun under loop#0
+            await RunEngineAsync(runId);   // iteration 0's agent.run parks one AgentRun under loop#0
 
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
@@ -488,7 +488,7 @@ public class MapAgentResumeFlowTests
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.Json("""{ "maxParallelism": 1, "errorHandling": "continue" }"""),
                     Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
@@ -502,8 +502,8 @@ public class MapAgentResumeFlowTests
         },
     };
 
-    // manual → map(items={{trigger.things}}; body: ms → agent[REAL agent.code, read-only, analysis-only]) → synthesizer.
-    // Each branch's agent.code parks a real AgentRun wait; on resume its { summary } reduces into results[i].
+    // manual → map(items={{trigger.things}}; body: ms → agent[REAL agent.run, read-only, analysis-only]) → synthesizer.
+    // Each branch's agent.run parks a real AgentRun wait; on resume its { summary } reduces into results[i].
     private static WorkflowDefinition MapOverAgentCodeDefinition() => new()
     {
         SchemaVersion = 1,
@@ -513,7 +513,7 @@ public class MapAgentResumeFlowTests
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
                     Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
@@ -527,7 +527,7 @@ public class MapAgentResumeFlowTests
         },
     };
 
-    // manual → loop(maxIterations:1; body: ls → agent[REAL agent.code]) → terminal. The body's agent.code parks
+    // manual → loop(maxIterations:1; body: ls → agent[REAL agent.run]) → terminal. The body's agent.run parks
     // an AgentRun under the loop iteration cell loop#0 — the loop analogue of the map branch case.
     private static WorkflowDefinition LoopOverAgentCodeDefinition() => new()
     {
@@ -537,7 +537,7 @@ public class MapAgentResumeFlowTests
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "loop",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "loop",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work the loop body","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

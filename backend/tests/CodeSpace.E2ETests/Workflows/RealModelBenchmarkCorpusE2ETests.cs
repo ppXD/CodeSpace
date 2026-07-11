@@ -112,7 +112,7 @@ public sealed class RealModelBenchmarkCorpusE2ETests
         }, attempts: 1);
     }
 
-    /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the agent.code executor resolves via <c>ModelCredentialId</c> and the <c>ClaudeCodeHarness</c> projects onto its env (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY for Provider="Anthropic"). The same shape the whole-loop coding arm seeds — the live key is read from the DB, never in-process.</summary>
+    /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the agent.run executor resolves via <c>ModelCredentialId</c> and the <c>ClaudeCodeHarness</c> projects onto its env (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY for Provider="Anthropic"). The same shape the whole-loop coding arm seeds — the live key is read from the DB, never in-process.</summary>
     private async Task<Guid> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey)
     {
         using var scope = _fixture.BeginScope();

@@ -283,7 +283,7 @@ public sealed class PostgresFixture : IAsyncLifetime
             .SingleInstance();
 
         // Test-only SUSPENDING body node for the flow.map durable parallel-branch resume (PR2) tests — the
-        // hermetic stand-in for an agent.code that parks to an AgentRun (parks an Action wait, no external
+        // hermetic stand-in for an agent.run that parks to an AgentRun (parks an Action wait, no external
         // staging). Same registration rationale: engine/validator see it, palette doesn't.
         builder.RegisterType<Workflows.Infrastructure.SuspendProbeNode>()
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()

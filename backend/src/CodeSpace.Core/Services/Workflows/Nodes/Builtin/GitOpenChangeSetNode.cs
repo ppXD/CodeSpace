@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <summary>
 /// Converges a MULTI-repo Change Set into reviewable output: opens ONE pull/merge request per repository in the set,
 /// the cross-repo analogue of <c>git.open_pr</c>. Wire its <c>repositories</c> input from an upstream multi-repo
-/// <c>agent.code</c> run's <c>repositoryResults</c> output (each repo's produced branch → that repo's PR) OR a
+/// <c>agent.run</c> run's <c>repositoryResults</c> output (each repo's produced branch → that repo's PR) OR a
 /// multi-repo <c>agent.supervisor</c> run's <c>repositoryBranches</c> output (each repo's reconciled head via
 /// <c>sourceBranch</c>/<c>targetBranch</c>) — both bind here verbatim, so this is the ONE per-repo PR-open seam.
 ///
@@ -28,7 +28,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <para>Re-run: like <c>git.open_pr</c>, this has no PR-dedup of its own — a from-node re-run is gated by the
 /// side-effect approval card (IsSideEffecting), and a re-open of an existing head/base is rejected by the provider
 /// (a 422 mapped to a Failed disposition), so a deliberate re-run never creates duplicate PRs but DOES report the
-/// already-open repos as Failed. Authoring: bind <c>repositories</c> from an upstream agent.code run's
+/// already-open repos as Failed. Authoring: bind <c>repositories</c> from an upstream agent.run run's
 /// <c>repositoryResults</c> VERBATIM — each entry carries repositoryId + producedBranch (head) + baseBranch (the
 /// per-repo PR target, the ref the repo was cloned at), which this node reads directly. A hand-authored entry may
 /// still use the <c>sourceBranch</c>/<c>targetBranch</c> aliases; <c>targetBranch</c> is no longer required at the
@@ -62,13 +62,13 @@ public sealed class GitOpenChangeSetNode : INodeRuntime
               "properties": {
                 "repositories": {
                   "type": "array",
-                  "description": "One entry per repository in the change set. Bind the upstream agent.code run's repositoryResults output here VERBATIM — it carries repositoryId + producedBranch + baseBranch, which this node reads directly. A repo with no produced branch (it changed nothing) is skipped.",
+                  "description": "One entry per repository in the change set. Bind the upstream agent.run run's repositoryResults output here VERBATIM — it carries repositoryId + producedBranch + baseBranch, which this node reads directly. A repo with no produced branch (it changed nothing) is skipped.",
                   "items": {
                     "type": "object",
                     "properties": {
                       "repositoryId": { "type": "string", "format": "uuid" },
-                      "producedBranch": { "type": ["string","null"], "description": "The repo's produced (head) branch — from agent.code repositoryResults. Null/empty ⇒ the repo changed nothing ⇒ Skipped. (Alias: sourceBranch, for hand-authoring.)" },
-                      "baseBranch": { "type": ["string","null"], "description": "The repo's base branch to open the PR into — from agent.code repositoryResults. Null/empty with a head ⇒ Failed (no PR target). (Alias: targetBranch, for hand-authoring.)" }
+                      "producedBranch": { "type": ["string","null"], "description": "The repo's produced (head) branch — from agent.run repositoryResults. Null/empty ⇒ the repo changed nothing ⇒ Skipped. (Alias: sourceBranch, for hand-authoring.)" },
+                      "baseBranch": { "type": ["string","null"], "description": "The repo's base branch to open the PR into — from agent.run repositoryResults. Null/empty with a head ⇒ Failed (no PR target). (Alias: targetBranch, for hand-authoring.)" }
                     },
                     "required": ["repositoryId"]
                   }
@@ -143,7 +143,7 @@ public sealed class GitOpenChangeSetNode : INodeRuntime
 
     /// <summary>
     /// Parse the <c>repositories</c> array into per-repo requests. Each entry needs a uuid repositoryId; the head is
-    /// <c>producedBranch</c> (preferred — matches agent.code repositoryResults) else <c>sourceBranch</c>, the base is
+    /// <c>producedBranch</c> (preferred — matches agent.run repositoryResults) else <c>sourceBranch</c>, the base is
     /// <c>baseBranch</c> (preferred) else <c>targetBranch</c>. Both branches may be blank here — the service classifies
     /// a no-head entry as Skipped and a head-without-base entry as Failed — so binding repositoryResults verbatim never
     /// fails the whole node over one degraded repo. Returns false only on a structurally malformed array.
@@ -178,7 +178,7 @@ public sealed class GitOpenChangeSetNode : INodeRuntime
 
     private static bool Bad(string message, out string error) { error = message; return false; }
 
-    /// <summary>Read a branch from the entry under its preferred key (the agent.code repositoryResults field name) else its hand-authored alias, returning "" when neither is a non-empty string. Lets repositoryResults bind verbatim while a hand-authored entry can still use source/targetBranch.</summary>
+    /// <summary>Read a branch from the entry under its preferred key (the agent.run repositoryResults field name) else its hand-authored alias, returning "" when neither is a non-empty string. Lets repositoryResults bind verbatim while a hand-authored entry can still use source/targetBranch.</summary>
     private static string ReadBranch(JsonElement obj, string preferredKey, string aliasKey)
     {
         if (TryReadStringProperty(obj, preferredKey, out var preferred) && preferred.Length > 0) return preferred;

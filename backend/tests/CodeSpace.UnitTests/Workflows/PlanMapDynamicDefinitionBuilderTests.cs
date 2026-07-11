@@ -13,7 +13,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// Pins the plan-map-dynamic projection builder — the MODEL-AUTHORED sibling of plan-map-synth. The emitted graph
 /// is STRUCTURALLY identical (<c>trigger.manual → llm.complete(planner) → flow.map(items=planner.json.subtasks) →
-/// flow.map_start → agent.code(body) → llm.complete(synth) → builtin.terminal(done)</c>) and ALWAYS passes the
+/// flow.map_start → agent.run(body) → llm.complete(synth) → builtin.terminal(done)</c>) and ALWAYS passes the
 /// REAL <see cref="DefinitionValidator"/>, with TWO differences from plan-map-synth: the planner's responseSchema
 /// is an OBJECT-ARRAY of per-agent specs (<c>{ name?, goal, mode }</c>, mode the enum research|code), and the
 /// body agent binds <c>goal={{item.instruction}}</c> + <c>mode={{item.kind}}</c> so the MODEL decides each agent's intent.
@@ -58,7 +58,7 @@ public class PlanMapDynamicDefinitionBuilderTests
         byId["planner"].ShouldBe("plan.author");
         byId["map"].ShouldBe("flow.map");
         byId["ms"].ShouldBe("flow.map_start");
-        byId["agent"].ShouldBe("agent.code");
+        byId["agent"].ShouldBe("agent.run");
         byId["synth"].ShouldBe("llm.complete");
         byId["done"].ShouldBe("builtin.terminal");
 

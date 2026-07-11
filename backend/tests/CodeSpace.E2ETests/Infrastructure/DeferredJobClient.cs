@@ -13,7 +13,7 @@ namespace CodeSpace.E2ETests.Infrastructure;
 /// <c>InMemoryBackgroundJobClient</c> deferral discipline: a real Hangfire worker only sees a row AFTER the
 /// dispatcher's transaction commits, so we defer execution to a FRESH Autofac scope (= fresh DbContext +
 /// connection) drained after the HTTP request returns. This lets the launch endpoint's post-commit dispatch →
-/// engine run → agent.code suspend → executor → completion → resume → terminal chain run for real, end to end,
+/// engine run → agent.run suspend → executor → completion → resume → terminal chain run for real, end to end,
 /// behind the real ASP.NET pipeline — only the Hangfire transport is faked.
 /// </summary>
 public sealed class DeferredJobClient : ICodeSpaceBackgroundJobClient

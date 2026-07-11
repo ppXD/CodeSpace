@@ -7,7 +7,7 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 /// The SHARED multi-repo workspace AUTHORING底層 (resolver loop #379, S7-A0): the one place that turns an authored
 /// <c>relatedRepositories</c> JSON array into <see cref="WorkspaceRepositorySpec"/>s and resolves the canonical
 /// <see cref="WorkspaceSpec"/>. EVERY producer of a multi-repo <see cref="AgentTask"/> funnels through here — the
-/// <c>agent.code</c> node (from its node inputs) AND the supervisor's spawn (from its agent profile) — so the
+/// <c>agent.run</c> node (from its node inputs) AND the supervisor's spawn (from its agent profile) — so the
 /// authored-repos → workspace projection has ONE implementation, never a per-producer hand-mirror (Rule 7, the
 /// same "recognise it in ONE place" discipline as <c>SupervisorDecisionKinds.StagesAgents</c>).
 ///
@@ -63,14 +63,14 @@ public static class AgentWorkspaceAuthoring
 
     /// <summary>
     /// Serialize related specs back to the authored <c>{repositoryId, alias?, access?, ref?}</c> JSON shape both the
-    /// <c>agent.code</c> node input AND the supervisor config consume — the inverse of <see cref="ParseRelatedRepositories"/>,
+    /// <c>agent.run</c> node input AND the supervisor config consume — the inverse of <see cref="ParseRelatedRepositories"/>,
     /// in ONE place (Rule 7) so a projection emits the EXACT shape these re-parse. Null / empty ⇒ null, so a caller
     /// omits the key entirely (a single-repo projection stays byte-identical). Alias is omitted when blank (the
     /// workspace re-derives a unique one).
     /// <para><paramref name="baseRefs"/> (session branch continuity) supplies a per-repo clone ref: when a repo has an
     /// entry, its <c>ref</c> is emitted so the agent clones it at the prior turn's produced branch. Null map / a repo
     /// absent from it ⇒ NO <c>ref</c> key for that entry (byte-identical — the repo clones at its default branch). The
-    /// agent.code path passes the map; the supervisor passes null (it has no per-repo continuity — out of scope).</para>
+    /// agent.run path passes the map; the supervisor passes null (it has no per-repo continuity — out of scope).</para>
     /// <para><paramref name="pinnedShas"/> (S1 — the launch's immutable base vector) supplies a per-repo base pin:
     /// when a repo has an entry, its <c>pinnedSha</c> is emitted so the agent materializes that exact commit. Wins
     /// over a spec-carried pin (the launch vector is fresher than a spec authored earlier); null map / a repo absent

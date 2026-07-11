@@ -442,7 +442,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         }
     }
 
-    // ─── Decision flow (Decision substrate D2 — agent.code mid-run decision.request) ──────────────────
+    // ─── Decision flow (Decision substrate D2 — agent.run mid-run decision.request) ──────────────────
     // The agent-grain analogue of the approval flow: same durable tool-ledger spine (claim → park → block → resolve),
     // but a DECISION is an ASK with no side effect — the human's typed answer IS the terminal result, so there is no
     // Running execution hop. The resolver records a DecisionAnswer (AwaitingApproval → Succeeded, guarded on the
@@ -460,7 +460,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         // A decision can ALWAYS be raised when the durable substrate is present (governance + ledger + waiter + team) — its
         // CORE answer surface is the durable ledger row + the team-wide "Needs decision" queue, NOT a chat conversation. A
         // chat card is OPTIONAL notification (posted only when a conversation is configured + team-owned, in ParkDecisionAsync).
-        // So a plain agent.code / workflow / supervisor-spawn run with NO conversation still parks a real, queue-answerable
+        // So a plain agent.run / workflow / supervisor-spawn run with NO conversation still parks a real, queue-answerable
         // decision — never a flat refusal. This decouples "can ask" from "has a chat surface" (the generic ask-human spine).
         if (!CanRaiseDecision()) return ToolResult(isError: true, "This run cannot raise a decision — decision governance is not enabled here.");
 

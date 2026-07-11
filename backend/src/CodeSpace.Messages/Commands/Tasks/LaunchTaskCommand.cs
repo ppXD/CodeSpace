@@ -158,7 +158,7 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// Per-run opt-in to the FULL MCP tool-fabric (the side-effecting catalog) for the run's agents. Null / false ⇒
     /// omitted ⇒ defer to the ambient deployment flag (the read-only catalog unless the deployment forces full) ⇒
     /// byte-identical. The gate is OR-only: this FORCES the full fabric ON for the run; it cannot turn it OFF when the
-    /// deployment enabled it. Flows to both the single-agent <c>agent.code</c> node and each supervisor-spawned agent.
+    /// deployment enabled it. Flows to both the single-agent <c>agent.run</c> node and each supervisor-spawned agent.
     /// </summary>
     public bool? EnableMcp { get; init; }
 
@@ -167,7 +167,7 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <c>"Grep"</c>, <c>"Bash"</c>). Null / empty ⇒ omitted ⇒ the harness default (all tools) ⇒ byte-identical. A
     /// CLAUDE-ONLY capability filter (Codex bounds the agent via its sandbox + autonomy, ignoring the list) and ADDITIVE
     /// against a persona's tools — NOT a write boundary (use the autonomy tier for that). Flows to both the single-agent
-    /// <c>agent.code</c> node's <c>tools</c> and each supervisor-spawned agent's <c>allowedTools</c>.
+    /// <c>agent.run</c> node's <c>tools</c> and each supervisor-spawned agent's <c>allowedTools</c>.
     /// </summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 
@@ -175,14 +175,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// Per-run opt-in to PUBLISHING the run's agent diff(s) as a branch (<c>codespace/agent/&lt;runId&gt;</c>) even when
     /// the deployment-wide push flag is off. Null / false ⇒ omitted ⇒ defer to the ambient flag ⇒ byte-identical. An
     /// OR-gate: this FORCES publish ON for the run; it cannot force it OFF (the diff is captured for review regardless).
-    /// Flows to both the single-agent <c>agent.code</c> node and each supervisor-spawned agent.
+    /// Flows to both the single-agent <c>agent.run</c> node and each supervisor-spawned agent.
     /// </summary>
     public bool? PushBranch { get; init; }
 
     /// <summary>How an INDEPENDENT critic reviews each supervisor DECISION (Deep only) before its side effect — baked into the supervisor node. <see cref="ReviewMode.None"/> (the default) ⇒ no critic ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
     public ReviewMode DecisionReviewMode { get; init; } = ReviewMode.None;
 
-    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT (its produced change) at completion. <see cref="ReviewMode.None"/> (the default) ⇒ no review ⇒ byte-identical. Gate: a flagged change → NeedsReview. Improve (S6): a flagged change first buys the agent a bounded revise round (critique fed back, same conversation) before it can flag. Flows to the single-agent <c>agent.code</c> node + each supervisor-spawned agent.</summary>
+    /// <summary>How an INDEPENDENT critic reviews each agent's OUTPUT (its produced change) at completion. <see cref="ReviewMode.None"/> (the default) ⇒ no review ⇒ byte-identical. Gate: a flagged change → NeedsReview. Improve (S6): a flagged change first buys the agent a bounded revise round (critique fed back, same conversation) before it can flag. Flows to the single-agent <c>agent.run</c> node + each supervisor-spawned agent.</summary>
     public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
 
     /// <summary>The credentialed-model ROW the review critic(s) run on — the shared reviewer for both the decision + output critics. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when a review mode is not None.</summary>

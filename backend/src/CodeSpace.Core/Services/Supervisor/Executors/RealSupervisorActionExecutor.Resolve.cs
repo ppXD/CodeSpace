@@ -8,7 +8,7 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 
 /// <summary>
 /// The ASYNC resolve half of the real executor (Rule 10 <c>.Resolve.cs</c>, resolver loop #379): <c>resolve</c>
-/// spawns ONE real <c>agent.code</c> run that reconciles a CONFLICTED integration's branches, builds, and runs the
+/// spawns ONE real <c>agent.run</c> run that reconciles a CONFLICTED integration's branches, builds, and runs the
 /// tests — then parks on it (the K=1 spawn shape, reusing <c>StageAgentsAndParkAsync</c> verbatim). The resolver
 /// task is assembled DETERMINISTICALLY from durable data (the conflicted merge's <c>integration</c> block + the
 /// prior agents' produced branches) via <see cref="SupervisorResolverRecipe"/> — the decider only chose to attempt;

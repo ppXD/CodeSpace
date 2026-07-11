@@ -1,7 +1,7 @@
 -- 0042_agent_definition.sql
 --
 -- The reusable Agent persona — the canonical "Agent" noun (Model A): a named, importable, @-mentionable,
--- directly-runnable capability. An `agent.code` node references one of these (with optional inline
+-- directly-runnable capability. An `agent.run` node references one of these (with optional inline
 -- overrides); the harness projects it. HARNESS-AGNOSTIC by design (no harness column) so the same persona
 -- runs on any compatible harness.
 --

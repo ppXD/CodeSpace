@@ -5,7 +5,7 @@ import { useProjects } from "@/hooks/use-projects";
 import { useRepositories } from "@/hooks/use-repositories";
 
 /**
- * agent.code "Add related repositories" editor (multi-repo PR5). Authors the ADDITIONAL repos an agent's
+ * agent.run "Add related repositories" editor (multi-repo PR5). Authors the ADDITIONAL repos an agent's
  * workspace clones alongside the primary (the `repositoryId` row above it) — the way to make a coordinated
  * change across e.g. a frontend + backend. Mirrors {@link TriggerRepositoriesSelector}'s repeatable
  * project→repo cascade rows, swapping the labels editor for an alias text input + a read/write access select.

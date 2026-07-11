@@ -48,7 +48,7 @@ public sealed record WorkspaceSpec
 
     /// <summary>
     /// Build the AUTHORED multi-repo workspace from a primary repo + a list of related repos — the centralization
-    /// point every producer (the agent.code node, the projection builders) funnels through so the projection logic
+    /// point every producer (the agent.run node, the projection builders) funnels through so the projection logic
     /// lives in ONE place. Returns NULL when there are NO related repos, so a caller does
     /// <c>Workspace = FromAuthoredRepos(primaryId, ref, related)</c> and a no-related-repos run keeps <c>Workspace</c>
     /// null → the resolver falls back to <see cref="FromRepository"/> → BYTE-IDENTICAL single-repo execution.

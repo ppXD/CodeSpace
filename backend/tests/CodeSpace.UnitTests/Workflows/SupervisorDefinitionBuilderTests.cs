@@ -224,7 +224,7 @@ public class SupervisorDefinitionBuilderTests
     [Fact]
     public void Supervisor_config_stamps_each_related_repo_so_a_deep_multi_repo_launch_is_not_a_silent_drop()
     {
-        // The deep (supervisor) path's analogue of the agent.code node's relatedRepositories — each spawned agent
+        // The deep (supervisor) path's analogue of the agent.run node's relatedRepositories — each spawned agent
         // clones these alongside the primary. Emitted in the SAME {repositoryId, alias?, access?} shape (via the ONE
         // shared serializer) the supervisor's SupervisorAgentProfile re-parses.
         var api = Guid.NewGuid();

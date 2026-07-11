@@ -52,7 +52,7 @@ public class EffortRouterFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
 
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
@@ -93,7 +93,7 @@ public class EffortRouterFlowTests
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == handle.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "the routed single-agent task must walk start → agent.code → terminal to Success through the real router → projection → engine → executor → fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
+            customMessage: "the routed single-agent task must walk start → agent.run → terminal to Success through the real router → projection → engine → executor → fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
 
         // It is a SNAPSHOT run — no Workflow / WorkflowVersion row for a routed task.
         run.WorkflowId.ShouldBeNull("a routed task run is a snapshot run — not a child of any workflow");
@@ -103,7 +103,7 @@ public class EffortRouterFlowTests
 
         // EVIDENCE the agent really ran the routed goal.
         var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == handle.RunId);
-        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the routed agent.code executed to Succeeded via the real executor + runner");
+        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the routed agent.run executed to Succeeded via the real executor + runner");
 
         var result = JsonSerializer.Deserialize<Messages.Agents.AgentRunResult>(agentRun.ResultJson!, AgentJson.Options)!;
         result.Summary.ShouldBe(SubtaskAwareFakeCli.ExpectedSummaryFor("Work on the auth refactor"),

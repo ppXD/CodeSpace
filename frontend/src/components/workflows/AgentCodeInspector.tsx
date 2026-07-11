@@ -22,7 +22,7 @@ export interface AgentCodeInspectorProps {
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
 /**
- * Dedicated inspector for the `agent.code` node — replaces the generic Config/Inputs forms with the
+ * Dedicated inspector for the `agent.run` node — replaces the generic Config/Inputs forms with the
  * two ways to run a coding agent the engine already supports:
  *
  *   • Use an Agent persona — bind a persona (its system prompt + model + tools become the defaults);

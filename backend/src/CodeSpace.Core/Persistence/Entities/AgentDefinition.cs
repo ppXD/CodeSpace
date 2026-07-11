@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <summary>
 /// A reusable Agent persona — the canonical "Agent" noun: a named, importable, @-mentionable,
 /// directly-runnable capability (system prompt + model + tools + skills + MCP + default autonomy). An
-/// <c>agent.code</c> node references one of these (with optional inline overrides resolved into the
+/// <c>agent.run</c> node references one of these (with optional inline overrides resolved into the
 /// <c>AgentTask</c> at dispatch); the harness projects it. **Harness-AGNOSTIC by design — no harness
 /// column** — so the same persona runs on any compatible harness (Codex today, Claude Code next).
 ///

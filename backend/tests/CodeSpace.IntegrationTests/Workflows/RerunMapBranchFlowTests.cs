@@ -35,7 +35,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <para>D7-5 lifts the pure-body-only restriction to a fail-closed ALLOWLIST (<see cref="RerunBranchBodyPolicy"/>):
 /// a re-run branch body may be PURE, PURELY side-effecting (routes through the D7-3 approval gate at runtime —
 /// approve → fire once / reject → skip, proven here with a per-element <see cref="MutatingProbeNode"/> counter), or
-/// <c>agent.code</c> (re-stages a fresh AgentRun — proven in <c>RerunMapBranchAgentFlowTests</c>, the E2E tier). It
+/// <c>agent.run</c> (re-stages a fresh AgentRun — proven in <c>RerunMapBranchAgentFlowTests</c>, the E2E tier). It
 /// still REFUSES any other suspendable node (un-opted <see cref="SuspendProbeNode"/>), a BOTH side-effecting AND
 /// suspendable node (<see cref="BothFlagsProbeNode"/>, the chat.post_message corruption guard), and a nested
 /// container — each pinned. A real-registry drift-detector here fails the instant a new CanSuspend node author
@@ -982,7 +982,7 @@ public class RerunMapBranchFlowTests
     public async Task Rerun_map_branch_with_an_unopted_suspendable_body_node_is_refused()
     {
         // An un-opted suspendable body (SuspendProbe is CanSuspend WITHOUT IsRerunnableWhenSuspendable) stays
-        // refused — only agent.code opts in. Pins the allowlist: lifting CanSuspend was NOT wholesale.
+        // refused — only agent.run opts in. Pins the allowlist: lifting CanSuspend was NOT wholesale.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "mapbranch-suspbody-" + Guid.NewGuid().ToString("N");
         SuspendProbeNode.Reset(probeKey);
@@ -1023,7 +1023,7 @@ public class RerunMapBranchFlowTests
     [Fact]
     public async Task RerunBranchBodyPolicy_over_the_real_registry_admits_the_three_restage_optins_among_suspendable_nodes()
     {
-        // DRIFT-DETECTOR over the REAL node registry: the fail-closed allowlist admits the re-stage opt-ins (agent.code
+        // DRIFT-DETECTOR over the REAL node registry: the fail-closed allowlist admits the re-stage opt-ins (agent.run
         // → fresh AgentRun; flow.subworkflow → fresh child run, D2; flow.sleep → fresh self-woken timer, D3) as
         // suspendable branch bodies, refuses every OTHER CanSuspend node, and refuses every both-flagged node. Fails the
         // instant a new CanSuspend node author forgets the opt-in, or a both-flagged node is admitted.
@@ -1036,9 +1036,9 @@ public class RerunMapBranchFlowTests
             .OrderBy(k => k)
             .ToList();
 
-        // agent.code + flow.subworkflow + flow.sleep are the admitted suspendable branch bodies (the ReStageExternalRun
+        // agent.run + flow.subworkflow + flow.sleep are the admitted suspendable branch bodies (the ReStageExternalRun
         // opt-ins); a new CanSuspend node forgetting IsRerunnableWhenSuspendable (fail-closed default), or wrongly opting in, breaks this.
-        admittedSuspendable.ShouldBe(new[] { "agent.code", "flow.sleep", "flow.subworkflow" });
+        admittedSuspendable.ShouldBe(new[] { "agent.run", "flow.sleep", "flow.subworkflow" });
 
         registry.All
             .Where(n => n.Manifest.IsSideEffecting && n.Manifest.CanSuspend)
@@ -1059,7 +1059,7 @@ public class RerunMapBranchFlowTests
     {
         // DRIFT-DETECTOR over the REAL registry for the FROM-NODE gate seam (the companion to the branch-policy one
         // above): every live node's disposition-based from-node admit equals the IsRerunUnsupported negation, AND the
-        // re-stage opt-ins (agent.code + flow.subworkflow, D2 + flow.sleep, D3) are the nodes earning ReStageExternalRun
+        // re-stage opt-ins (agent.run + flow.subworkflow, D2 + flow.sleep, D3) are the nodes earning ReStageExternalRun
         // — the ones the from-node arm admits — while every other suspendable node is fail-closed RefuseSuspendable.
         static bool PostP2_2Unsupported(NodeManifest m, string nodeId, string? exemptMapId) =>
             (m.CanSuspend && !(m.IsRerunnableWhenSuspendable && !m.IsSideEffecting))   // suspendable EXCEPT the re-stage opt-ins
@@ -1076,16 +1076,16 @@ public class RerunMapBranchFlowTests
                 .ShouldBe(!PostP2_2Unsupported(n.Manifest, n.TypeKey, exemptMapId), $"from-node gate drifted for {n.TypeKey} exempt={exemptMapId ?? "null"}");
 
         var reStage = registry.All.Where(n => RerunDispositions.For(n.Manifest) == RerunDisposition.ReStageExternalRun).Select(n => n.TypeKey).OrderBy(k => k).ToList();
-        // the re-stage opt-ins earning ReStageExternalRun — agent.code (fresh AgentRun) + flow.subworkflow (fresh child run, D2) + flow.sleep (fresh timer, D3)
-        reStage.ShouldBe(new[] { "agent.code", "flow.sleep", "flow.subworkflow" });
+        // the re-stage opt-ins earning ReStageExternalRun — agent.run (fresh AgentRun) + flow.subworkflow (fresh child run, D2) + flow.sleep (fresh timer, D3)
+        reStage.ShouldBe(new[] { "agent.run", "flow.sleep", "flow.subworkflow" });
 
         // The headline behaviour over the LIVE registry: every re-stage opt-in IS admitted as a from-node root, every
         // OTHER suspendable node is NOT (fail-closed). The live counterpart of the unit cube's surgical-change proof.
-        foreach (var typeKey in new[] { "agent.code", "flow.sleep", "flow.subworkflow" })
+        foreach (var typeKey in new[] { "agent.run", "flow.sleep", "flow.subworkflow" })
             RerunDispositions.Admits(registry.All.Single(n => n.TypeKey == typeKey).Manifest, RerunContext.FromNodeRoot, typeKey, exemptMapId: null)
                 .ShouldBeTrue($"{typeKey} re-stages a fresh external run on the forked run id — admitted as a from-node root");
 
-        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.code" && n.TypeKey != "flow.subworkflow" && n.TypeKey != "flow.sleep").ToList()
+        registry.All.Where(n => n.Manifest.CanSuspend && n.TypeKey != "agent.run" && n.TypeKey != "flow.subworkflow" && n.TypeKey != "flow.sleep").ToList()
             .ShouldAllBe(n => RerunDispositions.For(n.Manifest) == RerunDisposition.RefuseSuspendable
                 && !RerunDispositions.Admits(n.Manifest, RerunContext.FromNodeRoot, n.TypeKey, null),
                 "every other suspendable node stays fail-closed RefuseSuspendable + refused as a from-node root");

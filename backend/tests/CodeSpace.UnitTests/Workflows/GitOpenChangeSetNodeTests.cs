@@ -145,7 +145,7 @@ public sealed class GitOpenChangeSetNodeTests
     {
         var stub = new StubChangeSetService();
 
-        // The exact shape agent.code emits as repositoryResults — fed straight in, no re-authoring of source/target.
+        // The exact shape agent.run emits as repositoryResults — fed straight in, no re-authoring of source/target.
         await new GitOpenChangeSetNode(stub).RunAsync(ContextFrom(new()
         {
             ["repositories"] = JsonSerializer.SerializeToElement(new[]

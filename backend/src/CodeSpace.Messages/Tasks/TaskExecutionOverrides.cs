@@ -5,8 +5,8 @@ namespace CodeSpace.Messages.Tasks;
 /// <summary>
 /// The operator's optional EXECUTION overrides for a launched task (Rule 18.1, a pure data noun) — the harness /
 /// model / persona / runner / credential the launch service folds into a <see cref="ResolvedAgentProfile"/>. Every
-/// field is OPTIONAL and folds to the SAME default <c>agent.code</c> uses when absent (a null harness → the harness
-/// default, etc.), so a bare task launches identically to an authored bare <c>agent.code</c> node. <see cref="Harness"/>
+/// field is OPTIONAL and folds to the SAME default <c>agent.run</c> uses when absent (a null harness → the harness
+/// default, etc.), so a bare task launches identically to an authored bare <c>agent.run</c> node. <see cref="Harness"/>
 /// / <see cref="RunnerKind"/> are OPEN STRINGS (the registries resolve them).
 ///
 /// <para>Safety-budget caps (MaxParallelism / MaxTotalSpawns / MaxCostUsd) are NOT here — they are a

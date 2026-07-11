@@ -982,7 +982,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// Dispatch the agent run a just-suspended <c>agent.code</c> node staged. Looks up the run's pending
+    /// Dispatch the agent run a just-suspended <c>agent.run</c> node staged. Looks up the run's pending
     /// <c>AgentRun</c> wait (its Token is the agent-run id) and enqueues the executor on the background
     /// queue — so the harness streams in its sandbox out-of-band while this run stays Suspended. No-op
     /// for non-agent suspends. Enqueued (not awaited): a worker crash mid-run is re-claimed by the
@@ -990,7 +990,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task DispatchPendingAgentRunAsync(Guid runId, CancellationToken cancellationToken)
     {
-        // Enqueue EVERY agent run this suspend cycle staged — a parallel wave parks K agent.code nodes on K
+        // Enqueue EVERY agent run this suspend cycle staged — a parallel wave parks K agent.run nodes on K
         // AgentRun waits, and each needs its executor launched now. A single FirstOrDefault left K-1 stranded
         // until the reconciler's stale-window re-dispatch. The executor's claim CAS makes a re-dispatch a no-op.
         var tokens = await _db.WorkflowRunWait.AsNoTracking()
@@ -1890,7 +1890,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     ///   on the continue-mode error path.</item>
     /// </list>
     /// That is the exactly-once-per-branch guarantee: a branch that already reached terminal (e.g. an
-    /// <c>agent.code</c> that consumed its AgentRun, or a node that failed before being abandoned) is NEVER
+    /// <c>agent.run</c> that consumed its AgentRun, or a node that failed before being abandoned) is NEVER
     /// re-dispatched when a SIBLING branch's wait resolves and triggers a re-walk. A branch still PARKED (a
     /// node.suspended is its latest row; no terminal, no abandon-failure) is left out of the replay set so it
     /// re-runs from its suspended node (via <see cref="RehydrateMapBranchAsync"/>). A terminate-mode failure
@@ -2571,7 +2571,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // ALREADY staged the K real AgentRun waits (keyed <nodeId>#turn{N}#{k}). We record node.suspended (the
         // run-detail surface) but stage NO extra wait + schedule NO self-advance — the agents' completion +
         // the wait-for-all barrier drive the supervisor's next turn. The K AgentRun rows are dispatched by the
-        // post-Suspended-commit DispatchPendingAgentRunAsync (the SAME path agent.code uses).
+        // post-Suspended-commit DispatchPendingAgentRunAsync (the SAME path agent.run uses).
         if (waitKind == WorkflowWaitKinds.SupervisorAgentWaits)
         {
             await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, token.IterationKey ?? iterationKey, waitKind, wakeAt: null, cancellationToken).ConfigureAwait(false);
@@ -2652,7 +2652,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// Stage the agent run for an <c>agent.code</c> suspension: deserialize the <see cref="AgentTask"/>
+    /// Stage the agent run for an <c>agent.run</c> suspension: deserialize the <see cref="AgentTask"/>
     /// from the suspend payload and create the durable run (Queued, linked to this run + node) via
     /// <see cref="IAgentRunService"/>. NOT dispatched yet — <see cref="DispatchPendingAgentRunAsync"/>
     /// enqueues the executor only after the run commits Suspended, so the work can never start before
@@ -2844,7 +2844,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 catch (AgentRunAdmissionException ex)
                 {
                     // The fail-closed admission cap refused this agent run at staging — a clean node failure (like a
-                    // failed sub-workflow start), so the agent.code node routes to its error edge and, inside a map
+                    // failed sub-workflow start), so the agent.run node routes to its error edge and, inside a map
                     // branch, the map's continue-on-error / terminate policy applies. NOT a crash, NOT a leaked wait.
                     return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
                 }
@@ -2876,7 +2876,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // run away. In-process (non-suspending) retries keep the payload untouched (it is null for them anyway).
             //
             // The retiring payload rides forward one cycle as PriorAttemptPayload before being cleared — a node
-            // whose failed attempt captured a resumable session (agent.code's sessionId/sessionTranscript) reads it
+            // whose failed attempt captured a resumable session (agent.run's sessionId/sessionTranscript) reads it
             // on the fresh pass to warm-continue instead of cold-starting, mirroring the supervisor's own
             // ApplyRetryResumeHintAsync for its subtask retries. A node with no such payload shape just finds
             // nothing to read.

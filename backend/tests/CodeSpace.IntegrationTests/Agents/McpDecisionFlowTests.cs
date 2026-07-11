@@ -538,7 +538,7 @@ public class McpDecisionFlowTests
     [Fact]
     public async Task A_run_with_no_chat_conversation_still_parks_a_queue_answerable_decision()
     {
-        // Slice 0 — the decision substrate is DECOUPLED from chat: a plain agent.code run with NO approval conversation
+        // Slice 0 — the decision substrate is DECOUPLED from chat: a plain agent.run run with NO approval conversation
         // still raises a real, durable, queue-answerable decision (not a flat "no decision surface" refusal). The core
         // answer surface is the durable ledger + the cross-grain queue; the chat card is optional notification.
         var (teamId, ownerId, _) = await SeedTeamChannelAsync();

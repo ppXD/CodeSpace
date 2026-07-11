@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { HarnessSelector } from "./HarnessSelector";
 
 /**
- * The harness picker is dispatched via `x-selector: "harness"` on the `agent.code` node's config.
+ * The harness picker is dispatched via `x-selector: "harness"` on the `agent.run` node's config.
  * It lists the engine's registered harnesses and saves the chosen `kind` as a plain string.
  * Hook mocked: useHarnesses.
  */

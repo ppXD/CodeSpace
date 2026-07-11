@@ -70,7 +70,7 @@ public sealed record SupervisorGoalConfig
 
     /// <summary>
     /// The DEFAULT agent profile every agent this supervisor spawns inherits (P2-3) — the supervisor's
-    /// analogue of the <c>agent.code</c> node's config: repo / harness / model / persona / credential / runner /
+    /// analogue of the <c>agent.run</c> node's config: repo / harness / model / persona / credential / runner /
     /// MCP / autonomy. Wholly OPTIONAL: when absent (or all-null), a spawned agent is the bare
     /// <c>codex-cli</c> / Standard / no-repo task that pre-P2-3 supervisors produced, so an existing flag-on
     /// supervisor authored before this field is byte-identical. <see cref="AllowedTools"/> stays the tool
@@ -125,12 +125,12 @@ public sealed record SupervisorGoalConfig
 
 /// <summary>
 /// The default envelope a supervisor stamps on every agent it spawns (P2-3, Rule 18.1 — a pure data noun in
-/// Messages). Mirrors the <c>agent.code</c> node's config→<c>AgentTask</c> mapping so a supervisor-spawned
+/// Messages). Mirrors the <c>agent.run</c> node's config→<c>AgentTask</c> mapping so a supervisor-spawned
 /// agent is a REAL team agent (persona-merged, repo-cloned, MCP-capable), not a bare skeleton. Every field is
-/// OPTIONAL and folds to the SAME default <c>agent.code</c> uses: a null harness → <c>codex-cli</c>, a null
+/// OPTIONAL and folds to the SAME default <c>agent.run</c> uses: a null harness → <c>codex-cli</c>, a null
 /// autonomy → <c>Standard</c>, a null repo → analysis-only, a null persona → a pure-inline run. The spawned
 /// task's GOAL is the supervisor's per-subtask instruction (never authored here); a persona's system prompt is
-/// merged onto it by the dispatch-time resolver, exactly as for <c>agent.code</c>.
+/// merged onto it by the dispatch-time resolver, exactly as for <c>agent.run</c>.
 /// </summary>
 public sealed record SupervisorAgentProfile
 {
@@ -148,7 +148,7 @@ public sealed record SupervisorAgentProfile
     /// <c>{repositoryId, alias?, access?}</c> — that each spawned agent ALSO clones alongside the primary
     /// <see cref="RepositoryId"/>, for a coordinated change across e.g. a frontend + backend. Captured as the RAW
     /// element (not a typed list) so the executor parses it through the SHARED <c>AgentWorkspaceAuthoring</c> the
-    /// agent.code node uses — ONE authored-repos → workspace projection, no per-producer mirror (Rule 7), and no
+    /// agent.run node uses — ONE authored-repos → workspace projection, no per-producer mirror (Rule 7), and no
     /// brittle enum-deserialization of <c>access</c>. Null / absent / empty → a single-repo spawn (byte-identical).
     /// </summary>
     public JsonElement? RelatedRepositories { get; init; }
@@ -168,7 +168,7 @@ public sealed record SupervisorAgentProfile
     /// <summary>The sandbox runner each spawned agent executes on (e.g. <c>"local"</c>). Null → the executor's default.</summary>
     public string? RunnerKind { get; init; }
 
-    /// <summary>Each spawned agent's wall-clock cap, in seconds — the same vocabulary as the <c>agent.code</c> node's <c>timeoutSeconds</c>: a positive value caps the run, an explicit ≤0 means NO wall-clock (bounded only by the stall watchdog + cost cap), null/absent → the bounded 1h default. Wired from the Launch override so a long deep task is no longer pinned at the default.</summary>
+    /// <summary>Each spawned agent's wall-clock cap, in seconds — the same vocabulary as the <c>agent.run</c> node's <c>timeoutSeconds</c>: a positive value caps the run, an explicit ≤0 means NO wall-clock (bounded only by the stall watchdog + cost cap), null/absent → the bounded 1h default. Wired from the Launch override so a long deep task is no longer pinned at the default.</summary>
     public int? TimeoutSeconds { get; init; }
 
     /// <summary>Per-run opt-in to the MCP tool-fabric endpoint for each spawned agent. Null → defer to the ambient deployment flag (an ordinary spawn is unchanged).</summary>

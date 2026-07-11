@@ -132,7 +132,7 @@ public class DefinitionValidatorMapTests
         // PR2 acceptance: a body node that can SUSPEND (here flow.wait_approval, manifest CanSuspend=true)
         // is now ALLOWED — the PR1 fail-closed guard is gone. Each branch parks under its own iteration key
         // and the run resumes from the ledger when every branch wait resolves. This is the headline of the
-        // planner+parallel-subagents epic: a map body whose element is an agent.code that parks to an AgentRun.
+        // planner+parallel-subagents epic: a map body whose element is an agent.run that parks to an AgentRun.
         var def = new WorkflowDefinition
         {
             Nodes = new List<NodeDefinition>

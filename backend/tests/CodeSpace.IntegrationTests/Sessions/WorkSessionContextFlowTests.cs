@@ -274,7 +274,7 @@ public class WorkSessionContextFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend runs the REAL executor + runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend runs the REAL executor + runner + fake CLI
 
         // Turn 1: a real launch that actually executes to a real summary.
         const string firstGoal = "Work on the auth refactor";
@@ -348,7 +348,7 @@ public class WorkSessionContextFlowTests
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
     }
 
-    /// <summary>Reads the projected agent.code node's <c>goal</c> (the agent prompt) out of the frozen definition snapshot.</summary>
+    /// <summary>Reads the projected agent.run node's <c>goal</c> (the agent prompt) out of the frozen definition snapshot.</summary>
     private async Task<string> ReadAgentGoalAsync(Guid runId)
     {
         var run = await LoadRunAsync(runId);
@@ -359,7 +359,7 @@ public class WorkSessionContextFlowTests
         return agent.GetProperty("config").GetProperty("goal").GetString()!;
     }
 
-    /// <summary>Reads the frozen agent.code node's <c>displayTitle</c> config key — the CLEAN task text a card derives its title from, distinct from <c>goal</c> which a CONTINUE prepends the session grounding to.</summary>
+    /// <summary>Reads the frozen agent.run node's <c>displayTitle</c> config key — the CLEAN task text a card derives its title from, distinct from <c>goal</c> which a CONTINUE prepends the session grounding to.</summary>
     private async Task<string?> ReadAgentDisplayTitleAsync(Guid runId)
     {
         var run = await LoadRunAsync(runId);

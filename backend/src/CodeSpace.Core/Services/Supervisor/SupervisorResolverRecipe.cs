@@ -6,7 +6,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// <summary>
 /// Builds the DETERMINISTIC instruction for a resolver agent (resolver loop #379, S2) — a pure string builder, no
 /// state, no model. Given the goal, the conflicted integration, and the FULL set of the prior agents' produced
-/// branches, it produces the resolver <c>agent.code</c> run's goal text: reconcile those branches into one coherent
+/// branches, it produces the resolver <c>agent.run</c> run's goal text: reconcile those branches into one coherent
 /// change, build, run the tests, and commit ONLY if they pass.
 ///
 /// <para>This is the "deterministic synthesis" half of fork #2: the decider only CHOOSES to attempt resolution (the

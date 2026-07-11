@@ -22,19 +22,19 @@ namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// Closes the continuity gap the self-review found: the PLANNER'S OWN coding-path projection
-/// (<c>recommendedWorkflowKind="coding"</c> ⇒ an <c>agent.code</c> body) driven end-to-end through REAL agents
+/// (<c>recommendedWorkflowKind="coding"</c> ⇒ an <c>agent.run</c> body) driven end-to-end through REAL agents
 /// as ONE continuous flow. Today the two halves are proven only in SEPARATE tests — <see cref="HeadlineFlowE2ETests"/>
-/// fans out agent.code to real agents but on a HAND-BUILT graph the projector never produced, and
+/// fans out agent.run to real agents but on a HAND-BUILT graph the projector never produced, and
 /// <see cref="PlannerProjectionFlowTests"/> drives the real command→planner→projector→engine path but only the
-/// ANALYSIS body (its fake hardcoded "analysis", so it structurally never reached the agent.code branch). This
+/// ANALYSIS body (its fake hardcoded "analysis", so it structurally never reached the agent.run branch). This
 /// test joins them: the projector's OWN coding projection runs real agents.
 ///
 /// <para>The flow, as ONE engine run: the real <c>PlanWorkflowFromTaskCommand</c> → real
 /// <c>WorkflowPlanningService</c> → <c>LlmWorkflowPlanner</c> (structured fake emitting "coding") →
-/// <c>WorkflowPlanProjector</c> emits a graph whose map body is <c>agent.code</c>. We persist that definition
+/// <c>WorkflowPlanProjector</c> emits a graph whose map body is <c>agent.run</c>. We persist that definition
 /// UNCHANGED (save the one synth retarget below), seed a manual run, and run the engine: pass 1 suspends on the
 /// projector's <c>flow.wait_approval</c> gate; we approve; pass 2 the <c>flow.map</c> fans out one
-/// <c>agent.code</c> branch per planned subtask, each of which ACTUALLY EXECUTES through the real
+/// <c>agent.run</c> branch per planned subtask, each of which ACTUALLY EXECUTES through the real
 /// <see cref="IAgentRunExecutor"/> → real <c>LocalProcessRunner</c> → the <see cref="SubtaskAwareFakeCli"/> agent
 /// process → real ParseEvent/BuildResult → natural resume; the synthesizer then composes the real per-branch
 /// results.</para>
@@ -49,7 +49,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// codex so no API key / network is needed), pinned by the Rule-12.5 drift detector
 /// <see cref="SubtaskAwareFakeCliDriftTests"/>. The synthesizer is ALWAYS an <c>llm.complete</c> node even on the
 /// coding path (the projector emits it that way), so it is the ONLY node we retarget to the LLM fake — the
-/// <c>agent.code</c> body is left exactly as the projector emitted it and reaches the fake CLI via
+/// <c>agent.run</c> body is left exactly as the projector emitted it and reaches the fake CLI via
 /// <c>CodexHarness.CommandEnvVar</c>.</para>
 ///
 /// <para>POSIX-only: the fake CLI is a <c>/bin/sh</c> script the runner spawns. Skipped on Windows (Rule 12.1),
@@ -80,7 +80,7 @@ public class PlannerCodingFlowE2ETests
 
             var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-            // ── Plan via the command — the CODING-kind fake makes the projector emit an agent.code map body. ──
+            // ── Plan via the command — the CODING-kind fake makes the projector emit an agent.run map body. ──
             var result = await PlanCodingFromTaskAsync(teamId, userId, "Improve the onboarding module");
 
             result.PlannerEnabled.ShouldBeTrue();
@@ -88,10 +88,10 @@ public class PlannerCodingFlowE2ETests
             result.Definition.ShouldNotBeNull();
             result.Plan!.RecommendedWorkflowKind.ShouldBe(DeterministicTaskPlannerLlmClient.CodingKind);
 
-            // ── LOAD-BEARING: the PLANNER projected the coding path. The map body is agent.code, not hand-built. ──
+            // ── LOAD-BEARING: the PLANNER projected the coding path. The map body is agent.run, not hand-built. ──
             AssertProjectedMapBodyIsAgentCode(result.Definition!);
 
-            // ── Persist + run. Retarget ONLY the synth llm.complete to the fake provider; leave agent.code alone. ──
+            // ── Persist + run. Retarget ONLY the synth llm.complete to the fake provider; leave agent.run alone. ──
             var runnable = RetargetSynthToFake(result.Definition!);
             var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
@@ -104,7 +104,7 @@ public class PlannerCodingFlowE2ETests
             await RunEngineAsync(runId);
             await AssertSuspendedOnApprovalAsync(runId);
 
-            // ── Approve → pass 2: the map fans out agent.code branches; each parks + dispatches its real executor job. ──
+            // ── Approve → pass 2: the map fans out agent.run branches; each parks + dispatches its real executor job. ──
             (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
             await RunEngineAsync(runId);
 
@@ -122,15 +122,15 @@ public class PlannerCodingFlowE2ETests
 
     // ─── Assertions ──────────────────────────────────────────────────────────
 
-    /// <summary>The projector's coding switch fired: the per-branch map body node is <c>agent.code</c> — proof the running graph is the planner's OWN coding projection, not a hand-built one.</summary>
+    /// <summary>The projector's coding switch fired: the per-branch map body node is <c>agent.run</c> — proof the running graph is the planner's OWN coding projection, not a hand-built one.</summary>
     private static void AssertProjectedMapBodyIsAgentCode(WorkflowDefinition definition)
     {
         var body = definition.Nodes.SingleOrDefault(n => n.Id == "body");
 
         body.ShouldNotBeNull("the projector always emits a 'body' node inside the map");
-        body!.TypeKey.ShouldBe("agent.code",
-            customMessage: "the map body MUST be agent.code — if it's llm.complete, the planner's coding switch (ResolveBodyTypeKey) didn't fire and this test isn't exercising the real coding path");
-        body.ParentId.ShouldBe("map", "the agent.code body must be parented to the map so the engine fans it out per subtask");
+        body!.TypeKey.ShouldBe("agent.run",
+            customMessage: "the map body MUST be agent.run — if it's llm.complete, the planner's coding switch (ResolveBodyTypeKey) didn't fire and this test isn't exercising the real coding path");
+        body.ParentId.ShouldBe("map", "the agent.run body must be parented to the map so the engine fans it out per subtask");
     }
 
     private async Task AssertSuspendedOnApprovalAsync(Guid runId)
@@ -184,7 +184,7 @@ public class PlannerCodingFlowE2ETests
         var expectedSummaries = ExpectedAgentSummaries().OrderBy(s => s).ToList();
 
         actualSummaries.ShouldBe(expectedSummaries,
-            customMessage: "each agent's folded summary must be SubtaskAwareFakeCli.ExpectedSummaryFor(\"<title>: <instruction>\") for the planner's OWN subtasks — proving the projector's baked agent.code goal resolved + ran through the real CLI");
+            customMessage: "each agent's folded summary must be SubtaskAwareFakeCli.ExpectedSummaryFor(\"<title>: <instruction>\") for the planner's OWN subtasks — proving the projector's baked agent.run goal resolved + ran through the real CLI");
     }
 
     /// <summary>The map reduce's own bookkeeping: one branch per planned subtask, none failed.</summary>
@@ -193,7 +193,7 @@ public class PlannerCodingFlowE2ETests
         var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
         var mapOut = JsonDocument.Parse(mapNode.OutputsJson!).RootElement;
 
-        mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicTaskPlannerLlmClient.SubtaskTitles.Count, "one agent.code branch fanned out per planned subtask");
+        mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicTaskPlannerLlmClient.SubtaskTitles.Count, "one agent.run branch fanned out per planned subtask");
         mapOut.GetProperty("failed").GetInt32().ShouldBe(0, "no branch failed");
     }
 
@@ -225,7 +225,7 @@ public class PlannerCodingFlowE2ETests
     private async Task<PlanWorkflowFromTaskResult> PlanCodingFromTaskAsync(Guid teamId, Guid userId, string taskText)
     {
         // Child-scope registry holds ONLY the CODING-kind planner fake → LlmWorkflowPlanner resolves it
-        // deterministically and the projector switches onto the agent.code body.
+        // deterministically and the projector switches onto the agent.run body.
         using var scope = _fixture.BeginScope(b =>
         {
             RegisterCaller(b, userId, teamId);
@@ -275,7 +275,7 @@ public class PlannerCodingFlowE2ETests
     /// <summary>
     /// Test-only adaptation: rewrite ONLY the synthesizer's <c>llm.complete</c> provider from the production
     /// default (<c>Anthropic</c>) to the registered fake's tag, so the engine resolves the fake (no API key). On the
-    /// coding path the map body is <c>agent.code</c> — so this leaves the body exactly as the projector emitted it;
+    /// coding path the map body is <c>agent.run</c> — so this leaves the body exactly as the projector emitted it;
     /// only the always-llm.complete synth differs. The graph SHAPE — and the projector that built it — is untouched.
     /// </summary>
     private static WorkflowDefinition RetargetSynthToFake(WorkflowDefinition definition) => definition with

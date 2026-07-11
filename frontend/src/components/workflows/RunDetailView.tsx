@@ -287,7 +287,7 @@ function RunNodeRow({ node: n, branch, parallel, suppressChildEmbed, depth, onOp
         {branch && (
           <span className="wf-run-node-branch" title="Iteration — map element index, or supervisor decision turn">{branch}</span>
         )}
-        {/* For an agent.code node, the raw node status is "Suspended" the whole time the agent is actually
+        {/* For an agent.run node, the raw node status is "Suspended" the whole time the agent is actually
             working (the node parks on its AgentRun wait). Surface the agent run's live status instead so the
             row reads as active work, not an idle wait; the engine truth stays on hover. */}
         {parked
@@ -326,7 +326,7 @@ function RunNodeRow({ node: n, branch, parallel, suppressChildEmbed, depth, onOp
       {n.childRunId && !suppressChildEmbed && (
         <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />
       )}
-      {/* An agent.code step: stream its run's live status + event timeline inline, so you watch
+      {/* An agent.run step: stream its run's live status + event timeline inline, so you watch
           the agent work in real time (and see WHY, not just a static "Suspended"/final status). */}
       {n.agentRunId && <AgentRunTimeline agentRunId={n.agentRunId} />}
       {/* …and, alongside the narrative timeline, the GOVERNED tool-call audit: every side-effecting

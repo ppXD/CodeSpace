@@ -30,7 +30,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// <summary>
 /// Runs one already-created (Queued) agent run to a terminal state: claims it, runs the harness in its
 /// sandbox while streaming normalized events to the durable log, and lands the result. This is the
-/// execution core a worker (the agent.code node's Hangfire job) invokes — substrate-neutral, driving
+/// execution core a worker (the agent.run node's Hangfire job) invokes — substrate-neutral, driving
 /// everything through the harness + runner contracts so any harness/runner combination behaves the same.
 ///
 /// <para><b>Exactly-once:</b> the claim is a CAS (<see cref="IAgentRunService.MarkRunningAsync"/>); if the
@@ -536,7 +536,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
+    /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.run node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
     private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken)
     {
         try
@@ -818,7 +818,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>The stable id for the SET of branches a multi-repo run produces — run-id-derived, so a re-push of the SAME run reuses it (idempotent) and its non-null-ness distinguishes a multi-repo run from a single-repo one. A workflow RETRY of agent.code is a new run id → a new change set (like the produced branch names). Internal + static so it's unit-pinned.</summary>
+    /// <summary>The stable id for the SET of branches a multi-repo run produces — run-id-derived, so a re-push of the SAME run reuses it (idempotent) and its non-null-ness distinguishes a multi-repo run from a single-repo one. A workflow RETRY of agent.run is a new run id → a new change set (like the produced branch names). Internal + static so it's unit-pinned.</summary>
     internal static string ChangeSetIdFor(Guid runId) => $"cs-{runId:N}";
 
     /// <summary>
@@ -835,7 +835,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>
     /// When enabled, push a run's non-empty diff to a deterministically-named remote branch and fold the pushed
-    /// name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a downstream
+    /// name into the result so the agent.run node's <c>branch</c> output carries it — the handoff a downstream
     /// git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING write to
     /// the user's remote, so it is DEFAULT-ON but guarded: the publish guard chain (<see cref="IPublishGuard"/>)
     /// must clear, the run must have a non-empty diff, and the handle must be push-capable; a guard hit stamps
@@ -851,7 +851,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     ///
     /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
     /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
-    /// anyway) and we must not fire it. The branch name is run-id-derived, so a workflow RETRY of agent.code is a
+    /// anyway) and we must not fire it. The branch name is run-id-derived, so a workflow RETRY of agent.run is a
     /// new run id → a NEW branch (acceptable v1 branch-litter), and a re-push of the SAME run is a plain --force
     /// overwrite (no divergent branch).</para>
     ///
@@ -1400,7 +1400,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// node), so this call would otherwise record NOTHING. Mirror the engine: push the run's
     /// <c>(WorkflowRunId, NodeId, IterationKey)</c> cell + a FRESH-scope ledger writer/offloader (the long-running-job
     /// pattern above, not a ctor dep) around the call, so the recording decorator lands its <c>interaction.*</c> onto the
-    /// SAME <c>workflow_run_record</c> ledger as the rest of the run, keyed to the spawning agent.code node. A standalone
+    /// SAME <c>workflow_run_record</c> ledger as the rest of the run, keyed to the spawning agent.run node. A standalone
     /// run (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger ⇒ no scope pushed ⇒ records nothing
     /// (fail-open), and the critic runs byte-identically.
     /// </summary>

@@ -997,7 +997,7 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>
     /// Normalise the supervisor config's reused <c>AllowedTools</c> into the spawned-agent tool allow-list (P2-3),
-    /// preserving the <c>AgentTask.Tools</c> tri-state exactly as agent.code's ReadStringArray: null = inherit the
+    /// preserving the <c>AgentTask.Tools</c> tri-state exactly as agent.run's ReadStringArray: null = inherit the
     /// harness default (and the pre-P2-3 / no-config path), present = the non-blank elements (an empty list stays
     /// empty = no tools). Blanks are dropped so a stray <c>""</c> in the config never reads as a tool.
     /// </summary>

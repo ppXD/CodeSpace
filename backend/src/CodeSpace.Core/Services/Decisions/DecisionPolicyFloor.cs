@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Decisions;
 /// <summary>
 /// The fail-closed policy FLOOR for the Decision substrate (D4) — the single server-side enforcement point that decides
 /// WHO may answer a decision, RAISE-ONLY: it can force a decision up to <see cref="DecisionPolicies.HumanRequired"/>,
-/// but never down. A raiser (an <c>agent.code</c> mid-run, a <c>flow.decision</c> node) DECLARES a policy
+/// but never down. A raiser (an <c>agent.run</c> mid-run, a <c>flow.decision</c> node) DECLARES a policy
 /// (<c>auto_allowed</c> / <c>supervisor_first</c> / <c>human_required</c>); this clamps it so a relabeled or
 /// over-permissive declaration can never let a high-stakes decision auto-resolve without a person.
 ///

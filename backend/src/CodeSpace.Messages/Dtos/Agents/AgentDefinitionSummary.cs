@@ -4,7 +4,7 @@ namespace CodeSpace.Messages.Dtos.Agents;
 
 /// <summary>
 /// Operator-facing row for the Agents library (list + detail). The @-mention <see cref="Slug"/> is the
-/// stable handle an <c>agent.code</c> node / a chat mention resolves against. <see cref="Tools"/> is
+/// stable handle an <c>agent.run</c> node / a chat mention resolves against. <see cref="Tools"/> is
 /// null when the persona inherits the harness's default toolset (distinct from an empty list = no tools).
 /// <see cref="Origin"/> distinguishes an authored persona from an imported one (the latter is re-syncable
 /// from its pack). <see cref="BoundSkills"/> are the skills the persona carries, read from the

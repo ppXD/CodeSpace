@@ -13,7 +13,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// The orphaned-Queued-agent-run leak backstop (the durability audit's P1 finding). An <c>agent.code</c> /
+/// The orphaned-Queued-agent-run leak backstop (the durability audit's P1 finding). An <c>agent.run</c> /
 /// supervisor suspension commits the Queued <c>agent_run</c> (CreateAsync) but can crash BEFORE its
 /// <c>workflow_run_wait</c> commits — leaving a Queued run NO wait references. None of the existing sweeps see it
 /// (ReconcilePendingWaits inspects only wait-referenced runs; SweepStaleRunning is Running-only), so it would sit

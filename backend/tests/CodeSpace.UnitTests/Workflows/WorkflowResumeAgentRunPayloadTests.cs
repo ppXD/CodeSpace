@@ -9,7 +9,7 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// 🟢 Unit: the agent.code resume payload projection (<see cref="WorkflowResumeAgentRunCompletionNotifier"/>.BuildResumePayload)
+/// 🟢 Unit: the agent.run resume payload projection (<see cref="WorkflowResumeAgentRunCompletionNotifier"/>.BuildResumePayload)
 /// + the shared <see cref="RepositoryRunResult.WithoutDiff"/> projection. The crown jewel (resolver loop #379 S7-C0):
 /// the per-repo DIFF the executor now captures must NOT leak into the node's observable <c>outputs_jsonb</c> — the node
 /// output exposes each repo's branch + base for a downstream git.open_change_set, exactly as it already excludes the
@@ -71,7 +71,7 @@ public class WorkflowResumeAgentRunPayloadTests
     [Fact]
     public void BuildResumePayload_surfaces_per_repo_branches_WITHOUT_leaking_the_diff()
     {
-        // S7-C0 — a multi-repo run's resume payload (the agent.code node output source) carries each repo's branch +
+        // S7-C0 — a multi-repo run's resume payload (the agent.run node output source) carries each repo's branch +
         // base for git.open_change_set, but the per-repo diff is stripped so a large change set never bloats outputs_jsonb.
         var result = new AgentRunResult
         {
@@ -106,7 +106,7 @@ public class WorkflowResumeAgentRunPayloadTests
     [Fact]
     public void BuildResumePayload_carries_the_warm_resume_triple_for_a_respawn_to_read()
     {
-        // P2.3: the engine forwards THIS exact payload as PriorAttemptPayload on a retry — agent.code's respawn
+        // P2.3: the engine forwards THIS exact payload as PriorAttemptPayload on a retry — agent.run's respawn
         // reads sessionId/sessionTranscript(ArtifactId) from it to warm-continue instead of cold-starting.
         var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "gateway 429", SessionTranscript = "{\"role\":\"user\"}" };
         var run = new AgentRun { Status = AgentRunStatus.Failed, SessionId = "sess-abc", ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };

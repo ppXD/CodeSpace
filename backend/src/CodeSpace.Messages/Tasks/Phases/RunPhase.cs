@@ -1,7 +1,7 @@
 namespace CodeSpace.Messages.Tasks.Phases;
 
 /// <summary>
-/// One row in a task run's background-tasks UI phase tree — a structural node phase (a map fan-out, an agent.code
+/// One row in a task run's background-tasks UI phase tree — a structural node phase (a map fan-out, an agent.run
 /// step), a supervisor decision phase (plan/spawn/stop), or any future source's contribution. The shape is a
 /// FLAT, source-agnostic noun: the UI renders the merged list sorted by <see cref="Order"/> and never switches on
 /// <see cref="Kind"/> (an OPEN string — 'plan'/'spawn'/'map'/'node'/'agent'/'review'/'wait'/…). The ONLY closed

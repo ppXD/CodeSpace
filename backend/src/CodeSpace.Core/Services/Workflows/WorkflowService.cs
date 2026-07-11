@@ -381,7 +381,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
 
         // Fail-closed, ALL before any write. (1) the target must be a TOP-LEVEL flow.map; (2) its body must be
-        // re-runnable per the D7-5 allowlist (pure + purely-side-effecting [D7-3-gated] + agent.code [re-stage];
+        // re-runnable per the D7-5 allowlist (pure + purely-side-effecting [D7-3-gated] + agent.run [re-stage];
         // refuse other-suspendable / both-flagged / nested-container); (3) the original map must have reached a TERMINAL
         // AGGREGATE — Success OR a terminate-mode Failure (a Failure map provably has no parked sibling, so the clean
         // siblings replay and the failed siblings re-settle-as-failed via the TrySettleBranch Terminate arm; null /
@@ -474,7 +474,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary>Gate (D7-5): a re-run map branch body may contain — pure compute/read nodes; a PURELY side-effecting
     /// node (IsSideEffecting &amp;&amp; !CanSuspend, which parks on the D7-3 approval gate at runtime: approve → fire once /
-    /// reject → skip); and an <c>agent.code</c> node (CanSuspend &amp;&amp; IsRerunnableWhenSuspendable, which re-stages a fresh
+    /// reject → skip); and an <c>agent.run</c> node (CanSuspend &amp;&amp; IsRerunnableWhenSuspendable, which re-stages a fresh
     /// AgentRun with NO human gate). It REFUSES — any OTHER suspendable node (wait_* strand the fork, subworkflow forks
     /// an ungated child closure, supervisor has a distinct per-turn shape, sleep unanalyzed); a node that is BOTH
     /// side-effecting AND suspendable (chat.post_message — the gate cannot compose with the node's own post-then-suspend);
@@ -721,7 +721,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// supervisor / flow.wait_* (approval/callback/action, which re-stage a wait that STRANDS because no external party
     /// re-issues the signal) / decision (re-prompts a human or self-wakes to a stale default — not a faithful re-stage) /
     /// chat.post_message with waitForResponse) or a CONTAINER (a Map/Loop/Try, which would re-run its whole body).
-    /// agent.code, flow.subworkflow and flow.sleep OPT IN (IsRerunnableWhenSuspendable) and re-stage a fresh agent run /
+    /// agent.run, flow.subworkflow and flow.sleep OPT IN (IsRerunnableWhenSuspendable) and re-stage a fresh agent run /
     /// child / timer, so they are admitted. A purely SIDE-EFFECTING node (IsSideEffecting but not
     /// CanSuspend) is NOT refused here: the engine approval-gates it at runtime (D7-3); a node that is BOTH
     /// side-effecting and suspendable is refused via the CanSuspend arm (fail-closed wins). A node UPSTREAM
@@ -1759,7 +1759,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// Maps each <c>agent.code</c> node to the agent run it spawned, keyed by <c>(NodeId, IterationKey)</c> —
+    /// Maps each <c>agent.run</c> node to the agent run it spawned, keyed by <c>(NodeId, IterationKey)</c> —
     /// from the AgentRun wait row (its token IS the agent-run id), which persists post-resolution so the link
     /// holds whether the step is still suspended or finished. Lets the UI stream that run's live timeline.
     /// Merged over the lineage (latest attempt per cell wins), so a reused branch links to its earlier agent run.

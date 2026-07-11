@@ -189,7 +189,7 @@ public class LaunchBasePinFlowTests
         return await scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None);
     }
 
-    /// <summary>Reads the projected agent.code node's <c>pinnedSha</c> input out of the frozen definition snapshot (null when absent ⇒ unpinned).</summary>
+    /// <summary>Reads the projected agent.run node's <c>pinnedSha</c> input out of the frozen definition snapshot (null when absent ⇒ unpinned).</summary>
     private async Task<string?> ReadAgentPinAsync(Guid runId)
     {
         using var scope = _fixture.BeginScope();

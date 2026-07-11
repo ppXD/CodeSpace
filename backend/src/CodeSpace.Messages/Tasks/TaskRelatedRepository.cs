@@ -6,7 +6,7 @@ namespace CodeSpace.Messages.Tasks;
 /// shape: only what the operator chooses (<see cref="RepositoryId"/> + an optional <see cref="Alias"/> /
 /// <see cref="Access"/>); the derived fields (mount path, primary flag, clone ref) are NOT on the wire — the launch
 /// service projects this onto a <c>WorkspaceRepositorySpec</c> through the SHARED <c>AgentWorkspaceAuthoring</c> the
-/// agent.code node + the supervisor already funnel through (Rule 7 — ONE authored-repos → workspace projection).
+/// agent.run node + the supervisor already funnel through (Rule 7 — ONE authored-repos → workspace projection).
 /// <para>Null / empty list on the launch ⇒ a single-repo run (byte-identical to the pre-multi-repo launch).</para>
 /// </summary>
 public sealed record TaskRelatedRepository

@@ -8,7 +8,7 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
 /// <summary>
-/// Runs a coding agent (Codex, Claude Code, …) as a workflow step. On its first pass it builds an
+/// Runs an AI agent (Codex, Claude Code, …) as a workflow step. On its first pass it builds an
 /// <see cref="AgentTask"/> from config and SUSPENDS with an <c>AgentRun</c> token; the engine creates
 /// the durable run, dispatches the executor (which streams the harness in its sandbox), and parks this
 /// node. When the agent run reaches a terminal state the engine resumes this node with
@@ -32,7 +32,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// </summary>
 public sealed class AgentCodeNode : INodeRuntime
 {
-    public string TypeKey => "agent.code";
+    public string TypeKey => "agent.run";
 
     public NodeManifest Manifest { get; } = new()
     {

@@ -77,7 +77,7 @@ public sealed record AgentTask
     /// <summary>
     /// P3 (D1): the supervisor SUBTASK id this agent was spawned for — the linking key for retry-resume. When the
     /// supervisor RETRIES a subtask, the producer finds the prior attempt at the SAME subtask in the same run and
-    /// resumes its conversation. Only the supervisor's spawn/retry stamps it; a top-level agent.code run leaves it null
+    /// resumes its conversation. Only the supervisor's spawn/retry stamps it; a top-level agent.run run leaves it null
     /// (its continuity keys on the fork-cell lineage instead). <c>[JsonIgnore(WhenWritingNull)]</c> so a non-supervisor
     /// task's task_json is byte-identical.
     /// </summary>

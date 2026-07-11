@@ -8,7 +8,7 @@ const agents = vi.hoisted(() => ({ data: [{ id: "p1", slug: "reviewer", name: "R
 vi.mock("@/hooks/use-agents", () => ({ useAgentDefinitions: () => ({ isLoading: false, data: agents.data }) }));
 
 describe("AgentPaletteSection", () => {
-  it("renders nothing when the agent.code node isn't registered", () => {
+  it("renders nothing when the agent.run node isn't registered", () => {
     const { container } = render(<AgentPaletteSection enabled={false} onAdd={() => {}} />);
     expect(container).toBeEmptyDOMElement();
   });

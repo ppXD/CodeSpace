@@ -134,7 +134,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
 describe("RunDetailView — live agent-code node badge", () => {
   const parkedTitle = "Workflow node is parked (Suspended) while its agent runs";
 
-  it("badges a Suspended agent.code node with its agent run's LIVE status, not 'Suspended'", () => {
+  it("badges a Suspended agent.run node with its agent run's LIVE status, not 'Suspended'", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({
       status: "Suspended",
       nodes: [node({ nodeId: "code", status: "Suspended", agentRunId: "ar-1" })],

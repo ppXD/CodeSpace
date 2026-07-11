@@ -15,7 +15,7 @@ namespace CodeSpace.UnitTests.Workflows;
 public class AgentCodeNodeTests
 {
     [Fact]
-    public void Type_key_is_agent_code() => new AgentCodeNode().TypeKey.ShouldBe("agent.code");
+    public void Type_key_is_agent_code() => new AgentCodeNode().TypeKey.ShouldBe("agent.run");
 
     [Fact]
     public async Task First_pass_suspends_on_an_agent_run_wait_carrying_the_task_envelope()

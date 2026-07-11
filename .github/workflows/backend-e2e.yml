@@ -10,7 +10,7 @@ name: Backend · E2E
 #
 #   2. e2e-engine (Surface=Engine) — THE headline intelligent flow driven top-to-bottom as one engine run:
 #      trigger.manual → llm.complete(responseSchema) planner → flow.map fan-out whose body is a REAL
-#      agent.code that ACTUALLY EXECUTES (real AgentRunExecutor → real LocalProcessRunner → a fake
+#      agent.run that ACTUALLY EXECUTES (real AgentRunExecutor → real LocalProcessRunner → a fake
 #      codex CLI process under REAL bubblewrap confinement → real completion → resume) → a synthesizer
 #      that reduces the per-branch results. These engine-tier tests reuse the shared Postgres fixture +
 #      seed infra from CodeSpace.IntegrationTests (referenced as a project). bubblewrap is installed +
@@ -129,7 +129,7 @@ jobs:
       options: --privileged
 
     env:
-      # Fail-closed: the headline E2E runs a REAL agent.code branch through the real LocalProcessRunner,
+      # Fail-closed: the headline E2E runs a REAL agent.run branch through the real LocalProcessRunner,
       # which confines it under bubblewrap. With REQUIRE_SANDBOX=1 a host that can't sandbox (no bwrap /
       # no unprivileged userns) makes the run fail HARD instead of silently executing the agent unconfined
       # — so green here means the agent really ran AND was really confined.

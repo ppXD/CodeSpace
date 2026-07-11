@@ -646,7 +646,7 @@ public class TeamRunsIndexFlowTests
         var nodeDecision = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
         await SeedNodeDecisionWaitAsync(nodeDecision);                                                  // parked on a Decision wait
         var agentDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Running);
-        await SeedAgentDecisionAsync(teamA, agentDecision);                                             // an agent.code decision.request
+        await SeedAgentDecisionAsync(teamA, agentDecision);                                             // an agent.run decision.request
         var resolvedDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Suspended);
         await SeedNodeDecisionWaitAsync(resolvedDecision, resolved: true);                              // a RESOLVED decision → no longer pending
         var suspendedNoDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-3), workflowId: null, status: WorkflowRunStatus.Suspended);   // Suspended, but on no decision

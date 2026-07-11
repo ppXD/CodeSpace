@@ -367,14 +367,14 @@ public class WorkSessionBranchFlowTests
         return await scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None);
     }
 
-    /// <summary>Reads the projected agent.code node's <c>baseRef</c> input out of the frozen definition snapshot (null when absent ⇒ default branch).</summary>
+    /// <summary>Reads the projected agent.run node's <c>baseRef</c> input out of the frozen definition snapshot (null when absent ⇒ default branch).</summary>
     private async Task<string?> ReadAgentBaseRefAsync(Guid runId)
     {
         var agent = await ReadAgentNodeAsync(runId);
         return agent.GetProperty("inputs").TryGetProperty("baseRef", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     }
 
-    /// <summary>Reads a RELATED repo's <c>ref</c> out of the frozen agent.code node's <c>relatedRepositories</c> input (null when the repo/ref is absent ⇒ default branch).</summary>
+    /// <summary>Reads a RELATED repo's <c>ref</c> out of the frozen agent.run node's <c>relatedRepositories</c> input (null when the repo/ref is absent ⇒ default branch).</summary>
     private async Task<string?> ReadAgentRelatedRefAsync(Guid runId, Guid repoId)
     {
         var agent = await ReadAgentNodeAsync(runId);

@@ -12,7 +12,7 @@ import { WorkflowNode, type WorkflowNodeData } from "./WorkflowNode";
 vi.mock("./AgentRunTimeline", () => ({ AgentRunTimeline: ({ agentRunId }: { agentRunId: string }) => <div data-testid="agent-timeline" data-run={agentRunId} /> }));
 vi.mock("./AgentToolCalls", () => ({ AgentToolCalls: ({ agentRunId }: { agentRunId: string }) => <div data-testid="agent-toolcalls" data-run={agentRunId} /> }));
 
-// WorkflowNode reads a parked agent.code node's LIVE status via useAgentRun — mock it (the real hook needs a
+// WorkflowNode reads a parked agent.run node's LIVE status via useAgentRun — mock it (the real hook needs a
 // QueryClient). `agentHook.status` drives what the node sees; reset after each test.
 const agentHook = vi.hoisted(() => ({ status: undefined as string | undefined }));
 vi.mock("@/hooks/use-agents", () => ({ useAgentRun: () => ({ data: agentHook.status ? { status: agentHook.status } : undefined }) }));
@@ -132,8 +132,8 @@ describe("WorkflowNode coze-style result footer", () => {
   });
 });
 
-describe("WorkflowNode result footer — agent.code + sub-workflow embeds (S3)", () => {
-  it("makes an agent.code node expandable and embeds its live timeline + tool-call audit", () => {
+describe("WorkflowNode result footer — agent.run + sub-workflow embeds (S3)", () => {
+  it("makes an agent.run node expandable and embeds its live timeline + tool-call audit", () => {
     const run = renderNode({
       runStatus: "Suspended",   // an agent node parks (Suspended) while the agent works
       runRows: [row({ status: "Suspended", outputs: {}, agentRunId: "agent-7", startedAt: "2026-06-22T00:00:00.000Z", completedAt: null })],
@@ -185,7 +185,7 @@ describe("WorkflowNode result footer — agent.code + sub-workflow embeds (S3)",
     expect(run.container.querySelector(".wf-rf-fanout-term-ix")?.textContent).toBe("#2");
   });
 
-  it("surfaces a parked agent.code node's live status as Running (not the idle Suspended)", () => {
+  it("surfaces a parked agent.run node's live status as Running (not the idle Suspended)", () => {
     agentHook.status = "Running";   // the agent is actively working while the node parks
     const run = renderNode({
       runStatus: "Suspended",

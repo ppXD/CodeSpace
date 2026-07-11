@@ -19,8 +19,8 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// Regression for the parallel <c>agent.code</c> resume-corruption bug, against real Postgres + the real
-/// engine + the real AgentRunService / completion notifier. Two unconnected agent.code nodes run in ONE
+/// Regression for the parallel <c>agent.run</c> resume-corruption bug, against real Postgres + the real
+/// engine + the real AgentRunService / completion notifier. Two unconnected agent.run nodes run in ONE
 /// parallel wave; each MUST resume with its OWN agent's result. Pins all three fixed behaviours:
 /// <list type="bullet">
 ///   <item><b>dispatch-all</b> — both staged agent runs are dispatched on suspend (not just the first);</item>
@@ -53,7 +53,7 @@ public class ParallelAgentResumeFlowTests
 
         try
         {
-            // ── Pass 1: both agent.code nodes park in one wave → two AgentRun waits, run Suspended. ──
+            // ── Pass 1: both agent.run nodes park in one wave → two AgentRun waits, run Suspended. ──
             await RunEngineAsync(runId);
 
             var (agentA, agentB) = await GetTwoAgentRunIdsAsync(runId);
@@ -63,7 +63,7 @@ public class ParallelAgentResumeFlowTests
                 var db = verify.Resolve<CodeSpaceDbContext>();
                 (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
                 (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
-                    .ShouldBe(2, "a parallel wave parks BOTH agent.code nodes on their own AgentRun wait");
+                    .ShouldBe(2, "a parallel wave parks BOTH agent.run nodes on their own AgentRun wait");
             }
 
             // dispatch-all: BOTH staged agent runs were enqueued on suspend (the bug enqueued only the first).
@@ -217,10 +217,10 @@ public class ParallelAgentResumeFlowTests
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agentA", TypeKey = "agent.code",
+            new() { Id = "agentA", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Task A","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agentB", TypeKey = "agent.code",
+            new() { Id = "agentB", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Task B","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),

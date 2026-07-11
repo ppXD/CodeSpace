@@ -7,7 +7,7 @@ namespace CodeSpace.Messages.Commands.Decisions;
 /// <summary>
 /// Answer a pending decision FROM THE QUEUE — the generic write that completes the cross-grain "Needs decision" queue
 /// (Decision substrate D3b). One command answers EITHER grain: the service routes by the decision's id to the right
-/// durable resume mechanism (an <c>agent.code</c> <c>decision.request</c> unblocks its mid-run call; a
+/// durable resume mechanism (an <c>agent.run</c> <c>decision.request</c> unblocks its mid-run call; a
 /// <c>flow.decision</c> node resumes its run from the exact node), so the caller never needs to know which grain it is.
 ///
 /// <para>Tenancy (<see cref="IRequireTeamMembership"/>): the team is resolved from <c>ICurrentTeam</c> and the answerer

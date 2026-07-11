@@ -255,7 +255,7 @@ public class WorkSessionSummaryFlowTests
     public async Task A_continue_past_the_window_folds_the_summary_and_carries_it_into_the_launched_agent_goal()
     {
         // End-to-end through the REAL ITaskLaunchService: a continue on a >window thread runs the summarizer (fed a
-        // scoped fake LLM registry) then BuildAsync, and the distilled summary lands in the frozen agent.code goal via
+        // scoped fake LLM registry) then BuildAsync, and the distilled summary lands in the frozen agent.run goal via
         // ComposeGoal — proving TaskLaunchService → summarizer → digest → projection wires up + commits atomically.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");

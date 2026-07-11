@@ -1,6 +1,6 @@
 -- 0041_workflow_run_wait_agent_run_kind.sql
 --
--- The agent.code node suspends on an 'AgentRun' wait whose Token is the agent-run id; the agent run's
+-- The agent.run node suspends on an 'AgentRun' wait whose Token is the agent-run id; the agent run's
 -- completion resumes the node. Widen the wait_kind CHECK to admit the new kind (mirrors 0034/0035).
 -- VARCHAR(16) already fits 'AgentRun'. Idempotent (DROP IF EXISTS + re-ADD).
 

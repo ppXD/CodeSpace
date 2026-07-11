@@ -337,7 +337,7 @@ export interface WorkflowRunNodeSummary {
    */
   childRunId?: string | null;
   /**
-   * For an `agent.code` node — the id of the agent run this step spawned. Lets the run-detail view
+   * For an `agent.run` node — the id of the agent run this step spawned. Lets the run-detail view
    * embed the run's live status + event timeline inline for this step. `null`/absent otherwise.
    */
   agentRunId?: string | null;
@@ -566,7 +566,7 @@ export interface DecisionOption {
 
 /**
  * Mirrors backend `PendingDecision` — one PENDING item in the unified queue, projected over BOTH park grains
- * (an `agent.code` mid-run `decision.request` AND a `flow.decision` node wait). `rootTraceId` is the run-tree
+ * (an `agent.run` mid-run `decision.request` AND a `flow.decision` node wait). `rootTraceId` is the run-tree
  * key the Run Room filters on; `grain`/`decisionType`/`riskLevel`/`policy` are open strings.
  */
 export interface PendingDecision {

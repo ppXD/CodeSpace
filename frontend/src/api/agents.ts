@@ -31,7 +31,7 @@ export interface AgentDefinitionInput {
 
 /**
  * Mirrors backend `AgentDefinitionSummary` — a reusable Agent persona (the canonical "Agent" noun).
- * The @-mention `slug` is the stable handle an `agent.code` node references; `tools` is null when the
+ * The @-mention `slug` is the stable handle an `agent.run` node references; `tools` is null when the
  * persona inherits the harness's default toolset (distinct from an empty list = no tools). `boundSkills`
  * are the skills the persona carries (the binding join, ordered by handle).
  */
@@ -54,7 +54,7 @@ export interface AgentDefinitionSummary {
 
 /**
  * Mirrors backend `HarnessSummary` — one agent harness registered in the engine. `kind` is the wire
- * value the `agent.code` node stores (e.g. "codex-cli", "claude-code"); `models` seeds the model
+ * value the `agent.run` node stores (e.g. "codex-cli", "claude-code"); `models` seeds the model
  * field's suggestions for the chosen harness. Deployment-level, so the same set for every team.
  */
 export interface HarnessSummary {
@@ -72,7 +72,7 @@ export interface AgentRunSummary {
   id: string;
   status: AgentRunStatus;
   harness: string;
-  /** The goal the agent was given — its instruction/prompt (a supervisor-spawned agent's per-subtask instruction, or an agent.code node's configured goal). null/absent when the task blob is missing. */
+  /** The goal the agent was given — its instruction/prompt (a supervisor-spawned agent's per-subtask instruction, or an agent.run node's configured goal). null/absent when the task blob is missing. */
   goal?: string | null;
   error: string | null;
   startedAt: string | null;

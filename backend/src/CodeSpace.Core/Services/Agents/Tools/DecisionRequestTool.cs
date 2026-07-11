@@ -5,7 +5,7 @@ using CodeSpace.Messages.Decisions;
 namespace CodeSpace.Core.Services.Agents.Tools;
 
 /// <summary>
-/// The first-party <c>decision.request</c> MCP tool (Decision substrate D2): the seam an <c>agent.code</c> mid-run
+/// The first-party <c>decision.request</c> MCP tool (Decision substrate D2): the seam an <c>agent.run</c> mid-run
 /// uses to PAUSE and ask a typed question — pick an option, confirm, or free-text — and BLOCK until a human (or, once
 /// D4 lands, a policy / supervisor arbiter) answers. It is an ASK, never a side effect, so it never flows through the
 /// autonomy gate; <see cref="McpRequestHandler"/> special-cases it BEFORE the gate and drives the durable park/block

@@ -30,7 +30,7 @@ namespace CodeSpace.E2ETests.Workflows;
 ///
 /// <para>The work-plan fake (<see cref="DeterministicWorkPlanLlmClient"/>, heterogeneous-kinds script) authors a HETEROGENEOUS plan: one
 /// <c>research</c> item ("Work on alpha") + two <c>code</c> items ("Work on beta", "Work on gamma"). The map
-/// binds <c>{{item.instruction}}</c> + <c>{{item.kind}}</c> per branch; the agent.code node maps each mode to a base
+/// binds <c>{{item.instruction}}</c> + <c>{{item.kind}}</c> per branch; the agent.run node maps each mode to a base
 /// (research = read-only + no produced branch; code = workspace write + push its own branch) UNDER the
 /// autonomy-tier + override precedence. The assertions read the PERSISTED <c>AgentRun.TaskJson</c> → <c>AgentTask</c>
 /// and prove the model→platform DECISION per branch: the research branch resolved to <c>WriteScope=ReadOnly</c> +
@@ -83,7 +83,7 @@ public class PlanMapDynamicFanoutFlowTests
 
             var jobClient = ResolveJobClient();
             jobClient.Clear();
-            jobClient.AutoExecute = true;   // the agent.code suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
+            jobClient.AutoExecute = true;   // the agent.run suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
 
             var workflowCountBefore = await CountWorkflowsAsync(teamId);
             var versionCountBefore = await CountWorkflowVersionsAsync();
@@ -99,7 +99,7 @@ public class PlanMapDynamicFanoutFlowTests
             //    fake's row + retarget the synth to the synth fake; the real starter freezes + dispatches. ──
             var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
 
-            // ── Pass 1: planner emits per-agent specs, the map fans out N real agent.code branches, each parks +
+            // ── Pass 1: planner emits per-agent specs, the map fans out N real agent.run branches, each parks +
             //    dispatches its real executor job; the run suspends. ──
             await RunEngineAsync(runId);
 
@@ -148,7 +148,7 @@ public class PlanMapDynamicFanoutFlowTests
         agentRuns.Count.ShouldBeGreaterThan(1, "the map fanned out to MULTIPLE agents — this is a real multi-agent run, not a single agent");
         agentRuns.Count.ShouldBe(DeterministicWorkPlanLlmClient.HeterogeneousItems.Count, "one real AgentRun executed per planned subtask");
         agentRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded, "every branch agent actually executed to Succeeded via the real executor + runner");
-        agentRuns.ShouldAllBe(r => r.NodeId == "agent", "every branch links back to the projected agent.code body node");
+        agentRuns.ShouldAllBe(r => r.NodeId == "agent", "every branch links back to the projected agent.run body node");
     }
 
     /// <summary>EACH authored subtask GOAL propagated through the fan-out: every planner-authored goal shows up as exactly one real agent's resolved goal — proving the map's {{item.goal}} resolved per branch.</summary>
@@ -276,7 +276,7 @@ public class PlanMapDynamicFanoutFlowTests
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite BOTH <c>llm.complete</c> providers — the PLANNER node to the SPEC planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    /// <summary>Test-only adaptation: rewrite BOTH <c>llm.complete</c> providers — the PLANNER node to the SPEC planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.run body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
     private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
         Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),

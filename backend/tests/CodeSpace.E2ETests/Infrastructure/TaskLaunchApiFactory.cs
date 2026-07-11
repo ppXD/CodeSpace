@@ -15,7 +15,7 @@ namespace CodeSpace.E2ETests.Infrastructure;
 /// controller, the GlobalExceptionFilter, the mediator) in-memory against a throw-away GUID-named Postgres DB —
 /// for the <c>POST /api/tasks</c> launch E2E. Unlike <see cref="WebhookApiFactory"/> (which swaps in a no-op job
 /// client), this wires the <see cref="DeferredJobClient"/> as a SINGLETON so the launch endpoint's post-commit
-/// dispatch → engine run → agent.code → executor → fake CLI → resume → terminal chain can be DRAINED after the
+/// dispatch → engine run → agent.run → executor → fake CLI → resume → terminal chain can be DRAINED after the
 /// HTTP request returns — the run actually executes, end to end, behind the real HTTP surface.
 /// </summary>
 public sealed class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.Program>, IAsyncLifetime

@@ -4,7 +4,7 @@ namespace CodeSpace.Messages.Dtos.Decisions;
 
 /// <summary>
 /// One PENDING decision in the cross-grain "Needs decision" queue (Decision substrate D3) — the UNIFIED projection over
-/// BOTH park backends, team-scoped: an <c>agent.code</c> mid-run <c>decision.request</c> parked as a tool-ledger row,
+/// BOTH park backends, team-scoped: an <c>agent.run</c> mid-run <c>decision.request</c> parked as a tool-ledger row,
 /// AND a <c>flow.decision</c> node parked as a workflow-run wait. The display fields are projected from the parked
 /// <c>DecisionRequest</c> envelope (stashed at park on both backends), so the queue needs no grain-specific knowledge
 /// beyond the envelope. A Rule 18.1 pure data noun.

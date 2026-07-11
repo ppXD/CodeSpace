@@ -24,7 +24,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// row is distinct.
 ///
 /// <para>Mirrors <see cref="AgentCodeNode"/>'s re-entry shape (resume-from-payload vs return Suspend), but
-/// where agent.code waits on an EXTERNAL agent run, the supervisor turn waits on NOTHING external — its
+/// where agent.run waits on an EXTERNAL agent run, the supervisor turn waits on NOTHING external — its
 /// SupervisorDecision wait self-resumes. The node is a thin shell (Rule 16): it reads the run/team from the
 /// system scope, then delegates the whole turn to the scoped <see cref="ISupervisorTurnService"/>, resolved
 /// through an <see cref="IServiceScopeFactory"/> because the node itself is a DI singleton.</para>
@@ -430,7 +430,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
-    /// <summary>Read an optional uuid config value (the ask_human conversation), null when absent / empty / not a valid id (mirrors agent.code's ReadOptionalGuid).</summary>
+    /// <summary>Read an optional uuid config value (the ask_human conversation), null when absent / empty / not a valid id (mirrors agent.run's ReadOptionalGuid).</summary>
     private static Guid? ReadOptionalGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String && Guid.TryParse(v.GetString(), out var id) ? id : null;
 

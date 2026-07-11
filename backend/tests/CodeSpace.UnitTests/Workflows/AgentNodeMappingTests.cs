@@ -19,7 +19,7 @@ public class AgentNodeMappingTests
     public void BuildAgentConfig_omits_mode_when_null()
     {
         // The byte-identical regression pin: the two existing callers pass no third arg → mode defaults to null →
-        // the key is omitted entirely, so the emitted agent.code config is unchanged from before the param existed.
+        // the key is omitted entirely, so the emitted agent.run config is unchanged from before the param existed.
         var config = AgentNodeMapping.BuildAgentConfig("Work on {{item}}", new ResolvedAgentProfile { Harness = "codex-cli" });
 
         config.TryGetProperty("mode", out _).ShouldBeFalse("an absent mode must not emit the key — the existing callers' JSON stays byte-identical");
@@ -43,7 +43,7 @@ public class AgentNodeMappingTests
     {
         var config = AgentNodeMapping.BuildAgentConfig("Work on {{item.goal}}", new ResolvedAgentProfile { Harness = "codex-cli" }, mode);
 
-        config.GetProperty("mode").GetString().ShouldBe(mode, "a present mode is emitted as the agent.code config key the node reads");
+        config.GetProperty("mode").GetString().ShouldBe(mode, "a present mode is emitted as the agent.run config key the node reads");
     }
 
     // ── displayTitle: the CLEAN pre-grounding goal, so a CONTINUE's card title never shows the digest heading ──
@@ -67,7 +67,7 @@ public class AgentNodeMappingTests
         config.GetProperty("displayTitle").GetString().ShouldBe("Add retry logic");
     }
 
-    // ── timeoutSeconds: the operator's per-agent wall-clock mapped onto the agent.code config key the node reads. ──
+    // ── timeoutSeconds: the operator's per-agent wall-clock mapped onto the agent.run config key the node reads. ──
 
     [Fact]
     public void BuildAgentConfig_omits_timeoutSeconds_when_the_profile_sets_none()
@@ -84,10 +84,10 @@ public class AgentNodeMappingTests
     {
         var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli", TimeoutSeconds = timeout });
 
-        config.GetProperty("timeoutSeconds").GetInt32().ShouldBe(timeout, "the per-agent wall-clock is emitted verbatim (incl. 0 = infinite) onto the agent.code config key the node reads");
+        config.GetProperty("timeoutSeconds").GetInt32().ShouldBe(timeout, "the per-agent wall-clock is emitted verbatim (incl. 0 = infinite) onto the agent.run config key the node reads");
     }
 
-    // ── reviseRounds: the S6 bounded revise budget mapped onto the agent.code config key the node reads. ──
+    // ── reviseRounds: the S6 bounded revise budget mapped onto the agent.run config key the node reads. ──
 
     [Fact]
     public void BuildAgentConfig_omits_reviseRounds_when_the_profile_sets_none()
@@ -104,7 +104,7 @@ public class AgentNodeMappingTests
     {
         var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli", ReviseRounds = rounds });
 
-        config.GetProperty("reviseRounds").GetInt32().ShouldBe(rounds, "the revise budget is emitted verbatim onto the agent.code config key the node reads");
+        config.GetProperty("reviseRounds").GetInt32().ShouldBe(rounds, "the revise budget is emitted verbatim onto the agent.run config key the node reads");
     }
 
     // ── BuildAgentInputs: the Rule-16 single home that threads BaseRefs onto baseRef + relatedRepositories[].ref,

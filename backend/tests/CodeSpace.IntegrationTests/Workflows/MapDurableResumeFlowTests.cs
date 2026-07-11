@@ -19,7 +19,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// Map-PR2 — durable parallel-branch suspend/resume for the <c>flow.map</c> fan-out, against real Postgres
 /// + the real engine + the real <see cref="WorkflowResumeService"/>. This is the headline of the
 /// planner+parallel-subagents epic: a map body now contains a node that SUSPENDS (here a hermetic
-/// <see cref="SuspendProbeNode"/> that parks a real Action wait — the stand-in for an <c>agent.code</c>
+/// <see cref="SuspendProbeNode"/> that parks a real Action wait — the stand-in for an <c>agent.run</c>
 /// that parks to an AgentRun). K subtasks fan out to K parallel branches, each parks under its own
 /// iteration key <c>"&lt;mapId&gt;#&lt;i&gt;"</c>, the run stays Suspended until ALL branch waits resolve
 /// (the wait-for-all barrier via <see cref="IWorkflowResumeService.ResumeOnWaitCompletionAsync"/> — the
@@ -218,7 +218,7 @@ public class MapDurableResumeFlowTests
     public async Task The_planner_map_synthesizer_e2e_with_suspending_bodies_resumes_and_synthesizes()
     {
         // (e) THE HEADLINE: a planner stub emits json.subtasks (2 elements); flow.map fans over it; each
-        // branch is a SUSPENDING node (the agent.code stand-in) that parks to its own wait; we resume each
+        // branch is a SUSPENDING node (the agent.run stand-in) that parks to its own wait; we resume each
         // (wait-for-all barrier); the branch results reduce; a downstream synthesizer reads results[] /
         // results[0].summary / results.length as the run's outputs.
         var key = "sp-" + Guid.NewGuid().ToString("N");
@@ -703,7 +703,7 @@ public class MapDurableResumeFlowTests
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    // manual → map(items={{trigger.things}}; body: ms → park[SuspendProbe, the agent.code stand-in]) → terminal.
+    // manual → map(items={{trigger.things}}; body: ms → park[SuspendProbe, the agent.run stand-in]) → terminal.
     // The body terminal `park` parks an Action wait on its first pass and echoes { item, summary } on resume.
     private static WorkflowDefinition SuspendingMapDefinition(string key) => new()
     {

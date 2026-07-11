@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 /// not a container-internal branch). Map fan-outs roll up: a top-level node whose DIRECT branch rows carry
 /// <c>ContainerKind == "flow.map"</c> and an <c>IterationKey</c> prefixed <c>"&lt;mapNodeId&gt;#"</c> becomes a single
 /// 'map' phase whose Agents are those branches' agent refs + a count/failed metric from the map node's output roll-up.
-/// A plain top-level node carrying an <c>AgentRunId</c> (agent.code / agent.supervisor) becomes an 'agent' phase with
+/// A plain top-level node carrying an <c>AgentRunId</c> (agent.run / agent.supervisor) becomes an 'agent' phase with
 /// one ref; everything else is a plain 'node' phase. The node→agentRunId + branch ContainerKind are ALREADY resolved
 /// on the summary rows (PR1-PR6 substrate), so this never re-queries waits.
 ///
@@ -45,7 +45,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         if (run == null) return Array.Empty<RunPhase>();
 
         // ONE team-scoped read of the real AgentRun rows + tool ledger gives BOTH the ground-truth status AND the
-        // per-agent metrics (duration / tokens / tool count / model), so a plain agent.code / map agent now carries the
+        // per-agent metrics (duration / tokens / tool count / model), so a plain agent.run / map agent now carries the
         // SAME rollup the supervisor source folds from its ledger — not just status.
         var metricsById = await _metrics.ReadAsync(context.TeamId, AgentRunIdsOf(run.Nodes), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 

@@ -30,7 +30,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// projects the graph; we persist it UNCHANGED except retargeting the planner's <c>llm.complete</c> provider to
 /// the deterministic fake (the SAME honest IStructuredLLMClient-seam retarget HeadlineFlow / PlannerCodingFlow
 /// use); the real <see cref="IRunFromSnapshotStarter"/> freezes + dispatches it; the engine walks
-/// planner → <c>flow.map</c> (fans out one <c>agent.code</c> branch per planned subtask) → each branch ACTUALLY
+/// planner → <c>flow.map</c> (fans out one <c>agent.run</c> branch per planned subtask) → each branch ACTUALLY
 /// EXECUTES through the real <see cref="IAgentRunExecutor"/> → real <c>LocalProcessRunner</c> → the
 /// <see cref="SubtaskAwareFakeCli"/> process → real ParseEvent/BuildResult → natural resume; the synthesizer
 /// reduces the real per-branch results.</para>
@@ -73,7 +73,7 @@ public class PlanMapSynthFanoutFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
 
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
@@ -88,7 +88,7 @@ public class PlanMapSynthFanoutFlowTests
         //    work-plan fake's row + retarget the synth (the honest LLM seams); the real starter freezes + dispatches. ──
         var runId = await ProjectRetargetAndStartAsync(route, teamId, userId, plannerRowId);
 
-        // ── Pass 1: planner emits subtasks, the map fans out N real agent.code branches, each parks + dispatches
+        // ── Pass 1: planner emits subtasks, the map fans out N real agent.run branches, each parks + dispatches
         //    its real executor job; the run suspends. ──
         await RunEngineAsync(runId);
 
@@ -207,7 +207,7 @@ public class PlanMapSynthFanoutFlowTests
         agentRuns.Count.ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count, "one real AgentRun executed per planned subtask");
         agentRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded, "every branch agent actually executed to Succeeded via the real executor + runner");
         agentRuns.ShouldAllBe(r => r.ResultJson != null, "each run persisted a real folded AgentRunResult — not a fabricated stand-in");
-        agentRuns.ShouldAllBe(r => r.NodeId == "agent", "every branch links back to the projected agent.code body node");
+        agentRuns.ShouldAllBe(r => r.NodeId == "agent", "every branch links back to the projected agent.run body node");
     }
 
     /// <summary>EACH subtask's goal propagated through the fan-out: every planned subtask's goal ("Work on &lt;subtask&gt;") shows up as exactly one real agent's resolved goal — proving the map's {{item}} resolved per branch.</summary>
@@ -286,7 +286,7 @@ public class PlanMapSynthFanoutFlowTests
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: pin the plan.author PLANNER to the work-plan fake's pool row + rewrite the SYNTH llm.complete provider to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    /// <summary>Test-only adaptation: pin the plan.author PLANNER to the work-plan fake's pool row + rewrite the SYNTH llm.complete provider to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID; the agent.run body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
     private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition, Guid plannerRowId) => definition with
     {
         Nodes = definition.Nodes.Select(n => RetargetNode(n, plannerRowId)).ToList(),

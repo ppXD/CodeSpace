@@ -55,7 +55,7 @@ public class AgentRunExecutorRecordingFlowTests
 
             using (var scope = _fixture.BeginScope())
             {
-                // A persisted agent run spawned by this workflow run's agent.code node — the (WorkflowRunId, NodeId) cell
+                // A persisted agent run spawned by this workflow run's agent.run node — the (WorkflowRunId, NodeId) cell
                 // the interaction records key onto.
                 var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
 

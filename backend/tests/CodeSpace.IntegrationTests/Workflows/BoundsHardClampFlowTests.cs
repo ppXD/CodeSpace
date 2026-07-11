@@ -27,7 +27,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///
 /// <list type="number">
 ///   <item><b>Autonomy ceiling clamp.</b> An operator launching a task at <c>Autonomy=Unleashed</c> on a route
-///     whose <c>AutonomyCeiling</c> is Standard runs at STANDARD: the materialized agent.code node's
+///     whose <c>AutonomyCeiling</c> is Standard runs at STANDARD: the materialized agent.run node's
 ///     <c>autonomyLevel</c> is "Standard", AND — the load-bearing proof — the REAL persisted
 ///     <c>AgentTask.Permissions</c> the runner receives equal <c>AgentAutonomyPolicy.Derive(Standard)</c>, not the
 ///     network-on Unleashed set. The clamp is the single choke point in <c>TaskLaunchService.BuildAgentProfile</c>;
@@ -93,7 +93,7 @@ public class BoundsHardClampFlowTests
 
         // 1. The frozen snapshot shows the CLAMPED tier string (the displayed / config-level guarantee).
         ReadAgentAutonomyLevel(run.DefinitionSnapshotJson!).ShouldBe("Standard",
-            customMessage: "the Unleashed request must be clamped to the route's Standard ceiling in the frozen agent.code config — the clamp is the single choke point");
+            customMessage: "the Unleashed request must be clamped to the route's Standard ceiling in the frozen agent.run config — the clamp is the single choke point");
 
         // 2. THE load-bearing proof: the REAL AgentTask the runner received carries Standard's permissions, NOT
         //    Unleashed's. This is what the sandbox enforces — proving the clamp reached the real permission set,
@@ -178,7 +178,7 @@ public class BoundsHardClampFlowTests
         return scope.Resolve<InMemoryBackgroundJobClient>();
     }
 
-    /// <summary>Reads the projected agent.code node's <c>autonomyLevel</c> config out of the frozen definition snapshot.</summary>
+    /// <summary>Reads the projected agent.run node's <c>autonomyLevel</c> config out of the frozen definition snapshot.</summary>
     private static string? ReadAgentAutonomyLevel(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;

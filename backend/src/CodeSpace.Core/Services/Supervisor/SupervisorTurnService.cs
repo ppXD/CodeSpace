@@ -634,7 +634,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// record below never runs), and a re-walk would re-enter the same in-flight decision and re-throw forever.
     /// Recording Failed here makes it a CLEAN, terminal node failure (the node's <c>RunAsync</c> surfaces the re-thrown
     /// message → node retry + the <c>error</c> branch compose), mirroring <c>WorkflowEngine.StageAgentRunAsync</c> for an
-    /// <c>agent.code</c> node.
+    /// <c>agent.run</c> node.
     /// </summary>
     private async Task<SupervisorExecution> ExecuteOrTerminalizeFailureAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
     {

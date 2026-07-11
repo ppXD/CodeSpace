@@ -395,7 +395,7 @@ jobs:
     name: real model (benchmark corpus solve-rate)
     runs-on: ubuntu-latest
     # A SEPARATE job from the whole-loop gate (NOT a shared FQN filter): a real claude coding agent attempts the WHOLE
-    # seed corpus — every (task × mode) is its own live agent.code run — so this lane's wall-clock is isolated from the
+    # seed corpus — every (task × mode) is its own live agent.run run — so this lane's wall-clock is isolated from the
     # whole-loop's own near-60-min best-of-N budget; one slow benchmark run can never time-out the brain gate, and the
     # solve-rate gets its own job summary. The seed corpus is 9 non-trivial offline tasks (an easy one-edit tier + a
     # harder fizzbuzz/gcd/balanced-parens/clamp-range/grade-boundaries tier) × 2 modes = 18 live agent runs, each fast

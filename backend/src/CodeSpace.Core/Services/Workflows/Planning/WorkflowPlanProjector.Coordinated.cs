@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// trigger.manual ─▶ flow.wait_approval ─▶ logic.if(approved)
 ///                                            ├─true ▶ flow.loop[ subtasks, decision; term: decision∈{done,abort}; maxIterations = MaxRounds ]
 ///                                            │           loop_start ▶ flow.map(items = {{loop.subtasks}})
-///                                            │                            map_start ▶ [coding ? agent.code : llm.complete]
+///                                            │                            map_start ▶ [coding ? agent.run : llm.complete]
 ///                                            │         ▶ coordinator (llm.complete + CoordinatorSchema)
 ///                                            │        ▶ synthesizer (llm.complete) ▶ Done
 ///                                            └─false ▶ Rejected (End)
@@ -47,8 +47,8 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// template). The abort IS observable: it's on <c>{{nodes.loop.outputs.decision}}</c> and stated in the
 /// synthesizer's closing summary. PR-E's <c>stop{outcome: success|failed|abandoned}</c> gives outcome-typed
 /// termination natively. (2) The coordinated end-to-end integration covers the <c>llm.complete</c> body across
-/// rounds; the <c>agent.code</c> body that suspends per branch across rounds is covered by COMPOSITION — the
-/// coding projection's validity is unit-pinned (both kinds) and agent.code-in-map runnability by PR-D2's
+/// rounds; the <c>agent.run</c> body that suspends per branch across rounds is covered by COMPOSITION — the
+/// coding projection's validity is unit-pinned (both kinds) and agent.run-in-map runnability by PR-D2's
 /// headline real-agent E2E — rather than a dedicated coordinated-coding E2E here.</para>
 /// </summary>
 public sealed partial class WorkflowPlanProjector
@@ -87,7 +87,7 @@ public sealed partial class WorkflowPlanProjector
         new() { Id = "map_start", TypeKey = "flow.map_start", ParentId = "map", Config = Empty(), Inputs = Empty() },
         // Coordinated runs the platform-default harness (perItemAllocation: false): rework rounds re-seed from the
         // coordinator's reworkSubtasks, which carry no per-item harness, so {{item.harness}} would resolve empty and
-        // trip the agent.code guard. Per-subtask Auto-allocation is the one-shot path's job.
+        // trip the agent.run guard. Per-subtask Auto-allocation is the one-shot path's job.
         BodyNode(bodyTypeKey, perItemAllocation: false),
 
         // The coordinator judges the round + decides. Structured output (CoordinatorSchema) lands on `json`;

@@ -7,7 +7,7 @@ interface HarnessSelectorProps {
 }
 
 /**
- * Harness picker for the `agent.code` node — the wire protocol the run speaks (e.g. codex-cli,
+ * Harness picker for the `agent.run` node — the wire protocol the run speaks (e.g. codex-cli,
  * claude-code). Lists the harnesses registered in the engine; the saved value is the harness `kind`
  * string the node carries as `harness`.
  *

@@ -16,7 +16,7 @@ namespace CodeSpace.IntegrationTests.Decisions;
 /// <summary>
 /// 🟢 Integration (high fidelity, Rule 12): the cross-grain "Needs decision" queue (Decision substrate D3) over the
 /// REAL <see cref="DecisionQueueService"/> + real Postgres. The queue UNIFIES BOTH park backends without special-casing
-/// either — an agent.code <c>decision.request</c> (a parked tool-ledger row with its stashed envelope) and a
+/// either — an agent.run <c>decision.request</c> (a parked tool-ledger row with its stashed envelope) and a
 /// <c>flow.decision</c> node (a Pending workflow-run wait with its stashed envelope) — team-scoped. Pins: both grains
 /// appear, projected from the envelope; a foreign team's decisions never leak; a resolved/answered decision is excluded;
 /// ordering is soonest-deadline first.

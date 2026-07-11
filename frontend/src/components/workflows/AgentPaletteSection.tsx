@@ -2,7 +2,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions } from "@/hooks/use-agents";
 
 export interface AgentPaletteSectionProps {
-  /** Only rendered when the agent.code node type is loaded — it's what a dragged agent materializes into. */
+  /** Only rendered when the agent.run node type is loaded — it's what a dragged agent materializes into. */
   enabled: boolean;
   /** Add a Run-coding-agent node pre-bound to this persona id. */
   onAdd: (agentDefinitionId: string) => void;
@@ -13,9 +13,9 @@ export const AGENT_DRAG_MIME = "application/x-workflow-agent";
 
 /**
  * "Agents" palette section — lists the team's Agent personas as draggable items next to the generic
- * node Steps. Picking or dragging one drops a Run-agent (agent.code) node pre-bound to that
+ * node Steps. Picking or dragging one drops a Run-agent (agent.run) node pre-bound to that
  * persona, so its prompt + model become the run's defaults; the generic "Run agent" node stays
- * in Steps for inline runs. Hidden entirely when no agent.code node is registered or the team has no
+ * in Steps for inline runs. Hidden entirely when no agent.run node is registered or the team has no
  * personas yet.
  */
 export function AgentPaletteSection({ enabled, onAdd }: AgentPaletteSectionProps) {

@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Tasks.Phases;
 /// <summary>
 /// Reads the per-agent metrics (status · duration · tokens · tool count · model) for a set of agent runs, team-scoped, in
 /// TWO batch queries — the <c>AgentRun</c> rows + a grouped <c>tool_call_ledger</c> count. The ONE place that turns the
-/// durable agent record into <see cref="AgentRunMetrics"/>, so a plain <c>agent.code</c> / map agent surfaces the SAME
+/// durable agent record into <see cref="AgentRunMetrics"/>, so a plain <c>agent.run</c> / map agent surfaces the SAME
 /// rollup <c>SupervisorPhaseSource</c> folds from its decision ledger. Duration is LIVE (recomputed at <c>now</c>);
 /// tokens/model/cost/files deserialize DEFENSIVELY from a NARROW projection of <c>ResultJson</c>/<c>TaskJson</c> — the
 /// token-usage + changed-file list (for its COUNT) + model leaves, never the whole result/task graph (so the heavy

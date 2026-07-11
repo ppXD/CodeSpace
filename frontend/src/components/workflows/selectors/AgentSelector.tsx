@@ -9,7 +9,7 @@ interface AgentSelectorProps {
 
 /**
  * Single-persona picker. Lists the team's Agent personas; the saved value is the chosen persona's
- * UUID, which the `agent.code` node carries as `agentDefinitionId` and the dispatch-time resolver
+ * UUID, which the `agent.run` node carries as `agentDefinitionId` and the dispatch-time resolver
  * merges into the run.
  *
  * Used by the schema-driven form whenever a field declares `"x-selector": "agent"` — generic, not

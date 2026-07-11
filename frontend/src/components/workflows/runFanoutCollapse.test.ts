@@ -17,7 +17,7 @@ function manifest(kind: string): NodeManifestDto {
 const manifests = new Map<string, NodeManifestDto>([
   ["flow.map", manifest("Map")],
   ["flow.map_start", manifest("Regular")],
-  ["agent.code", manifest("Regular")],
+  ["agent.run", manifest("Regular")],
   ["llm.complete", manifest("Regular")],
 ]);
 
@@ -25,7 +25,7 @@ const manifests = new Map<string, NodeManifestDto>([
 function planMapDef(): WorkflowDefinition {
   return {
     schemaVersion: 1,
-    nodes: [node("planner", "llm.complete"), node("map", "flow.map"), node("ms", "flow.map_start", "map"), node("agent", "agent.code", "map"), node("synth", "llm.complete")],
+    nodes: [node("planner", "llm.complete"), node("map", "flow.map"), node("ms", "flow.map_start", "map"), node("agent", "agent.run", "map"), node("synth", "llm.complete")],
     edges: [],
   };
 }
@@ -53,7 +53,7 @@ describe("runFanoutCollapse", () => {
 
   it("does NOT collapse a map whose body is a multi-step subgraph (two workers)", () => {
     const def = planMapDef();
-    def.nodes.push(node("review", "agent.code", "map"));   // a second worker inside the map
+    def.nodes.push(node("review", "agent.run", "map"));   // a second worker inside the map
 
     const c = runFanoutCollapse(def, manifests, new Map([["agent", [branch(0), branch(1)]]]));
 
@@ -63,7 +63,7 @@ describe("runFanoutCollapse", () => {
   it("ignores non-map containers (a loop body is never collapsed here)", () => {
     const def: WorkflowDefinition = {
       schemaVersion: 1,
-      nodes: [node("loop", "flow.loop"), node("ls", "flow.loop_start", "loop"), node("body", "agent.code", "loop")],
+      nodes: [node("loop", "flow.loop"), node("ls", "flow.loop_start", "loop"), node("body", "agent.run", "loop")],
       edges: [],
     };
     const loopManifests = new Map(manifests).set("flow.loop", manifest("Loop")).set("flow.loop_start", manifest("Regular"));

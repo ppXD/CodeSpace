@@ -21,7 +21,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// Engine ↔ agent-execution-layer round-trip for the <c>agent.code</c> node, against real Postgres + the
+/// Engine ↔ agent-execution-layer round-trip for the <c>agent.run</c> node, against real Postgres + the
 /// real engine + the real AgentRunService / completion notifier. The node SUSPENDS; the engine stages a
 /// durable agent run + an <c>AgentRun</c> wait + dispatches the executor; the executor's completion
 /// resumes the node — mapping the run's result onto the node's outputs (Succeeded) or failing the node
@@ -30,7 +30,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// not double-resume (no wasted re-run / re-spent tokens).
 ///
 /// <para><b>Fidelity (Rule 12) — medium-mock:</b> every production class on the WIRING path is real
-/// (engine suspend/resume, the AgentRunService state machine, the resume notifier, the agent.code node).
+/// (engine suspend/resume, the AgentRunService state machine, the resume notifier, the agent.run node).
 /// Only the harness EXECUTION is stood in for: <see cref="SimulateAgentExecutorAsync"/> drives the same
 /// MarkRunning → Complete → Notify sequence the executor's <c>CompleteAndNotifyAsync</c> runs, minus the
 /// sandboxed CLI (no codex binary in CI — the harness/runner contracts have their own suites). The
@@ -114,7 +114,7 @@ public class AgentNodeFlowTests
 
         try
         {
-            // The agent.code node parks and enqueues its LONG-running executor job. It MUST land on the dedicated
+            // The agent.run node parks and enqueues its LONG-running executor job. It MUST land on the dedicated
             // agent queue, not the control-plane "default" queue — that isolation is the whole point of the split:
             // enough concurrent agent runs would otherwise occupy every worker and starve the reconcilers / expiry.
             await RunEngineAsync(runId);
@@ -123,7 +123,7 @@ public class AgentNodeFlowTests
                 c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync));
 
             agentEnqueue.Queue.ShouldBe(HangfireConstants.AgentQueue,
-                "the long agent.code executor job rides the dedicated agents queue so it can't starve the control plane");
+                "the long agent.run executor job rides the dedicated agents queue so it can't starve the control plane");
         }
         finally
         {
@@ -172,7 +172,7 @@ public class AgentNodeFlowTests
     public async Task Failed_agent_run_takes_the_nodes_error_branch()
     {
         // The agent layer's failure composes with the Phase-2 error branch: a failed run makes the
-        // agent.code node fail, which routes down its `error` edge to a handler instead of failing the run.
+        // agent.run node fail, which routes down its `error` edge to a handler instead of failing the run.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: true));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
@@ -194,7 +194,7 @@ public class AgentNodeFlowTests
             var db = verify.Resolve<CodeSpaceDbContext>();
 
             (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-                .ShouldBe(WorkflowRunStatus.Success, "the run's failure is handled by the agent.code node's error branch");
+                .ShouldBe(WorkflowRunStatus.Success, "the run's failure is handled by the agent.run node's error branch");
             (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "agent")).Status
                 .ShouldBe(NodeStatus.Failure);
             (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "caught")).Status
@@ -463,7 +463,7 @@ public class AgentNodeFlowTests
 
             var detail = await verify.Resolve<CodeSpace.Core.Services.Workflows.IWorkflowService>().GetRunAsync(runId, teamId, CancellationToken.None);
             detail!.Nodes.Single(n => n.NodeId == "agent").AgentRunId
-                .ShouldBe(agentRunId.ToString(), "the agent.code node carries its agent run id for live streaming");
+                .ShouldBe(agentRunId.ToString(), "the agent.run node carries its agent run id for live streaming");
 
             var svc = verify.Resolve<IAgentRunService>();
 
@@ -834,7 +834,7 @@ public class AgentNodeFlowTests
         }
     }
 
-    // manual → agent.code(Retry{maxAttempts, 0s}) → terminal — the respawn tests' definition (0s backoff so tests never sleep).
+    // manual → agent.run(Retry{maxAttempts, 0s}) → terminal — the respawn tests' definition (0s backoff so tests never sleep).
     private static WorkflowDefinition RetryingAgentNodeDefinition(int maxAttempts)
     {
         var definition = AgentNodeDefinition(withErrorBranch: false);
@@ -843,13 +843,13 @@ public class AgentNodeFlowTests
         return definition with { Nodes = nodes };
     }
 
-    // manual → agent.code → terminal(forwards summary + branch). Optionally agent =(error)=> caught.
+    // manual → agent.run → terminal(forwards summary + branch). Optionally agent =(error)=> caught.
     private static WorkflowDefinition AgentNodeDefinition(bool withErrorBranch)
     {
         var nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code",
+            new() { Id = "agent", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Fix the failing billing tests","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","timeoutSeconds":900,"readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
@@ -867,13 +867,13 @@ public class AgentNodeFlowTests
         return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
     }
 
-    // manual → agent.code (references a persona by id; no inline model; a small task goal) → terminal.
+    // manual → agent.run (references a persona by id; no inline model; a small task goal) → terminal.
     private static WorkflowDefinition PersonaAgentNodeDefinition(string agentDefinitionId)
     {
         var nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code",
+            new() { Id = "agent", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json($$"""{"harness":"codex-cli","agentDefinitionId":"{{agentDefinitionId}}","goal":"Fix the billing bug."}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),

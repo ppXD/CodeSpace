@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// <summary>
 /// Executes the SIDE EFFECT of a claimed supervisor decision (PR-E E2 seam, Rule 7) — the action half of a
 /// turn, run EXACTLY ONCE behind the ledger's Pending → Running claim. E2 shipped a STUB; E3 swaps in the
-/// real <c>RealSupervisorActionExecutor</c> behind the SAME interface (spawn fans out real agent.code child
+/// real <c>RealSupervisorActionExecutor</c> behind the SAME interface (spawn fans out real agent.run child
 /// runs, plan calls the real planner, merge synthesizes prior results), so the turn loop + claim hop never
 /// change.
 ///

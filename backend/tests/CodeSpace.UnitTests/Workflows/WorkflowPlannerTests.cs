@@ -216,7 +216,7 @@ public class WorkflowPlannerTests
 
     [Theory]
     [InlineData("analysis")]   // llm.complete body
-    [InlineData("coding")]     // agent.code body — a CanSuspend node + a structurally different graph; the flagship path must also validate
+    [InlineData("coding")]     // agent.run body — a CanSuspend node + a structurally different graph; the flagship path must also validate
     public void Projection_of_a_representative_plan_passes_DefinitionValidator(string recommendedKind)
     {
         var definition = Projector().Project(SamplePlan(recommendedKind));
@@ -296,10 +296,10 @@ public class WorkflowPlannerTests
         baked[2].GetProperty("harness").GetString().ShouldBe("claude-code", "a registered kind is canonicalised to its registered casing");
     }
 
-    // ── Recommended-kind switch: coding → agent.code body, else → llm.complete ─
+    // ── Recommended-kind switch: coding → agent.run body, else → llm.complete ─
 
     [Theory]
-    [InlineData("coding", "agent.code")]
+    [InlineData("coding", "agent.run")]
     [InlineData("analysis", "llm.complete")]
     [InlineData("anything-else", "llm.complete")]
     public void Body_node_type_follows_recommended_workflow_kind(string kind, string expectedBodyTypeKey)
@@ -362,7 +362,7 @@ public class WorkflowPlannerTests
 
     [Theory]
     [InlineData("analysis")]   // coordinator + map body = llm.complete
-    [InlineData("coding")]     // map body = agent.code (a CanSuspend node inside a map inside a loop)
+    [InlineData("coding")]     // map body = agent.run (a CanSuspend node inside a map inside a loop)
     public void Coordinated_projection_passes_DefinitionValidator(string recommendedKind)
     {
         var definition = Projector().ProjectCoordinated(SamplePlan(recommendedKind), new CoordinationOptions());
@@ -376,11 +376,11 @@ public class WorkflowPlannerTests
     public void Coordinated_coding_body_uses_a_stable_literal_harness_not_a_per_item_ref()
     {
         // The coordinator's reworkSubtasks (rounds 2+) carry NO per-item harness, so a {{item.harness}} body would
-        // resolve empty and trip the agent.code 'harness is required' guard. The coordinated body must bake a literal
+        // resolve empty and trip the agent.run 'harness is required' guard. The coordinated body must bake a literal
         // registered kind so EVERY round stays runnable. (Per-subtask Auto-allocation is the one-shot path's job.)
         var body = Projector().ProjectCoordinated(SamplePlan("coding"), new CoordinationOptions()).Nodes.Single(n => n.Id == "body");
 
-        body.TypeKey.ShouldBe("agent.code");
+        body.TypeKey.ShouldBe("agent.run");
         body.Config.GetProperty("harness").GetString().ShouldBe("codex-cli", "coordinated bakes a literal harness so rework rounds (no per-item harness) still run");
         body.Config.TryGetProperty("model", out _).ShouldBeFalse("no per-item model ref on the coordinated body — there's no allocator across rework rounds");
     }

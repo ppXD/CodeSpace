@@ -32,8 +32,8 @@ public class RerunBranchBodyPolicyTests
     // canSuspend, sideEffecting, rerunnableWhenSuspendable, kind  → expectedRefused
     [InlineData(false, false, false, NodeKind.Regular, false)]  // pure compute/read → ADMIT
     [InlineData(false, true, false, NodeKind.Regular, false)]   // purely side-effecting (git write / http POST) → ADMIT (routes through the D7-3 gate)
-    [InlineData(true, false, true, NodeKind.Regular, false)]    // agent.code / subworkflow / sleep: CanSuspend + opted-in + NOT side-effecting → ADMIT (re-stage, no gate)
-    [InlineData(true, false, false, NodeKind.Regular, true)]    // un-opted suspendable (wait_* / decision / supervisor — agent.code, subworkflow & sleep opt in) → REFUSE
+    [InlineData(true, false, true, NodeKind.Regular, false)]    // agent.run / subworkflow / sleep: CanSuspend + opted-in + NOT side-effecting → ADMIT (re-stage, no gate)
+    [InlineData(true, false, false, NodeKind.Regular, true)]    // un-opted suspendable (wait_* / decision / supervisor — agent.run, subworkflow & sleep opt in) → REFUSE
     [InlineData(true, true, true, NodeKind.Regular, true)]      // BOTH side-effecting AND suspendable (chat.post_message) → REFUSE even if opted in (belt-and-suspenders)
     [InlineData(true, true, false, NodeKind.Regular, true)]     // both-flagged, not opted in → REFUSE (doubly)
     [InlineData(false, false, false, NodeKind.Map, true)]       // nested container Map → REFUSE

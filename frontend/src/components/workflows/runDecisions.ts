@@ -3,7 +3,7 @@ import type { DecisionType, PendingDecision } from "@/api/workflows";
 /**
  * The run's own pending decisions — the team-wide queue narrowed to THIS run. Two match paths cover the two grains:
  *   • NODE grain (a flow.decision raised directly in this workflow run): `rootTraceId === runId`.
- *   • AGENT grain (an agent.code mid-run decision.request): its `rootTraceId`/`agentRunId` is the AGENT run's id,
+ *   • AGENT grain (an agent.run mid-run decision.request): its `rootTraceId`/`agentRunId` is the AGENT run's id,
  *     never this workflow run's, so we also match `agentRunId` against the agent runs this run fanned out to
  *     (`runAgentIds`, from the phase projection).
  * Known gap: a decision parked inside a nested flow.subworkflow CHILD run carries the child's id on both keys and

@@ -86,7 +86,7 @@ public sealed record NodeManifest
     /// <summary>
     /// Opt-in marker that this node is safe to expose as a SYNCHRONOUS, standalone agent tool (via the Tool
     /// Fabric). Eligible nodes run to completion in one call against a minimal context — so a node that SUSPENDS
-    /// for an async wait (agent.code, flow.wait_*), a Trigger, or a flow/container node must leave it false.
+    /// for an async wait (agent.run, flow.wait_*), a Trigger, or a flow/container node must leave it false.
     ///
     /// <para>Default <c>false</c> (fail-closed: not a tool unless it says so). A side-effecting eligible node is
     /// still exposed — it just surfaces as a destructive, approval-gated tool. The registry projects only
@@ -156,7 +156,7 @@ public sealed record NodeManifest
     /// Opt-in marker (D7-5) that a <see cref="CanSuspend"/> node is PROVEN to re-run cleanly as a re-run
     /// <c>flow.map</c> branch body — the engine itself drives its wait to completion on the fork, so re-running
     /// the branch re-stages the work without a stranded wait, an ungated child closure, or a distinct suspend
-    /// shape. <c>agent.code</c> sets it (a re-run branch re-stages a FRESH <c>AgentRun</c> under the branch's
+    /// shape. <c>agent.run</c> sets it (a re-run branch re-stages a FRESH <c>AgentRun</c> under the branch's
     /// iteration key, mechanically identical to the shipped original-run map durable resume).
     ///
     /// <para>Default <c>false</c> — FAIL-CLOSED: bare <see cref="CanSuspend"/> is NOT sufficient. The other

@@ -9,7 +9,7 @@ namespace CodeSpace.Messages.Agents;
 /// single <c>integratedBranch</c> instead).
 ///
 /// <para>Shaped to bind VERBATIM into <c>git.open_change_set</c>'s <c>repositories</c> input — the SAME generic per-repo
-/// PR-open node agent.code's <c>repositoryResults</c> feeds (so the "last mile" of the resolver loop is a workflow edge,
+/// PR-open node agent.run's <c>repositoryResults</c> feeds (so the "last mile" of the resolver loop is a workflow edge,
 /// not a new node): the node reads each entry's head via <c>sourceBranch</c> and base via <c>targetBranch</c>.
 /// <see cref="SourceBranch"/> is the reconciled / integrated head (the supervisor's vocabulary, but exposed under the
 /// PR-source key the node reads); <see cref="TargetBranch"/> is the per-repo base to open the PR into (the ref the

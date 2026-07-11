@@ -71,7 +71,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend runs the REAL executor + runner + fake CLI per branch
+        jobClient.AutoExecute = true;   // the agent.run suspend runs the REAL executor + runner + fake CLI per branch
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 

@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// <summary>
 /// The AgentRun lifecycle as a pure state machine: Queued → Running → terminal
 /// (Succeeded | Failed | Cancelled | TimedOut | NeedsReview). The single source of truth for which status
-/// transitions are legal, so every writer (AgentRunService, the reconciler, the agent.code node)
+/// transitions are legal, so every writer (AgentRunService, the reconciler, the agent.run node)
 /// agrees on the rules. Pure + side-effect-free → unit-tested exhaustively.
 /// </summary>
 public static class AgentRunStateMachine

@@ -14,11 +14,11 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// Pins the plan-map-synth projection builder: the emitted graph is
 /// <c>trigger.manual → llm.complete(planner, responseSchema) → flow.map(items=planner.json.subtasks) →
-/// flow.map_start → agent.code(body, {{item}}) → llm.complete(synth, REAL reduce over the results array) →
+/// flow.map_start → agent.run(body, {{item}}) → llm.complete(synth, REAL reduce over the results array) →
 /// builtin.terminal(done, combined=synth.text)</c>, it ALWAYS passes the REAL <see cref="DefinitionValidator"/>
 /// over the real node manifests (so the planner's json output, the map items binding, the synth's prompt refs,
 /// and the done node's synth-text ref all validate), and the <see cref="ResolvedAgentProfile"/> + seed goal map
-/// onto the planner model + the agent.code body via the SAME shared mapping the single-agent builder uses.
+/// onto the planner model + the agent.run body via the SAME shared mapping the single-agent builder uses.
 /// </summary>
 [Trait("Category", "Unit")]
 [Collection("DefaultHarnessEnvMutation")]   // an absent-harness build reads the unset default harness — serialize with the env-mutating AgentHarnessDefaultsTests
@@ -62,7 +62,7 @@ public class PlanMapSynthDefinitionBuilderTests
         byId["planner"].ShouldBe("plan.author");
         byId["map"].ShouldBe("flow.map");
         byId["ms"].ShouldBe("flow.map_start");
-        byId["agent"].ShouldBe("agent.code");
+        byId["agent"].ShouldBe("agent.run");
         byId["synth"].ShouldBe("llm.complete");   // the synth is a REAL llm.complete reduce now, not a builtin.terminal raw-bind
         byId["done"].ShouldBe("builtin.terminal");
 
@@ -287,6 +287,6 @@ public class PlanMapSynthDefinitionBuilderTests
 
         planner.Config.TryGetProperty("plannerModelId", out _).ShouldBeFalse("no launch pin ⇒ plan.author auto-picks the team's strongest structured model");
         Builder.Build(Context()).Nodes.Single(n => n.Id == "agent").Config.GetProperty("harness").GetString().ShouldBe("codex-cli",
-            "a null harness folds to the agent.code catalog default");
+            "a null harness folds to the agent.run catalog default");
     }
 }

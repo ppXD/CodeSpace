@@ -812,33 +812,33 @@ public class RerunFromNodeFlowTests
     [Fact]
     public async Task Rerun_from_an_agent_code_root_with_an_unsupported_downstream_is_refused_on_the_downstream_not_the_root()
     {
-        // P2.2 made agent.code an ADMITTED from-node root. A from-node ROOT re-walks its WHOLE forward closure, so an
+        // P2.2 made agent.run an ADMITTED from-node root. A from-node ROOT re-walks its WHOLE forward closure, so an
         // unsupported node DOWNSTREAM of the admitted root must STILL refuse the rerun (the admission is surgical, not
-        // a hole). start → agent.code(a) → suspendprobe(b) → end; rerun from "a" scans the closure {a, b, end}. The
+        // a hole). start → agent.run(a) → suspendprobe(b) → end; rerun from "a" scans the closure {a, b, end}. The
         // discriminator proves BOTH halves at once: BlockedNodeIds holds "b" (the gate still does its job downstream)
-        // but NOT "a" — the agent.code root is admitted. That ShouldNotContain("a") is the load-bearing control:
-        // revert the one-line P2.2 flip and "a" reappears here (agent.code refused as a root), failing this test.
+        // but NOT "a" — the agent.run root is admitted. That ShouldNotContain("a") is the load-bearing control:
+        // revert the one-line P2.2 flip and "a" reappears here (agent.run refused as a root), failing this test.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "rerun-agentroot-unsupported-" + Guid.NewGuid().ToString("N");
         SuspendProbeNode.Reset(probeKey);
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = false;   // park agent.code(a) cleanly; never run the binary-less harness
+        jobClient.AutoExecute = false;   // park agent.run(a) cleanly; never run the binary-less harness
 
         try
         {
             var workflowId = await CreateWorkflowAsync(teamId, userId, AgentThenSuspendProbeDef(probeKey));
             var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-            await RunEngineAsync(originalRunId);   // suspends parked on agent.code(a)'s AgentRun wait
+            await RunEngineAsync(originalRunId);   // suspends parked on agent.run(a)'s AgentRun wait
             await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
 
             var before = await RunCountAsync(teamId);
             var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
-                await RerunAsync(originalRunId, "a", teamId, userId));   // "a" = the admitted agent.code root
+                await RerunAsync(originalRunId, "a", teamId, userId));   // "a" = the admitted agent.run root
 
-            ex.BlockedNodeIds.ShouldContain("b", "the unsupported suspendprobe DOWNSTREAM of the admitted agent.code root still refuses the rerun");
-            ex.BlockedNodeIds.ShouldNotContain("a", "the agent.code root is ADMITTED (P2.2) — revert the flip and it would be blocked here too: the load-bearing control");
+            ex.BlockedNodeIds.ShouldContain("b", "the unsupported suspendprobe DOWNSTREAM of the admitted agent.run root still refuses the rerun");
+            ex.BlockedNodeIds.ShouldNotContain("a", "the agent.run root is ADMITTED (P2.2) — revert the flip and it would be blocked here too: the load-bearing control");
 
             (await RunCountAsync(teamId)).ShouldBe(before, "a downstream-blocked rerun must write nothing");
         }
@@ -942,7 +942,7 @@ public class RerunFromNodeFlowTests
     public async Task The_flag_is_false_for_a_suspendable_node_and_its_upstream_matching_the_endpoint_refusal()
     {
         // The fail-closed CanSuspend ARM — the supervisor / un-opted suspendable class (every CanSuspend node EXCEPT
-        // the agent.code re-stage opt-in, which P2.2 admits). A SuspendProbe (CanSuspend, IsRerunnableWhenSuspendable
+        // the agent.run re-stage opt-in, which P2.2 admits). A SuspendProbe (CanSuspend, IsRerunnableWhenSuspendable
         // unset → RefuseSuspendable, like a supervisor) and ANYTHING upstream of it are not from-node rerunnable, so the
         // flag is false for both — matching the endpoint's RerunBlockedByUnsupportedNodeException.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -960,7 +960,7 @@ public class RerunFromNodeFlowTests
 
         bool Flag(string nodeId) => detail!.Nodes.Single(n => n.NodeId == nodeId && n.IterationKey == WorkflowIterationKeys.TopLevel).RerunnableFromHere;
 
-        Flag("suspendprobe").ShouldBeFalse("an un-opted CanSuspend node is never a from-node rerun target (the supervisor class; agent.code opts in via P2.2)");
+        Flag("suspendprobe").ShouldBeFalse("an un-opted CanSuspend node is never a from-node rerun target (the supervisor class; agent.run opts in via P2.2)");
         Flag("start").ShouldBeFalse("start's closure includes the suspendable node → the endpoint would refuse");
     }
 
@@ -1299,14 +1299,14 @@ public class RerunFromNodeFlowTests
         },
     };
 
-    // start → agent.code(a) [admitted from-node root, P2.2] → suspendprobe(b) [unsupported] → end.
+    // start → agent.run(a) [admitted from-node root, P2.2] → suspendprobe(b) [unsupported] → end.
     private static WorkflowDefinition AgentThenSuspendProbeDef(string probeKey) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "a", TypeKey = "agent.code",
+            new() { Id = "a", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{ "goal": "Work on alpha", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "b", TypeKey = SuspendProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}","item":"x"}""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

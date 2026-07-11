@@ -12,8 +12,8 @@ namespace CodeSpace.UnitTests.Workflows;
 /// (CanSuspend × IsSideEffecting × IsRerunnableWhenSuspendable × every NodeKind × every exempt-map case), the
 /// disposition-based admit decision MUST equal the negation of the FROZEN boolean predicates — copied verbatim below.
 /// The CONTAINER-BODY arm is still byte-identical to the original. The FROM-NODE arm encodes the P2.2 spec (the
-/// agent.code re-stage opt-in is now admitted as a from-node root); the cube proves this change is SURGICAL — the new
-/// from-node spec differs from the frozen pre-P2.2 predicate on EXACTLY the agent.code <c>ReStageExternalRun</c> cells,
+/// agent.run re-stage opt-in is now admitted as a from-node root); the cube proves this change is SURGICAL — the new
+/// from-node spec differs from the frozen pre-P2.2 predicate on EXACTLY the agent.run <c>ReStageExternalRun</c> cells,
 /// and only by flipping refuse → admit. Every other cell is unchanged.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -56,11 +56,11 @@ public class RerunDispositionTests
                         $"FromNodeRoot diverged at canSuspend={canSuspend} side={sideEffecting} rerunnable={rerunnable} kind={kind} exempt={exemptMapId ?? "null"}");
 
                 // SURGICAL-CHANGE PROOF: the post-P2.2 from-node spec may differ from the frozen pre-P2.2 predicate
-                // ONLY on the agent.code re-stage opt-in (ReStageExternalRun), and only by flipping refuse → admit.
+                // ONLY on the agent.run re-stage opt-in (ReStageExternalRun), and only by flipping refuse → admit.
                 if (NewIsRerunUnsupported(m, nodeId, exemptMapId) != OldIsRerunUnsupported(m, nodeId, exemptMapId))
                 {
                     RerunDispositions.For(m).ShouldBe(RerunDisposition.ReStageExternalRun,
-                        $"P2.2 may only change the agent.code re-stage cell, but kind={kind} canSuspend={canSuspend} side={sideEffecting} rerunnable={rerunnable} changed");
+                        $"P2.2 may only change the agent.run re-stage cell, but kind={kind} canSuspend={canSuspend} side={sideEffecting} rerunnable={rerunnable} changed");
                     OldIsRerunUnsupported(m, nodeId, exemptMapId).ShouldBeTrue("the changed cell was refused pre-P2.2");
                     NewIsRerunUnsupported(m, nodeId, exemptMapId).ShouldBeFalse("and is admitted post-P2.2");
                     p2_2DeltaCells++;
@@ -79,7 +79,7 @@ public class RerunDispositionTests
         // Guard against a vacuous pass: the cube must actually exercise every disposition bucket + a non-trivial cell count.
         seenDispositions.ShouldBe(Enum.GetValues<RerunDisposition>(), ignoreOrder: true, "the cube must reach every disposition bucket — else a derivation arm is untested");
         cells.ShouldBeGreaterThan(100, "the cube must be exhaustive over the full flag/kind/exempt space");
-        p2_2DeltaCells.ShouldBeGreaterThan(0, "the P2.2 from-node delta (agent.code admitted as a root) must actually be exercised by the cube");
+        p2_2DeltaCells.ShouldBeGreaterThan(0, "the P2.2 from-node delta (agent.run admitted as a root) must actually be exercised by the cube");
     }
 
     // ── Explicit per-disposition pins (legibility on top of the exhaustive cube) ──────
@@ -140,7 +140,7 @@ public class RerunDispositionTests
         || (m.Kind == NodeKind.Map && nodeId != exemptMapId)
         || m.Kind is NodeKind.Loop or NodeKind.Try;
 
-    /// <summary>The from-node gate spec AFTER P2.2 — a suspendable node is refused UNLESS it is the agent.code re-stage
+    /// <summary>The from-node gate spec AFTER P2.2 — a suspendable node is refused UNLESS it is the agent.run re-stage
     /// opt-in (<c>IsRerunnableWhenSuspendable &amp;&amp; !IsSideEffecting</c>), which is now admitted as a root. The
     /// container-kind disjuncts are unchanged.</summary>
     private static bool NewIsRerunUnsupported(NodeManifest m, string nodeId, string? exemptMapId) =>

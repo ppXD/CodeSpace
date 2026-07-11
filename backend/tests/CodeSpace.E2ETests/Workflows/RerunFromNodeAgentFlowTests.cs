@@ -17,20 +17,20 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
-/// P2.2 — agent.code as a from-node rerun ROOT (not just a map-branch body). Re-run a TOP-LEVEL flow from a real
-/// <c>agent.code</c> node: the fork mints a new run id, replays the kept upstream agent from the ledger (NO re-stage),
+/// P2.2 — agent.run as a from-node rerun ROOT (not just a map-branch body). Re-run a TOP-LEVEL flow from a real
+/// <c>agent.run</c> node: the fork mints a new run id, replays the kept upstream agent from the ledger (NO re-stage),
 /// and re-stages EXACTLY ONE fresh AgentRun for the from-node target on the forked run id — driving the actual durable
 /// agent suspend/resume to completion.
 ///
 /// <para><b>Tier: high-fidelity</b> — the same harness as <see cref="RerunMapBranchAgentFlowTests"/>: the real
 /// <see cref="IWorkflowService.RerunFromNodeAsync"/> forks, the real engine re-walks the ReRun closure, the target's
-/// <c>agent.code</c> node parks an AgentRun, dispatches the REAL <see cref="Core.Services.Agents.IAgentRunExecutor"/>
+/// <c>agent.run</c> node parks an AgentRun, dispatches the REAL <see cref="Core.Services.Agents.IAgentRunExecutor"/>
 /// → real <c>LocalProcessRunner</c> → the <see cref="SubtaskAwareFakeCli"/> process → real ParseEvent/BuildResult →
 /// natural resume → the run completes. Only the CLI's intelligence is faked, at the binary (POSIX-only, Rule 12.1).</para>
 ///
 /// <para>This proves the one-line P2.2 disposition flip (<c>RerunDispositions</c> admits <c>ReStageExternalRun</c> as a
 /// from-node root) needs NO engine change: a from-node fork's new run id makes the re-staged AgentRun unique by
-/// construction, and the stateless agent.code node re-walks through the SAME generic stage chain it uses on a first
+/// construction, and the stateless agent.run node re-walks through the SAME generic stage chain it uses on a first
 /// run. The discriminators mirror the map-branch crown jewel: the fork re-stages EXACTLY ONE fresh AgentRun (distinct
 /// Id, the fork's WorkflowRunId, the target's own goal), the kept upstream agent carries zero node.started + is NOT
 /// re-staged, and the from-node target ran exactly twice (park-walk + resume-walk).</para>
@@ -55,7 +55,7 @@ public class RerunFromNodeAgentFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // an agent.code suspend dispatches the REAL executor + runner + fake CLI, then resumes
+        jobClient.AutoExecute = true;   // an agent.run suspend dispatches the REAL executor + runner + fake CLI, then resumes
 
         // ── Original: start → agent(a:"Work on alpha") → agent(b:"Work on beta") → end. Both run to Succeeded. ──
         var workflowId = await CreateWorkflowAsync(teamId, userId, TwoAgentChainDef());
@@ -67,7 +67,7 @@ public class RerunFromNodeAgentFlowTests
         var originalAgents = await LoadAgentRunsAsync(originalRunId);
         originalAgents.Count.ShouldBe(2, "the original chain staged one AgentRun per agent node");
         var originalB = originalAgents.Single(r => r.NodeId == "b");
-        originalB.IterationKey.ShouldBe("", "a top-level agent.code is keyed TopLevel");
+        originalB.IterationKey.ShouldBe("", "a top-level agent.run is keyed TopLevel");
 
         // ── Rerun FROM node "b". The fork keeps "a" (upstream → replayed, NOT re-staged) and re-stages ONLY "b". ──
         var rerunId = await RerunFromNodeAsync(originalRunId, "b", teamId, userId);
@@ -246,16 +246,16 @@ public class RerunFromNodeAgentFlowTests
             .ShouldBe("sess-team-a", "the same-team lookup DOES resolve the ancestor's session — the null above is tenancy, not a dead query");
     }
 
-    // ── Definition: start → agent(a) → agent(b) → end. Two top-level real agent.code nodes with distinct goals. ──
+    // ── Definition: start → agent(a) → agent(b) → end. Two top-level real agent.run nodes with distinct goals. ──
     private static WorkflowDefinition TwoAgentChainDef() => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "a", TypeKey = "agent.code",
+            new() { Id = "a", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{ "goal": "Work on alpha", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "b", TypeKey = "agent.code",
+            new() { Id = "b", TypeKey = "agent.run",
                     Config = WorkflowsTestSeed.Json("""{ "goal": "Work on beta", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },

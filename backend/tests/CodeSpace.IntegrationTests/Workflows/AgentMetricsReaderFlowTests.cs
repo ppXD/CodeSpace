@@ -16,7 +16,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
 /// 🟢 Integration (real Postgres + the REAL <see cref="AgentMetricsReader"/> from DI): the per-agent metrics a plain
-/// agent.code / map agent surfaces — proving duration (off the persisted timestamps), tokens (off the real
+/// agent.run / map agent surfaces — proving duration (off the persisted timestamps), tokens (off the real
 /// <c>ResultJson</c>), model (off <c>TaskJson</c>), and the actual tool count (off the <c>agent_run_event</c> log's
 /// <see cref="AgentEventKind.ToolCall"/> entries — the agent's real tool calls, not the governed ledger) all read back
 /// team-scoped from the durable rows. A foreign-team agent is never returned.
