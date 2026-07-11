@@ -403,6 +403,7 @@ public class ArtifactStoreFlowTests
             Id = workflowId,
             TeamId = teamId,
             Name = "artifact-test-" + Guid.NewGuid().ToString("N")[..6],
+            Slug = "artifact-" + workflowId.ToString("N")[..8],
             DefinitionJson = "{}",
             LatestVersion = 1,
             Enabled = true,

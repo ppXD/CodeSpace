@@ -24,10 +24,16 @@ public class WorkflowsController : ControllerBase
         return Ok(result);
     }
 
-    [HttpGet("{workflowId:guid}")]
-    public async Task<IActionResult> Get([FromRoute] Guid workflowId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Read a single workflow by a URL reference — its GUID (legacy link) or team-unique slug
+    /// (canonical clean URL, e.g. <c>/api/workflows/nightly-audit</c>). The response carries the
+    /// canonical <c>Slug</c> so the router can redirect a legacy-GUID URL to the slug URL. Mutations
+    /// (PUT/DELETE/run) stay GUID-keyed — the caller already holds the id.
+    /// </summary>
+    [HttpGet("{idOrSlug}")]
+    public async Task<IActionResult> Get([FromRoute] string idOrSlug, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new GetWorkflowQuery { WorkflowId = workflowId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = idOrSlug }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 

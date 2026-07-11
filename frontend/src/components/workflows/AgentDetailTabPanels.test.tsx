@@ -34,7 +34,7 @@ vi.mock("./RunViewerDialog", () => ({ RunViewerDialog: ({ runId }: { runId: stri
 
 const def = (inputs: unknown[]) => ({ nodes: [], edges: [], inputs } as unknown as WorkflowDetail["definition"]);
 const wf = (over: Partial<WorkflowDetail> = {}): WorkflowDetail => ({
-  id: "w1", teamId: "t1", name: "PR Security Reviewer", description: "Reviews PRs.",
+  id: "w1", teamId: "t1", slug: "pr-security-reviewer", name: "PR Security Reviewer", description: "Reviews PRs.",
   enabled: true, latestVersion: 3, definition: def([]), activations: [],
   createdDate: "", lastModifiedDate: "", ...over,
 });

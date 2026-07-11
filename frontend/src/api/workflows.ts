@@ -100,6 +100,7 @@ export interface EdgeDefinition {
 export interface WorkflowSummary {
   id: string;
   teamId: string;
+  slug: string;
   name: string;
   description: string | null;
   enabled: boolean;
@@ -113,6 +114,7 @@ export interface WorkflowSummary {
 export interface WorkflowDetail {
   id: string;
   teamId: string;
+  slug: string;
   name: string;
   description: string | null;
   enabled: boolean;
@@ -603,7 +605,8 @@ export interface AnswerDecisionResult {
 export const workflowsApi = {
   list: () => fetchJson<WorkflowSummary[]>("/api/workflows"),
 
-  get: (workflowId: string) => fetchJson<WorkflowDetail>(`/api/workflows/${workflowId}`),
+  /** Resolve one workflow by ref — its GUID (legacy link) or team-unique slug (clean URL). */
+  get: (ref: string) => fetchJson<WorkflowDetail>(`/api/workflows/${encodeURIComponent(ref)}`),
 
   create: (input: CreateWorkflowInput) => fetchJson<{ id: string }>("/api/workflows", {
     method: "POST",

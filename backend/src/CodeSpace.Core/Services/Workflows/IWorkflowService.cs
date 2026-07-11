@@ -13,6 +13,12 @@ public interface IWorkflowService
 {
     Task<IReadOnlyList<WorkflowSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken);
     Task<WorkflowDetail?> GetAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolves a workflow by EITHER its GUID (legacy link) or its team-unique slug (canonical clean
+    /// URL), reusing <see cref="GetAsync"/> for the full detail load + team-scope. Null on miss / not-team.
+    /// </summary>
+    Task<WorkflowDetail?> GetByRefAsync(string idOrSlug, Guid teamId, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken);
     Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken);
     Task DeleteAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken);

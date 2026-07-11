@@ -366,6 +366,94 @@ public class WorkflowRoundTripFlowTests
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
+    // ─── Slug (clean-URL handle) ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Create_derives_slug_from_name_and_GetByRef_resolves_by_slug_and_guid()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        Guid workflowId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+            {
+                Name = "Nightly Audit",
+                Definition = WorkflowsTestSeed.MinimalDefinition(),
+                Activations = new List<WorkflowActivationInput>(),
+            });
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = verify.Resolve<IMediator>();
+
+        var bySlug = await mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = "nightly-audit" });
+        var byGuid = await mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = workflowId.ToString() });
+
+        bySlug.ShouldNotBeNull(customMessage: "the clean workflow URL resolves by the slug derived from the name");
+        bySlug!.Id.ShouldBe(workflowId);
+        bySlug.Slug.ShouldBe("nightly-audit");
+        byGuid.ShouldNotBeNull(customMessage: "a legacy GUID URL must still resolve — the router redirects it to the slug URL");
+        byGuid!.Id.ShouldBe(workflowId);
+        byGuid.Slug.ShouldBe("nightly-audit", "both refs resolve to the identical canonical row");
+    }
+
+    [Fact]
+    public async Task Create_with_same_name_auto_suffixes_the_slug()
+    {
+        // Unlike a project slug (a variable-path contract key that REFUSES on collision), a workflow
+        // slug is display-only, so a second workflow with the same name gets `-2` rather than an error.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+
+        var firstId = await mediator.Send(new CreateWorkflowCommand { Name = "Deploy", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+        var secondId = await mediator.Send(new CreateWorkflowCommand { Name = "Deploy", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+
+        var first = await mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = firstId.ToString() });
+        var second = await mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = secondId.ToString() });
+
+        first!.Slug.ShouldBe("deploy");
+        second!.Slug.ShouldBe("deploy-2",
+            customMessage: "a same-name workflow auto-suffixes to keep the team-unique slug, never colliding or erroring");
+    }
+
+    [Fact]
+    public async Task GetByRef_by_slug_is_team_scoped()
+    {
+        // Team A and Team B each create a "Shared" workflow (slug "shared"). Team B's by-slug lookup
+        // MUST return B's own row — the slug is unique only per team, so the resolver has to scope by
+        // team_id or one tenant's clean URL would resolve into another tenant's data.
+        var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, userB) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        Guid inA, inB;
+        using (var scope = _fixture.BeginScopeAs(userA, teamA, Roles.Admin))
+            inA = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = "Shared", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+        using (var scope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin))
+            inB = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = "Shared", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+
+        using var teamBScope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var resolved = await teamBScope.Resolve<IMediator>().Send(new GetWorkflowByRefQuery { IdOrSlug = "shared" });
+
+        resolved.ShouldNotBeNull();
+        resolved!.Id.ShouldBe(inB, customMessage: "team B's /workflows/shared MUST resolve team B's own row, not team A's");
+        resolved.Id.ShouldNotBe(inA, "resolving another team's row through a shared slug is a cross-team data leak");
+    }
+
+    [Theory]
+    [InlineData("does-not-exist")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task GetByRef_returns_null_for_a_ref_that_matches_nothing(string idOrSlug)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+
+        var result = await scope.Resolve<IMediator>().Send(new GetWorkflowByRefQuery { IdOrSlug = idOrSlug });
+
+        result.ShouldBeNull(customMessage: "an unresolvable ref is a real miss — the router turns null into a 404");
+    }
+
     private async Task<Guid> CreateAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

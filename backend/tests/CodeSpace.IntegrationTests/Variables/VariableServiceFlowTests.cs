@@ -363,6 +363,7 @@ public class VariableServiceFlowTests
             Id = workflowId,
             TeamId = teamId,
             Name = $"wf-{workflowId:N}",
+            Slug = $"wf-{workflowId:N}"[..20],
             DefinitionJson = "{}",
             LatestVersion = 1,
             Enabled = true,

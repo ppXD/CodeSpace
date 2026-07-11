@@ -11,6 +11,14 @@ public class Workflow : IEntity<Guid>, IAuditable
     public Guid Id { get; set; }
     public Guid TeamId { get; set; }
 
+    /// <summary>
+    /// Stable, team-unique URL handle derived from <see cref="Name"/> at creation
+    /// (<c>WorkflowService.DeriveAvailableSlugAsync</c>) and never recomputed on rename. Addresses
+    /// the workflow in a clean URL — <c>/teams/{team}/workflows/{Slug}</c>. Auto-suffixed on
+    /// collision (unlike <c>Project.Slug</c>, it is not a variable-path contract key).
+    /// </summary>
+    public string Slug { get; set; } = default!;
+
     public string Name { get; set; } = default!;
     public string? Description { get; set; }
 
