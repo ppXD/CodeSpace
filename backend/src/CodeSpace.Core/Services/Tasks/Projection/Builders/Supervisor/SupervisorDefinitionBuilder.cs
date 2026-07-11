@@ -134,7 +134,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // off the resolved profile (the same source the single-agent path's "tools" key uses). Omitted when empty ⇒ the
         // harness default ⇒ byte-identical. Closes the gap where a launched pool was dropped on the supervisor lane.
         AddIfPresent(config, "allowedTools", context.AgentProfile?.AllowedTools is { Count: > 0 } tools ? tools.ToList() : null);
-        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile, context.PinnedShas));
+        AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile, context.PinnedShas, context.Seed.BaseBranch));
         // DC-2a: the operator's OWN pre-declared delivery preference — PER FIELD authoritative over the model's
         // plan-time proposal (SupervisorDeliveryClamp enforces this at plan-persist time). Omitted when the
         // operator named none (byte-identical to before DC-2a — the model's own proposal stands untouched).
@@ -144,7 +144,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     }
 
     /// <summary>The nested agentProfile object — the resolved profile field-for-field onto the ConfigSchema keys. Null (omitted) when the profile is absent or all-null, so a bare supervisor spawns the codex-cli / Standard / no-repo default.</summary>
-    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile, IReadOnlyDictionary<Guid, string>? pinnedShas)
+    private static Dictionary<string, object?>? BuildAgentProfile(ResolvedAgentProfile? profile, IReadOnlyDictionary<Guid, string>? pinnedShas, string? baseRef)
     {
         if (profile == null) return null;
 
@@ -154,6 +154,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // S1: the launch base pin for the primary — every agent this supervisor spawns materializes the SAME commit,
         // so two parallel spawns can never land on different trees. Omitted when unpinned (byte-identical).
         AddIfPresent(map, "pinnedSha", profile.RepositoryId is { } primaryId && pinnedShas is { } pins && pins.TryGetValue(primaryId, out var pin) ? pin : null);
+        // …and the operator's launch-pinned BRANCH rides alongside: the pin fixes the TREE, the ref fixes the branch
+        // CONTEXT (the clone's branch, the produced branches' base, the PR/merge target). Baking only the pin would
+        // clone the default branch and ask the provider to materialize a commit from a branch it never fetched.
+        AddIfPresent(map, "baseRef", profile.RepositoryId is not null ? NullIfBlank(baseRef) : null);
         // Multi-repo: each spawned agent ALSO clones these (the supervisor config's relatedRepositories — the SAME
         // {repositoryId, alias?, access?} shape the agent.code node gets, via the ONE shared serializer). Omitted
         // when none, so a single-repo / analysis-only supervisor spawn is byte-identical. S1: each entry carries its

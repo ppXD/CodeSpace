@@ -309,6 +309,27 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
+    public async Task A_pin_on_a_branch_the_clone_never_fetched_still_materializes()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "main-content");
+        // The pin lives on a DIVERGENT branch (scan M1's shape: the clone's branch context and the pin disagree —
+        // e.g. a reviewer cloning the default while the pin rides the operator's BaseBranch).
+        await RunGitAsync(origin.Path, "checkout", "-b", "release/2.x");
+        await WriteAndCommitAsync(origin.Path, "file.txt", "release-content");
+        var pin = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await RunGitAsync(origin.Path, "checkout", "main");
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "main", PinnedSha = pin }), CancellationToken.None);
+
+        (await File.ReadAllTextAsync(Path.Combine(handle.Directory, "file.txt"))).Trim()
+            .ShouldBe("release-content", "the all-branches rung rescues a cross-branch pin — the single-branch shallow clone alone could never reach it");
+    }
+
+    [Fact]
     public async Task A_missing_pinned_sha_fails_the_provision_loud_naming_the_pin()
     {
         if (!await GitAvailableAsync()) return;

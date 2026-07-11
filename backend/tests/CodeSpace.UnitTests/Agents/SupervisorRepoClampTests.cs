@@ -137,6 +137,31 @@ public class SupervisorRepoClampTests
         ex.Message.ShouldContain("did not bind", Case.Insensitive);
     }
 
+    // ── S1: the launch base pin is SERVER truth on the clamped subset ───
+
+    [Fact]
+    public void A_clamped_subset_takes_each_bound_repos_own_pin_and_discards_a_model_authored_one()
+    {
+        var boundWithPins = new[]
+        {
+            new WorkspaceRepositorySpec { RepositoryId = ApiWritable, Alias = "api", Access = WorkspaceAccess.Write, PinnedSha = "bbb222bbb222" },
+            new WorkspaceRepositorySpec { RepositoryId = SdkReadOnly, Alias = "sdk", Access = WorkspaceAccess.Read },
+        };
+
+        // The model authored its OWN pinnedSha on the api entry — a dispatch must not point a bound mount at an
+        // arbitrary commit; the BOUND spec's launch pin wins (scan M2/m2), and an unpinned bound repo stays unpinned.
+        var authored = JsonSerializer.SerializeToElement(new object[]
+        {
+            new { repositoryId = ApiWritable, access = "write", pinnedSha = "deadbeefdead" },
+            new { repositoryId = SdkReadOnly, access = "read" },
+        });
+
+        var result = SupervisorRepoClamp.IntersectWithBoundRepos(authored, Primary, boundWithPins);
+
+        result.Single(r => r.RepositoryId == ApiWritable).PinnedSha.ShouldBe("bbb222bbb222", "a dispatched agent's mounts materialize the SAME base as its homogeneous siblings");
+        result.Single(r => r.RepositoryId == SdkReadOnly).PinnedSha.ShouldBeNull("no launch pin on the bound spec ⇒ none on the clamp output — never the model's invention");
+    }
+
     // ── Helpers ───
 
     private static IReadOnlyList<WorkspaceRepositorySpec> Clamp(JsonElement authored) =>

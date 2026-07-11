@@ -473,17 +473,42 @@ public class SupervisorBuildAgentTaskTests
     }
 
     [Fact]
-    public void A_dispatch_primary_override_never_inherits_the_profiles_pin()
+    public void A_dispatch_primary_override_promotes_the_bound_repos_own_pin_never_the_profiles()
     {
+        // Scan M2: the vector pins EVERY bound repo — a dispatch that promotes a bound related repo to primary must
+        // carry THAT repo's own baked pin (its homogeneous siblings mount the same commit), never the profile
+        // primary's pin (a different repo's commit) and never an unpinned live tip (the drift S1 kills).
         var primary = Guid.NewGuid();
         var api = Guid.NewGuid();
-        var context = BoundContext(primary, apiWrite: api, sdkRead: Guid.NewGuid());
-        context = context with { AgentProfile = context.AgentProfile! with { PinnedSha = "abc123def456" } };
+        var context = new SupervisorTurnContext
+        {
+            Goal = "ship",
+            AgentProfile = new SupervisorAgentProfile
+            {
+                RepositoryId = primary,
+                PinnedSha = "aaa111aaa111",
+                RelatedRepositories = JsonDocument.Parse($$"""[{"repositoryId":"{{api}}","alias":"api","access":"write","pinnedSha":"bbb222bbb222"}]""").RootElement,
+            },
+        };
 
         var task = BuildWithSpec(context, new SupervisorAgentDispatch { SubtaskId = SubtaskId, RepositoryId = api });
 
         task.RepositoryId.ShouldBe(api);
-        task.Workspace!.Repositories.Single(r => r.IsPrimary).PinnedSha.ShouldBeNull("the vector was resolved for the LAUNCH's primary — a different repo must not wear another repo's commit");
+        task.Workspace!.Repositories.Single(r => r.IsPrimary).PinnedSha.ShouldBe("bbb222bbb222", "the promoted repo wears ITS OWN launch pin — never the profile primary's, never the live tip");
+    }
+
+    [Fact]
+    public void The_profiles_launch_base_ref_clones_the_operators_branch_alongside_the_pin()
+    {
+        // Scan M1: the pin fixes the TREE, the ref fixes the branch CONTEXT — baking only the pin would clone the
+        // default branch and ask the provider to materialize a commit from a branch it never fetched.
+        var repoId = Guid.NewGuid();
+        var context = new SupervisorTurnContext { Goal = "ship", AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId, PinnedSha = "abc123def456", BaseRef = "release/2.x" } };
+
+        var primary = Build(context).Workspace!.Repositories.Single();
+
+        primary.Ref.ShouldBe("release/2.x", "the operator's launch-pinned branch reaches every spawn's clone");
+        primary.PinnedSha.ShouldBe("abc123def456");
     }
 
     /// <summary>A context whose profile binds a primary (write) + api (write) + sdk (read) — the operator bound set the per-agent clamp validates against.</summary>

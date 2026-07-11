@@ -205,15 +205,19 @@ public class SupervisorDefinitionBuilderTests
         var apiId = Guid.NewGuid();
         var profile = new ResolvedAgentProfile { RepositoryId = repoId, RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = apiId, Access = WorkspaceAccess.Write } } };
 
-        var pinned = Builder.Build(Context(profile) with { PinnedShas = new Dictionary<Guid, string> { [repoId] = "aaa111aaa111", [apiId] = "bbb222bbb222" } })
-            .Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+        var context = Context(profile) with { PinnedShas = new Dictionary<Guid, string> { [repoId] = "aaa111aaa111", [apiId] = "bbb222bbb222" } };
+        context = context with { Seed = context.Seed with { BaseBranch = "release/2.x" } };
+
+        var pinned = Builder.Build(context).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
 
         pinned.GetProperty("pinnedSha").GetString().ShouldBe("aaa111aaa111");
+        pinned.GetProperty("baseRef").GetString().ShouldBe("release/2.x", "the pin fixes the TREE, the operator's branch fixes the CONTEXT — both must reach every spawn");
         pinned.GetProperty("relatedRepositories")[0].GetProperty("pinnedSha").GetString().ShouldBe("bbb222bbb222", "each related entry carries ITS OWN pin — no bleed");
 
         var unpinned = Builder.Build(Context(profile)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
 
         unpinned.TryGetProperty("pinnedSha", out _).ShouldBeFalse("no vector ⇒ no key (byte-identical to before S1)");
+        unpinned.TryGetProperty("baseRef", out _).ShouldBeFalse("no operator pin ⇒ no key");
         unpinned.GetProperty("relatedRepositories")[0].TryGetProperty("pinnedSha", out _).ShouldBeFalse();
     }
 
