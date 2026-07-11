@@ -292,6 +292,23 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
+    public async Task A_pin_matching_the_tip_keeps_the_clone_shallow()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "v1");
+        var pin = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");   // the tip has NOT moved — the common launch
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), PinnedSha = pin }), CancellationToken.None);
+
+        (await GitStdoutAsync(handle.Directory, "rev-parse", "HEAD")).ShouldBe(pin);
+        (await GitStdoutAsync(handle.Directory, "rev-parse", "--is-shallow-repository"))
+            .ShouldBe("true", "pin == the fetched tip ⇒ the cheap rung wins — the common launch must not pay a full-history clone for its pin");
+    }
+
+    [Fact]
     public async Task A_missing_pinned_sha_fails_the_provision_loud_naming_the_pin()
     {
         if (!await GitAvailableAsync()) return;

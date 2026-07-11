@@ -44,7 +44,10 @@ public sealed class LaunchBasePinResolver : ILaunchBasePinResolver, IScopedDepen
 
             if (request is null) continue;
 
-            if (await _tips.ResolveTipShaAsync(request, cancellationToken).ConfigureAwait(false) is { } sha) vector[repositoryId] = sha;
+            // refRequired only for an AUTHORED ref (the operator's BaseBranch / a related spec's Ref) — its absence
+            // is an authoring error worth failing the launch for. An implicit recorded default branch that the
+            // remote doesn't have (an empty just-created repo, a stale record) launches unpinned instead.
+            if (await _tips.ResolveTipShaAsync(request, refRequired: hardRef is not null, cancellationToken).ConfigureAwait(false) is { } sha) vector[repositoryId] = sha;
         }
 
         return vector.Count > 0 ? vector : null;

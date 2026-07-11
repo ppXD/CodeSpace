@@ -23,7 +23,7 @@ public sealed class RemoteTipResolverTests
         await SeedOriginAsync(origin.Path, "file.txt", "v1");
         var expected = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
 
-        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "main" }, CancellationToken.None);
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "main" }, refRequired: true, CancellationToken.None);
 
         sha.ShouldBe(expected);
     }
@@ -37,7 +37,7 @@ public sealed class RemoteTipResolverTests
         await SeedOriginAsync(origin.Path, "file.txt", "v1");
         var expected = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
 
-        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, refRequired: true, CancellationToken.None);
 
         sha.ShouldBe(expected, "no ref ⇒ the remote's HEAD — the same commit a bare `git clone` would materialize");
     }
@@ -51,7 +51,7 @@ public sealed class RemoteTipResolverTests
         await SeedOriginAsync(origin.Path, "file.txt", "v1");
 
         var ex = await Should.ThrowAsync<WorkspaceException>(() => NewResolver().ResolveTipShaAsync(
-            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "release/9.x" }, CancellationToken.None));
+            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "release/9.x" }, refRequired: true, CancellationToken.None));
 
         ex.Message.ShouldContain("release/9.x", customMessage: "a HARD ref that is gone fails the launch loud — the clone would fail identically later, never a silent unpinned launch");
     }
@@ -68,7 +68,7 @@ public sealed class RemoteTipResolverTests
         // DefaultRef set = the request's own SOFT semantics (a pruned session branch degrades to the default) —
         // the resolver mirrors the clone's ResolveCheckoutRefAsync so pin and clone can never diverge.
         var sha = await NewResolver().ResolveTipShaAsync(
-            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "run-1/pruned", DefaultRef = "main" }, CancellationToken.None);
+            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "run-1/pruned", DefaultRef = "main" }, refRequired: true, CancellationToken.None);
 
         sha.ShouldBe(expected);
     }
@@ -84,7 +84,7 @@ public sealed class RemoteTipResolverTests
         await RunGitAsync(origin.Path, "tag", "-a", "v1.0", "-m", "release");   // annotated: the tag OBJECT sha ≠ the commit sha
         await WriteAndCommitAsync(origin.Path, "file.txt", "v2");               // the tip moves past the tag
 
-        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "v1.0" }, CancellationToken.None);
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "v1.0" }, refRequired: true, CancellationToken.None);
 
         sha.ShouldBe(expected, "an annotated tag pin must be the PEELED commit — the tag object itself is not a tree the workspace can materialize");
     }
@@ -97,7 +97,7 @@ public sealed class RemoteTipResolverTests
         using var origin = new TempDir();
         await RunGitAsync(origin.Path, "init", "--bare", "-b", "main");
 
-        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, refRequired: true, CancellationToken.None);
 
         sha.ShouldBeNull("an empty remote has no commit to pin — the launch proceeds unpinned rather than failing a brand-new repo");
     }
@@ -110,7 +110,70 @@ public sealed class RemoteTipResolverTests
         var dead = Path.Combine(Path.GetTempPath(), "cs-no-such-remote-" + Guid.NewGuid().ToString("N"));
 
         await Should.ThrowAsync<WorkspaceException>(() => NewResolver().ResolveTipShaAsync(
-            new WorkspaceRequest { RepositoryUrl = new Uri(dead).AbsoluteUri, Ref = "main" }, CancellationToken.None));
+            new WorkspaceRequest { RepositoryUrl = new Uri(dead).AbsoluteUri, Ref = "main" }, refRequired: true, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_missing_IMPLICIT_ref_returns_null_instead_of_throwing()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await RunGitAsync(origin.Path, "init", "--bare", "-b", "main");   // an empty just-created repo: its recorded default branch has no commits yet
+
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "main" }, refRequired: false, CancellationToken.None);
+
+        sha.ShouldBeNull("an IMPLICIT recorded default the remote doesn't have launches UNPINNED (the pre-S1 behaviour) — an opportunistic pin must never fail a brand-new repo's launch");
+    }
+
+    [Fact]
+    public async Task A_branch_is_preferred_over_a_tag_with_the_same_name()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "v1");
+        await RunGitAsync(origin.Path, "tag", "release");                  // a tag at v1…
+        var branchTip = await WriteCommitAndBranchAsync(origin.Path);      // …and a BRANCH `release` at a different commit
+
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "release" }, refRequired: true, CancellationToken.None);
+
+        sha.ShouldBe(branchTip, "refs/heads wins over refs/tags for an ambiguous name — matching git clone --branch's own preference");
+    }
+
+    [Fact]
+    public async Task A_lightweight_tag_resolves_to_its_commit()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "v1");
+        var expected = await GitStdoutAsync(origin.Path, "rev-parse", "HEAD");
+        await RunGitAsync(origin.Path, "tag", "v1.0");                     // lightweight: no tag object, no peeled ^{} line
+        await WriteAndCommitAsync(origin.Path, "file.txt", "v2");
+
+        var sha = await NewResolver().ResolveTipShaAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "v1.0" }, refRequired: true, CancellationToken.None);
+
+        sha.ShouldBe(expected, "a lightweight tag points at the commit directly — the non-peeled fallback arm must return it");
+    }
+
+    [Fact]
+    public async Task A_missing_soft_ref_whose_default_is_also_missing_fails_loud()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "file.txt", "v1");
+
+        await Should.ThrowAsync<WorkspaceException>(() => NewResolver().ResolveTipShaAsync(
+            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "run-1/pruned", DefaultRef = "no-such-default" }, refRequired: true, CancellationToken.None));
+    }
+
+    [Fact]
+    public void SanitizeUrl_strips_userinfo_and_leaves_clean_urls_alone()
+    {
+        RemoteTipResolver.SanitizeUrl("https://user:secret@host/repo.git").ShouldNotContain("secret", customMessage: "a stored clone URL may itself carry credentials the token redaction knows nothing about");
+        RemoteTipResolver.SanitizeUrl("https://host/repo.git").ShouldBe("https://host/repo.git");
     }
 
     // ─── harness (the LocalGitWorkspaceProviderTests pattern) ───────────────────────
@@ -147,6 +210,16 @@ public sealed class RemoteTipResolverTests
         await File.WriteAllTextAsync(Path.Combine(dir, file), content);
         await RunGitAsync(dir, "add", ".");
         await RunGitAsync(dir, "commit", "-m", "seed");
+    }
+
+    /// <summary>Commit on a new branch named <c>release</c> (shadowing the tag of the same name), back to main; returns the branch tip.</summary>
+    private static async Task<string> WriteCommitAndBranchAsync(string dir)
+    {
+        await RunGitAsync(dir, "checkout", "-b", "release");
+        await WriteAndCommitAsync(dir, "file.txt", "branch-content");
+        var tip = await GitStdoutAsync(dir, "rev-parse", "HEAD");
+        await RunGitAsync(dir, "checkout", "main");
+        return tip;
     }
 
     private static async Task RunGitAsync(string workdir, params string[] args)
