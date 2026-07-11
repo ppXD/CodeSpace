@@ -562,6 +562,13 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
 
     const isContainer = isContainerKind(manifest.kind);
 
+    // When adding via the "+" from a node INSIDE a container, computeAddPosition returned a position in that
+    // source node's coordinate space (right of it), so inheriting the source's parentId drops the new node into
+    // the SAME container — both correctly positioned AND same-scope, which makes the auto-link below a valid
+    // within-container edge instead of the boundary-crossing one the engine silently drops (and Save rejects). A
+    // free drop (screen coord) or a top-level source inherits nothing → the node stays top-level, as before.
+    const inheritParentId = !options.screen && selectedId ? nodes.find((n) => n.id === selectedId)?.parentId : undefined;
+
     const newNode: Node<WorkflowNodeData> = {
       id,
       type: "wf",
@@ -581,6 +588,9 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
+      // Added from inside a container → nest it there (see inheritParentId). extent:"parent" is deliberately
+      // NOT set, so the author can still drag it back out (the drag handler unparents on drag-out).
+      ...(inheritParentId ? { parentId: inheritParentId } : {}),
       // A container (loop / try) is a box sized to hold its body subgraph. It's draggable from anywhere
       // on the box; its body steps render ABOVE it (React Flow parent/child z-order) so they stay
       // clickable and grabbing one drags the step, while grabbing empty space drags the whole box.
