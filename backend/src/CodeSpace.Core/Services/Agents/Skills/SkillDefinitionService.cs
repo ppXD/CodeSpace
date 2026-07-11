@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Slugs;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
@@ -251,26 +252,14 @@ public sealed class SkillDefinitionService : ISkillDefinitionService, IScopedDep
     private async Task<string> DeriveAvailableSlugAsync(Guid teamId, string name, CancellationToken cancellationToken)
     {
         var baseSlug = DeriveValidSlug(name);
-        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
 
         var taken = (await _db.SkillDefinition.AsNoTracking()
-            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null && s.Slug.StartsWith(probe))
+            .Where(s => s.TeamId == teamId && s.Scope == DefinitionScope.Working && s.DeletedDate == null && s.Slug.StartsWith(SlugDeduper.ProbePrefix(baseSlug)))
             .Select(s => s.Slug)
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
 
-        if (!taken.Contains(baseSlug)) return baseSlug;
-
-        for (var n = 2; n < 10000; n++)
-        {
-            var suffix = $"-{n}";
-            var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
-            var candidate = trimmed + suffix;
-
-            if (!taken.Contains(candidate)) return candidate;
-        }
-
-        throw new InvalidOperationException($"Could not derive a free handle from '{name}' — too many existing variants of '{baseSlug}'.");
+        return SlugDeduper.DeriveAvailable(baseSlug, taken);
     }
 
     private async Task SaveCreateAsync(SkillDefinition skill, string slug, string requestedName, CancellationToken cancellationToken)

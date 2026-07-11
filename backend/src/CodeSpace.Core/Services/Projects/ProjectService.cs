@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Slugs;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
@@ -259,29 +260,7 @@ public sealed class ProjectService : IProjectService, IScopedDependency
     ///   <item><c>"---spaces---"</c> → <c>"spaces"</c></item>
     /// </list></para>
     /// </summary>
-    public static string SlugifyName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
-
-        var sb = new System.Text.StringBuilder(name.Length);
-        var lastWasHyphen = true;   // suppresses a leading hyphen
-        foreach (var c in name)
-        {
-            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
-            {
-                sb.Append(char.ToLowerInvariant(c));
-                lastWasHyphen = false;
-            }
-            else if (!lastWasHyphen)
-            {
-                sb.Append('-');
-                lastWasHyphen = true;
-            }
-        }
-
-        var result = sb.ToString().TrimEnd('-');
-        return result.Length <= 64 ? result : result[..64].TrimEnd('-');
-    }
+    public static string SlugifyName(string name) => Slug.Slugify(name);
 
     public async Task UpdateAsync(Guid teamId, Guid projectId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken)
     {

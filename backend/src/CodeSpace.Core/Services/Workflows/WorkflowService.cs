@@ -6,6 +6,7 @@ using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Slugs;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -1669,27 +1670,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// </summary>
     public static string SlugifyName(string? name)
     {
-        if (string.IsNullOrWhiteSpace(name)) return FallbackSlug;
-
-        var sb = new System.Text.StringBuilder(name.Length);
-        var lastWasHyphen = true;   // suppresses a leading hyphen
-        foreach (var c in name)
-        {
-            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
-            {
-                sb.Append(char.ToLowerInvariant(c));
-                lastWasHyphen = false;
-            }
-            else if (!lastWasHyphen)
-            {
-                sb.Append('-');
-                lastWasHyphen = true;
-            }
-        }
-
-        var result = sb.ToString().TrimEnd('-');
-        if (result.Length > 64) result = result[..64].TrimEnd('-');
-        return result.Length == 0 ? FallbackSlug : result;
+        var slug = Slug.Slugify(name);
+        return slug.Length == 0 ? FallbackSlug : slug;
     }
 
     /// <summary>
@@ -1701,28 +1683,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     {
         var baseSlug = SlugifyName(name);
 
-        // A 50-char prefix is a prefix of baseSlug AND of every trimmed -N variant, so one StartsWith
-        // prefetch covers the truncation case; the exact Contains check below stays precise.
-        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
-
         var taken = (await _db.Workflow.AsNoTracking()
-            .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug.StartsWith(probe))
+            .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug.StartsWith(SlugDeduper.ProbePrefix(baseSlug)))
             .Select(w => w.Slug)
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
 
-        if (!taken.Contains(baseSlug) && !ReservedSlugs.Contains(baseSlug)) return baseSlug;
-
-        for (var n = 2; n < 10000; n++)
-        {
-            var suffix = $"-{n}";
-            var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
-            var candidate = trimmed + suffix;
-
-            if (!taken.Contains(candidate) && !ReservedSlugs.Contains(candidate)) return candidate;
-        }
-
-        throw new InvalidOperationException($"Could not derive a free slug from workflow name '{name}'.");
+        return SlugDeduper.DeriveAvailable(baseSlug, taken, ReservedSlugs);
     }
 
     /// <summary>
