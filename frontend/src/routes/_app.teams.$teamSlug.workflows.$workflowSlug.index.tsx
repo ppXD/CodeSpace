@@ -577,6 +577,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
         isSideEffecting: manifest.isSideEffecting,
         canSuspend: manifest.canSuspend,
         alwaysRequiresApproval: manifest.alwaysRequiresApproval,
+        outputs: manifest.outputs,
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
@@ -617,11 +618,13 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
     if (options.autoLink && selectedId && selectedId !== id && manifest.kind !== "Trigger") {
       const sourceNode = nodes.find((n) => n.id === selectedId);
       if (sourceNode && sourceNode.data.kind !== "Terminal") {
-        // addEdge accepts a Connection (no id required) and returns the edge with a
-        // generated id. Cast to Connection to satisfy the overload — sourceHandle /
-        // targetHandle null is fine because our nodes only have one handle per side.
+        // A node with named output handles (logic.if's true/false) has no single default output, so a null
+        // sourceHandle would author a dead edge (the engine maps null → "out", which never matches a named
+        // branch). Auto-link from its FIRST branch so the edge is LIVE; the author can drag from another
+        // handle to wire the other branch. Nodes with a single default output keep the null handle.
+        const sourceHandle = sourceNode.data.outputs?.[0]?.name ?? null;
         setEdges((eds) => addEdge(
-          { source: selectedId, target: id, sourceHandle: null, targetHandle: null, type: "default", animated: true } as Connection,
+          { source: selectedId, target: id, sourceHandle, targetHandle: null, type: "default", animated: true } as Connection,
           eds,
         ));
       }

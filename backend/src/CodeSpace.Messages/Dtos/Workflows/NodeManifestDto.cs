@@ -46,8 +46,23 @@ public sealed record NodeManifestDto
     /// </summary>
     public bool AlwaysRequiresApproval { get; init; }
 
+    /// <summary>
+    /// The node's named output handles (routing branches) — e.g. logic.if's "true"/"false". The editor renders
+    /// one labelled source handle per entry so an author wires each branch explicitly; absent for a node with a
+    /// single default output. Names match the handles the engine routes to (NodeResult.Route).
+    /// </summary>
+    public IReadOnlyList<NodeOutputHandleDto>? Outputs { get; init; }
+
     /// <summary>Author-facing starter templates the editor offers as "start from a template". Null/empty ⇒ none.</summary>
     public IReadOnlyList<NodePresetDto>? Presets { get; init; }
+}
+
+/// <summary>API view of one named output handle — a routing branch the editor renders as a labelled source handle.</summary>
+public sealed record NodeOutputHandleDto
+{
+    public required string Name { get; init; }
+    public string? DisplayName { get; init; }
+    public string? Description { get; init; }
 }
 
 /// <summary>API view of one node starter template — a named (Config, Inputs) pair the editor applies on pick.</summary>

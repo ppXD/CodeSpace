@@ -1636,6 +1636,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             IsSideEffecting = n.Manifest.IsSideEffecting,
             CanSuspend = n.Manifest.CanSuspend,
             AlwaysRequiresApproval = n.Manifest.AlwaysRequiresApproval,
+            Outputs = n.Manifest.Outputs?.Select(o => new NodeOutputHandleDto { Name = o.Name, DisplayName = o.DisplayName, Description = o.Description }).ToList(),
             Presets = n.Manifest.Presets?.Select(p => new NodePresetDto { Id = p.Id, Label = p.Label, Description = p.Description, Config = p.Config, Inputs = p.Inputs }).ToList()
         }).ToList();
     }

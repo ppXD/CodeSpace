@@ -69,6 +69,17 @@ describe("WorkflowNode card", () => {
     expect(run.container.querySelector(".wf-rf-node")?.getAttribute("data-run-status")).toBe("Success");
     expect(run.container.querySelector('.wf-rf-status-badge[data-status="success"]')).not.toBeNull();
   });
+
+  it("renders one labelled source handle per named output (logic.if true/false), not an anonymous handle", () => {
+    const named = renderNode({ outputs: [{ name: "true", displayName: "True" }, { name: "false", displayName: "False" }] });
+
+    expect(named.container.querySelectorAll(".wf-rf-handle-named").length).toBe(2);
+    expect(named.container.querySelector(".wf-rf-h-true .wf-rf-handle-label")?.textContent).toBe("True");
+    expect(named.container.querySelector(".wf-rf-h-false .wf-rf-handle-label")?.textContent).toBe("False");
+
+    // a node with no named outputs shows none (its single default handle stays)
+    expect(renderNode({}).container.querySelectorAll(".wf-rf-handle-named").length).toBe(0);
+  });
 });
 
 /** A bare run row with sensible defaults; override per test. */

@@ -3,7 +3,7 @@ import { Handle, NodeResizer, Position, useStore, type NodeProps, type ReactFlow
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
-import type { NodeKind, NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
+import type { NodeKind, NodeOutputHandle, NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
 import { useAgentRun } from "@/hooks/use-agents";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
@@ -63,6 +63,8 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   isSideEffecting?: boolean;
   canSuspend?: boolean;
   alwaysRequiresApproval?: boolean;
+  /** Named output handles (routing branches, e.g. logic.if's true/false) → one labelled source handle each. */
+  outputs?: NodeOutputHandle[];
   label: string | null;
   /**
    * Manual Start node only: the workflow's declared input fields, rendered on the card so the
@@ -420,7 +422,28 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
         )}
         {runStatus === "Failure" && d.rerunnableFromHere && <RerunMenu target={{ kind: "node", nodeId: id }} className="wf-rerun-node-row nodrag nopan" />}
       </div>
-      {d.kind !== "Terminal" && <Handle type="source" position={Position.Right} className="wf-rf-handle" />}
+      {/* Source output(s). A node with named outputs (logic.if's true/false) renders one LABELLED handle per
+          branch — each with id = the exact handle the engine routes to — so an author wires each branch
+          explicitly. A single anonymous handle here would author an edge with no sourceHandle, which the engine
+          maps to the default "out" and never matches true/false, i.e. a silently dead branch. A node with no
+          named outputs keeps the single default handle. */}
+      {d.kind !== "Terminal" && (
+        d.outputs && d.outputs.length > 0
+          ? d.outputs.map((o, i) => (
+              <Handle
+                key={o.name}
+                id={o.name}
+                type="source"
+                position={Position.Right}
+                className={`wf-rf-handle wf-rf-handle-named wf-rf-h-${o.name}`}
+                style={{ top: `${((i + 1) / (d.outputs!.length + 1)) * 100}%` }}
+                title={o.description ?? undefined}
+              >
+                <span className="wf-rf-handle-label">{o.displayName ?? o.name}</span>
+              </Handle>
+            ))
+          : <Handle type="source" position={Position.Right} className="wf-rf-handle" />
+      )}
       {/* Error output — connect it to a handler node to catch this node's failure (route the run
           there instead of failing it). Only meaningful on regular nodes that can fail-and-continue.
           Sits on the BOTTOM edge (the right edge is the node's normal left→right output). */}
