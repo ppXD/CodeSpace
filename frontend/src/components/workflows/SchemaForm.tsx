@@ -6,7 +6,9 @@ import { coerceNumberInput } from "@/lib/inputFieldSchema";
 import type { ScopeSuggestion } from "./scope-introspection";
 import { AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
+import { CredentialedModelMultiSelector, CredentialedModelSelector } from "./selectors/CredentialedModelSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
+import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
@@ -424,6 +426,22 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
     case "harness":
       return (
         <HarnessSelector
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
+    case "credentialedModel":
+      // Value = the credentialed-model ROW id (the pool resolves it via ResolveByRowIdAsync — NOT the bare
+      // model id or the credential id). Array field → multi-select chips (e.g. the supervisor's
+      // allowedModelIds); scalar → a single picker (which SchemaForm also wraps in Pick ⇄ Expression).
+      return schema.type === "array"
+        ? <CredentialedModelMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
+        : <CredentialedModelSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
+    case "modelCredential":
+      // Value = the owning ModelCredential id (not a model row). Scalar in current manifests; harness-provider
+      // filtering belongs to the agent-profile composite (which has the sibling harness), not this generic case.
+      return (
+        <ModelCredentialSelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />
