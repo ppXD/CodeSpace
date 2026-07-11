@@ -101,6 +101,13 @@ public interface IWorkflowService
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true);
 
     /// <summary>
+    /// Resolves a run by EITHER its GUID (legacy link) or its team-scoped run number (canonical clean
+    /// URL, e.g. <c>/runs/1042</c>), reusing <see cref="GetRunAsync"/> for the detail load + team-scope.
+    /// Null on miss / not-team.
+    /// </summary>
+    Task<WorkflowRunDetail?> GetRunByRefAsync(string idOrNumber, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// The attempt ladder of the lineage <paramref name="runId"/> belongs to — the original plus every replay/rerun
     /// fork sharing its <c>RootRunId ?? Id</c> key, oldest first, 1-based and latest-flagged. Team-scoped; a foreign /
     /// absent run returns null (the controller 404-conflates).

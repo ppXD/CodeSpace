@@ -10,6 +10,9 @@ public sealed record WorkflowRunSummary
 {
     public required Guid Id { get; init; }
 
+    /// <summary>Team-scoped sequential number — the run's clean-URL handle. The cockpit row links by it.</summary>
+    public required long RunNumber { get; init; }
+
     /// <summary>Parent workflow id for an authored run. <c>null</c> for a snapshot run (it has no parent workflow).</summary>
     public Guid? WorkflowId { get; init; }
 

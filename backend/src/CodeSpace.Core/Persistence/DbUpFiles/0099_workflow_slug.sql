@@ -22,28 +22,41 @@ ALTER TABLE workflow ADD CONSTRAINT chk_workflow_slug_format
 --    (re-trimming a '-' the cut may expose), and map an empty result to 'workflow'. Rows are then
 --    deduped per (team_id, base_slug) with a '-N' suffix (N = ordinal within the group), so no two
 --    rows in a team ever share a slug and the partial unique index in step 4 cannot fail.
-WITH slugified AS (
-    SELECT id, team_id, created_date,
-           CASE WHEN base = '' THEN 'workflow' ELSE base END AS base_slug
-    FROM (
-        SELECT id, team_id, created_date,
-               RTRIM(LEFT(TRIM(BOTH '-' FROM regexp_replace(lower(name), '[^a-z0-9_]+', '-', 'g')), 64), '-') AS base
-        FROM workflow
-        WHERE slug IS NULL
-    ) s
-),
-ranked AS (
-    SELECT id, base_slug,
-           ROW_NUMBER() OVER (PARTITION BY team_id, base_slug ORDER BY created_date, id) AS rn
-    FROM slugified
-)
-UPDATE workflow w
-SET slug = CASE
-    WHEN r.rn = 1 THEN r.base_slug
-    ELSE LEFT(r.base_slug, 64 - LENGTH('-' || r.rn::text)) || '-' || r.rn::text
-END
-FROM ranked r
-WHERE w.id = r.id;
+-- Loop-until-free per row, byte-mirroring the runtime resolver WorkflowService.DeriveAvailableSlugAsync:
+-- a `-N` variant is bumped until it collides with NOTHING already assigned in the team, so a variant can
+-- never duplicate another row's base slug (a pure ROW_NUMBER partition would emit "foo-2" for both
+-- "Foo","Foo" (partition foo, rn 2) AND "Foo 2" (partition foo-2, rn 1) → unique-index build aborts the
+-- whole DbUp batch). Reserved words that would be shadowed by a literal /api/workflows GET route are also
+-- pushed to `-N`. Row-by-row (one-time backfill), so the O(rows) EXISTS probe is acceptable.
+DO $$
+DECLARE
+    r          RECORD;
+    candidate  TEXT;
+    n          INT;
+BEGIN
+    FOR r IN
+        SELECT id, team_id,
+               CASE WHEN base = '' THEN 'workflow' ELSE base END AS base_slug
+        FROM (
+            SELECT id, team_id, created_date,
+                   RTRIM(LEFT(TRIM(BOTH '-' FROM regexp_replace(lower(name), '[^a-z0-9_]+', '-', 'g')), 64), '-') AS base
+            FROM workflow
+            WHERE slug IS NULL
+        ) s
+        ORDER BY team_id, created_date, id
+    LOOP
+        candidate := r.base_slug;
+        n := 1;
+        WHILE candidate IN ('runs', 'node-manifests', 'system-variables', 'decisions')
+           OR EXISTS (SELECT 1 FROM workflow w
+                      WHERE w.team_id = r.team_id AND w.slug = candidate AND w.deleted_date IS NULL AND w.id <> r.id)
+        LOOP
+            n := n + 1;
+            candidate := LEFT(r.base_slug, 64 - LENGTH('-' || n::text)) || '-' || n::text;
+        END LOOP;
+        UPDATE workflow SET slug = candidate WHERE id = r.id;
+    END LOOP;
+END $$;
 
 -- 4) Every row now has a slug — enforce NOT NULL + per-team uniqueness among alive rows
 --    (a soft-deleted slug is reusable, matching project/agent/skill).

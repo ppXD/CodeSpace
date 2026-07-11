@@ -71,13 +71,19 @@ public sealed class ProjectService : IProjectService, IScopedDependency
     public Task<ProjectSummary?> GetAsync(Guid teamId, Guid projectId, CancellationToken cancellationToken) =>
         FindAsync(teamId, p => p.Id == projectId, cancellationToken);
 
-    public Task<ProjectSummary?> GetByRefAsync(Guid teamId, string idOrSlug, CancellationToken cancellationToken)
+    public async Task<ProjectSummary?> GetByRefAsync(Guid teamId, string idOrSlug, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(idOrSlug)) return Task.FromResult<ProjectSummary?>(null);
+        if (string.IsNullOrWhiteSpace(idOrSlug)) return null;
+
+        // Slug FIRST, then a GUID fallback: a slug can be GUID-shaped (the CHECK allows 32 hex), so a
+        // GUID-first branch would look up a random id and 404 a real row. Only a ref that matches no slug
+        // AND parses as a GUID falls through to the legacy-id lookup — keeping old GUID links working.
+        var bySlug = await FindAsync(teamId, p => p.Slug == idOrSlug, cancellationToken).ConfigureAwait(false);
+        if (bySlug != null) return bySlug;
 
         return Guid.TryParse(idOrSlug, out var id)
-            ? FindAsync(teamId, p => p.Id == id, cancellationToken)
-            : FindAsync(teamId, p => p.Slug == idOrSlug, cancellationToken);
+            ? await FindAsync(teamId, p => p.Id == id, cancellationToken).ConfigureAwait(false)
+            : null;
     }
 
     /// <summary>

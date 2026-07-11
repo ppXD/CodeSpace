@@ -60,11 +60,17 @@ public class WorkflowRunsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>One run's detail — status, per-node cells, version-pinned definition snapshot, outputs, pending wait. Team-scoped; foreign / absent → 404.</summary>
-    [HttpGet("{runId:guid}")]
-    public async Task<IActionResult> Get([FromRoute] Guid runId, CancellationToken cancellationToken)
+    /// <summary>
+    /// One run's detail — status, per-node cells, version-pinned definition snapshot, outputs, pending wait.
+    /// Addressed by a URL ref: the team-scoped run number (canonical clean URL, e.g. <c>runs/1042</c>) or a
+    /// GUID (legacy link). The response carries <c>RunNumber</c> so the router can canonicalise a legacy-GUID
+    /// URL to the number URL. Team-scoped; foreign / absent → 404. Sub-routes stay GUID-keyed (the FE resolves
+    /// once here, then calls them with the run's id).
+    /// </summary>
+    [HttpGet("{idOrNumber}")]
+    public async Task<IActionResult> Get([FromRoute] string idOrNumber, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new GetWorkflowRunQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send(new GetWorkflowRunByRefQuery { IdOrNumber = idOrNumber }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 

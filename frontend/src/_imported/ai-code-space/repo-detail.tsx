@@ -272,7 +272,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
             onClose={() => setLaunchOpen(false)}
             onLaunched={(runId) => {
               setLaunchOpen(false);
-              navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
+              navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: runId } });
             }}
           />
         )}

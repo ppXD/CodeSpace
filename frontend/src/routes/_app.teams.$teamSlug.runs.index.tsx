@@ -114,7 +114,7 @@ function TeamRunsPage() {
   // opens its raw detail in a modal over this list. hasSession is undefined against an older backend → treat as "has session".
   const openRun = (run: WorkflowRunSummary) => {
     if (run.hasSession === false) setModalRunId(run.id);
-    else navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: run.id } });
+    else navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: String(run.runNumber) } });
   };
 
   const errorBanner = runs.error instanceof ApiError ? (

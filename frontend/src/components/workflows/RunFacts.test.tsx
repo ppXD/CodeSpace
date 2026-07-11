@@ -7,7 +7,7 @@ import { RunFacts } from "./RunFacts";
 
 function run(o: Partial<WorkflowRunDetail>): WorkflowRunDetail {
   return {
-    id: "run-1", workflowId: "wf", workflowVersion: 3, sourceType: "manual", normalizedPayload: {},
+    id: "run-1", runNumber: 1, workflowId: "wf", workflowVersion: 3, sourceType: "manual", normalizedPayload: {},
     status: "Success", error: null, startedAt: null, completedAt: null, createdDate: "2026-06-22T00:00:00Z", nodes: [], ...o,
   };
 }

@@ -12,6 +12,7 @@ internal static class RunDetailFixtures
     public static WorkflowRunDetail Run(WorkflowRunStatus status, params WorkflowRunNodeSummary[] nodes) => new()
     {
         Id = Guid.NewGuid(),
+        RunNumber = 1,
         SourceType = "test",
         NormalizedPayload = EmptyObject,
         Status = status,

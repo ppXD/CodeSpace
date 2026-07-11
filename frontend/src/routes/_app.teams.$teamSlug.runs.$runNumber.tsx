@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
+import { ApiError } from "@/api/request";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
+import { useWorkflowRun } from "@/hooks/use-workflows";
 import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
 
@@ -13,14 +15,38 @@ import { SessionRoomView } from "@/components/sessions/SessionRoomView";
  * the same {@link RunViewerDialog} the workflow editor uses — so "View trace" / "Run details" never navigates away. A
  * legacy/session-less run (only pre-release data) opens the SAME modal on its own over the app shell.
  */
-export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runId")({
+export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runNumber")({
   component: RunDetailPage,
 });
 
-// Remount per URL run id so the modal state resets cleanly on navigation (a path-param change doesn't remount by default).
+// The URL segment is a ref — the canonical team-scoped run number, or a legacy GUID. Resolve it to the
+// run (getting its real id + number) before the room/journal fetches, which are all GUID-keyed. Remount
+// per resolved id so the modal state resets cleanly on navigation.
 function RunDetailPage() {
-  const { teamSlug, runId } = Route.useParams();
-  return <RunDetail key={runId} teamSlug={teamSlug} runId={runId} />;
+  const { teamSlug, runNumber } = Route.useParams();
+  const navigate = useNavigate();
+  const run = useWorkflowRun(runNumber);
+
+  // Canonicalise a legacy-GUID URL to the number URL.
+  useEffect(() => {
+    const resolved = run.data;
+    if (resolved && String(resolved.runNumber) !== runNumber) {
+      navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: String(resolved.runNumber) }, replace: true });
+    }
+  }, [run.data, runNumber, teamSlug, navigate]);
+
+  if (run.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
+
+  if (run.error instanceof ApiError || !run.data) {
+    return (
+      <div className="run-outline-empty" style={{ padding: 48 }}>
+        Run not found.
+        <a className="btn" style={{ marginLeft: 8 }} onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Back to runs</a>
+      </div>
+    );
+  }
+
+  return <RunDetail key={run.data.id} teamSlug={teamSlug} runId={run.data.id} />;
 }
 
 // The Session — the Room frame with the Journal's chronological steps ③ as its middle. The strangler rebuild is complete:
