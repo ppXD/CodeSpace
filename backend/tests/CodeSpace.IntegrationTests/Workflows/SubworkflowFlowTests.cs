@@ -87,7 +87,7 @@ public class SubworkflowFlowTests
     public async Task Rerun_from_a_subworkflow_node_restages_a_fresh_child_and_completes()
     {
         // D2: the flow.subworkflow node is now an admitted from-node rerun ROOT. A rerun re-executes the node on the
-        // fork, staging a FRESH child run (parent_run_id = the fork) — unique by construction like the agent.code
+        // fork, staging a FRESH child run (parent_run_id = the fork) — unique by construction like the agent.run
         // re-stage — that runs to completion; the ORIGINAL run + its child are untouched (no cross-run mutation).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var childId = await CreateWorkflowAsync(teamId, userId, EchoChildDefinition());

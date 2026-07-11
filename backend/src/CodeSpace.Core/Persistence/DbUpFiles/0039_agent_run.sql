@@ -9,7 +9,7 @@
 -- the normalized AgentRunResult lands in `result_jsonb` on completion. The live event log is a
 -- separate append-only table (later slice), not this row.
 --
--- `workflow_run_id` / `node_id` link back to the agent.code node that spawned this run; both NULL for
+-- `workflow_run_id` / `node_id` link back to the agent.run node that spawned this run; both NULL for
 -- a standalone agent run. The run-id link is a deliberate SOFT reference (no FK) — agent runs are
 -- managed independently of the workflow-run lifecycle (cross-aggregate). `team_id` keeps its FK to
 -- team (the stable root), denormalized for team-scoped queries like every other run-ish table.
@@ -47,4 +47,4 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_running_heartbeat ON agent_run(heartbea
 COMMENT ON TABLE agent_run IS
     'Durable lifecycle record of a coding-agent harness execution (Queued -> Running -> terminal). '
     'task_jsonb holds the AgentTask envelope; result_jsonb the normalized AgentRunResult on completion; '
-    'heartbeat_at drives stuck-run recovery. workflow_run_id/node_id soft-link the spawning agent.code node.';
+    'heartbeat_at drives stuck-run recovery. workflow_run_id/node_id soft-link the spawning agent.run node.';

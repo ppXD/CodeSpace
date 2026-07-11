@@ -2,7 +2,7 @@ import { isAgentRunActive } from "@/api/agents";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 
 /**
- * Live, chat-style monitor for one agent run, embedded under an `agent.code` step in the run detail. While
+ * Live, chat-style monitor for one agent run, embedded under an `agent.run` step in the run detail. While
  * the run is in flight it polls its status + event log every ~2s, so you watch each step (assistant
  * messages, tool/command calls, file edits, the final summary, errors) stream in real time — and it shows
  * "live · active Ns ago" off the heartbeat so the run is never an opaque "Suspended". Polling stops the

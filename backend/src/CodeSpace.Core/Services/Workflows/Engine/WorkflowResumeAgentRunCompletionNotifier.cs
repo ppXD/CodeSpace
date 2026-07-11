@@ -11,7 +11,7 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Workflows.Engine;
 
 /// <summary>
-/// Resumes the <c>agent.code</c> node parked on a now-terminal agent run. When the executor finishes a
+/// Resumes the <c>agent.run</c> node parked on a now-terminal agent run. When the executor finishes a
 /// run a workflow node spawned (<see cref="AgentRun.WorkflowRunId"/> set), this maps the run's
 /// <c>AgentRunResult</c> onto the node's resume payload — <c>{ status, summary, changedFiles, branch,
 /// error }</c> — and resumes the workflow run, which re-runs the node so it turns that into outputs
@@ -53,14 +53,14 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
 
     /// <summary>
     /// Resume the parent run on THIS agent run's completion. Resolves ONLY this run's own AgentRun wait
-    /// (its Token is the agent-run id) — never the sibling waits a parallel agent.code wave holds — so each
+    /// (its Token is the agent-run id) — never the sibling waits a parallel agent.run wave holds — so each
     /// node resumes with its own result. A no-op when no pending wait matches (replay / double-notify).
     /// </summary>
     private async Task ResumeParkedNodeAsync(AgentRun run, CancellationToken cancellationToken)
     {
         // Resume ONLY on a terminal run. A non-terminal status here means the notifier fired while the run
         // was still in flight — a completion racing the reconciler, or an inconsistent mid-transition row —
-        // and resuming would hand the agent.code node a non-terminal "Running"/"Queued" status, which it can
+        // and resuming would hand the agent.run node a non-terminal "Running"/"Queued" status, which it can
         // only read as failure ("Agent run did not succeed: Running"). Skip: the reconciler terminalizes a
         // genuinely stuck run and re-fires this, so the node always resumes with a real terminal result.
         if (!AgentRunStateMachine.IsTerminal(run.Status))
@@ -83,7 +83,7 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
         await _resumeService.ResumeOnWaitCompletionAsync(run.WorkflowRunId!.Value, waitId.Value, BuildResumePayload(run), cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.code node reads on resume. Internal so a unit test can pin the projection (notably the DIFF-FREE per-repo change set) without a full resume flow.</summary>
+    /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.run node reads on resume. Internal so a unit test can pin the projection (notably the DIFF-FREE per-repo change set) without a full resume flow.</summary>
     internal static string BuildResumePayload(AgentRun run)
     {
         var result = string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
@@ -94,7 +94,7 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             summary = result?.Summary,
             changedFiles = result?.ChangedFiles,
             branch = result?.ProducedBranch,
-            // Multi-repo: the per-repo change set the agent.code node surfaces for a downstream git.open_change_set.
+            // Multi-repo: the per-repo change set the agent.run node surfaces for a downstream git.open_change_set.
             // Null/empty for a single-repo run, so the node's single-repo outputs are unchanged. DIFF-FREE (the same
             // WithoutDiff projection the supervisor compact uses) — the node output exposes each repo's branch + base
             // for PR-open, NEVER the raw per-repo diff, exactly as it already excludes the top-level patch.
@@ -109,7 +109,7 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // genuine failed check even though both share exitReason "acceptance-failed".
             acceptanceDetail = result?.AcceptanceDetail,
             // Warm-resume triple (P2.3): unused on a Succeeded outcome, but on a RETRYABLE failure this is the exact
-            // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.code's fresh respawn
+            // payload the engine carries forward as NodeRunContext.PriorAttemptPayload so agent.run's fresh respawn
             // can stamp AgentTask.ResumeFromSessionId/RestoredTranscript(ArtifactId) — the same triple
             // ApplyRetryResumeHintAsync reads for a supervisor-orchestrated subtask retry, just sourced from the
             // in-hand payload instead of a DB re-query.

@@ -4,7 +4,7 @@ namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// The normalized OUTPUT contract of an agent run — what the harness produces at the end, regardless
-/// of which CLI ran. Stable + versioned so a consumer (the agent.code node, audit, the UI) reads one
+/// of which CLI ran. Stable + versioned so a consumer (the agent.run node, audit, the UI) reads one
 /// shape for every harness. B0.3 persists this alongside the run as <c>result_jsonb</c>. A small unified
 /// diff stays INLINE in <see cref="Patch"/>; a large diff (D2) is offloaded to the artifact store and
 /// <see cref="Patch"/> is cleared, with <see cref="PatchArtifactId"/> holding the reference — so the
@@ -130,7 +130,7 @@ public sealed record AgentRunResult
     /// with its own changed files + produced branch + base SHA. EMPTY for a single-repo run, whose single outcome is
     /// the top-level <see cref="ChangedFiles"/>/<see cref="Patch"/>/<see cref="ProducedBranch"/>/<see cref="BaseSha"/>;
     /// those top-level fields continue to mirror the PRIMARY repo even when this is populated, so an existing consumer
-    /// (the agent.code node's branch output, audit) is unaffected. The per-repo branches together form the <see cref="ChangeSetId"/>.
+    /// (the agent.run node's branch output, audit) is unaffected. The per-repo branches together form the <see cref="ChangeSetId"/>.
     /// </summary>
     public IReadOnlyList<RepositoryRunResult> RepositoryResults { get; init; } = Array.Empty<RepositoryRunResult>();
 
@@ -196,7 +196,7 @@ public sealed record RepositoryRunResult
     /// <summary>
     /// The DIFF-FREE projection of this per-repo result — the bounded facts (alias / repository id / changed files /
     /// produced branch / base) with the unbounded <see cref="Patch"/> + <see cref="PatchArtifactId"/> cleared. The
-    /// single shared way every TOKEN-CHEAP surface (the supervisor's decider-visible compact, the agent.code node
+    /// single shared way every TOKEN-CHEAP surface (the supervisor's decider-visible compact, the agent.run node
     /// output) drops the diff — exactly as those surfaces already exclude the top-level patch — so the diff lives only
     /// on the durable <c>AgentRunResult</c> (where the on-disk integration reads it) and never bloats a ledger row or
     /// an <c>outputs_jsonb</c>. One place, so the two surfaces can't drift on which fields are "heavy".

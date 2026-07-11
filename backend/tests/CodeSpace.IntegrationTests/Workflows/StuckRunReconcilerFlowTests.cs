@@ -396,7 +396,7 @@ public class StuckRunReconcilerFlowTests
     public async Task Stranded_suspended_with_a_resolved_suspending_node_wait_resumes_from_payload_and_reaches_success()
     {
         // The FAITHFUL stranded scenario the sibling recovery test above only approximates: the orphaned wait
-        // belongs to a REAL SUSPENDING node (the SuspendProbeNode, the agent.code stand-in), not the trigger.
+        // belongs to a REAL SUSPENDING node (the SuspendProbeNode, the agent.run stand-in), not the trigger.
         // The other test pre-records the wait on the already-settled "start" trigger, so the re-walk treats it
         // as done and never re-runs a node that consumes its rehydrated payload — it only proves "re-queue +
         // walk the remaining frontier". Here we drive the REAL engine to a genuine park (real branch ledger +

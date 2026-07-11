@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 
 /// <summary>
 /// Default <see cref="IRoomFilePreviewService"/>. Locates the file among the turn's agent runs (joined by the run id,
-/// so it covers a supervisor turn's spawned agents AND a plain agent.code turn), resolves that agent's captured unified
+/// so it covers a supervisor turn's spawned agents AND a plain agent.run turn), resolves that agent's captured unified
 /// diff (inline or offloaded), and hands the file's section to the pure <see cref="UnifiedPatchReader"/> — reconstructing
 /// full content for an added file, the diff for a modified one, a notice for binary/unavailable. All copy is authored
 /// here; the frontend renders by <c>Kind</c>. READ-ONLY.

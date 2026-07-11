@@ -10,7 +10,7 @@ namespace CodeSpace.Messages.Tasks;
 /// </summary>
 public static class TaskProjectionKinds
 {
-    /// <summary>One agent works the whole task in a single <c>agent.code</c> step — the only projection with a builder in this PR.</summary>
+    /// <summary>One agent works the whole task in a single <c>agent.run</c> step — the only projection with a builder in this PR.</summary>
     public const string SingleAgent = "single-agent";
 
     /// <summary>RESERVED: a planner fans the task out over a <c>flow.map</c> then a synthesizer reduces. No builder yet.</summary>

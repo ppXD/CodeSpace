@@ -2,7 +2,7 @@ namespace CodeSpace.Messages.Decisions;
 
 /// <summary>
 /// The typed envelope for a generic, durable DECISION (Rule 18.1 — a pure data noun in Messages). ANY raiser —
-/// an <c>agent.code</c> mid-run via an MCP tool, an <c>agent.supervisor</c>, a workflow node (<c>flow.decision</c>),
+/// an <c>agent.run</c> mid-run via an MCP tool, an <c>agent.supervisor</c>, a workflow node (<c>flow.decision</c>),
 /// a future native loop — produces this; the substrate uniformly handles park / policy / queue / resume. It is the
 /// ONE logical contract carried as the <c>workflow_run_wait.payload_jsonb</c> (node backend) or the tool-ledger row
 /// (agent backend) while parked, distinct from chat (chat is a notify channel, never the source of truth).

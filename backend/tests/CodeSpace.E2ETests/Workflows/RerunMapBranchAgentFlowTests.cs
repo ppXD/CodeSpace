@@ -19,17 +19,17 @@ namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// D7-5 agent-bodied map-branch rerun — the crown jewel for the "agent-branch(execute-again)" v1 goal. Re-run ONE
-/// branch of a top-level flow.map whose body is a REAL <c>agent.code</c> node, reusing the N-1 sibling branches,
+/// branch of a top-level flow.map whose body is a REAL <c>agent.run</c> node, reusing the N-1 sibling branches,
 /// driving the actual durable agent suspend/resume on the fork.
 ///
 /// <para><b>Tier: high-fidelity (the same harness the supervisor + plan-map-synth E2Es use).</b> The real
 /// <see cref="IWorkflowService.RerunMapBranchAsync"/> forks the run; the real engine re-enters the map, replays the
-/// seeded siblings from the ledger (NO agent re-stage), and re-runs ONLY the target branch — whose <c>agent.code</c>
+/// seeded siblings from the ledger (NO agent re-stage), and re-runs ONLY the target branch — whose <c>agent.run</c>
 /// node parks an AgentRun under <c>map#i</c>, dispatches the REAL <see cref="Core.Services.Agents.IAgentRunExecutor"/>
 /// → real <c>LocalProcessRunner</c> → the <see cref="SubtaskAwareFakeCli"/> process → real ParseEvent/BuildResult →
 /// natural resume → the map barrier completes → the downstream synthesizer re-runs over the new aggregate. Only the
 /// CLI's intelligence is faked, at the binary (POSIX-only, Rule 12.1). This is the agent path D7-5 lifted the
-/// pure-body restriction to admit (<see cref="Rerun.RerunBranchBodyPolicy"/> opts in agent.code alone); the
+/// pure-body restriction to admit (<see cref="Rerun.RerunBranchBodyPolicy"/> opts in agent.run alone); the
 /// per-element side-effecting / refusal / drift-detector coverage lives in <c>RerunMapBranchFlowTests</c>.</para>
 ///
 /// <para>The discriminators: the fork re-stages EXACTLY ONE fresh AgentRun (for the target branch, keyed
@@ -58,9 +58,9 @@ public class RerunMapBranchAgentFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // an agent.code suspend dispatches the REAL executor + runner + fake CLI, then resumes
+        jobClient.AutoExecute = true;   // an agent.run suspend dispatches the REAL executor + runner + fake CLI, then resumes
 
-        // ── Original: map fans out 4 real agent.code branches, each runs the fake CLI to Succeeded; map Success. ──
+        // ── Original: map fans out 4 real agent.run branches, each runs the fake CLI to Succeeded; map Success. ──
         var workflowId = await CreateWorkflowAsync(teamId, userId, AgentMapDef());
         var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourGoals);
         await RunEngineAsync(originalRunId);
@@ -114,7 +114,7 @@ public class RerunMapBranchAgentFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        // Body = agent.code → side-effecting node. On a rerun the branch parks the agent's AgentRun wait first;
+        // Body = agent.run → side-effecting node. On a rerun the branch parks the agent's AgentRun wait first;
         // after the agent completes it re-walks and the side-effecting node parks the D7-3 Approval gate. The two
         // waits of DIFFERENT kinds coexist under the same branch key (NodeId-keyed payloads never collide), the
         // agent re-derives from its payload (NOT re-staged), and the side effect fires only after approval.
@@ -160,7 +160,7 @@ public class RerunMapBranchAgentFlowTests
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{ "goal": "Work on {{item}}", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
@@ -183,7 +183,7 @@ public class RerunMapBranchAgentFlowTests
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{ "goal": "Work on {{item}}", "harness": "codex-cli" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "se", TypeKey = MutatingProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.Json($$"""{ "key": "{{probeKey}}-{{"{{"}}item{{"}}"}}" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },

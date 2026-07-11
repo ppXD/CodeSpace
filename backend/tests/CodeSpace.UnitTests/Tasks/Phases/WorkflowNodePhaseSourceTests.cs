@@ -9,7 +9,7 @@ namespace CodeSpace.UnitTests.Tasks.Phases;
 /// The structural node source's pure projection (node summaries + the already-resolved ground-truth agent statuses →
 /// phases). The team-scoped DB read of the AgentRun statuses is integration-tested; here we pin the per-node shape: a
 /// flow.map node + its DIRECT branch rows roll into ONE 'Fan out' phase whose Agents carry the REAL AgentRunStatus
-/// (never the NodeStatus name), a plain agent.code node surfaces as a one-agent 'agent' phase, a plain node is
+/// (never the NodeStatus name), a plain agent.run node surfaces as a one-agent 'agent' phase, a plain node is
 /// agentless, a branch row is never a top-level phase, and a NESTED map's grandchild branches are NOT folded into the
 /// outer fan-out.
 /// </summary>

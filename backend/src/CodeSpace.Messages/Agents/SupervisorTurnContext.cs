@@ -39,7 +39,7 @@ public sealed record SupervisorTurnContext
 
     /// <summary>
     /// The conversation an <c>ask_human</c> turn posts its question card into (E4) — carried from node config, the
-    /// SAME <c>x-selector: conversation</c> shape agent.code uses for its approval surface. Tenancy is enforced at
+    /// SAME <c>x-selector: conversation</c> shape agent.run uses for its approval surface. Tenancy is enforced at
     /// post time (the conversation must belong to <see cref="TeamId"/>; never model-supplied). <c>null</c> when the
     /// supervisor was authored without a conversation → an ask_human turn degrades to a clean no-surface stop.
     /// </summary>

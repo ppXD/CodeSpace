@@ -10,7 +10,7 @@ namespace CodeSpace.UnitTests.Tasks;
 /// Pins the SINGLE autonomy choke point: <see cref="TaskLaunchService.BuildAgentProfile"/> clamps the operator's
 /// requested tier down to the route's <see cref="RouteCaps.AutonomyCeiling"/> and stamps the CLAMPED tier string
 /// onto <see cref="ResolvedAgentProfile.AutonomyLevel"/>. That string is what flows through projection → the
-/// agent.code node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox runner, so this is where a
+/// agent.run node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox runner, so this is where a
 /// Quick/Standard route's "can't run Trusted/Unleashed" guarantee is established. The clamp is pure, so it is
 /// unit-pinned directly here (no DB) — the integration tier proves it propagates to the REAL permissions.
 /// </summary>
@@ -41,7 +41,7 @@ public class TaskLaunchServiceClampTests
     // Requested AT or BELOW the ceiling passes through verbatim (the clamp never escalates, never over-tightens).
     [InlineData("Confined", "Standard", "Confined")]
     [InlineData("Standard", "Standard", "Standard")]
-    // Case-insensitive parse (mirrors agent.code's ReadAutonomyLevel).
+    // Case-insensitive parse (mirrors agent.run's ReadAutonomyLevel).
     [InlineData("unleashed", "standard", "Standard")]
     // No ceiling declared (blank) ⇒ the top tier ⇒ no-op ⇒ the request passes through.
     [InlineData("Trusted", "", "Trusted")]
@@ -180,7 +180,7 @@ public class TaskLaunchServiceClampTests
     [Fact]
     public void BuildAgentProfile_with_related_but_no_primary_repo_throws_fail_loud()
     {
-        // A related repo has nowhere to anchor without a primary — fail LOUD at launch (mirroring the agent.code node),
+        // A related repo has nowhere to anchor without a primary — fail LOUD at launch (mirroring the agent.run node),
         // not silently drop the authored multi-repo intent into a no-repo run.
         var ex = Should.Throw<ArgumentException>(() =>
             TaskLaunchService.BuildAgentProfile(

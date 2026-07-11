@@ -5,7 +5,7 @@ namespace CodeSpace.UnitTests.Jobs;
 
 /// <summary>
 /// Pins the Hangfire queue names (Rule 8). The control-plane pool and the agent pool are configured against these
-/// exact strings, and the agent.code executor enqueues route to <see cref="HangfireConstants.AgentQueue"/> — so a
+/// exact strings, and the agent.run executor enqueues route to <see cref="HangfireConstants.AgentQueue"/> — so a
 /// rename here without updating both the server pools AND the enqueue sites would silently leave agent jobs on a
 /// queue NO server processes (they'd never run) or collapse the isolation. A hard pin makes the rename test-visible.
 /// </summary>

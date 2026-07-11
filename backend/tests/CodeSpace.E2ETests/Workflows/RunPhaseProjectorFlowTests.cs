@@ -32,7 +32,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// faked at their honest boundaries). It proves the phase tree is DERIVED from the durable substrate a run actually
 /// produced, not asserted:
 /// <list type="bullet">
-///   <item>QUICK single-agent → the agent.code node surfaces as a phase carrying ONE real PhaseAgentRef (Succeeded);</item>
+///   <item>QUICK single-agent → the agent.run node surfaces as a phase carrying ONE real PhaseAgentRef (Succeeded);</item>
 ///   <item>STANDARD plan-map-synth → a 'Fan out' map phase whose Agents are the >1 real branch agent refs;</item>
 ///   <item>DEEP supervisor (PlanThenStop) → the agent.supervisor node phase AND the supervisor-ledger Plan + Stop
 ///         decision phases with the right statuses.</item>
@@ -97,7 +97,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
         phases.ShouldNotBeNull();
 
         var agentPhase = phases!.Where(p => p.Kind == "agent").ToList()
-            .ShouldHaveSingleItem("the single-agent run's agent.code node surfaces as one 'agent' phase");
+            .ShouldHaveSingleItem("the single-agent run's agent.run node surfaces as one 'agent' phase");
 
         agentPhase.SourceKey.ShouldBe(WorkflowNodePhaseSource.Key);
         agentPhase.Status.ShouldBe(PhaseStatus.Succeeded);
@@ -106,11 +106,11 @@ public class RunPhaseProjectorFlowTests : IDisposable
         agent.Status.ShouldBe(nameof(AgentRunStatus.Succeeded), "the ref carries the REAL team-scoped AgentRunStatus, not the NodeStatus name");
         agent.AgentRunId.ShouldBe(await AgentRunIdForAsync(handle.RunId, teamId), "the phase ref is the REAL agent run the node spawned");
 
-        // The per-agent metrics now project for a plain agent.code node (not just supervisor-spawned agents): the
+        // The per-agent metrics now project for a plain agent.run node (not just supervisor-spawned agents): the
         // completed agent's ref carries a real duration computed END-TO-END from its persisted timestamps — the
         // supervisor-only metric gap is closed through the real source + DB. (The exact token/tool-count/model values
         // off real rows are pinned in AgentMetricsReaderFlowTests; here we prove the wiring reaches the ref.)
-        agent.DurationMs.ShouldNotBeNull("a plain agent.code node's ref now carries a live duration from StartedAt/CompletedAt");
+        agent.DurationMs.ShouldNotBeNull("a plain agent.run node's ref now carries a live duration from StartedAt/CompletedAt");
         agent.DurationMs!.Value.ShouldBeGreaterThanOrEqualTo(0);
     }
 
@@ -153,7 +153,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
         fanOut.Agents.Count.ShouldBe(DeterministicWorkPlanLlmClient.DefaultInstructions.Count, "one branch agent ref per planned subtask");
         fanOut.Agents.ShouldAllBe(a => a.Status == nameof(AgentRunStatus.Succeeded), "every real branch agent finished Succeeded (the team-scoped AgentRunStatus, not the NodeStatus name)");
         fanOut.Agents.Select(a => a.IterationKey).ShouldAllBe(k => k != null && k.StartsWith("map#"), "each ref carries its map branch key");
-        fanOut.Agents.ShouldAllBe(a => a.DurationMs != null, "the per-agent metrics project onto map BRANCH refs too, not just a single agent.code node");
+        fanOut.Agents.ShouldAllBe(a => a.DurationMs != null, "the per-agent metrics project onto map BRANCH refs too, not just a single agent.run node");
 
         var realBranchAgentIds = await BranchAgentRunIdsAsync(runId, teamId);
         fanOut.Agents.Select(a => a.AgentRunId).OrderBy(id => id).ShouldBe(realBranchAgentIds.OrderBy(id => id), "the refs are the REAL branch agent runs");

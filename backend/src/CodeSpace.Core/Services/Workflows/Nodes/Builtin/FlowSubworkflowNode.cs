@@ -39,7 +39,7 @@ public sealed class FlowSubworkflowNode : INodeRuntime
         Kind = NodeKind.Regular,
         CanSuspend = true,
         // D2: rerunnable as a from-node ROOT — the "external run" a re-stage mints is a FRESH child WorkflowRun
-        // (parent_run_id = the fork), unique by construction like the agent.code re-stage. Re-executing the node on
+        // (parent_run_id = the fork), unique by construction like the agent.run re-stage. Re-executing the node on
         // the fork stages a new child through the SAME first-pass path; the original run's child is untouched. The
         // child's own nodes re-run (its side effects governed within the child), so it is not side-effecting here.
         IsRerunnableWhenSuspendable = true,

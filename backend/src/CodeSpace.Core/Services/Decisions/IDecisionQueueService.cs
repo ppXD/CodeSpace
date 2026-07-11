@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Decisions;
 
 /// <summary>
 /// The cross-grain "Needs decision" queue (Decision substrate D3): the UNIFIED read of every PENDING decision a team
-/// owns, projected over BOTH park backends without special-casing either — an <c>agent.code</c> mid-run
+/// owns, projected over BOTH park backends without special-casing either — an <c>agent.run</c> mid-run
 /// <c>decision.request</c> (a parked tool-ledger row) and a <c>flow.decision</c> node (a Pending workflow-run wait).
 /// Each backend stashes the same <c>DecisionRequest</c> envelope at park (the ledger's <c>decision_envelope_jsonb</c>
 /// column / the wait's <c>payload_jsonb</c>), so the projection is one shared mapper. Team-scoped: a foreign team's
@@ -21,7 +21,7 @@ public interface IDecisionQueueService
 {
     Task<IReadOnlyList<PendingDecision>> ListPendingAsync(Guid teamId, CancellationToken cancellationToken);
 
-    /// <summary>The pending AGENT-grain decisions raised by a specific set of agent runs (the supervisor arbiter's children, D4) — team-scoped, soonest-deadline first. Node-grain decisions don't apply (a supervisor's children are agent.code runs). Empty input → empty result.</summary>
+    /// <summary>The pending AGENT-grain decisions raised by a specific set of agent runs (the supervisor arbiter's children, D4) — team-scoped, soonest-deadline first. Node-grain decisions don't apply (a supervisor's children are agent.run runs). Empty input → empty result.</summary>
     Task<IReadOnlyList<PendingDecision>> ListPendingForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken);
 }
 

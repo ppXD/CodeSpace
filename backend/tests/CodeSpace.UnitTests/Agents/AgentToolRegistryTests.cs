@@ -92,7 +92,7 @@ public class AgentToolRegistryTests
     {
         var registry = Build(
             new FakeNode("git.read", eligible: true),
-            new FakeNode("agent.code", eligible: false),    // suspends → not a tool
+            new FakeNode("agent.run", eligible: false),    // suspends → not a tool
             new FakeNode("trigger.push", eligible: false),  // trigger → not a tool
             new FakeNode("run.cmd", eligible: true));
 
@@ -107,7 +107,7 @@ public class AgentToolRegistryTests
         registry.Resolve("git.read").ShouldNotBeNull();
         registry.Resolve("git.read")!.Kind.ShouldBe("git.read");
         registry.Resolve("nope").ShouldBeNull();
-        registry.Resolve("agent.code").ShouldBeNull("an ineligible node is not resolvable");
+        registry.Resolve("agent.run").ShouldBeNull("an ineligible node is not resolvable");
     }
 
     [Fact]

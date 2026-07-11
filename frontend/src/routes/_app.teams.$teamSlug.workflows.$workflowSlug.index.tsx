@@ -659,7 +659,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
     // A dragged Agent persona materializes into a Run-coding-agent node pre-bound to it.
     const agentId = e.dataTransfer.getData(AGENT_DRAG_MIME);
     if (agentId) {
-      const agentNode = manifestByType.get("agent.code");
+      const agentNode = manifestByType.get("agent.run");
       if (agentNode) addNodeFromManifest(agentNode, { screen: { x: e.clientX, y: e.clientY }, seedConfig: { agentDefinitionId: agentId } });
       return;
     }
@@ -689,7 +689,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   // Add a Run-coding-agent node pre-bound to a persona (from the palette's Agents section). The node
   // carries only the reference; the persona's prompt + model are resolved live at dispatch.
   const onAddAgent = (agentDefinitionId: string) => {
-    const agentNode = manifestByType.get("agent.code");
+    const agentNode = manifestByType.get("agent.run");
     if (agentNode) addNodeFromManifest(agentNode, { autoLink: true, seedConfig: { agentDefinitionId } });
   };
 
@@ -981,7 +981,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
             <PaletteSection key={g.tone} title={g.label} manifests={g.items} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
           ))}
           {/* Team personas — each drops a Run-coding-agent node pre-bound to it. Hidden while searching. */}
-          {!paletteQuery.trim() && <AgentPaletteSection enabled={manifestByType.has("agent.code")} onAdd={onAddAgent} />}
+          {!paletteQuery.trim() && <AgentPaletteSection enabled={manifestByType.has("agent.run")} onAdd={onAddAgent} />}
         </aside>
 
         <div className="wf-resize" role="separator" aria-orientation="vertical" aria-label="Resize palette" onPointerDown={(e) => startResize("palette", e)} />
@@ -1427,7 +1427,7 @@ function NodeInspector({
         <section className="wf-inspector-section">
           <p className="wf-retry-hint">Map body entry — added automatically inside a Map. Connect the per-element body steps from here; read the element as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. Nothing to configure.</p>
         </section>
-      ) : manifest.typeKey === "agent.code" ? (
+      ) : manifest.typeKey === "agent.run" ? (
         // Run-coding-agent gets a two-mode editor (bind an Agent persona ⇄ configure inline) with a
         // harness picker, instead of the generic Config/Inputs forms — the engine already supports
         // both modes; this surfaces them clearly.

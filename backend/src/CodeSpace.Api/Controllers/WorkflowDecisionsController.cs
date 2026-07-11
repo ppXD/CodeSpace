@@ -20,7 +20,7 @@ public class WorkflowDecisionsController : ControllerBase
 
     public WorkflowDecisionsController(IMediator mediator) { _mediator = mediator; }
 
-    /// <summary>The team's pending decisions across both grains (agent.code mid-run + flow.decision node), soonest-deadline first.</summary>
+    /// <summary>The team's pending decisions across both grains (agent.run mid-run + flow.decision node), soonest-deadline first.</summary>
     [HttpGet]
     public async Task<IActionResult> ListPending(CancellationToken cancellationToken)
     {

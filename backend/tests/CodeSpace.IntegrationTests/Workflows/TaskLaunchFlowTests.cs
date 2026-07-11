@@ -26,7 +26,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <see cref="ITaskLaunchService"/> (composing the real seed-provider registry + the real effort router + the
 /// real snapshot factory) takes a <see cref="TaskLaunchRequest"/> (team + actor sourced from the current
 /// context, never the wire), seeds → routes → projects → starts a snapshot run; the REAL engine + executor +
-/// fake CLI run the single-agent <c>agent.code</c> to Success, with NO <c>workflow</c> / <c>workflow_version</c>
+/// fake CLI run the single-agent <c>agent.run</c> to Success, with NO <c>workflow</c> / <c>workflow_version</c>
 /// row. Proves the whole L1→L2→L3 spine in one call.
 ///
 /// <para><b>Fidelity (Rule 12):</b> the run tiers are HIGH — real launch service over real registries, real
@@ -54,7 +54,7 @@ public class TaskLaunchFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
 
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
@@ -91,7 +91,7 @@ public class TaskLaunchFlowTests
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == result.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "the launched chat task must walk start → agent.code → terminal to Success through the real launch → route → projection → engine → executor → fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
+            customMessage: "the launched chat task must walk start → agent.run → terminal to Success through the real launch → route → projection → engine → executor → fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
 
         // It is a SNAPSHOT run — no Workflow / WorkflowVersion row for a launched task (PR1's promise, end to end).
         run.WorkflowId.ShouldBeNull("a launched task run is a snapshot run — not a child of any workflow");
@@ -101,7 +101,7 @@ public class TaskLaunchFlowTests
 
         // EVIDENCE the agent really ran the launched goal through the real CLI.
         var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == result.RunId);
-        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the launched agent.code executed to Succeeded via the real executor + runner");
+        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the launched agent.run executed to Succeeded via the real executor + runner");
 
         var folded = JsonSerializer.Deserialize<Messages.Agents.AgentRunResult>(agentRun.ResultJson!, AgentJson.Options)!;
         folded.Summary.ShouldBe(SubtaskAwareFakeCli.ExpectedSummaryFor("Work on the auth refactor"),
@@ -188,7 +188,7 @@ public class TaskLaunchFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
 
-        // The launch passes the team-scope check (same-team repo) and projects the agent.code with the bound repo.
+        // The launch passes the team-scope check (same-team repo) and projects the agent.run with the bound repo.
         // We assert the ACCEPT path + the repo round-trip into the frozen snapshot — without running (a real clone
         // of a seed-only repo would fail; the run tiers above cover the analysis-only Success path).
         var request = new TaskLaunchRequest
@@ -208,9 +208,9 @@ public class TaskLaunchFlowTests
         var run = await LoadRunAsync(result.RunId);
         run.DefinitionSnapshotJson.ShouldNotBeNull("the launched definition is frozen inline on the run");
 
-        // The repo flowed seed → profile → projected agent.code input.
+        // The repo flowed seed → profile → projected agent.run input.
         var agentRepo = ReadAgentRepositoryId(run.DefinitionSnapshotJson!);
-        agentRepo.ShouldBe(repoId.ToString(), "the same-team repo round-trips into the projected agent.code repositoryId input");
+        agentRepo.ShouldBe(repoId.ToString(), "the same-team repo round-trips into the projected agent.run repositoryId input");
     }
 
     [Fact]
@@ -240,7 +240,7 @@ public class TaskLaunchFlowTests
         var run = await LoadRunAsync(result.RunId);
         run.DefinitionSnapshotJson.ShouldNotBeNull("the launched definition is frozen inline on the run");
 
-        ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(repoId.ToString(), "the repo task scopes the projected agent.code to the selected repository");
+        ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(repoId.ToString(), "the repo task scopes the projected agent.run to the selected repository");
     }
 
     [Fact]
@@ -669,7 +669,7 @@ public class TaskLaunchFlowTests
     [Fact]
     public async Task A_single_agent_launch_bakes_the_operator_working_dir_mode_into_the_agent_config()
     {
-        // The same working-dir choice on a single-agent (Quick) launch binds into the projected agent.code node's cwdMode
+        // The same working-dir choice on a single-agent (Quick) launch binds into the projected agent.run node's cwdMode
         // config (wire "primary" → enum name "PrimaryRepo"), which the node reads back via WorkspaceCwdModeWire. Frozen-def
         // assertion (don't walk the run — a real clone of a seed-only repo would fail).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -686,14 +686,14 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull();
 
         ReadAgentCwdMode(run.DefinitionSnapshotJson!).ShouldBe("PrimaryRepo",
-            "the operator's working-dir mode binds into the single-agent agent.code config as the enum name");
+            "the operator's working-dir mode binds into the single-agent agent.run config as the enum name");
     }
 
     [Fact]
     public async Task A_single_agent_launch_bakes_the_operator_force_mcp_opt_in_into_the_agent_config()
     {
         // The operator's "Force MCP fabric" opt-in must bind through the command → ResolvedAgentProfile.EnableMcp → the
-        // projected agent.code node's enableMcp config, where ShouldOpenMcpEndpoint reads it to open the full catalog.
+        // projected agent.run node's enableMcp config, where ShouldOpenMcpEndpoint reads it to open the full catalog.
         // Unset ⇒ omitted ⇒ defer to the ambient flag (byte-identical — the other single-agent tests exercise that).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
@@ -709,7 +709,7 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull();
 
         ReadAgentEnableMcp(run.DefinitionSnapshotJson!).ShouldBe(true,
-            "the operator's force-MCP opt-in binds into the single-agent agent.code config");
+            "the operator's force-MCP opt-in binds into the single-agent agent.run config");
     }
 
     [Fact]
@@ -748,7 +748,7 @@ public class TaskLaunchFlowTests
     public async Task A_single_agent_launch_bakes_the_operator_tool_allow_list_into_the_agent_config()
     {
         // The operator's Tools allow-list binds through the command → ResolvedAgentProfile.AllowedTools → the projected
-        // agent.code node's tools config (the Claude --allowed-tools source). Unset ⇒ omitted ⇒ the harness default
+        // agent.run node's tools config (the Claude --allowed-tools source). Unset ⇒ omitted ⇒ the harness default
         // (byte-identical — the other single-agent tests exercise that).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
@@ -764,7 +764,7 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull();
 
         ReadAgentTools(run.DefinitionSnapshotJson!).ShouldBe(new[] { "Read", "Grep" },
-            "the operator's tool allow-list binds into the single-agent agent.code config, in authored order");
+            "the operator's tool allow-list binds into the single-agent agent.run config, in authored order");
     }
 
     [Fact]
@@ -804,7 +804,7 @@ public class TaskLaunchFlowTests
     public async Task A_single_agent_launch_bakes_the_operator_publish_branch_opt_in_into_the_agent_config()
     {
         // The operator's "Publish branch" opt-in must bind through the command → ResolvedAgentProfile.PushBranch → the
-        // projected agent.code node's pushBranch config, where the publish guard chain reads it as an explicit
+        // projected agent.run node's pushBranch config, where the publish guard chain reads it as an explicit
         // opt-out signal when false. Unset ⇒ omitted ⇒ push is default-on downstream (byte-identical node projection).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
@@ -820,7 +820,7 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull();
 
         ReadAgentPushBranch(run.DefinitionSnapshotJson!).ShouldBe(true,
-            "the operator's publish-branch opt-in binds into the single-agent agent.code config");
+            "the operator's publish-branch opt-in binds into the single-agent agent.run config");
     }
 
     [Fact]
@@ -860,7 +860,7 @@ public class TaskLaunchFlowTests
     public async Task A_single_agent_launch_bakes_the_operator_output_review_into_the_agent_config()
     {
         // The operator's agent-output review mode + reviewer model bind through the command path → ResolvedAgentProfile →
-        // the projected agent.code node's outputReviewMode (the enum int) + reviewerModelId, where the executor runs the
+        // the projected agent.run node's outputReviewMode (the enum int) + reviewerModelId, where the executor runs the
         // critic at completion. Unset ⇒ omitted ⇒ None ⇒ no review (byte-identical).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
@@ -877,7 +877,7 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull();
 
         ReadAgentOutputReviewMode(run.DefinitionSnapshotJson!).ShouldBe((int)ReviewMode.Gate,
-            "the operator's output-review mode binds into the single-agent agent.code config as the enum int");
+            "the operator's output-review mode binds into the single-agent agent.run config as the enum int");
     }
 
     [Fact]
@@ -1156,7 +1156,7 @@ public class TaskLaunchFlowTests
         ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(primary.ToString());
 
         var related = ReadAgentRelatedRepositories(run.DefinitionSnapshotJson!);
-        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString(), web.ToString() }, "both related repos round-trip into the frozen agent.code inputs, in authored order");
+        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString(), web.ToString() }, "both related repos round-trip into the frozen agent.run inputs, in authored order");
         related.Single(r => r.repoId == api.ToString()).access.ShouldBe("write", "the authored write access round-trips");
         related.Single(r => r.repoId == web.ToString()).access.ShouldBe("read", "the authored read access round-trips");
         related.Single(r => r.repoId == api.ToString()).alias.ShouldBe("api");
@@ -1205,7 +1205,7 @@ public class TaskLaunchFlowTests
         var api = await SeedRepositoryAsync(teamId);
 
         // A STANDARD task routes to the plan-map-synth fan-out (the multi-agent map shape). The related repos must reach
-        // the MAP BODY agent.code node (each fan-out branch clones them) — proving the multi-repo workspace flows through
+        // the MAP BODY agent.run node (each fan-out branch clones them) — proving the multi-repo workspace flows through
         // the map projection too, not only single-agent. Frozen-def assertion only (the map run path is covered by
         // PlanMapSynthFanoutFlowTests; the deep→supervisor multi-repo projection by SupervisorDefinitionBuilderTests).
         var request = new TaskLaunchRequest
@@ -1226,7 +1226,7 @@ public class TaskLaunchFlowTests
         var run = await LoadRunAsync(result.RunId);
 
         var related = ReadAgentRelatedRepositories(run.DefinitionSnapshotJson!);
-        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString() }, "the related repo reaches the map body agent.code node — a deep multi-repo launch is NOT a silent drop");
+        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString() }, "the related repo reaches the map body agent.run node — a deep multi-repo launch is NOT a silent drop");
         related.Single().access.ShouldBe("write");
         run.ScopeRepositoryIds.ShouldBe(new[] { primary, api }, ignoreOrder: true);
     }
@@ -1250,7 +1250,7 @@ public class TaskLaunchFlowTests
         var run = await LoadRunAsync((await LaunchAsync(request)).RunId);
 
         HasRelatedRepositoriesKey(run.DefinitionSnapshotJson!).ShouldBeFalse(
-            "a single-repo launch must NOT add a relatedRepositories key — the frozen agent.code inputs are byte-identical to the pre-multi-repo launch");
+            "a single-repo launch must NOT add a relatedRepositories key — the frozen agent.run inputs are byte-identical to the pre-multi-repo launch");
         run.ScopeRepositoryIds.ShouldBe(new[] { primary }, ignoreOrder: true, customMessage: "the scope is just the primary — byte-identical");
     }
 
@@ -1436,7 +1436,7 @@ public class TaskLaunchFlowTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>Reads the projected agent.code node's bound <c>repositoryId</c> input out of the frozen definition snapshot.</summary>
+    /// <summary>Reads the projected agent.run node's bound <c>repositoryId</c> input out of the frozen definition snapshot.</summary>
     private static string? ReadAgentRepositoryId(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1790,7 +1790,7 @@ public class TaskLaunchFlowTests
             ? v.GetString() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>cwdMode</c> config out of the frozen snapshot. Null when the key is absent (the Auto default — byte-identical).</summary>
+    /// <summary>Reads the projected agent.run node's <c>cwdMode</c> config out of the frozen snapshot. Null when the key is absent (the Auto default — byte-identical).</summary>
     private static string? ReadAgentCwdMode(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1799,7 +1799,7 @@ public class TaskLaunchFlowTests
         return agent.GetProperty("config").TryGetProperty("cwdMode", out var v) ? v.GetString() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>enableMcp</c> config out of the frozen snapshot. Null when the key is absent (defers to the ambient flag — byte-identical).</summary>
+    /// <summary>Reads the projected agent.run node's <c>enableMcp</c> config out of the frozen snapshot. Null when the key is absent (defers to the ambient flag — byte-identical).</summary>
     private static bool? ReadAgentEnableMcp(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1818,7 +1818,7 @@ public class TaskLaunchFlowTests
             ? v.GetBoolean() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>pushBranch</c> config out of the frozen snapshot. Null when the key is absent (defers to the mode default / ambient flag — byte-identical).</summary>
+    /// <summary>Reads the projected agent.run node's <c>pushBranch</c> config out of the frozen snapshot. Null when the key is absent (defers to the mode default / ambient flag — byte-identical).</summary>
     private static bool? ReadAgentPushBranch(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1827,7 +1827,7 @@ public class TaskLaunchFlowTests
         return agent.GetProperty("config").TryGetProperty("pushBranch", out var v) ? v.GetBoolean() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>outputReviewMode</c> (the baked int) out of the frozen snapshot. Null when absent (None ⇒ no review, byte-identical).</summary>
+    /// <summary>Reads the projected agent.run node's <c>outputReviewMode</c> (the baked int) out of the frozen snapshot. Null when absent (None ⇒ no review, byte-identical).</summary>
     private static int? ReadAgentOutputReviewMode(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1856,7 +1856,7 @@ public class TaskLaunchFlowTests
             ? v.GetBoolean() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>tools</c> allow-list out of the frozen snapshot, in authored order. Empty when the key is absent (the harness default — byte-identical).</summary>
+    /// <summary>Reads the projected agent.run node's <c>tools</c> allow-list out of the frozen snapshot, in authored order. Empty when the key is absent (the harness default — byte-identical).</summary>
     private static IReadOnlyList<string> ReadAgentTools(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1896,7 +1896,7 @@ public class TaskLaunchFlowTests
         return sup.GetProperty("config").TryGetProperty("reviewerModelId", out var v) ? v.GetString() : null;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
+    /// <summary>Reads the projected agent.run node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
     private static IReadOnlyList<(string repoId, string? alias, string? access)> ReadAgentRelatedRepositories(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -1910,7 +1910,7 @@ public class TaskLaunchFlowTests
             e.TryGetProperty("access", out var ac) && ac.ValueKind == JsonValueKind.String ? ac.GetString() : null)).ToList();
     }
 
-    /// <summary>True when the frozen agent.code node carries a <c>relatedRepositories</c> input key at all (the byte-identity guard for a single-repo launch).</summary>
+    /// <summary>True when the frozen agent.run node carries a <c>relatedRepositories</c> input key at all (the byte-identity guard for a single-repo launch).</summary>
     private static bool HasRelatedRepositoriesKey(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;

@@ -23,7 +23,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// with AutoExecute=false + SimulateAgentCompletionAsync; the planner half had zero integration coverage):
 ///
 /// <para><c>trigger.manual</c> → <c>llm.complete(responseSchema)</c> PLANNER (emits <c>json.subtasks</c>) →
-/// <c>flow.map(items = {{nodes.planner.outputs.json.subtasks}})</c> whose body is a REAL <c>agent.code</c> node
+/// <c>flow.map(items = {{nodes.planner.outputs.json.subtasks}})</c> whose body is a REAL <c>agent.run</c> node
 /// that ACTUALLY EXECUTES (real <see cref="IAgentRunExecutor"/> → real <c>LocalProcessRunner</c> → a fake-CLI
 /// agent process → real ParseEvent/BuildResult → real completion → natural resume) → a SYNTHESIZER node that
 /// REDUCES <c>{{nodes.map.outputs.results}}</c> into a single combined output.</para>
@@ -76,7 +76,7 @@ public class HeadlineFlowE2ETests
         jobClient.Clear();
         jobClient.AutoExecute = true;   // the executor dispatch runs the REAL AgentRunExecutor + real runner + fake CLI
 
-        // ── Pass 1: planner emits subtasks, the map fans out 3 REAL agent.code branches, each parks + dispatches
+        // ── Pass 1: planner emits subtasks, the map fans out 3 REAL agent.run branches, each parks + dispatches
         //    its real executor job; the run suspends. ──
         await RunEngineAsync(runId);
 
@@ -130,7 +130,7 @@ public class HeadlineFlowE2ETests
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // D1 under genuine engine fan-out: the planner fans out to 3 REAL agent.code branches that each stream a
+        // D1 under genuine engine fan-out: the planner fans out to 3 REAL agent.run branches that each stream a
         // high-volume (60-line) per-branch sequence through the production executor → real LocalProcessRunner →
         // batched BufferedEventWriter, into the shared agent_run_event table. (The in-memory job client drains the
         // branch executors SEQUENTIALLY, so this is not a true-concurrency test — that's pinned at the service tier
@@ -191,7 +191,7 @@ public class HeadlineFlowE2ETests
         if (OperatingSystem.IsWindows()) return;
 
         // D1 deepest catch-net (the user's "超級複雜 workflows + 節點恢復"): an OUTER flow.map over ["o0","o1"]
-        // whose body is an INNER flow.map over ["{{item}}::j0","{{item}}::j1"] whose leaf is a REAL agent.code —
+        // whose body is an INNER flow.map over ["{{item}}::j0","{{item}}::j1"] whose leaf is a REAL agent.run —
         // FOUR durable agent tails ("o0::j0" … "o1::j1") writing into the shared agent_run_event table while the
         // engine parks + resumes each leaf and re-walks the nested barriers. (Branch executors drain sequentially
         // via the in-memory job queue; this exercises the NESTED resume + per-leaf isolation through the real path,
@@ -246,7 +246,7 @@ public class HeadlineFlowE2ETests
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     // manual → outer map(items={{trigger.things}}) → end; outer body: mso → inner map(items=["{{item}}::j0","{{item}}::j1"])
-    //   → outerTerm(emit inner results); inner body: mst → leaf(REAL agent.code, goal="{{item}}" = the leaf coordinate).
+    //   → outerTerm(emit inner results); inner body: mst → leaf(REAL agent.run, goal="{{item}}" = the leaf coordinate).
     private static WorkflowDefinition NestedAgentMapDefinition() => new()
     {
         SchemaVersion = 1,
@@ -257,7 +257,7 @@ public class HeadlineFlowE2ETests
             new() { Id = "mso", TypeKey = "flow.map_start", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "inner", TypeKey = "flow.map", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": [ "{{item}}::j0", "{{item}}::j1" ] }""") },
             new() { Id = "mst", TypeKey = "flow.map_start", ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "leaf", TypeKey = "agent.code", ParentId = "inner",
+            new() { Id = "leaf", TypeKey = "agent.run", ParentId = "inner",
                     Config = WorkflowsTestSeed.Json("""{"goal":"{{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "outerTerm", TypeKey = JsonEmitNode.Key, ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(),
@@ -301,7 +301,7 @@ public class HeadlineFlowE2ETests
     }
 
     // manual → planner(llm.complete, responseSchema → json.subtasks) → map(items = {{planner.subtasks}};
-    //   body: ms → agent[REAL agent.code running the fake codex CLI, read-only, no repo]) → synth(combine results).
+    //   body: ms → agent[REAL agent.run running the fake codex CLI, read-only, no repo]) → synth(combine results).
     // The synthesizer REDUCES the per-branch summaries into ONE string via multi-placeholder composition — the
     // production VariableResolver path for {{nodes.map.outputs.results[i].summary}} (array indexing into the reduce).
     private static WorkflowDefinition HeadlineFlowDefinition() => new()
@@ -327,9 +327,9 @@ public class HeadlineFlowE2ETests
                     Inputs = WorkflowsTestSeed.Json("""{ "items": "{{nodes.planner.outputs.json.subtasks}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
 
-            // BRANCH AGENT: a REAL agent.code whose goal carries this branch's {{item}} — the fake CLI derives its
+            // BRANCH AGENT: a REAL agent.run whose goal carries this branch's {{item}} — the fake CLI derives its
             // summary from that goal, so each branch's results[i] is its OWN element's real output.
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
 

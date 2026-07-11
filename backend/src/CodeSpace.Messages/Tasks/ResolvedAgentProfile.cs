@@ -4,12 +4,12 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Messages.Tasks;
 
 /// <summary>
-/// The resolved agent envelope a task projection stamps onto the <c>agent.code</c> step(s) it emits (Rule 18.1,
+/// The resolved agent envelope a task projection stamps onto the <c>agent.run</c> step(s) it emits (Rule 18.1,
 /// a pure data noun) — repo / harness / model / persona / credential / runner / MCP / autonomy / tools.
 /// Mirrors <c>SupervisorAgentProfile</c> (plus <c>AllowedTools</c>, which on the supervisor lives on the parent
 /// <c>SupervisorGoalConfig</c>) so a single-agent task and a supervisor-spawned agent project the SAME envelope
-/// onto the SAME <c>agent.code</c> config keys. Every field is OPTIONAL and folds to
-/// the SAME default <c>agent.code</c> uses: a null harness → the harness default, a null autonomy → Standard,
+/// onto the SAME <c>agent.run</c> config keys. Every field is OPTIONAL and folds to
+/// the SAME default <c>agent.run</c> uses: a null harness → the harness default, a null autonomy → Standard,
 /// a null repo → analysis-only, a null persona → a pure-inline run.
 /// </summary>
 public sealed record ResolvedAgentProfile
@@ -17,7 +17,7 @@ public sealed record ResolvedAgentProfile
     /// <summary>The repository the agent clones into its workspace (the executor clones it) — the PRIMARY repo of a multi-repo workspace. Null → no workspace (analysis-only).</summary>
     public Guid? RepositoryId { get; init; }
 
-    /// <summary>Multi-repo: the RELATED repositories the agent's workspace also clones (alias + access; the primary is <see cref="RepositoryId"/>). Null / empty → a single-repo workspace (byte-identical). The projection emits these onto the agent.code node's <c>relatedRepositories</c> input, which the node folds into <c>AgentTask.Workspace</c>.</summary>
+    /// <summary>Multi-repo: the RELATED repositories the agent's workspace also clones (alias + access; the primary is <see cref="RepositoryId"/>). Null / empty → a single-repo workspace (byte-identical). The projection emits these onto the agent.run node's <c>relatedRepositories</c> input, which the node folds into <c>AgentTask.Workspace</c>.</summary>
     public IReadOnlyList<WorkspaceRepositorySpec>? RelatedRepositories { get; init; }
 
     /// <summary>The harness the agent runs on (e.g. <c>"codex-cli"</c>). Null / blank → the projection's harness default.</summary>
@@ -47,7 +47,7 @@ public sealed record ResolvedAgentProfile
     /// <summary>Per-run opt-in to PUBLISHING the agent's diff as its own branch (<c>codespace/agent/&lt;runId&gt;</c>) even when the deployment-wide push flag is off. Null → defer to the ambient flag (byte-identical). OR-gate: this forces publish ON, it cannot force it OFF; the diff is captured for review either way.</summary>
     public bool? PushBranch { get; init; }
 
-    /// <summary>How an INDEPENDENT critic reviews the agent's OUTPUT at completion — the projection writes it onto the agent.code node's <c>outputReviewMode</c>. <see cref="ReviewMode.None"/> (the default) → no review (byte-identical). v1 = Gate.</summary>
+    /// <summary>How an INDEPENDENT critic reviews the agent's OUTPUT at completion — the projection writes it onto the agent.run node's <c>outputReviewMode</c>. <see cref="ReviewMode.None"/> (the default) → no review (byte-identical). v1 = Gate.</summary>
     public ReviewMode OutputReviewMode { get; init; } = ReviewMode.None;
 
     /// <summary>The credentialed-model ROW the output critic runs on (written onto the node's <c>reviewerModelId</c>). Null → the critic auto-picks the team brain. Only consulted when <see cref="OutputReviewMode"/> is not None.</summary>

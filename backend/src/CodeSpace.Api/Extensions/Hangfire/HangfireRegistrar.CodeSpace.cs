@@ -59,14 +59,14 @@ public class CodeSpaceHangfireRegistrar : HangfireRegistrarBase
         if (!IsProcessingEnabled()) return;
 
         // TWO dedicated worker pools so a saturated agent pool can never starve the control plane. A long
-        // agent.code run holds a worker for minutes (a codex/claude child runs); isolating the IAgentRunExecutor
+        // agent.run run holds a worker for minutes (a codex/claude child runs); isolating the IAgentRunExecutor
         // jobs onto their OWN server — not just queue order, which only biases a FREE worker — guarantees the
         // control-plane jobs (wait/resume, recurring reconcilers/expiry, webhooks) keep their own capacity.
         //
-        // KNOWN RESIDUAL (tracked separately): the agent.code node PARKS and dispatches its executor here, so its
+        // KNOWN RESIDUAL (tracked separately): the agent.run node PARKS and dispatches its executor here, so its
         // engine walk is short — but a SYNCHRONOUS long node (agent.run_command, the git open-PR/review nodes, the
         // supervisor acceptance grader) runs inline ON the engine job, which is on the control pool. So this split
-        // isolates the agent.code EXECUTOR, not every long job; a command-heavy engine walk can still occupy a
+        // isolates the agent.run EXECUTOR, not every long job; a command-heavy engine walk can still occupy a
         // control worker for its timeout. Fully closing it needs those nodes dispatched off the control pool too.
         // Both pools run only on a processing (worker) pod.
 

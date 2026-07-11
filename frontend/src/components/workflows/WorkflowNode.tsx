@@ -166,7 +166,7 @@ function RunResultBar({ status, rows, title }: { status: NodeStatus; rows: Workf
 }
 
 /**
- * One run row's detail inside the result panel — error first, then output, then input. For an `agent.code`
+ * One run row's detail inside the result panel — error first, then output, then input. For an `agent.run`
  * step it also embeds the LIVE agent run (status + event timeline + governed tool-call audit), so you watch
  * the agent work without leaving the canvas; for a `flow.subworkflow` step it offers to open the child run.
  * Falls back to "no output" only when the row carries nothing at all.
@@ -361,7 +361,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const onAddFrom = useContext(NodeAddContext);
   const showAdd = d.kind !== "Terminal";
 
-  // An agent.code node parks (Suspended) the whole time its agent works; surface the agent's LIVE status so
+  // An agent.run node parks (Suspended) the whole time its agent works; surface the agent's LIVE status so
   // the card reads as active, not an idle wait — matching the timeline view. Single agent row only; the hook
   // stays unconditional (disabled, no fetch, when there's no agent row — the editor, a plain node, a fan-out).
   const agentRow = d.runRows?.length === 1 ? d.runRows[0] : undefined;
@@ -434,7 +434,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
 }
 
 /**
- * The status to PAINT for a node. An agent.code node parks (Suspended) while its agent run is still
+ * The status to PAINT for a node. An agent.run node parks (Suspended) while its agent run is still
  * working, so — for the single-agent-row case — surface the agent's live activity as "Running" instead of a
  * misleading idle "Suspended" (mirrors the timeline view's isParkedOnLiveAgent). Everything else is the raw
  * node status.

@@ -30,7 +30,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///         the bound holds across the multi-turn barrier resume.</item>
 ///   <item>APPROVAL POLICY gate-before-spawn: with <c>approvalPolicy: "spawns"</c>, the turn-1 spawn routes
 ///         through the HITL gate — it is rewritten into an ask_human APPROVAL card + parks on an Action wait
-///         BEFORE any agent run is created (zero <c>agent.code</c> rows).</item>
+///         BEFORE any agent run is created (zero <c>agent.run</c> rows).</item>
 /// </list>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -128,7 +128,7 @@ public class SupervisorBoundsFlowTests : IDisposable
         try
         {
             // Turn 0: plan → self-advance. Turn 1: the decider WANTS to spawn, but the approval policy rewrites it
-            // into an ask_human approval card + parks — BEFORE any agent.code run is created.
+            // into an ask_human approval card + parks — BEFORE any agent.run run is created.
             await RunEngineAsync(runId);
             await ResolveSelfAdvanceAsync(runId);
             await RunEngineAsync(runId);

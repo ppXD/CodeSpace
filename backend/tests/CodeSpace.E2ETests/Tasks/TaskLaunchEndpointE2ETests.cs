@@ -24,7 +24,7 @@ namespace CodeSpace.E2ETests.Tasks;
 /// E2E coverage for <c>POST /api/workflows/runs</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
 /// team-scope behavior (TeamMembershipAuthorizationBehavior), model binding of <c>LaunchTaskCommand</c>, the
 /// controller, the mediator, the GlobalExceptionFilter. The launch's post-commit dispatch → engine run →
-/// agent.code → real executor + LocalProcessRunner + fake CLI → resume → terminal chain is then DRAINED and the
+/// agent.run → real executor + LocalProcessRunner + fake CLI → resume → terminal chain is then DRAINED and the
 /// run asserted to reach Success — proving the generic launch surface works end to end behind real HTTP.
 ///
 /// <para>Tier: 🟢 High-fidelity — real app host + real Postgres + real engine + real executor + LocalProcessRunner
@@ -77,7 +77,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         body.SurfaceKind.ShouldBe("chat");
 
         // Drain the deferred chain: the launch's post-commit dispatch enqueued the engine run; that run's
-        // agent.code suspend enqueued the real executor; draining runs the whole chain to terminal.
+        // agent.run suspend enqueued the real executor; draining runs the whole chain to terminal.
         await _factory.JobClient.DrainAsync();
 
         using var scope = _factory.Services.CreateScope();
@@ -101,7 +101,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         run.SessionTurnIndex.ShouldBe(1, "the launch run is the session's first turn");
 
         var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == body.RunId);
-        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the launched agent.code executed to Succeeded via the real executor + runner + fake CLI");
+        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the launched agent.run executed to Succeeded via the real executor + runner + fake CLI");
 
         // The folded summary must be the fake-CLI transform of the POSTed task text — proving the operator's exact
         // goal reached the real CLI end-to-end through HTTP (not just "some agent exited 0"). This assertion is also
@@ -179,9 +179,9 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == body!.RunId);
 
-        // The related repo bound through HTTP and round-tripped into the frozen agent.code inputs…
+        // The related repo bound through HTTP and round-tripped into the frozen agent.run inputs…
         ReadAgentRelatedRepositoryIds(run.DefinitionSnapshotJson!).ShouldBe(new[] { web.ToString() },
-            customMessage: "the relatedRepositories array must bind through real ASP.NET model binding into the projected agent.code inputs");
+            customMessage: "the relatedRepositories array must bind through real ASP.NET model binding into the projected agent.run inputs");
 
         // …and the run scope is the primary + the related repo (what a multi-repo session-branch resolver scans).
         run.ScopeRepositoryIds.ShouldBe(new[] { primary, web }, ignoreOrder: true,
@@ -316,7 +316,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         return body!;
     }
 
-    /// <summary>Reads the projected agent.code node's <c>goal</c> (the agent prompt) out of the frozen definition snapshot.</summary>
+    /// <summary>Reads the projected agent.run node's <c>goal</c> (the agent prompt) out of the frozen definition snapshot.</summary>
     private static string ReadAgentGoal(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -324,7 +324,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         return agent.GetProperty("config").GetProperty("goal").GetString()!;
     }
 
-    /// <summary>Reads the projected agent.code node's (clamped) <c>autonomyLevel</c> config out of the frozen snapshot.</summary>
+    /// <summary>Reads the projected agent.run node's (clamped) <c>autonomyLevel</c> config out of the frozen snapshot.</summary>
     private static string ReadAgentAutonomyLevel(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
@@ -340,7 +340,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         return sup.GetProperty("config").Clone();
     }
 
-    /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> repo ids out of the frozen snapshot. Empty when the key is absent.</summary>
+    /// <summary>Reads the projected agent.run node's <c>relatedRepositories</c> repo ids out of the frozen snapshot. Empty when the key is absent.</summary>
     private static IReadOnlyList<string> ReadAgentRelatedRepositoryIds(string definitionSnapshotJson)
     {
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;

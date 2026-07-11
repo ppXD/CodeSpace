@@ -35,9 +35,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// fake tag — so the flow runs with no API key.</para>
 ///
 /// <para>Scope: this exercises the ANALYSIS path (recommendedWorkflowKind="analysis" → an llm.complete body),
-/// which runs with no sandbox. That BOTH projection shapes (analysis→llm.complete and coding→agent.code) emit a
+/// which runs with no sandbox. That BOTH projection shapes (analysis→llm.complete and coding→agent.run) emit a
 /// definition the real DefinitionValidator accepts is pinned by the unit Theory
-/// (WorkflowPlannerTests.Projection_of_a_representative_plan_passes_DefinitionValidator); the agent.code body's
+/// (WorkflowPlannerTests.Projection_of_a_representative_plan_passes_DefinitionValidator); the agent.run body's
 /// real RUNNABILITY is covered by the planner→map→real-agent E2E (PR-D2). Together they cover both paths without
 /// requiring a sandbox here.</para>
 /// </summary>

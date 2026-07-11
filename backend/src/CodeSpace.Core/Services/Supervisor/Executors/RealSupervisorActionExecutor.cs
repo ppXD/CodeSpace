@@ -24,7 +24,7 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// <list type="bullet">
 ///   <item><c>plan</c> → fold the decider's planned subtasks into the recorded outcome (the decider IS the
 ///         planner-in-the-loop; the executor records the plan so later spawn/merge can read it). SYNCHRONOUS.</item>
-///   <item><c>spawn</c> / <c>retry</c> → create K real <c>agent.code</c> child runs (through the admission
+///   <item><c>spawn</c> / <c>retry</c> → create K real <c>agent.run</c> child runs (through the admission
 ///         gate) + stage K <c>AgentRun</c> waits keyed <c>&lt;nodeId&gt;#turn{N}#{k}</c>; the node parks on
 ///         them + the wait-for-all barrier resumes once all complete. ASYNC (see <c>.Spawn.cs</c>).</item>
 ///   <item><c>merge</c> → read the recorded prior-Attempt agent results by id + reduce them into a synthesis

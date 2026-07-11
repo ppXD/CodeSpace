@@ -8,7 +8,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 /// <summary>
 /// Test-only SUSPENDING body node for the flow.map durable-resume (PR2) tests — the hermetic stand-in for
-/// an <c>agent.code</c> that parks to an AgentRun. It mirrors the loop parallel-suspend fixture
+/// an <c>agent.run</c> that parks to an AgentRun. It mirrors the loop parallel-suspend fixture
 /// (<c>flow.wait_approval</c> in LoopFlowTests) but parks an <b>Action</b> wait, which needs NO external
 /// staging (no child run / agent run), so the test stays self-contained while still committing a REAL
 /// <c>WorkflowRunWait</c> row and resuming through the REAL <see cref="WorkflowResumeService"/> path:

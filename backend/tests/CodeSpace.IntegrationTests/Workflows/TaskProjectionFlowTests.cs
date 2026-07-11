@@ -24,10 +24,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// walks it. No <c>workflow</c> / <c>workflow_version</c> row is created (it is a snapshot run, PR1's promise).
 ///
 /// <para>Two tiers of proof:
-///   (a) 🟢 HIGH — the <c>single-agent</c> projection's <c>agent.code</c> step ACTUALLY EXECUTES through the
+///   (a) 🟢 HIGH — the <c>single-agent</c> projection's <c>agent.run</c> step ACTUALLY EXECUTES through the
 ///       real <see cref="AgentRunExecutor"/> → real <c>LocalProcessRunner</c> → a fake-CLI process → real
 ///       result fold → natural resume → run Success, proving the projected definition runs identically to an
-///       authored agent.code node;
+///       authored agent.run node;
 ///   (b) the ZERO-CORE-EDIT genericity contract — a FAKE <see cref="IWorkflowDefinitionBuilder"/>
 ///       (<c>"fake-projection"</c>, emitting a trivial manual→terminal def) registered ONLY in a test DI scope
 ///       is resolved + built + run to Success by the SAME factory, with no production-core edit. Dispatch is
@@ -60,7 +60,7 @@ public class TaskProjectionFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend dispatches the REAL AgentRunExecutor + real runner + fake CLI
 
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
@@ -69,7 +69,7 @@ public class TaskProjectionFlowTests
         // needed). The route names the single-agent projection kind — the ONLY thing dispatch keys off.
         var context = SingleAgentContext(teamId, goal: "Work on the auth refactor", harness: "codex-cli");
 
-        // ── Pass 1: the factory projects + starts a snapshot run; the engine walks start → agent.code, which
+        // ── Pass 1: the factory projects + starts a snapshot run; the engine walks start → agent.run, which
         //    parks + dispatches its real executor job; the run suspends. ──
         var handle = await CreateAndRunAsync(context, teamId, userId);
         await RunEngineAsync(handle.RunId);
@@ -85,7 +85,7 @@ public class TaskProjectionFlowTests
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == handle.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "the projected single-agent definition must walk start → agent.code → terminal to Success through the real engine + executor + fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
+            customMessage: "the projected single-agent definition must walk start → agent.run → terminal to Success through the real engine + executor + fake CLI; if not, inspect the failed WorkflowRunNode rows + the AgentRun.Error for this run");
 
         // It is a SNAPSHOT run — PR1's promise holds for a projected definition too.
         run.WorkflowId.ShouldBeNull("a projected task run is a snapshot run — not a child of any workflow");
@@ -94,16 +94,16 @@ public class TaskProjectionFlowTests
         (await CountWorkflowsAsync(teamId)).ShouldBe(workflowCountBefore, "no workflow row is created for a projected snapshot run");
         (await CountWorkflowVersionsAsync()).ShouldBe(versionCountBefore, "no workflow_version row is created for a projected snapshot run");
 
-        // EVIDENCE the agent REALLY ran: one real AgentRun for the projected agent.code node, Succeeded, with a
+        // EVIDENCE the agent REALLY ran: one real AgentRun for the projected agent.run node, Succeeded, with a
         // folded result whose summary is the fake-CLI transform of the projected goal — proving the profile→goal
         // mapping reached the real CLI.
         var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == handle.RunId);
-        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the projected agent.code executed to Succeeded via the real executor + runner");
-        agentRun.NodeId.ShouldBe("agent", "the run links back to the projected agent.code node");
+        agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the projected agent.run executed to Succeeded via the real executor + runner");
+        agentRun.NodeId.ShouldBe("agent", "the run links back to the projected agent.run node");
 
         var task = JsonSerializer.Deserialize<Messages.Agents.AgentTask>(agentRun.TaskJson, AgentJson.Options)!;
-        task.Goal.ShouldBe("Work on the auth refactor", "the seed goal mapped onto the projected agent.code goal config");
-        task.Harness.ShouldBe("codex-cli", "the profile harness mapped onto the projected agent.code harness config");
+        task.Goal.ShouldBe("Work on the auth refactor", "the seed goal mapped onto the projected agent.run goal config");
+        task.Harness.ShouldBe("codex-cli", "the profile harness mapped onto the projected agent.run harness config");
 
         var result = JsonSerializer.Deserialize<Messages.Agents.AgentRunResult>(agentRun.ResultJson!, AgentJson.Options)!;
         result.Summary.ShouldBe(SubtaskAwareFakeCli.ExpectedSummaryFor("Work on the auth refactor"),

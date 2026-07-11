@@ -115,7 +115,7 @@ public class NodeAgentToolTests
     public async Task A_suspending_node_is_not_tool_callable()
     {
         var suspend = NodeResult.Suspend(new SuspensionToken { Kind = "agent_run", Payload = EmptyObject });
-        var result = await Tool(new StubNode("agent.code", true, suspend)).CallAsync(new AgentToolCall { Input = EmptyObject }, CancellationToken.None);
+        var result = await Tool(new StubNode("agent.run", true, suspend)).CallAsync(new AgentToolCall { Input = EmptyObject }, CancellationToken.None);
 
         result.IsError.ShouldBeTrue();
         result.Error.ShouldContain("suspends");

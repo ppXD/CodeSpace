@@ -328,7 +328,7 @@ public class NodeManifestContractTests
         new FlowWaitActionNode().Manifest.CanSuspend.ShouldBeTrue("flow.wait_action parks on an Action wait");
         new FlowSleepNode().Manifest.CanSuspend.ShouldBeTrue("flow.sleep parks on a Timer wait");
         new FlowSubworkflowNode().Manifest.CanSuspend.ShouldBeTrue("flow.subworkflow parks on a Subworkflow wait");
-        new AgentCodeNode().Manifest.CanSuspend.ShouldBeTrue("agent.code parks on an AgentRun wait");
+        new AgentCodeNode().Manifest.CanSuspend.ShouldBeTrue("agent.run parks on an AgentRun wait");
         new ChatPostMessageNode(null!, null!, null!).Manifest.CanSuspend.ShouldBeTrue("chat.post_message can park on an Action wait when waitForResponse is on");
     }
 

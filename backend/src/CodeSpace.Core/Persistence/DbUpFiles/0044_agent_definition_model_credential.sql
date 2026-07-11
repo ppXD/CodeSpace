@@ -1,6 +1,6 @@
 -- 0044_agent_definition_model_credential.sql
 --
--- A persona's DEFAULT model credential: the ModelCredential (0043) an agent.code run authenticates with when
+-- A persona's DEFAULT model credential: the ModelCredential (0043) an agent.run run authenticates with when
 -- the node doesn't pin one. A REFERENCE (id) only — never the key. Resolved + decrypted just-in-time in the
 -- executor; NULL falls back to a team default / operator-global key. Deliberately a SOFT reference (no FK):
 -- a persona may be imported/copied across teams, and the run-time resolver is what enforces that the

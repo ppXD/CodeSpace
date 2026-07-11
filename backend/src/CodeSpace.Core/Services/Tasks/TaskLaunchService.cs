@@ -305,7 +305,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         CapsOverride = request.CapsOverride,
     };
 
-    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + each related repo + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults. Related repos require a primary (fail-loud, mirroring the agent.code node — a workspace has nowhere to anchor without one). Internal (not private) so the clamp + related-repo choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
+    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + each related repo + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.run's own defaults. Related repos require a primary (fail-loud, mirroring the agent.run node — a workspace has nowhere to anchor without one). Internal (not private) so the clamp + related-repo choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
     internal static ResolvedAgentProfile BuildAgentProfile(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route)
     {
         var repositoryId = seed.RepositoryId ?? request.RepositoryId;
@@ -345,7 +345,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private static int? DefaultTimeoutSeconds(RoutePlan route) =>
         string.Equals(route.EffortMode, TaskEffortModes.Deep, StringComparison.OrdinalIgnoreCase) ? DeepAgentTimeoutSeconds : null;
 
-    /// <summary>Project the operator's typed related repos onto <see cref="WorkspaceRepositorySpec"/>s through the SHARED authoring path (Rule 7 — the same defaults the agent.code node + supervisor get). Null / empty ⇒ null, so a single-repo launch leaves <c>RelatedRepositories</c> unset (the projection omits the key — byte-identical).</summary>
+    /// <summary>Project the operator's typed related repos onto <see cref="WorkspaceRepositorySpec"/>s through the SHARED authoring path (Rule 7 — the same defaults the agent.run node + supervisor get). Null / empty ⇒ null, so a single-repo launch leaves <c>RelatedRepositories</c> unset (the projection omits the key — byte-identical).</summary>
     private static IReadOnlyList<WorkspaceRepositorySpec>? BuildRelatedRepositories(IReadOnlyList<TaskRelatedRepository>? related) =>
         related is { Count: > 0 }
             ? related.Select(r => AgentWorkspaceAuthoring.ToRelatedSpec(r.RepositoryId, r.Alias, r.Access)).ToList()
@@ -356,7 +356,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// <see cref="RouteCaps.AutonomyCeiling"/>, and stamp the CLAMPED tier string. A blank / unrecognised request
     /// folds to the route's recipe/effort default (NOT Unleashed); a blank / unrecognised ceiling means "no ceiling"
     /// (the top tier, so the clamp is a no-op and the requested tier passes through). The clamped string is what
-    /// flows through projection → the agent.code node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox
+    /// flows through projection → the agent.run node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox
     /// runner, so a Quick/Standard route can never run Trusted/Unleashed however the caller asks.
     /// </summary>
     private static string ClampAutonomy(TaskLaunchRequest request, RoutePlan route)

@@ -74,7 +74,7 @@ public sealed class SessionConvergenceWholeLoopE2ETests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend runs the REAL executor + runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend runs the REAL executor + runner + fake CLI
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -219,7 +219,7 @@ public sealed class SessionConvergenceWholeLoopE2ETests
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
     }
 
-    /// <summary>Reads the projected agent.code node's <c>baseRef</c> input out of the frozen definition snapshot (null ⇒ default branch). Mirrors WorkSessionBranchFlowTests.</summary>
+    /// <summary>Reads the projected agent.run node's <c>baseRef</c> input out of the frozen definition snapshot (null ⇒ default branch). Mirrors WorkSessionBranchFlowTests.</summary>
     private async Task<string?> ReadAgentBaseRefAsync(Guid runId)
     {
         var run = await LoadRunAsync(runId);

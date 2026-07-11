@@ -32,7 +32,7 @@ public sealed record PlannedWorkflow
 
     /// <summary>
     /// The execution shape the planner recommends for each subtask branch. <c>"coding"</c> projects each
-    /// branch onto an <c>agent.code</c> body node; anything else (the default) projects onto a plain
+    /// branch onto an <c>agent.run</c> body node; anything else (the default) projects onto a plain
     /// <c>llm.complete</c> body node. The projector switches on this — the model never names a node type.
     /// </summary>
     public string RecommendedWorkflowKind { get; init; } = "analysis";

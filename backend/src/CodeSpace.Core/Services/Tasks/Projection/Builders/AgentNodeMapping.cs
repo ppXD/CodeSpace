@@ -8,12 +8,12 @@ using CodeSpace.Messages.Tasks;
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders;
 
 /// <summary>
-/// The ONE place an <c>agent.code</c> node's Config / Inputs are mapped from a <see cref="ResolvedAgentProfile"/>
+/// The ONE place an <c>agent.run</c> node's Config / Inputs are mapped from a <see cref="ResolvedAgentProfile"/>
 /// (Rule 16 — shared builder logic has a single home, never copy-pasted across builders). Both the
 /// <c>single-agent</c> projection (one whole-task agent) and the <c>plan-map-synth</c> projection (a per-subtask
-/// fan-out body) emit IDENTICAL agent.code config shape — only the GOAL differs (a literal seed goal vs a
+/// fan-out body) emit IDENTICAL agent.run config shape — only the GOAL differs (a literal seed goal vs a
 /// <c>{{item}}</c> binding the map resolves per branch). Keeping the mapping here guarantees a snapshot agent runs
-/// the SAME way an authored agent.code node does, regardless of which projection emitted it.
+/// the SAME way an authored agent.run node does, regardless of which projection emitted it.
 ///
 /// <para>Optional fields are emitted only when present (an absent key inherits the node's own default), so a bare
 /// profile produces the same minimal config a bare authored node would. The harness, when the profile names none, is
@@ -32,7 +32,7 @@ internal static class AgentNodeMapping
     public static RetryPolicy DefaultRetry => new() { MaxAttempts = 3, BackoffSeconds = 30 };
 
     /// <summary>
-    /// The <c>agent.code</c> Config — maps the resolved profile onto the EXACT keys <c>AgentCodeNode</c> reads,
+    /// The <c>agent.run</c> Config — maps the resolved profile onto the EXACT keys <c>AgentCodeNode</c> reads,
     /// with the supplied <paramref name="goal"/> (a literal for single-agent, a <c>{{item}}</c> binding for a map
     /// body) and an optional <paramref name="mode"/> (the model-authored intent — a <c>{{item.mode}}</c> binding the
     /// dynamic fan-out body passes per branch; omitted when null/blank so the two existing callers emit identical
@@ -116,7 +116,7 @@ internal static class AgentNodeMapping
             : $"{grounding}\n\n---\nNow address this follow-up for the SAME thread — continue from the prior work above, do not start over:\n\n{goal}";
 
     /// <summary>
-    /// The <c>agent.code</c> Inputs — the bound <c>repositoryId</c> (primary) from the profile, else the seed's repo,
+    /// The <c>agent.run</c> Inputs — the bound <c>repositoryId</c> (primary) from the profile, else the seed's repo,
     /// plus the multi-repo <c>relatedRepositories</c> when the profile authored any (the SAME {repositoryId, alias,
     /// access} shape <c>AgentCodeNode</c> reads + the editor emits, so the projection lane and the authored node
     /// produce an identical workspace). Absent when neither names a repo (an analysis-only run); the related-repos

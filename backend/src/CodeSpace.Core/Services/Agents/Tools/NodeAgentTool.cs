@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Agents.Tools;
 /// manifest IS the tool schema; its <see cref="NodeManifest.IsSideEffecting"/> flag drives the fail-closed risk
 /// declarations (side-effecting → destructive → approval-gated; read-only → concurrency-safe, no approval).
 ///
-/// <para>Only synchronous nodes are tool-callable: a node that SUSPENDS for an async wait (e.g. agent.code)
+/// <para>Only synchronous nodes are tool-callable: a node that SUSPENDS for an async wait (e.g. agent.run)
 /// returns a typed error rather than silently parking — a tool call must produce a concrete result. The node
 /// runs against a minimal synthetic context (the tool input as its inputs, no upstream scope, no-op
 /// observability); the agent loop / MCP layer owns its own auditing around the call.</para>

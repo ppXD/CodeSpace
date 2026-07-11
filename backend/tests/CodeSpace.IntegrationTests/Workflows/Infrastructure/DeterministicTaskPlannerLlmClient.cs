@@ -25,7 +25,7 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
     /// <summary>The fixed subtask titles the planner emits — three subtasks the projected map fans out over.</summary>
     public static readonly IReadOnlyList<string> SubtaskTitles = new[] { "Audit", "Refactor", "Verify" };
 
-    /// <summary>The <c>recommendedWorkflowKind</c> the projector switches a CODING plan on (→ an agent.code body).</summary>
+    /// <summary>The <c>recommendedWorkflowKind</c> the projector switches a CODING plan on (→ an agent.run body).</summary>
     public const string CodingKind = "coding";
 
     /// <summary>The default <c>recommendedWorkflowKind</c> — the analysis path (→ an llm.complete body).</summary>
@@ -36,7 +36,7 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
     /// <summary>Default ctor — Autofac resolves this at the fixture root, emitting the ANALYSIS path (the byte-identical behaviour the existing PlannerProjectionFlowTests + retarget seam depend on).</summary>
     public DeterministicTaskPlannerLlmClient() : this(AnalysisKind) { }
 
-    /// <summary>Kind-selecting ctor — a test instantiates this in its own child-scope registry to drive the CODING projection path (<see cref="CodingKind"/> ⇒ agent.code body).</summary>
+    /// <summary>Kind-selecting ctor — a test instantiates this in its own child-scope registry to drive the CODING projection path (<see cref="CodingKind"/> ⇒ agent.run body).</summary>
     public DeterministicTaskPlannerLlmClient(string recommendedWorkflowKind) { _recommendedWorkflowKind = recommendedWorkflowKind; }
 
     public string Provider => ProviderTag;

@@ -699,7 +699,7 @@ public sealed class DefinitionValidator : IScopedDependency
     /// <para>PR2: a body node MAY now SUSPEND (park the run on a durable wait). Each branch parks under its
     /// own iteration key <c>"&lt;mapId&gt;#&lt;i&gt;"</c>, the run stays Suspended until every branch wait
     /// resolves (the wait-for-all barrier), and a re-walk replays settled branches + re-runs only the
-    /// suspended ones — so an <c>agent.code</c> (or any CanSuspend node) is a first-class map body element.
+    /// suspended ones — so an <c>agent.run</c> (or any CanSuspend node) is a first-class map body element.
     /// The earlier PR1 fail-closed guard that rejected such a body at save time is intentionally gone.</para>
     /// </summary>
     private void CheckMapBodyShape(WorkflowDefinition definition, NodeDefinition mapNode, List<string> errors)

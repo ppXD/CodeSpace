@@ -31,7 +31,7 @@ public static class WorkflowWaitKinds
     public const string Action = "Action";
 
     /// <summary>
-    /// Waits for an agent run (<c>agent.code</c>) to reach a terminal state. The wait's <c>Token</c> is
+    /// Waits for an agent run (<c>agent.run</c>) to reach a terminal state. The wait's <c>Token</c> is
     /// the agent-run id; the executor's completion resumes the node with the <c>AgentRunResult</c>
     /// mapped onto <c>{ status, summary, changedFiles, branch, error }</c>.
     /// </summary>

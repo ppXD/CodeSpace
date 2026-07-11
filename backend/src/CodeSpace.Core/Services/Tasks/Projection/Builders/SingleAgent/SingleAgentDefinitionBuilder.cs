@@ -7,12 +7,12 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
 
 /// <summary>
 /// The <c>single-agent</c> projection (Rule 18.3 — one impl beside its variant folder): one agent works the
-/// whole task in a single <c>agent.code</c> step. Emits the fixed-safe graph
-/// <c>trigger.manual → agent.code → builtin.terminal</c>, whose <c>agent.code</c> node Config maps from the
+/// whole task in a single <c>agent.run</c> step. Emits the fixed-safe graph
+/// <c>trigger.manual → agent.run → builtin.terminal</c>, whose <c>agent.run</c> node Config maps from the
 /// context's <see cref="ResolvedAgentProfile"/> + <see cref="TaskLaunchSeed.Goal"/> onto the SAME keys
 /// <c>AgentCodeNode</c> reads (via the shared <see cref="AgentNodeMapping"/>), and binds <c>repositoryId</c> as
 /// the node's INPUT from <c>AgentProfile.RepositoryId ?? Seed.RepositoryId</c>. So a snapshot single-agent run
-/// executes IDENTICALLY to an authored <c>agent.code</c> node — the executor sees the same task.
+/// executes IDENTICALLY to an authored <c>agent.run</c> node — the executor sees the same task.
 ///
 /// <para>Self-registers via <see cref="ISingletonDependency"/>; a new projection is a sibling builder folder,
 /// never an edit here. The output ALWAYS passes <c>DefinitionValidator</c> (the build is parameter-driven over
@@ -40,7 +40,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
     {
         new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
-        new() { Id = "agent", TypeKey = "agent.code", Label = "Run the task", Retry = AgentNodeMapping.DefaultRetry,
+        new() { Id = "agent", TypeKey = "agent.run", Label = "Run the task", Retry = AgentNodeMapping.DefaultRetry,
                 Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
@@ -57,7 +57,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
     private static bool IsMultiRepo(TaskBuildContext context) => context.AgentProfile?.RelatedRepositories is { Count: > 0 };
 
     /// <summary>
-    /// The terminal surfaces the agent's result as the run's outputs — the SAME output keys agent.code emits, wired
+    /// The terminal surfaces the agent's result as the run's outputs — the SAME output keys agent.run emits, wired
     /// via {{ref}}. A MULTI-repo run ALSO surfaces <c>repositoryResults</c> (each repo's produced branch) so a session
     /// follow-up can continue each repo from its own prior branch (a session-branch resolver reads it from OutputsJson).
     /// <para>It is bound ONLY for a multi-repo run: a single-repo run never emits <c>repositoryResults</c> from the

@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 
 /// <summary>
 /// The ASYNC half of the real executor (Rule 10 <c>.Spawn.cs</c>): <c>spawn</c> / <c>retry</c> stage K real
-/// <c>agent.code</c> child runs + K <c>AgentRun</c> waits, then the node parks on them (the wait-for-all
+/// <c>agent.run</c> child runs + K <c>AgentRun</c> waits, then the node parks on them (the wait-for-all
 /// barrier resumes the supervisor once every spawned agent terminates). Mirrors the engine's agent-run
 /// staging (<c>WorkflowEngine.StageAgentRunAsync</c>) but K-at-once for the supervisor's per-turn fan-out —
 /// reusing the SAME <c>AgentRun</c> wait kind + barrier, NOT a parallel fan-out.
@@ -649,14 +649,14 @@ public sealed partial class RealSupervisorActionExecutor
             Tools = context.SpawnedAgentTools,
             RunnerKind = NullIfBlank(profile?.RunnerKind),
             RepositoryId = repositoryId,
-            // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.code node uses —
+            // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.run node uses —
             // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it). The operator's
             // multi-repo cwd mode rides the profile (null/Auto → byte-identical). The primary's ref + pin resolve
             // above (handoff > profile branch/pin > promoted related repo's own pin).
             Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryBaseRef, primaryPinnedSha: primaryPin),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
-            // The profile's wall-clock cap, in the agent.code node's vocabulary: positive caps the run, an explicit ≤0
+            // The profile's wall-clock cap, in the agent.run node's vocabulary: positive caps the run, an explicit ≤0
             // means NO wall-clock (the operator's "no timeout" choice), absent → the bounded 1h default — so the Launch
             // timeout override finally reaches the agents that do the hours of work.
             TimeoutSeconds = profile?.TimeoutSeconds is { } timeout ? (timeout > 0 ? timeout : (int?)null) : 3600,
@@ -672,11 +672,11 @@ public sealed partial class RealSupervisorActionExecutor
         };
     }
 
-    /// <summary>The profile's harness, else the shared platform default (<see cref="AgentHarnessDefaults.DefaultHarness"/> — the same operator-overridable, codex-cli-floor source the agent.code projection uses). Null/blank profile → byte-identical to pre-P2-3.</summary>
+    /// <summary>The profile's harness, else the shared platform default (<see cref="AgentHarnessDefaults.DefaultHarness"/> — the same operator-overridable, codex-cli-floor source the agent.run projection uses). Null/blank profile → byte-identical to pre-P2-3.</summary>
     private static string HarnessOf(SupervisorAgentProfile? profile) =>
         !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : AgentHarnessDefaults.DefaultHarness;
 
-    /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.code's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
+    /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.run's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
     private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
         Enum.TryParse<AgentAutonomyLevel>(profile?.AutonomyLevel, ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
 
@@ -684,6 +684,6 @@ public sealed partial class RealSupervisorActionExecutor
     private static AgentAutonomyLevel ClampAutonomy(string? requested, AgentAutonomyLevel ceiling) =>
         Enum.TryParse<AgentAutonomyLevel>(requested, ignoreCase: true, out var level) && level < ceiling ? level : ceiling;
 
-    /// <summary>A blank string degrades to null (the harness-default sentinel), mirroring agent.code's ReadOptionalString.</summary>
+    /// <summary>A blank string degrades to null (the harness-default sentinel), mirroring agent.run's ReadOptionalString.</summary>
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 }

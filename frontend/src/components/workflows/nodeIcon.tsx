@@ -63,7 +63,7 @@ const ICON_BY_TYPE: Record<string, typeof Ic.Box> = {
   "git.close_issue": Ic.IssueClosed,
   "git.integrate": Ic.Fork,
   "git.open_change_set": Ic.Branch,
-  "agent.code": Ic.Bot,
+  "agent.run": Ic.Bot,
   "agent.run_command": Ic.Command,
   "agent.supervisor": Ic.Team,
   "llm.complete": Ic.Sparkles,

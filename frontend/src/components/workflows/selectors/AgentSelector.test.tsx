@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentSelector } from "./AgentSelector";
 
 /**
- * The agent picker is dispatched via `x-selector: "agent"` on the `agent.code` node's config
+ * The agent picker is dispatched via `x-selector: "agent"` on the `agent.run` node's config
  * (`agentDefinitionId`). It lists the team's Agent personas and saves the chosen id as a plain string.
  * Hook mocked: useAgentDefinitions.
  */

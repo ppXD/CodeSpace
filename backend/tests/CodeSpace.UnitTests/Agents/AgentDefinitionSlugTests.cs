@@ -5,7 +5,7 @@ namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
 /// Pins <see cref="AgentDefinitionService.DeriveSlug"/> — the pure derivation of an Agent persona's
-/// @-mention handle from its name. The handle is a stable contract (an <c>agent.code</c> node and a
+/// @-mention handle from its name. The handle is a stable contract (an <c>agent.run</c> node and a
 /// chat @-mention resolve against it), so the shape is locked here: lowercase, ASCII <c>[a-z0-9_]</c>
 /// kept, every other run collapses to a single hyphen, leading/trailing hyphens trimmed, capped at 64,
 /// empty when nothing usable survives (the service turns that into an actionable error).

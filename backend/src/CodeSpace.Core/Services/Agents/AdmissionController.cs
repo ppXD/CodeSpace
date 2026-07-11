@@ -9,7 +9,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// The fail-closed admission gate <see cref="AgentRunService.CreateAsync"/> consults before persisting a new
 /// agent run. Today the only limits on a <c>flow.map</c> fan-out are its per-map maxParallelism + the engine's
 /// branch ceiling — neither bounds the TOTAL in-flight agent runs across a team or the whole deployment, so
-/// several teams (or several workflows on one big team) fanning out <c>agent.code</c> branches can exhaust
+/// several teams (or several workflows on one big team) fanning out <c>agent.run</c> branches can exhaust
 /// runner / Hangfire / model quota. This applies backpressure on concurrent (Queued + Running) agent runs at
 /// two levels: per-team (so one team can't starve the others) and global (a deployment-wide guard). The
 /// reconciler's re-dispatch / re-attach operate on already-admitted runs and are NOT re-gated, so a run is
@@ -45,7 +45,7 @@ public sealed class AdmissionController : IAdmissionController, IScopedDependenc
     // The cap pair is env-overridable (Rule 8) so an operator can tune it without a redeploy — pinned by a unit
     // test. Sizing them needs the REAL flow.map staging model, not the intuition that parallelism bounds the
     // count: a map's branch ceiling is MapPlan.MaxBranchesCeiling = 10_000, and maxParallelism bounds only how
-    // many branches RUN AT ONCE — NOT how many are in flight. Every agent.code branch stages a Queued AgentRun
+    // many branches RUN AT ONCE — NOT how many are in flight. Every agent.run branch stages a Queued AgentRun
     // and immediately suspends (releasing the parallelism gate fast), so on the first engine pass a map over N
     // elements stages ~N in-flight (Queued) AgentRuns regardless of its parallelism. So PerTeam is the count a
     // single fan-out is allowed to reach: at the default 50, an ordinary single flow.map over 50+ elements
@@ -123,7 +123,7 @@ public sealed class AdmissionController : IAdmissionController, IScopedDependenc
 /// A new agent run was refused because admitting it would breach the per-team or global in-flight cap
 /// (<see cref="AdmissionController"/>). The D4a policy is REJECT: the over-cap run fails cleanly with a message
 /// naming the breached cap + the env var to raise it, rather than being deferred-and-retried (a future
-/// enhancement). The engine wraps this into a clean node failure, so an over-cap <c>agent.code</c> branch
+/// enhancement). The engine wraps this into a clean node failure, so an over-cap <c>agent.run</c> branch
 /// routes to its error edge / the map's continue-on-error policy instead of crashing the run.
 /// </summary>
 public sealed class AgentRunAdmissionException : Exception

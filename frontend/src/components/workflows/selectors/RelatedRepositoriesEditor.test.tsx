@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RelatedRepositoriesEditor } from "./RelatedRepositoriesEditor";
 
 /**
- * The agent.code "Add related repositories" editor (multi-repo PR5). Authors `inputs.relatedRepositories`
+ * The agent.run "Add related repositories" editor (multi-repo PR5). Authors `inputs.relatedRepositories`
  * (Array<{ repositoryId, alias?, access }>) that the backend folds into AgentTask.Workspace.
  *
  * Tests pin:

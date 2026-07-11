@@ -2,7 +2,7 @@ namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
 /// Thrown when a from-node rerun (D7) is refused because its RE-RUN closure contains a node whose re-execution
-/// isn't supported yet: a SUSPENDABLE node (<c>CanSuspend</c> — agent.code / subworkflow / supervisor, which
+/// isn't supported yet: a SUSPENDABLE node (<c>CanSuspend</c> — agent.run / subworkflow / supervisor, which
 /// would re-stage an agent run / child / decision) or a CONTAINER (Map/Loop/Try, which would re-run its whole
 /// body atomically). Fail-closed.
 ///

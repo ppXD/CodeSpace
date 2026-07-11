@@ -19,7 +19,7 @@ public static class SupervisorDecisionKinds
     /// <summary>Decompose the goal into subtasks. SYNCHRONOUS — the executor folds the plan + the node self-advances.</summary>
     public const string Plan = "plan";
 
-    /// <summary>Fan out K real <c>agent.code</c> child runs over prior-plan subtask ids. ASYNC — the executor stages K AgentRun waits keyed <c>&lt;nodeId&gt;#turn{N}#{k}</c> + the node parks; the barrier resumes once all K finish.</summary>
+    /// <summary>Fan out K real <c>agent.run</c> child runs over prior-plan subtask ids. ASYNC — the executor stages K AgentRun waits keyed <c>&lt;nodeId&gt;#turn{N}#{k}</c> + the node parks; the barrier resumes once all K finish.</summary>
     public const string Spawn = "spawn";
 
     /// <summary>Re-run ONE prior subtask as a FRESH agent run (a new Attempt), optionally with a revised instruction. ASYNC — same stage-K-waits + barrier as <see cref="Spawn"/> (here K=1).</summary>
@@ -32,7 +32,7 @@ public static class SupervisorDecisionKinds
     public const string Merge = "merge";
 
     /// <summary>
-    /// Attempt to resolve a CONFLICTED integration (resolver loop #379): spawn ONE real <c>agent.code</c> run that
+    /// Attempt to resolve a CONFLICTED integration (resolver loop #379): spawn ONE real <c>agent.run</c> run that
     /// reconciles the prior agents' preserved branches, builds, and runs the tests. ASYNC — stages a single AgentRun
     /// wait + parks (the K=1 spawn shape). The resolver task's CONTENT (instruction + branch set + conflicted files)
     /// is assembled DETERMINISTICALLY by the executor from durable data, never authored by the model — the decider
@@ -55,7 +55,7 @@ public static class SupervisorDecisionKinds
     public const string Publish = "publish";
 
     /// <summary>
-    /// Whether a verb STAGES real <c>agent.code</c> child runs (<see cref="Spawn"/> / <see cref="Retry"/> /
+    /// Whether a verb STAGES real <c>agent.run</c> child runs (<see cref="Spawn"/> / <see cref="Retry"/> /
     /// <see cref="Resolve"/> — all create agent runs + park on them, recording <c>{agentRunIds, agentCount}</c>).
     /// The SINGLE classifier every "did this verb produce agents" path shares — the rehydrate folds (spend / total
     /// / progress / agent-results), the phase projector, the eval scorecard, and the decider's agent-result

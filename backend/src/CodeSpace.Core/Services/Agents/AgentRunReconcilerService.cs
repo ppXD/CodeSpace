@@ -170,7 +170,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// any branch <see cref="AgentRunStatus.Queued"/> run whose parent workflow run is TERMINAL and which NO AgentRun
     /// wait references. That is the one uncollectable leak <see cref="ReconcilePendingWaitsAsync"/> can't see (it only
     /// inspects wait-referenced runs) and <see cref="SweepStaleRunningAsync"/> can't see (it's Running-only): an
-    /// <c>agent.code</c> / supervisor suspension commits the Queued run (CreateAsync) but crashes BEFORE its
+    /// <c>agent.run</c> / supervisor suspension commits the Queued run (CreateAsync) but crashes BEFORE its
     /// <c>workflow_run_wait</c> commits, so the row has no wait — the staged executor never launches, and the run sits
     /// Queued forever, permanently counted against the <see cref="AdmissionController"/> in-flight cap. A still-Queued
     /// run under a LIVE parent is deliberately left alone: it may be a healthy just-staged run, or a supervisor

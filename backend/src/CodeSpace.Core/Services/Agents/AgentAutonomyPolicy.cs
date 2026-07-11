@@ -25,7 +25,7 @@ public static class AgentAutonomyPolicy
     public static AgentAutonomyLevel Clamp(AgentAutonomyLevel requested, AgentAutonomyLevel ceiling) =>
         (AgentAutonomyLevel)Math.Min((int)requested, (int)ceiling);
 
-    /// <summary>Parse an autonomy tier string case-insensitively (mirrors agent.code's ReadAutonomyLevel); null / blank / unrecognised → the supplied fallback. The single tier parser, reused by the launch clamp and the caps-override merge.</summary>
+    /// <summary>Parse an autonomy tier string case-insensitively (mirrors agent.run's ReadAutonomyLevel); null / blank / unrecognised → the supplied fallback. The single tier parser, reused by the launch clamp and the caps-override merge.</summary>
     public static AgentAutonomyLevel Parse(string? value, AgentAutonomyLevel fallback) =>
         Enum.TryParse<AgentAutonomyLevel>(value, ignoreCase: true, out var level) ? level : fallback;
 

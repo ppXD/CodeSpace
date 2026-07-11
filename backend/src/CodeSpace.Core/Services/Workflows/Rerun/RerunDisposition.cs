@@ -23,7 +23,7 @@ public enum RerunDisposition
     /// <summary>A side-effecting (but non-suspendable) leaf — admits both contexts; the runtime D7-3 approval gate fires at execution, not at the rerun gate.</summary>
     SideEffectGuarded,
 
-    /// <summary>An agent.code node — the <c>IsRerunnableWhenSuspendable</c> opt-in: its external agent run is RE-STAGED. Admitted in BOTH contexts — as a container BODY (the proven map-branch re-stage) and, since P2.2, as a from-node ROOT: a from-node fork mints a fresh run id, so the re-staged agent run is unique by construction and the stateless agent.code node re-walks through the same generic stage chain. The re-stage gets a FRESH tool-call ledger, so irreversible side effects (git push / open_pr) re-execute on rerun — governed at the MCP tool level, not the rerun gate.</summary>
+    /// <summary>An agent.run node — the <c>IsRerunnableWhenSuspendable</c> opt-in: its external agent run is RE-STAGED. Admitted in BOTH contexts — as a container BODY (the proven map-branch re-stage) and, since P2.2, as a from-node ROOT: a from-node fork mints a fresh run id, so the re-staged agent run is unique by construction and the stateless agent.run node re-walks through the same generic stage chain. The re-stage gets a FRESH tool-call ledger, so irreversible side effects (git push / open_pr) re-execute on rerun — governed at the MCP tool level, not the rerun gate.</summary>
     ReStageExternalRun,
 
     /// <summary>Any other suspendable node (supervisor / subworkflow / wait_* / sleep / chat.post_message) with no built re-stage — refused in BOTH contexts (fail-closed).</summary>
@@ -37,13 +37,13 @@ public enum RerunDisposition
 /// disjunction at each site. The win is one classification per node-kind and a SINGLE place — the
 /// <see cref="RerunContext.FromNodeRoot"/> / <see cref="RerunContext.ContainerBody"/> arms — that decides which
 /// dispositions each context admits, instead of duplicating the from-node-vs-body distinction across two predicates.
-/// P2.2 admitted <see cref="RerunDisposition.ReStageExternalRun"/> (agent.code) as a from-node root by extending that
+/// P2.2 admitted <see cref="RerunDisposition.ReStageExternalRun"/> (agent.run) as a from-node root by extending that
 /// one arm; every other cell stays byte-identical to the original predicates (proven over the full flag cube + every
 /// live node kind in the disposition tests).
 /// </summary>
 public static class RerunDispositions
 {
-    /// <summary>The disposition a node-kind earns from its manifest — the suspend / side-effect axis (the container-kind axis is applied in <see cref="Admits"/>). A <c>CanSuspend</c> node is the agent.code re-stage opt-in or a fail-closed refusal; a non-suspendable node is side-effect-guarded or pure.</summary>
+    /// <summary>The disposition a node-kind earns from its manifest — the suspend / side-effect axis (the container-kind axis is applied in <see cref="Admits"/>). A <c>CanSuspend</c> node is the agent.run re-stage opt-in or a fail-closed refusal; a non-suspendable node is side-effect-guarded or pure.</summary>
     public static RerunDisposition For(NodeManifest manifest) =>
         manifest.CanSuspend
             ? (manifest.IsRerunnableWhenSuspendable && !manifest.IsSideEffecting ? RerunDisposition.ReStageExternalRun : RerunDisposition.RefuseSuspendable)

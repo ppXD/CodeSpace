@@ -17,7 +17,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// (it needs the graph + ledger, which a node never sees). <see cref="RunAsync"/> therefore throws:
 /// reaching it means the dispatch was bypassed, a bug worth surfacing loudly.</para>
 ///
-/// <para><b>Suspending bodies.</b> A map branch body may SUSPEND (an approval, an <c>agent.code</c> run, a
+/// <para><b>Suspending bodies.</b> A map branch body may SUSPEND (an approval, an <c>agent.run</c> run, a
 /// sub-workflow, a timer): each branch parks its own durable wait under <c>&lt;mapId&gt;#&lt;i&gt;</c>, the
 /// map suspends until ALL branches resolve, and each branch resumes EXACTLY ONCE from its own wait (a settled
 /// sibling is replayed from the ledger, never re-run). Nesting is supported — a map (or a loop / try) inside a

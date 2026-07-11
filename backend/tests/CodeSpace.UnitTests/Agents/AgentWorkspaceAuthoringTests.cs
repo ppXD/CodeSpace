@@ -7,9 +7,9 @@ namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
 /// 🟢 Unit: the SHARED multi-repo workspace authoring底層 (resolver loop #379, S7-A0) — the parse + resolve both the
-/// <c>agent.code</c> node and the supervisor spawn funnel through, so there is ONE authored-repos → workspace
+/// <c>agent.run</c> node and the supervisor spawn funnel through, so there is ONE authored-repos → workspace
 /// implementation (Rule 7) instead of a per-producer hand-mirror. These pin the exact lenient-parse + null-workspace
-/// rules the agent.code node relied on (its <c>AgentCodeNodeTests</c> are the byte-identity guard that the relocation
+/// rules the agent.run node relied on (its <c>AgentCodeNodeTests</c> are the byte-identity guard that the relocation
 /// preserved behaviour) AND the rules the supervisor (S7-A) will inherit for free.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -276,7 +276,7 @@ public class AgentWorkspaceAuthoringTests
     [Fact]
     public void SerializeRelatedRepositories_round_trips_through_ParseRelatedRepositories()
     {
-        // The serializer is the inverse of the parse — a projection emits the EXACT shape the agent.code node + the
+        // The serializer is the inverse of the parse — a projection emits the EXACT shape the agent.run node + the
         // supervisor re-parse, so a launch-authored multi-repo workspace resolves identically end-to-end.
         var original = new[]
         {

@@ -9,7 +9,7 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
 /// <summary>
 /// Drives one (task, mode) through the REAL agent-execution pipeline, grades it with the task's objective oracle,
-/// and records a <see cref="BenchmarkResult"/>. Thin orchestration over the same production seams the agent.code
+/// and records a <see cref="BenchmarkResult"/>. Thin orchestration over the same production seams the agent.run
 /// node uses (Rule 16): <c>IAgentRunService.CreateAsync</c> → <c>IAgentRunExecutor.ExecuteAsync</c> →
 /// <c>IBenchmarkGrader.GradeAsync</c>. The runner adds NO new execution path — it reuses the executor, the runner
 /// registry, and the grader registry; the model behind the CLI is the environment's (a fake CLI in CI).

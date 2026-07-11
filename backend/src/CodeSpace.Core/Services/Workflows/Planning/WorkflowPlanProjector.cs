@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// <code>
 /// trigger.manual ─▶ flow.wait_approval ─▶ logic.if(approved)
 ///                                            ├─true ▶ flow.map(items = {{input.subtasks}})
-///                                            │           └ map_start ▶ [coding ? agent.code : llm.complete]
+///                                            │           └ map_start ▶ [coding ? agent.run : llm.complete]
 ///                                            │        ▶ synthesizer (llm.complete) ▶ End
 ///                                            └─false ▶ Rejected (End)
 /// </code>
@@ -52,9 +52,9 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
         };
     }
 
-    /// <summary>The per-branch body node type the recommended-kind switch decides — <c>coding</c> ⇒ <c>agent.code</c>, anything else ⇒ <c>llm.complete</c>. Shared by the one-shot and coordinated projections so the switch never drifts.</summary>
+    /// <summary>The per-branch body node type the recommended-kind switch decides — <c>coding</c> ⇒ <c>agent.run</c>, anything else ⇒ <c>llm.complete</c>. Shared by the one-shot and coordinated projections so the switch never drifts.</summary>
     private static string ResolveBodyTypeKey(PlannedWorkflow plan) =>
-        string.Equals(plan.RecommendedWorkflowKind, CodingKind, StringComparison.OrdinalIgnoreCase) ? "agent.code" : "llm.complete";
+        string.Equals(plan.RecommendedWorkflowKind, CodingKind, StringComparison.OrdinalIgnoreCase) ? "agent.run" : "llm.complete";
 
     /// <summary>The declared <c>subtasks</c> Input whose DEFAULT bakes the plan's subtasks as a resolvable array — the source the map's <c>{{input.subtasks}}</c> binding fans out over.</summary>
     private static WorkflowVariable SubtasksInput(PlannedWorkflow plan, IReadOnlyCollection<string> harnessKinds) => new()
@@ -90,21 +90,21 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
         new() { Id = "rejected", TypeKey = "builtin.terminal", Label = "Rejected", Config = Empty(), Inputs = Empty() },
     };
 
-    /// <summary>The per-branch body node — the only place the recommended-kind switch decides a node type (coding → agent.code, else → llm.complete). Each reads its element as {{item.title}}/{{item.instruction}}.</summary>
-    private static NodeDefinition BodyNode(string bodyTypeKey, bool perItemAllocation) => bodyTypeKey == "agent.code"
-        ? new() { Id = "body", TypeKey = "agent.code", ParentId = "map", Label = "Agent",
+    /// <summary>The per-branch body node — the only place the recommended-kind switch decides a node type (coding → agent.run, else → llm.complete). Each reads its element as {{item.title}}/{{item.instruction}}.</summary>
+    private static NodeDefinition BodyNode(string bodyTypeKey, bool perItemAllocation) => bodyTypeKey == "agent.run"
+        ? new() { Id = "body", TypeKey = "agent.run", ParentId = "map", Label = "Agent",
                   Config = AgentBodyConfig(perItemAllocation), Inputs = Empty() }
         : new() { Id = "body", TypeKey = "llm.complete", ParentId = "map", Label = "Work the subtask",
                   Config = Json("""{ "provider": "Anthropic" }"""),
                   Inputs = Json("""{ "userPrompt": "{{item.title}}: {{item.instruction}}" }""") };
 
     /// <summary>
-    /// The agent.code body config. <b>One-shot</b> (<paramref name="perItemAllocation"/> = true) allocates PER SUBTASK:
+    /// The agent.run body config. <b>One-shot</b> (<paramref name="perItemAllocation"/> = true) allocates PER SUBTASK:
     /// <c>{{item.harness}}</c> ALWAYS resolves to a registered kind (SerializeSubtasks clamps it) and <c>{{item.model}}</c>
     /// is the planner's loose name (the run-time reconciler aligns the harness to that model's provider — the 兜底).
     /// <b>Coordinated</b> (false) runs the platform-default harness on a stable literal: its rework rounds re-seed from
     /// the coordinator's <c>reworkSubtasks</c>, which carry NO harness/model, so <c>{{item.harness}}</c> would resolve
-    /// empty and trip the agent.code 'harness is required' guard — a literal keeps every round runnable. Per-subtask
+    /// empty and trip the agent.run 'harness is required' guard — a literal keeps every round runnable. Per-subtask
     /// Auto-allocation stays the one-shot path's job (the common case).
     /// </summary>
     private static JsonElement AgentBodyConfig(bool perItemAllocation) => perItemAllocation
@@ -143,7 +143,7 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
             // P2 — fill the harness so the body's {{item.harness}} ALWAYS resolves to a REGISTERED kind: the planner's
             // per-subtask choice wins WHEN it names a real harness, else the platform default (a hallucinated or empty
             // kind can't reach the registry and throw). Model stays the planner's loose choice as an empty string when
-            // unset, so {{item.model}} resolves to "" → the agent.code node falls to the harness default.
+            // unset, so {{item.model}} resolves to "" → the agent.run node falls to the harness default.
             harness = NormalizeHarness(s.Harness, harnessKinds),
             model = s.Model?.Trim() ?? "",
         }), CamelCase);

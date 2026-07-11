@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// churn); the normalized outcome lands in <see cref="ResultJson"/> on completion. The live event log
 /// is a separate append-only table (B0.3b), not this row.
 ///
-/// <see cref="WorkflowRunId"/> / <see cref="NodeId"/> link back to the agent.code node that spawned
+/// <see cref="WorkflowRunId"/> / <see cref="NodeId"/> link back to the agent.run node that spawned
 /// this run; both are nullable so a future direct/standalone agent run is representable. The run-id
 /// link is a soft cross-aggregate reference (no DB FK) — agent runs are managed independently of the
 /// workflow-run lifecycle. <see cref="TeamId"/> is the denormalized team scope (FK to team, like
@@ -25,7 +25,7 @@ public class AgentRun : IEntity<Guid>, IAuditable
 
     public Guid TeamId { get; set; }
 
-    /// <summary>The workflow run whose agent.code node spawned this. NULL for a standalone agent run. Soft link (no FK).</summary>
+    /// <summary>The workflow run whose agent.run node spawned this. NULL for a standalone agent run. Soft link (no FK).</summary>
     public Guid? WorkflowRunId { get; set; }
 
     /// <summary>
@@ -35,7 +35,7 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// </summary>
     public Guid? AgentDefinitionId { get; set; }
 
-    /// <summary>The agent.code node id within that run. NULL for a standalone agent run.</summary>
+    /// <summary>The agent.run node id within that run. NULL for a standalone agent run.</summary>
     public string? NodeId { get; set; }
 
     /// <summary>

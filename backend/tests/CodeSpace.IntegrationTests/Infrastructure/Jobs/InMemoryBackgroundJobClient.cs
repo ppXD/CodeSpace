@@ -248,6 +248,6 @@ public sealed record EnqueuedCall
     public required string MethodName { get; init; }
     public required Guid? RunId { get; init; }
     public required DateTimeOffset EnqueuedAt { get; init; }
-    /// <summary>The Hangfire queue the job was routed to — DefaultQueue unless an overload passed one (e.g. agent.code executor jobs → AgentQueue).</summary>
+    /// <summary>The Hangfire queue the job was routed to — DefaultQueue unless an overload passed one (e.g. agent.run executor jobs → AgentQueue).</summary>
     public required string Queue { get; init; }
 }

@@ -3,7 +3,7 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 namespace CodeSpace.Core.Services.Workflows.Plugins.Builtin;
 
 /// <summary>
-/// The agent-execution nodes — <c>agent.code</c> (runs a coding agent — Codex, Claude Code, … — as a step),
+/// The agent-execution nodes — <c>agent.run</c> (runs a coding agent — Codex, Claude Code, … — as a step),
 /// <c>agent.run_command</c> (runs one shell command in a sandbox, optionally inside a cloned repo), and
 /// <c>agent.supervisor</c> (PR-E: the bounded durable turn-loop brain, always on — the supervisor recipe always
 /// projects the durable lane). They sit on

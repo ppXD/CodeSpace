@@ -61,7 +61,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
         body.Phases.ShouldContain(p => p.Status == PhaseStatus.Succeeded, "at least one phase reached the Succeeded render status");
 
         var agentPhase = body.Phases.Where(p => p.Kind == "agent").ToList()
-            .ShouldHaveSingleItem("the quick run's agent.code node surfaces as one 'agent' phase over real HTTP");
+            .ShouldHaveSingleItem("the quick run's agent.run node surfaces as one 'agent' phase over real HTTP");
         // The node source stamps the ref's Status from the REAL team-scoped AgentRun row (Succeeded), not the NodeStatus.
         agentPhase.Agents.ShouldHaveSingleItem().Status.ShouldBe(nameof(AgentRunStatus.Succeeded));
     }

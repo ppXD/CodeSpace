@@ -15,7 +15,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// Ecosystem PR2 — the Agents-library CRUD vertical end-to-end through the mediator + DB.
 ///
-/// <para>An Agent persona (<c>agent_definition</c>) is the canonical "Agent" noun an <c>agent.code</c>
+/// <para>An Agent persona (<c>agent_definition</c>) is the canonical "Agent" noun an <c>agent.run</c>
 /// node / a chat @-mention references. This suite proves the operator-facing contract: name → @-handle
 /// derivation, the tools tri-state (null = harness default / empty / specific), per-team handle
 /// uniqueness with reuse after soft-delete, cross-team isolation on every verb, and — the keystone of
@@ -55,7 +55,7 @@ public class AgentDefinitionFlowTests
         loaded.ShouldNotBeNull();
         loaded!.Name.ShouldBe("Backend Architect");
         loaded.Slug.ShouldBe("backend-architect",
-            customMessage: "the @-mention handle is DERIVED from the name — operators never type it. If this changes, every agent.code / chat reference to the handle breaks");
+            customMessage: "the @-mention handle is DERIVED from the name — operators never type it. If this changes, every agent.run / chat reference to the handle breaks");
         loaded.Description.ShouldBe("Use PROACTIVELY for system design.");
         loaded.SystemPrompt.ShouldBe("You are a senior backend architect.");
         loaded.Model.ShouldBe("claude-opus-4-8");

@@ -69,7 +69,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = true;   // the agent.code suspend runs the REAL executor + runner + fake CLI
+        jobClient.AutoExecute = true;   // the agent.run suspend runs the REAL executor + runner + fake CLI
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -189,7 +189,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
     }
 
-    /// <summary>Read the projected agent.code node's composed <c>goal</c> (the agent prompt) out of the run's frozen definition snapshot.</summary>
+    /// <summary>Read the projected agent.run node's composed <c>goal</c> (the agent prompt) out of the run's frozen definition snapshot.</summary>
     private async Task<string> ReadAgentGoalAsync(Guid runId)
     {
         var run = await LoadRunAsync(runId);

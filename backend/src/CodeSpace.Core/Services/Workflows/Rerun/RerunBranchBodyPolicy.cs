@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 ///         ops, <c>agent.run_command</c>) — each routes through the D7-3 <c>RerunSideEffectGate</c> at runtime: on a
 ///         rerun the engine parks it on an Approval wait (approve → fire once; reject → skip), so it never SILENTLY
 ///         re-fires.</item>
-///   <item><c>agent.code</c> SPECIFICALLY — <c>CanSuspend</c> &amp;&amp; <see cref="NodeManifest.IsRerunnableWhenSuspendable"/>
+///   <item><c>agent.run</c> SPECIFICALLY — <c>CanSuspend</c> &amp;&amp; <see cref="NodeManifest.IsRerunnableWhenSuspendable"/>
 ///         &amp;&amp; !<c>IsSideEffecting</c> — a re-run branch re-stages a FRESH <c>AgentRun</c> under the branch's
 ///         iteration key (mechanically identical to the shipped original-run map durable resume), with NO node-level
 ///         re-fire gate. This is the intended "execute-again" semantics: re-running an agent branch RE-RUNS the agent,
@@ -22,11 +22,11 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 ///         open_pr can repeat). The operator's click-to-rerun IS the node-level human intent; the agent's OWN
 ///         irreversible tool calls stay governed at the TOOL level (the MCP governance ledger + AlwaysRequiresApproval
 ///         tools like merge_pr remain human-gated inside the agent). A node-level agent-rerun approval gate is a
-///         deferred option, not a v1 requirement. The <c>&amp;&amp; !IsSideEffecting</c> half holds because agent.code is
+///         deferred option, not a v1 requirement. The <c>&amp;&amp; !IsSideEffecting</c> half holds because agent.run is
 ///         not flagged side-effecting; were it ever both-flagged, the both-flag arm below would refuse it.</item>
 ///   <item><c>flow.subworkflow</c> (D2) — the same <c>IsRerunnableWhenSuspendable</c> &amp;&amp; !<c>IsSideEffecting</c>
 ///         opt-in: a re-run branch re-executes the node, staging a FRESH child run under the branch's fork
-///         (mechanically identical to the agent.code re-stage). Its child's side effects are governed WITHIN the child
+///         (mechanically identical to the agent.run re-stage). Its child's side effects are governed WITHIN the child
 ///         (the same "execute-again" semantics), not by this scan — so the node itself is not flagged side-effecting.</item>
 ///   <item><c>flow.sleep</c> (D3) — the same opt-in, and the SIMPLEST re-stage: the "external run" is just the engine's
 ///         OWN <c>Timer</c> wait, minted keyed to the fork's run id + a fresh wait id and self-woken by the scheduled

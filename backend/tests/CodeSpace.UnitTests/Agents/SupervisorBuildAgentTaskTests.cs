@@ -109,7 +109,7 @@ public class SupervisorBuildAgentTaskTests
     [Theory]
     [InlineData(7200, 7200)]  // positive → caps the run
     [InlineData(0, null)]     // explicit 0 → NO wall-clock (the operator's "no timeout" choice)
-    [InlineData(-5, null)]    // any non-positive → unbounded, mirroring the agent.code node's vocabulary
+    [InlineData(-5, null)]    // any non-positive → unbounded, mirroring the agent.run node's vocabulary
     public void A_profile_timeout_maps_onto_the_spawned_task_in_the_agent_code_vocabulary(int authored, int? expected)
     {
         var task = Build(new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { TimeoutSeconds = authored } });
@@ -138,7 +138,7 @@ public class SupervisorBuildAgentTaskTests
         var task = Build(context);
 
         task.RepositoryId.ShouldBe(primary, "the primary still drives the legacy single-repo field");
-        task.Workspace.ShouldNotBeNull("authored related repos project onto a multi-repo workspace through the SAME AgentWorkspaceAuthoring the agent.code node uses — no second parse");
+        task.Workspace.ShouldNotBeNull("authored related repos project onto a multi-repo workspace through the SAME AgentWorkspaceAuthoring the agent.run node uses — no second parse");
         task.Workspace!.Repositories.Count.ShouldBe(2, "primary + one related repo");
         task.Workspace.Repositories.ShouldContain(r => r.RepositoryId == primary && r.IsPrimary);
 

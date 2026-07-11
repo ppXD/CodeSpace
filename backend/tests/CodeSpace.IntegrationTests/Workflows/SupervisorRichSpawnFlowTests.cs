@@ -28,7 +28,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// the staged <c>AgentRun.TaskJson</c>). A supervisor whose node config carries a FULL agent profile
 /// (repo + harness + model + persona + credential + runner + MCP + tools + conversation) spawns agents whose
 /// PERSISTED <see cref="AgentTask"/> inherits every profile field AND has the PERSONA-MERGE applied — the same
-/// resolver <c>WorkflowEngine.StageAgentRunAsync</c> runs for an <c>agent.code</c> node — proving the spawn
+/// resolver <c>WorkflowEngine.StageAgentRunAsync</c> runs for an <c>agent.run</c> node — proving the spawn
 /// envelope is a REAL team agent, not the bare skeleton pre-P2-3 produced, and that the persona-merge bypass is
 /// fixed (system prompt prepended, persona model fills in, persona∪node tools union).
 /// </summary>
@@ -413,7 +413,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         });
     }
 
-    /// <summary>Assert one spawned task is a REAL team agent: every profile field + the persona-merged model / tools / credential — what an agent.code node with the same config would produce.</summary>
+    /// <summary>Assert one spawned task is a REAL team agent: every profile field + the persona-merged model / tools / credential — what an agent.run node with the same config would produce.</summary>
     private static void AssertRichTeamAgent(AgentTask task, Guid repoId, Guid personaId, Guid conversationId, Guid expectedCredentialId)
     {
         task.Harness.ShouldBe(ProfileHarness, "the profile harness overrides the codex-cli default");

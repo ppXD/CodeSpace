@@ -11,12 +11,12 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the single-agent projection builder: the emitted graph is <c>trigger.manual → agent.code →
+/// Pins the single-agent projection builder: the emitted graph is <c>trigger.manual → agent.run →
 /// builtin.terminal</c>, it ALWAYS passes the REAL <see cref="DefinitionValidator"/> (against the real node
-/// manifests, including the agent.code output-key existence check the terminal's refs hit), and the
-/// <see cref="ResolvedAgentProfile"/> + seed goal map onto the SAME agent.code config keys
+/// manifests, including the agent.run output-key existence check the terminal's refs hit), and the
+/// <see cref="ResolvedAgentProfile"/> + seed goal map onto the SAME agent.run config keys
 /// <see cref="AgentCodeNode"/> reads — so a snapshot single-agent run executes identically to an authored
-/// agent.code node. Validation is asserted across a bare profile, a fully-populated profile, and the seed-repo
+/// agent.run node. Validation is asserted across a bare profile, a fully-populated profile, and the seed-repo
 /// fallback so a relaxed mapping can't slip through.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -25,7 +25,7 @@ public class SingleAgentDefinitionBuilderTests
 {
     private static readonly SingleAgentDefinitionBuilder Builder = new();
 
-    /// <summary>The REAL validator over the REAL node runtimes the builder emits — so the output-key check runs against agent.code's actual OutputSchema, not a stub.</summary>
+    /// <summary>The REAL validator over the REAL node runtimes the builder emits — so the output-key check runs against agent.run's actual OutputSchema, not a stub.</summary>
     private static DefinitionValidator RealValidator() => new(new NodeRegistry(new INodeRuntime[]
     {
         new TriggerManualNode(),
@@ -59,7 +59,7 @@ public class SingleAgentDefinitionBuilderTests
     {
         var def = Builder.Build(Context(Seed(), profile: null));
 
-        def.Nodes.Select(n => n.TypeKey).ShouldBe(new[] { "trigger.manual", "agent.code", "builtin.terminal" });
+        def.Nodes.Select(n => n.TypeKey).ShouldBe(new[] { "trigger.manual", "agent.run", "builtin.terminal" });
         def.Edges.Select(e => (e.From, e.To)).ShouldBe(new[] { ("start", "agent"), ("agent", "done") });
     }
 
@@ -77,7 +77,7 @@ public class SingleAgentDefinitionBuilderTests
         var config = AgentConfigOf(Builder.Build(Context(Seed(), profile: null)));
 
         config.GetProperty("goal").GetString().ShouldBe("Fix the failing login test");
-        config.GetProperty("harness").GetString().ShouldBe("codex-cli", customMessage: "a null harness folds to the agent.code catalog default");
+        config.GetProperty("harness").GetString().ShouldBe("codex-cli", customMessage: "a null harness folds to the agent.run catalog default");
 
         // No optional knobs leak — an absent key inherits the node's own default, matching a bare authored node.
         config.TryGetProperty("model", out _).ShouldBeFalse();
@@ -116,7 +116,7 @@ public class SingleAgentDefinitionBuilderTests
         config.GetProperty("autonomyLevel").GetString().ShouldBe("Trusted");
         config.GetProperty("tools").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "Read", "Grep" });
 
-        // repositoryId binds as the node's INPUT (matching agent.code's InputSchema), not config.
+        // repositoryId binds as the node's INPUT (matching agent.run's InputSchema), not config.
         AgentInputsOf(def).GetProperty("repositoryId").GetString().ShouldBe(repoId.ToString());
 
         RealValidator().Validate(def).IsValid.ShouldBeTrue();
@@ -229,7 +229,7 @@ public class SingleAgentDefinitionBuilderTests
 
         TerminalInputsOf(def).GetProperty("repositoryResults").GetString().ShouldBe("{{nodes.agent.outputs.repositoryResults}}",
             "a multi-repo terminal surfaces the per-repo branches for downstream session continuity");
-        RealValidator().Validate(def).IsValid.ShouldBeTrue(customMessage: "the repositoryResults ref must resolve against agent.code's real OutputSchema");
+        RealValidator().Validate(def).IsValid.ShouldBeTrue(customMessage: "the repositoryResults ref must resolve against agent.run's real OutputSchema");
     }
 
     [Fact]
@@ -292,7 +292,7 @@ public class SingleAgentDefinitionBuilderTests
     {
         var def = Builder.Build(Context(Seed(), profile: null) with { AcceptanceChecks = new[] { "sh", " ", "check.sh" } });
 
-        var acceptance = def.Nodes.Single(n => n.TypeKey == "agent.code").Config.GetProperty("acceptance");
+        var acceptance = def.Nodes.Single(n => n.TypeKey == "agent.run").Config.GetProperty("acceptance");
         acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
         acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass");
     }
@@ -300,7 +300,7 @@ public class SingleAgentDefinitionBuilderTests
     [Fact]
     public void No_checks_floor_omits_the_acceptance_key_byte_identically()
     {
-        Builder.Build(Context(Seed(), profile: null)).Nodes.Single(n => n.TypeKey == "agent.code").Config.TryGetProperty("acceptance", out _)
+        Builder.Build(Context(Seed(), profile: null)).Nodes.Single(n => n.TypeKey == "agent.run").Config.TryGetProperty("acceptance", out _)
             .ShouldBeFalse("no floor ⇒ no oracle ⇒ byte-identical");
     }
 }

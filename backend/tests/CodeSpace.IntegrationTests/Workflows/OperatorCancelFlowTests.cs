@@ -60,7 +60,7 @@ public class OperatorCancelFlowTests : IDisposable
 
         try
         {
-            // Pass 1: both branches' agent.code nodes park → two Queued AgentRun waits, the run Suspended.
+            // Pass 1: both branches' agent.run nodes park → two Queued AgentRun waits, the run Suspended.
             await RunEngineAsync(runId);
 
             var agent0 = await BranchAgentRunIdAsync(runId, "map#0");
@@ -396,7 +396,7 @@ public class OperatorCancelFlowTests : IDisposable
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    // manual → map(items={{trigger.things}}; body: ms → agent[REAL agent.code]) → terminal. Each branch parks a real AgentRun wait.
+    // manual → map(items={{trigger.things}}; body: ms → agent[REAL agent.run]) → terminal. Each branch parks a real AgentRun wait.
     private static WorkflowDefinition MapOverAgentCodeDefinition() => new()
     {
         SchemaVersion = 1,
@@ -406,7 +406,7 @@ public class OperatorCancelFlowTests : IDisposable
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
                     Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+            new() { Id = "agent", TypeKey = "agent.run", ParentId = "map",
                     Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),

@@ -21,7 +21,7 @@ public enum AgentRunStatus
     /// human must resolve before anything downstream proceeds (a decision it raised is still unanswered, or its
     /// final output reads as an unresolved question). The completion contract (<c>AgentCompletionContract</c>)
     /// re-grades a would-be <see cref="Succeeded"/> to this; <c>AgentRunResult.CompletionDisposition</c> names
-    /// which case it is. A consumer that only proceeds on <see cref="Succeeded"/> (the agent.code node) treats it
+    /// which case it is. A consumer that only proceeds on <see cref="Succeeded"/> (the agent.run node) treats it
     /// as a clean non-success — the work is NOT consumed as if it had finished.
     /// </summary>
     NeedsReview,

@@ -3,7 +3,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// <summary>
 /// Notified when an agent run reaches a terminal state, so a subscriber can react out-of-band from
 /// whatever started the run. The executor fires this immediately after it lands the terminal result;
-/// the agent layer stays decoupled from the trigger — a workflow's <c>agent.code</c> node today, a
+/// the agent layer stays decoupled from the trigger — a workflow's <c>agent.run</c> node today, a
 /// future direct / standalone API run tomorrow.
 ///
 /// The sole production subscriber resumes the workflow node parked on the run (the workflow-layer impl).
