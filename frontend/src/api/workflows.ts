@@ -429,8 +429,17 @@ export interface NodeManifestDto {
   canSuspend?: boolean;
   /** True when the node always parks on a human-approval gate before its effect. Badged "Approval". */
   alwaysRequiresApproval?: boolean;
+  /** Named output handles (routing branches, e.g. logic.if's true/false). One labelled source handle each; absent ⇒ a single default output. */
+  outputs?: NodeOutputHandle[];
   /** Starter templates the editor offers as "start from a template". Absent/empty ⇒ none. */
   presets?: NodePreset[];
+}
+
+/** Mirrors backend `NodeOutputHandleDto` — one named routing branch; `name` matches the engine's route handle. */
+export interface NodeOutputHandle {
+  name: string;
+  displayName?: string | null;
+  description?: string | null;
 }
 
 // ─── Run phases (the run-outline projection — GET /api/workflows/runs/{id}/phases) ───────────────

@@ -3363,6 +3363,20 @@ textarea:-webkit-autofill {
 /* The flow.try catch handle — a recoverable/handled failure path, so warn (amber) not error red. */
 .acs-root .wf-rf-handle-catch { border-color: var(--warn) !important; }
 .acs-root .wf-rf-handle-catch:hover { background: var(--warn) !important; border-color: var(--warn) !important; }
+/* Named output handles (logic.if true/false): one labelled source handle per branch, stacked on the right
+   edge. The label floats just past the dot so the branch reads at a glance; true = good/green, false = muted. */
+.acs-root .wf-rf-handle-named { overflow: visible !important; }
+.acs-root .wf-rf-handle-label {
+  position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+  font-size: 9px; font-weight: 600; line-height: 1; white-space: nowrap; pointer-events: none; letter-spacing: .02em;
+  color: var(--muted);
+}
+.acs-root .wf-rf-h-true  { border-color: var(--good) !important; }
+.acs-root .wf-rf-h-true:hover  { background: var(--good) !important; border-color: var(--good) !important; }
+.acs-root .wf-rf-h-true  .wf-rf-handle-label { color: var(--good); }
+.acs-root .wf-rf-h-false { border-color: var(--muted-2) !important; }
+.acs-root .wf-rf-h-false:hover { background: var(--muted-2) !important; border-color: var(--muted-2) !important; }
+.acs-root .wf-rf-h-false .wf-rf-handle-label { color: var(--muted); }
 /* A try container's head icon is warn-tinted to set it apart from a loop (whose icon is accent-tinted). */
 .acs-root .wf-rf-loop[data-kind="try"] .wf-rf-loop-icon { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 /* A map (fan-out) container's head icon is ink-tinted — distinct from a loop (accent) and a try (warn),

@@ -133,6 +133,7 @@ export function definitionToRfNodes(
       isSideEffecting: manifest?.isSideEffecting,
       canSuspend: manifest?.canSuspend,
       alwaysRequiresApproval: manifest?.alwaysRequiresApproval,
+      outputs: manifest?.outputs,
       // Manual start node shows the workflow's input fields on its card (Dify-style).
       ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
       // An explicit (user-resized) container size — marks this container as "don't auto-size", and round-trips back out via rfToDefinition.
