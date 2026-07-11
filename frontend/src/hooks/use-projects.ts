@@ -15,11 +15,12 @@ export function useProjects() {
   return useQuery({ queryKey: PROJECTS_KEY, queryFn: () => projectsApi.list() });
 }
 
-export function useProject(projectId: string | undefined) {
+/** Read one project by ref — its GUID (legacy link) or team-unique slug (canonical clean URL). */
+export function useProject(ref: string | undefined) {
   return useQuery({
-    queryKey: ["project", projectId],
-    queryFn: () => projectsApi.get(projectId!),
-    enabled: !!projectId,
+    queryKey: ["project", ref],
+    queryFn: () => projectsApi.get(ref!),
+    enabled: !!ref,
   });
 }
 

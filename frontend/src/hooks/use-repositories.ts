@@ -15,6 +15,12 @@ export const PR_PAGE_SIZE = 30;
 interface UseRepositoriesFilter {
   providerInstanceId?: string;
   projectId?: string;
+  /**
+   * Gate the fetch. Defaults to true. The project-detail page passes
+   * <c>enabled: !!projectId</c> so it doesn't fire a "list all repos" request in the
+   * window between resolving the project ref (slug → id) and having the real project id.
+   */
+  enabled?: boolean;
 }
 
 /**
@@ -32,6 +38,7 @@ export function useRepositories(filter?: UseRepositoriesFilter | string) {
   return useQuery({
     queryKey: ["repositories", normalized.providerInstanceId ?? "all", normalized.projectId ?? "all"],
     queryFn: () => repositoriesApi.list(normalized.providerInstanceId, normalized.projectId),
+    enabled: normalized.enabled ?? true,
   });
 }
 
