@@ -96,7 +96,7 @@ public sealed class AgentReviewRunner : IScopedDependency
         Harness = reviewerHarness,
         ModelCredentialModelId = spec.ReviewerModelId,
         RepositoryId = spec.RepositoryId,
-        Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(spec.RepositoryId, Array.Empty<WorkspaceRepositorySpec>(), primaryRef: spec.BaseRef),
+        Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(spec.RepositoryId, Array.Empty<WorkspaceRepositorySpec>(), primaryRef: spec.BaseRef, primaryPinnedSha: spec.PinnedSha),
         Autonomy = AgentAutonomyLevel.Confined,
         Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined),
         TimeoutSeconds = ReviewerTimeoutSeconds,
@@ -171,6 +171,9 @@ public sealed record AgentReviewSpec
 
     /// <summary>The ref to clone at — a produced branch for an output review; null (the default branch) for a plan review.</summary>
     public string? BaseRef { get; init; }
+
+    /// <summary>S1 — the exact base commit to materialize (the launch's immutable base pin). Null ⇒ the tip of <see cref="BaseRef"/> / the default branch at review time (legacy).</summary>
+    public string? PinnedSha { get; init; }
 
     public required Guid TeamId { get; init; }
 

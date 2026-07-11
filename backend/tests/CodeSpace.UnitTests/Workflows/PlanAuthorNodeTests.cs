@@ -23,7 +23,7 @@ public class PlanAuthorNodeTests
         node.TypeKey.ShouldBe("plan.author");
         node.Manifest.IsSideEffecting.ShouldBeTrue("one structured LLM call per execution — billing, like llm.complete");
 
-        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan", "reviewerAgent", "repositoryId" }, ignoreOrder: true);
+        ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan", "reviewerAgent", "repositoryId", "pinnedSha" }, ignoreOrder: true);
         InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback", "criteria" }, ignoreOrder: true);
         OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
 
@@ -87,6 +87,16 @@ public class PlanAuthorNodeTests
         request.BrainModelId.ShouldBe(plannerRow);
         request.Review.ShouldBe(ReviewMode.Improve);
         request.ReviewerModelId.ShouldBe(reviewerRow);
+    }
+
+    [Fact]
+    public void The_launch_base_pin_maps_into_the_planner_request_and_a_blank_pin_is_omitted()
+    {
+        // S1: the projection's pinnedSha config reaches the plan request, so the grounded reviewer clones the SAME
+        // commit the executing agents materialize; blank/absent folds to null (byte-identical legacy).
+        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"abc123def456"}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBe("abc123def456");
+        PlanAuthorNode.BuildPlanRequest(Config("""{"pinnedSha":"   "}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBeNull();
+        PlanAuthorNode.BuildPlanRequest(Config("""{}"""), Guid.NewGuid(), "goal", "", "").PinnedSha.ShouldBeNull();
     }
 
     [Theory]

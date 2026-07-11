@@ -26,6 +26,9 @@ public sealed class AgentPlanReviewer : IAgentPlanReviewer, IScopedDependency
             SubjectInstructions = BuildReviewInstructions(request.PlanArtifact, request.Goal),
             RepositoryId = request.RepositoryId,
             BaseRef = null,   // the plan targets the repo's CURRENT state — clone the default branch
+            // S1: …and when the launch pinned an immutable base, materialize exactly THAT commit — the reviewer must
+            // judge the plan against the same tree the executing agents will see, not a tip that moved since launch.
+            PinnedSha = request.PinnedSha,
             TeamId = request.TeamId,
             WorkflowRunId = request.WorkflowRunId,
             NodeId = request.NodeId,

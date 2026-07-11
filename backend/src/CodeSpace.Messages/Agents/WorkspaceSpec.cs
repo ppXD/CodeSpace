@@ -33,13 +33,14 @@ public sealed record WorkspaceSpec
     /// <summary>
     /// Build the single-repo workspace an existing <c>AgentTask.RepositoryId</c> implies — one writable primary repo
     /// at the default alias. The back-compat bridge so every single-repo run resolves through the SAME canonical
-    /// <see cref="WorkspaceSpec"/> as a multi-repo one, with byte-identical execution.
+    /// <see cref="WorkspaceSpec"/> as a multi-repo one, with byte-identical execution. <paramref name="pinnedSha"/>
+    /// (S1) pins the primary to an exact base commit (see <see cref="WorkspaceRepositorySpec.PinnedSha"/>).
     /// </summary>
-    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null, bool refSoftFallback = false) => new()
+    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null, bool refSoftFallback = false, string? pinnedSha = null) => new()
     {
         Repositories = new[]
         {
-            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, RefSoftFallback = refSoftFallback, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
+            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, RefSoftFallback = refSoftFallback, PinnedSha = pinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
         },
         PrimaryAlias = DefaultAlias,
         CwdMode = WorkspaceCwdMode.Auto,
@@ -61,11 +62,11 @@ public sealed record WorkspaceSpec
     /// first authored occurrence win. Without this, the same repo would clone into two mount folders with conflicting
     /// access. Symmetric to the alias de-dup: a collision is collapsed, never a double-clone.</para>
     /// </summary>
-    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto)
+    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null)
     {
         if (relatedRepositories.Count == 0) return null;
 
-        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, RefSoftFallback = primaryRefSoftFallback, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
+        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, RefSoftFallback = primaryRefSoftFallback, PinnedSha = primaryPinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
 
         var taken = new HashSet<string>(StringComparer.Ordinal) { DefaultAlias };
         var takenRepoIds = new HashSet<Guid> { primaryRepositoryId };

@@ -37,4 +37,7 @@ public sealed record PlanReviewRequest
 
     /// <summary>The operator's reviewer model pin; null ⇒ auto.</summary>
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>S1 — the exact base commit to clone the repository at (the launch's immutable base pin), so the reviewer verifies the plan against the SAME tree the executing agents materialize. Null ⇒ the default branch's tip at review time (legacy).</summary>
+    public string? PinnedSha { get; init; }
 }

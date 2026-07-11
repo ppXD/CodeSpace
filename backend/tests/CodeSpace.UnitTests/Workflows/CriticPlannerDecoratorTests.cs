@@ -123,6 +123,7 @@ public class CriticPlannerDecoratorTests
         sent.ReviewerModelId.ShouldBe(request.ReviewerModelId, "the operator's reviewer model pin drives the reviewer agent");
         sent.Goal.ShouldBe("do x", "the task text is the reviewer's yardstick");
         sent.PlanArtifact.ShouldContain("- t: i", customMessage: "the rendered plan is the artifact under review");
+        sent.PinnedSha.ShouldBe(request.PinnedSha, "S1: the launch's immutable base pin reaches the reviewer — it must judge the plan against the SAME tree the executing agents materialize");
 
         result.Risks.ShouldContain(r => r.Contains("no *Tests.csproj exists"), "the agent's EVIDENCE surfaces on the annotated risks");
         result.Risks.ShouldContain(r => r.Contains("flagged concerns"), "the agent's Gate-shaped verdict drives the same annotation a model verdict would");
@@ -216,6 +217,7 @@ public class CriticPlannerDecoratorTests
         WorkflowRunId = Guid.NewGuid(),
         NodeId = "plan-1",
         ReviewerModelId = Guid.NewGuid(),
+        PinnedSha = "abc123def456",   // S1: the launch's immutable base pin rides the plan request into the reviewer
     };
 
     private sealed class FakePlanner : IWorkflowPlanner

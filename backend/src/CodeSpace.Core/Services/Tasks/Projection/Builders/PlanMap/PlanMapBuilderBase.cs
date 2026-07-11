@@ -110,6 +110,9 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         var reviewerAgentOn = context.PlannerReviewMode != ReviewMode.None && context.AgentProfile?.ReviewerAgent == true && context.AgentProfile?.RepositoryId is not null;
         AddIfPresent(config, "reviewerAgent", reviewerAgentOn ? true : (bool?)null);
         AddIfPresent(config, "repositoryId", reviewerAgentOn ? context.AgentProfile!.RepositoryId!.Value.ToString() : null);
+        // S1: the reviewer clones at the launch's immutable base pin — the SAME commit the fan-out agents materialize,
+        // so the tree the plan is verified against can never drift from the tree the plan executes on.
+        AddIfPresent(config, "pinnedSha", reviewerAgentOn && context.PinnedShas is { } pins && pins.TryGetValue(context.AgentProfile!.RepositoryId!.Value, out var pin) ? pin : null);
 
         return JsonSerializer.SerializeToElement(config);
     }

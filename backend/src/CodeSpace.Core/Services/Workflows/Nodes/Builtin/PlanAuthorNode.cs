@@ -55,7 +55,8 @@ public sealed class PlanAuthorNode : INodeRuntime
                 "reviewerModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "The credentialed model the plan reviewer runs on (ideally distinct from the planner). Leave empty to auto-pick. Only used when reviewMode is not 0." },
                 "flatPlan": { "type": "boolean", "default": false, "description": "Constrain the plan to INDEPENDENT subtasks (no dependsOn) — set by parallel fan-out projections (flow.map runs every item concurrently, so ordering could not be honored). Authored dependencies are stripped as a fail-safe (logged)." },
                 "reviewerAgent": { "type": "boolean", "default": false, "description": "D①: review the plan with a REAL independent agent that clones the repository below and verifies the plan against the actual code (assumptions, feasibility, already-done work), instead of only the in-process model critic. Falls back to the model critic when the agent cannot produce a verdict. Only used when reviewMode is not 0 AND repositoryId is set." },
-                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when reviewerAgent is on." }
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when reviewerAgent is on." },
+                "pinnedSha": { "type": "string", "description": "The EXACT commit the grounded plan reviewer clones at (S1 — the launch's immutable base), so the tree the plan is verified against matches the tree the executing agents materialize. Leave empty for the repository's default-branch tip. Only used when reviewerAgent is on." }
               }
             }
             """),
@@ -179,6 +180,8 @@ public sealed class PlanAuthorNode : INodeRuntime
         // D① grounded plan review: a real read-only agent verifies the plan against this repository's actual tree.
         ReviewerAgent = ReadBool(config, "reviewerAgent"),
         RepositoryId = ReadGuid(config, "repositoryId"),
+        // S1: the launch's immutable base pin — the reviewer clones the SAME commit the executing agents materialize.
+        PinnedSha = string.IsNullOrWhiteSpace(ReadString(config, "pinnedSha")) ? null : ReadString(config, "pinnedSha"),
         WorkflowRunId = workflowRunId,
         NodeId = nodeId,
     };
