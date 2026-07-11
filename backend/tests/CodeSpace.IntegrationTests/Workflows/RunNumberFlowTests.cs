@@ -130,6 +130,63 @@ public class RunNumberFlowTests
         result.ShouldBeNull(customMessage: "an unresolvable ref is a real miss — the router turns null into a 404");
     }
 
+    [Fact]
+    public async Task The_0100_backfill_numbers_runs_densely_and_seeds_the_counter_to_max()
+    {
+        // The branch the empty-DB fixture never exercises (the reviewer's H2): backfill 1..N per team and seed
+        // team_run_counter to MAX, so the first post-migration run continues at MAX+1 rather than colliding with a
+        // backfilled number. Reconstructed in a rolled-back transaction (Postgres DDL is transactional), so the
+        // schema surgery never touches the shared DB.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var r1 = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var r2 = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var r3 = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        await using var tx = await db.Database.BeginTransactionAsync();
+
+        // Pre-0100 state for THIS team: drop the guards, NULL the run numbers, remove the counter row.
+        await db.Database.ExecuteSqlRawAsync("DROP TRIGGER trg_workflow_run_number ON workflow_run");
+        await db.Database.ExecuteSqlRawAsync("DROP INDEX uq_workflow_run_team_number");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_run ALTER COLUMN run_number DROP NOT NULL");
+        await db.Database.ExecuteSqlRawAsync("UPDATE workflow_run SET run_number = NULL WHERE team_id = {0}", teamId);
+        await db.Database.ExecuteSqlRawAsync("DELETE FROM team_run_counter WHERE team_id = {0}", teamId);
+
+        // The 0100 backfill body (steps 3-4), VERBATIM. Keep byte-identical to 0100_workflow_run_number.sql.
+        await db.Database.ExecuteSqlRawAsync(@"
+WITH ranked AS (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY team_id ORDER BY created_date, id) AS rn
+    FROM workflow_run
+    WHERE run_number IS NULL
+)
+UPDATE workflow_run r SET run_number = ranked.rn
+FROM ranked WHERE r.id = ranked.id;
+
+INSERT INTO team_run_counter (team_id, last_run_number)
+SELECT team_id, MAX(run_number) FROM workflow_run GROUP BY team_id
+ON CONFLICT (team_id) DO UPDATE SET last_run_number = EXCLUDED.last_run_number;");
+
+        // Rebuilding the unique index proves the backfill produced no per-team collision.
+        await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX uq_workflow_run_team_number ON workflow_run(team_id, run_number)");
+
+        var numbers = await db.WorkflowRun.AsNoTracking()
+            .Where(r => new[] { r1, r2, r3 }.Contains(r.Id))
+            .OrderBy(r => r.RunNumber).Select(r => r.RunNumber).ToArrayAsync();
+        numbers.ShouldBe(new long[] { 1, 2, 3 });   // the backfill numbers a team's runs densely from 1 by creation order
+
+        // The counter must be seeded to MAX (=3) — the exact branch whose failure would collide the first prod run.
+        // Prove it end-to-end by running the trigger's own claim SQL: it must return MAX+1 = 4.
+        var next = (await db.Database.SqlQueryRaw<long>(
+            "INSERT INTO team_run_counter (team_id, last_run_number) VALUES ({0}, 1) " +
+            "ON CONFLICT (team_id) DO UPDATE SET last_run_number = team_run_counter.last_run_number + 1 " +
+            "RETURNING last_run_number AS \"Value\"", teamId).ToListAsync()).Single();
+        next.ShouldBe(4, customMessage: "counter seeded to MAX → the first post-migration run is MAX+1, never colliding with a backfilled number");
+
+        await tx.RollbackAsync();
+    }
+
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
