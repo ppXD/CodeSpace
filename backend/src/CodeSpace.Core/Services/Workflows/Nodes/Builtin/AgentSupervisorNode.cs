@@ -90,6 +90,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
                     "repositoryId": { "type": "string", "format": "uuid", "title": "Primary repository", "x-selector": "repository", "description": "The primary repository each spawned agent clones into its workspace. Leave empty for an analysis-only run with no repo." },
                     "relatedRepositories": {
                       "type": "array",
+                      "x-selector": "relatedRepositories",
                       "description": "Multi-repo: each spawned agent ALSO clones these repositories alongside the primary (for a coordinated change across e.g. a frontend + backend). The primary is repositoryId; leave empty for a single-repo run.",
                       "items": {
                         "type": "object",
