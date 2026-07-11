@@ -3605,6 +3605,11 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-advanced-summary::before { content: "▸"; display: inline-block; margin-right: 5px; font-size: 9px; transition: transform 0.12s ease; }
 .acs-root .wf-form-advanced[open] > .wf-form-advanced-summary::before { transform: rotate(90deg); }
 .acs-root .wf-form-advanced-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+/* Grouped config layout (x-group): each section is a titled block; the flex gap spaces fields and a hairline
+   separates adjacent sections. Only rendered when a manifest opts in via x-group — flat forms are untouched. */
+.acs-root .wf-form-group { display: flex; flex-direction: column; gap: 16px; }
+.acs-root .wf-form-group + .wf-form-group { border-top: 1px solid var(--line); padding-top: 16px; }
+.acs-root .wf-form-group-h { font-size: 11px; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.06em; }
 /* "Start from a template" chooser — collapsed disclosure of intent presets a node declares in its manifest. */
 .acs-root .wf-inspector-presets-summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--ink-2); list-style: none; user-select: none; }
 .acs-root .wf-inspector-presets-summary::-webkit-details-marker { display: none; }

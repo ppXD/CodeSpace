@@ -80,6 +80,13 @@ interface Schema {
    * value — e.g. show `count` only when `mode` === "quorum". Hidden fields keep their stored value (the
    * engine ignores irrelevant ones), so toggling the condition is non-destructive. Purely presentational. */
   "x-showWhen"?: { field: string; equals: unknown };
+  /** Buckets a field into a named section (e.g. "Guardrails"). When ANY field declares x-group, SchemaForm
+   *  renders titled sections instead of one flat list; ungrouped fields fall into a trailing "More" section.
+   *  Presentational only — the stored value is unchanged, and a node with no x-group renders exactly as before. */
+  "x-group"?: string;
+  /** Root-level only: the section order for the grouped layout (group names). Groups not listed are appended
+   *  in first-seen order. Ignored when no field declares x-group. */
+  "x-sections"?: string[];
 }
 
 interface SchemaFormProps {
@@ -129,18 +136,54 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
     return !cond || (obj as Record<string, unknown>)[cond.field] === cond.equals;
   };
   const entries = Object.entries(parsed.properties).filter(([, s]) => showWhenMet(s));
-  const primary = entries.filter(([, s]) => !s["x-advanced"]);
-  const advanced = entries.filter(([, s]) => s["x-advanced"]);
+
+  // A field's x-advanced tucks it under an "Advanced" drawer; a field's x-group buckets it into a titled
+  // section. When NO field declares a group we keep the flat layout (primary inline + one Advanced drawer),
+  // so every existing node renders byte-for-byte as before.
+  type Entry = [string, Schema];
+  const split = (es: Entry[]) => ({ primary: es.filter(([, s]) => !s["x-advanced"]), advanced: es.filter(([, s]) => s["x-advanced"]) });
+  const advancedDrawer = (advanced: Entry[]) =>
+    advanced.length > 0 && (
+      <details className="wf-form-advanced">
+        <summary className="wf-form-advanced-summary">Advanced</summary>
+        <div className="wf-form-advanced-body">{advanced.map(renderField)}</div>
+      </details>
+    );
+
+  if (!entries.some(([, s]) => s["x-group"])) {
+    const { primary, advanced } = split(entries);
+    return (
+      <div className="wf-form">
+        {primary.map(renderField)}
+        {advancedDrawer(advanced)}
+      </div>
+    );
+  }
+
+  // Grouped layout: bucket by x-group (ungrouped → a trailing "More"), order the sections by the root
+  // x-sections list (then any remaining groups in first-seen order), each section with its own Advanced drawer.
+  const byGroup = new Map<string, Entry[]>();
+  for (const e of entries) {
+    const g = e[1]["x-group"] ?? "More";
+    const bucket = byGroup.get(g);
+    if (bucket) bucket.push(e);
+    else byGroup.set(g, [e]);
+  }
+  const declared = parsed["x-sections"] ?? [];
+  const orderedNames = [...declared.filter((g) => byGroup.has(g)), ...[...byGroup.keys()].filter((g) => !declared.includes(g))];
 
   return (
     <div className="wf-form">
-      {primary.map(renderField)}
-      {advanced.length > 0 && (
-        <details className="wf-form-advanced">
-          <summary className="wf-form-advanced-summary">Advanced</summary>
-          <div className="wf-form-advanced-body">{advanced.map(renderField)}</div>
-        </details>
-      )}
+      {orderedNames.map((name) => {
+        const { primary, advanced } = split(byGroup.get(name)!);
+        return (
+          <div className="wf-form-group" key={name}>
+            <div className="wf-form-group-h">{name}</div>
+            {primary.map(renderField)}
+            {advancedDrawer(advanced)}
+          </div>
+        );
+      })}
     </div>
   );
 }

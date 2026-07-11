@@ -372,3 +372,47 @@ describe("SchemaForm — x-showWhen conditional visibility", () => {
     expect(screen.getByText("Mode")).toBeInTheDocument();
   });
 });
+
+/**
+ * When a field declares `x-group`, SchemaForm renders titled sections (ordered by the root `x-sections`)
+ * instead of one flat list — the "narrow before you show" layout. Ungrouped fields fall into a trailing
+ * "More" section; x-advanced fields keep their per-section Advanced drawer. A schema with NO x-group renders
+ * exactly as before (backward-compatible), which is what every other test in this file already exercises.
+ */
+describe("SchemaForm grouped layout (x-group)", () => {
+  const grouped = {
+    type: "object",
+    "x-sections": ["Limits", "Task"],
+    properties: {
+      goal: { type: "string", "x-group": "Task", title: "Goal" },        // Task field appears first in properties…
+      budget: { type: "number", "x-group": "Limits", title: "Budget" },
+      timeout: { type: "integer", "x-group": "Limits", title: "Timeout", "x-advanced": true },
+      note: { type: "string", title: "Note" },                            // ungrouped → trailing "More"
+    },
+  };
+
+  it("renders titled sections in x-sections order, ungrouped fields under 'More'", () => {
+    render(<SchemaForm schema={grouped} value={{}} onChange={vi.fn()} />);
+    const limits = screen.getByText("Limits");
+    const task = screen.getByText("Task");
+    const more = screen.getByText("More");
+
+    // "Limits" is listed first in x-sections, so it renders before "Task" even though a Task field is first
+    // in `properties`; the ungrouped "More" section trails.
+    expect(limits.compareDocumentPosition(task) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(task.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps x-advanced fields under an Advanced drawer inside their section", () => {
+    render(<SchemaForm schema={grouped} value={{}} onChange={vi.fn()} />);
+    expect(screen.getByText("Budget")).toBeInTheDocument();   // non-advanced, visible inline
+    expect(screen.getByText("Advanced")).toBeInTheDocument(); // the Limits section's drawer holds Timeout
+  });
+
+  it("stays a flat form (no section headers) when no field declares a group", () => {
+    const flat = { type: "object", properties: { a: { type: "string", title: "A" }, b: { type: "string", title: "B" } } };
+    const { container } = render(<SchemaForm schema={flat} value={{}} onChange={vi.fn()} />);
+    expect(container.querySelector(".wf-form-group")).toBeNull();
+    expect(screen.getByText("A")).toBeInTheDocument();
+  });
+});
