@@ -68,6 +68,12 @@ public sealed record SupervisorAgentResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? AcceptancePassed { get; init; }
 
+    /// <summary>S3 — whether the unit's BASE tree (the S1 immutable base it started from) passed the SAME oracle with no candidate work applied, captured beside the candidate grade so a differential consumer (V0+) can tell "the candidate broke it" from "it was already broken" and credit "the candidate fixed it". Null-omitted: only present when the fold captured a baseline (a contract-bearing single-repo unit whose manifest records its base).</summary>
+    public bool? BaselinePassed { get; init; }
+
+    /// <summary>The baseline grade's detail. A <c>clone-failed:</c>/<c>grade-error:</c> prefix means the baseline could not be MEASURED (treat as unknown, never as "was already broken") — F0's typed dispositions replace this convention. Null-omitted alongside <see cref="BaselinePassed"/>.</summary>
+    public string? BaselineDetail { get; init; }
+
     /// <summary>The per-unit acceptance verdict detail (the grader's reason — e.g. "tests-passed", "tests-failed-exit-1", "no-branch-or-repo", "grade-error: …"). Null-omitted; only present alongside a non-null <see cref="AcceptancePassed"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AcceptanceDetail { get; init; }

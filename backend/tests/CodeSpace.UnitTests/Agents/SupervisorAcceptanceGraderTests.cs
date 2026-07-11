@@ -153,6 +153,36 @@ public class SupervisorAcceptanceGraderTests
         grade.Detail.ShouldContain("clone exit 128", Case.Insensitive);
     }
 
+    // ── S3: GradeBaseAsync — the base tree's OWN health under the same oracle (no candidate work) ────
+
+    [Fact]
+    public async Task GradeBaseAsync_clones_detached_at_the_base_and_grades_without_applying_anything()
+    {
+        var resolver = new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" });
+        var oracle = new FakeGrader(Pass);
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(resolver, oracle, runners: runners);
+
+        var grade = await grader.GradeBaseAsync(Guid.NewGuid(), Guid.NewGuid(), "deadbeef", Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+        runners.Invocations.ShouldContain(i => i.Args.Contains("checkout") && i.Args.Contains("--detach") && i.Args.Contains("deadbeef"), "the S1 base is checked out detached, exactly like the patch twin");
+        runners.Invocations.ShouldNotContain(i => i.Args.Contains("apply"), "the baseline measures the BASE — no candidate work is ever applied");
+        oracle.Context.ShouldNotBeNull("the same oracle runs against the untouched base tree");
+    }
+
+    [Fact]
+    public async Task GradeBaseAsync_fails_closed_with_a_prefixed_detail_when_the_base_cannot_be_cloned()
+    {
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true, cloneSucceeds: false);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var grade = await grader.GradeBaseAsync(Guid.NewGuid(), Guid.NewGuid(), "deadbeef", Spec(), 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldStartWith("clone-failed:", customMessage: "the prefix is the interim infra-vs-genuine discriminator a differential consumer keys on (until F0's typed dispositions)");
+    }
+
     // ── S2: GradePatchAsync — the branch-less twin (a fresh clone at the BASE SHA + apply, no push) ────
 
     [Fact]
