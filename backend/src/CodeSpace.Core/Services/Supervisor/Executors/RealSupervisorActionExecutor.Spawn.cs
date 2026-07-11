@@ -626,6 +626,16 @@ public sealed partial class RealSupervisorActionExecutor
 
         var autonomy = ClampAutonomy(spec?.AutonomyLevel, AutonomyOf(profile));
 
+        // S1: a dependency-staging handoff ref outranks everything (continuing work rides the prior branch — neither
+        // the operator's BaseBranch nor the pin can express that). Otherwise the PROFILE primary clones the operator's
+        // launch-pinned branch at the launch pin; a dispatch that PROMOTED a bound related repo to primary carries
+        // THAT repo's own baked pin (resolved for it at launch — its homogeneous siblings mount the same commit),
+        // and no branch ref (the operator's BaseBranch names the profile primary's branch, not the override's).
+        var primaryBaseRef = primaryRef ?? (repositoryId == profile?.RepositoryId ? NullIfBlank(profile?.BaseRef) : null);
+        var primaryPin = primaryRef is not null ? null
+            : repositoryId == profile?.RepositoryId ? NullIfBlank(profile?.PinnedSha)
+            : NullIfBlank(boundRelated.FirstOrDefault(r => r.RepositoryId == repositoryId)?.PinnedSha);
+
         return new AgentTask
         {
             Goal = goal,
@@ -641,13 +651,9 @@ public sealed partial class RealSupervisorActionExecutor
             RepositoryId = repositoryId,
             // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.code node uses —
             // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it). The operator's
-            // multi-repo cwd mode rides the profile (null/Auto → byte-identical). primaryRef (S1 handoff) overrides the
-            // clone ref to a dependency's own branch/integration branch; null → the byte-identical default-branch clone.
-            // S1: the launch base pin applies ONLY when this spawn clones the PROFILE's own primary (a dispatch that
-            // overrode the primary pins nothing — the vector was resolved for the launch's repo, not the override) and
-            // ONLY without a handoff ref (continuing work rides the prior attempt's branch, which a pin cannot express).
-            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryRef,
-                primaryPinnedSha: primaryRef is null && repositoryId == profile?.RepositoryId ? NullIfBlank(profile?.PinnedSha) : null),
+            // multi-repo cwd mode rides the profile (null/Auto → byte-identical). The primary's ref + pin resolve
+            // above (handoff > profile branch/pin > promoted related repo's own pin).
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, cwdMode: WorkspaceCwdModeWire.FromWire(profile?.CwdMode) ?? WorkspaceCwdMode.Auto, primaryRef: primaryBaseRef, primaryPinnedSha: primaryPin),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             // The profile's wall-clock cap, in the agent.code node's vocabulary: positive caps the run, an explicit ≤0

@@ -119,12 +119,22 @@ public class LaunchBasePinFlowTests
 
         (await ReadSupervisorProfilePinAsync(result.RunId)).ShouldBe(tip, "the vector bakes into the supervisor node's agentProfile — every spawn reads the same frozen pin");
 
+        // …and an operator BaseBranch bakes BOTH halves: the branch (context) + its tip (the pin).
+        var releaseTip = await remote.BranchAsync("release/2.x", "release-content");
+        var pinnedLaunch = await LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep, BaseBranch = "release/2.x" });
+
+        (await ReadSupervisorProfilePinAsync(pinnedLaunch.RunId)).ShouldBe(releaseTip, "the pin is the OPERATOR's branch tip, not the default's");
+        (await ReadSupervisorProfileFieldAsync(pinnedLaunch.RunId, "baseRef")).ShouldBe("release/2.x", "the branch context rides alongside — a pin alone would clone the default branch");
+
         var ex = await Should.ThrowAsync<WorkspaceException>(() => LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep, BaseBranch = "release/9.x" }));
         ex.Message.ShouldContain("release/9.x");
     }
 
     /// <summary>Reads the projected supervisor node's <c>agentProfile.pinnedSha</c> out of the frozen definition snapshot (null when absent ⇒ unpinned).</summary>
-    private async Task<string?> ReadSupervisorProfilePinAsync(Guid runId)
+    private Task<string?> ReadSupervisorProfilePinAsync(Guid runId) => ReadSupervisorProfileFieldAsync(runId, "pinnedSha");
+
+    /// <summary>Reads one string field off the projected supervisor node's <c>agentProfile</c> (null when absent).</summary>
+    private async Task<string?> ReadSupervisorProfileFieldAsync(Guid runId, string field)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -133,7 +143,7 @@ public class LaunchBasePinFlowTests
         var sup = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.Clone()
             .GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("typeKey").GetString() == "agent.supervisor");
 
-        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty("pinnedSha", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        return sup.GetProperty("config").TryGetProperty("agentProfile", out var profile) && profile.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     }
 
     [Fact]

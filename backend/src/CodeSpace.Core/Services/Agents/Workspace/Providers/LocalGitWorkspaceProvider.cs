@@ -330,7 +330,15 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             await RunGitAsync(new[] { "-C", directory, "fetch", "origin", pin }, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout below is the arbiter
 
             if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false) && request.Depth > 0)
+            {
                 await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
+
+                // The shallow clone was SINGLE-BRANCH — a pin living on a branch the clone never fetched (a ref/pin
+                // context mismatch, or a reviewer cloning the default while the pin rides the operator's branch)
+                // needs the full ref space before the checkout can arbitrate.
+                if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false))
+                    await RunGitAsync(new[] { "-C", directory, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*" }, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", pin }, cancellationToken).ConfigureAwait(false);

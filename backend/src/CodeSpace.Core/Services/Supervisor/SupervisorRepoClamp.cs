@@ -41,7 +41,13 @@ public static class SupervisorRepoClamp
                 throw new SupervisorRepoAccessException($"Agent dispatch requests write access to repository {repo.RepositoryId}, but the operator granted read-only.");
         }
 
-        return authored;
+        // S1: the launch base pin is SERVER truth, never a model authoring — each granted entry takes the BOUND
+        // spec's pin (a dispatched agent's mounts materialize the same base as its homogeneous siblings), and a
+        // model-authored pinnedSha on the subset is discarded outright (a dispatch must not point a bound mount at
+        // an arbitrary commit).
+        var boundPins = boundRelated.Where(b => !string.IsNullOrWhiteSpace(b.PinnedSha)).ToDictionary(b => b.RepositoryId, b => b.PinnedSha);
+
+        return authored.Select(repo => repo with { PinnedSha = boundPins.TryGetValue(repo.RepositoryId, out var pin) ? pin : null }).ToList();
     }
 
     /// <summary>

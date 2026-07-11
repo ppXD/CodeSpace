@@ -140,6 +140,9 @@ public sealed record SupervisorAgentProfile
     /// <summary>S1 — the launch-resolved base pin for <see cref="RepositoryId"/>: the EXACT commit every spawned agent materializes, so two parallel spawns can never land on different trees when the remote advances mid-run. Null → the tip at each spawn's own clone time (legacy). A dependency-staging handoff ref (a prior attempt's produced branch) outranks it — continuing work rides the prior branch, not the launch base.</summary>
     public string? PinnedSha { get; init; }
 
+    /// <summary>The operator's launch-pinned branch (<c>TaskLaunchSeed.BaseBranch</c>) for <see cref="RepositoryId"/> — each spawned agent CLONES this branch (its context: the produced-branch base, the PR/merge target), while <see cref="PinnedSha"/> pins the exact TREE. Null → the repository default branch. A dependency-staging handoff ref outranks it, exactly like the pin.</summary>
+    public string? BaseRef { get; init; }
+
     /// <summary>
     /// Multi-repo (resolver loop #379, S7): the authored <c>relatedRepositories</c> array — each
     /// <c>{repositoryId, alias?, access?}</c> — that each spawned agent ALSO clones alongside the primary
