@@ -6,6 +6,7 @@ using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -75,6 +76,58 @@ public class RunNumberFlowTests
             customMessage: "every concurrent run must get a unique team run number — a duplicate means the allocator raced");
         numbers.OrderBy(x => x).ShouldBe(Enumerable.Range(1, n).Select(i => (long)i),
             customMessage: "and with no rollbacks they're the dense 1..N, no gaps");
+    }
+
+    [Fact]
+    public async Task GetRunByRef_resolves_by_number_and_by_guid_and_exposes_the_number()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = verify.Resolve<IMediator>();
+
+        var byNumber = await mediator.Send(new GetWorkflowRunByRefQuery { IdOrNumber = "1" });
+        var byGuid = await mediator.Send(new GetWorkflowRunByRefQuery { IdOrNumber = runId.ToString() });
+
+        byNumber.ShouldNotBeNull(customMessage: "the clean run URL resolves by the team-scoped run number");
+        byNumber!.Id.ShouldBe(runId);
+        byNumber.RunNumber.ShouldBe(1);
+        byGuid.ShouldNotBeNull(customMessage: "a legacy GUID URL still resolves — the router redirects it to the number URL");
+        byGuid!.Id.ShouldBe(runId);
+        byGuid.RunNumber.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task GetRunByRef_by_number_is_team_scoped()
+    {
+        // Team A run #1 and team B run #1 both exist; team B's by-number lookup MUST return B's run.
+        var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, userB) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runA = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, await CreateWorkflowAsync(teamA, userA), teamA);
+        var runB = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, await CreateWorkflowAsync(teamB, userB), teamB);
+
+        using var teamBScope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var resolved = await teamBScope.Resolve<IMediator>().Send(new GetWorkflowRunByRefQuery { IdOrNumber = "1" });
+
+        resolved.ShouldNotBeNull();
+        resolved!.Id.ShouldBe(runB, customMessage: "team B's /runs/1 MUST resolve team B's run, not team A's #1");
+        resolved.Id.ShouldNotBe(runA, "resolving another team's run through a shared number is a cross-team leak");
+    }
+
+    [Theory]
+    [InlineData("999999")]   // a number with no run
+    [InlineData("not-a-ref")] // neither a GUID nor a number
+    [InlineData("")]
+    public async Task GetRunByRef_returns_null_for_a_ref_that_matches_nothing(string idOrNumber)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+
+        var result = await scope.Resolve<IMediator>().Send(new GetWorkflowRunByRefQuery { IdOrNumber = idOrNumber });
+
+        result.ShouldBeNull(customMessage: "an unresolvable ref is a real miss — the router turns null into a 404");
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)

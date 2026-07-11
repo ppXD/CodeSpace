@@ -1387,6 +1387,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private Expression<Func<WorkflowRun, WorkflowRunSummary>> ToSummaryExpr => r => new WorkflowRunSummary
     {
         Id = r.Id,
+        RunNumber = r.RunNumber,
         WorkflowId = r.WorkflowId,
         WorkflowVersion = r.WorkflowVersion,
         WorkflowName = r.Workflow != null ? r.Workflow.Name : null,
@@ -1501,6 +1502,28 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return new CellAttemptsResponse { Attempts = attempts };
     }
 
+    public async Task<WorkflowRunDetail?> GetRunByRefAsync(string idOrNumber, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(idOrNumber)) return null;
+
+        // Resolve the URL ref (a GUID from a legacy link, or the team-scoped run number from the clean
+        // URL) to the run id, then reuse GetRunAsync. Number match is team-scoped (uq_workflow_run_team_number).
+        Guid runId;
+        if (Guid.TryParse(idOrNumber, out var id))
+            runId = id;
+        else if (long.TryParse(idOrNumber, out var number))
+            runId = await _db.WorkflowRun.AsNoTracking()
+                .Where(r => r.TeamId == teamId && r.RunNumber == number)
+                .Select(r => (Guid?)r.Id)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? Guid.Empty;
+        else
+            return null;
+
+        if (runId == Guid.Empty) return null;
+
+        return await GetRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken, bool mergeLineage = true)
     {
         var run = await _db.WorkflowRun
@@ -1569,6 +1592,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return new WorkflowRunDetail
         {
             Id = run.Id,
+            RunNumber = run.RunNumber,
             WorkflowId = run.WorkflowId,
             WorkflowVersion = run.WorkflowVersion,
             SourceType = run.RunRequest?.SourceType ?? string.Empty,

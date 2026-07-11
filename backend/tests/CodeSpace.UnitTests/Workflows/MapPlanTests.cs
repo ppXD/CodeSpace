@@ -68,7 +68,7 @@ public class MapPlanTests
         // A plain run (no flow.map fan-out) never resolves a planner — MapPlan is scoped to map nodes.
         var run = new WorkflowRunDetail
         {
-            Id = Guid.NewGuid(), SourceType = "test", NormalizedPayload = Obj("{}"), Status = WorkflowRunStatus.Success,
+            Id = Guid.NewGuid(), RunNumber = 1, SourceType = "test", NormalizedPayload = Obj("{}"), Status = WorkflowRunStatus.Success,
             CreatedDate = DateTimeOffset.UtcNow, Outputs = Obj("{}"),
             Nodes = new[] { Planner("planner", Subtasks(("s1", "First"))) },
             Definition = new WorkflowDefinition { Nodes = Array.Empty<NodeDefinition>(), Edges = Array.Empty<EdgeDefinition>() },
@@ -96,7 +96,7 @@ public class MapPlanTests
 
         return new WorkflowRunDetail
         {
-            Id = Guid.NewGuid(), SourceType = "test", NormalizedPayload = Obj("{}"), Status = WorkflowRunStatus.Success,
+            Id = Guid.NewGuid(), RunNumber = 1, SourceType = "test", NormalizedPayload = Obj("{}"), Status = WorkflowRunStatus.Success,
             CreatedDate = DateTimeOffset.UtcNow, Outputs = Obj("{}"), Definition = definition,
             Nodes = new[] { planner, Map("map"), Branch("map", 0), Branch("map", 1) },
         };
