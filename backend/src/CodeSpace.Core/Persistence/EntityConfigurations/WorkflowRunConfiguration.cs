@@ -17,6 +17,10 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         // never write it (INSERT/UPDATE) and must read it back after a write.
         builder.Property(r => r.RunKind).ValueGeneratedOnAddOrUpdate();
 
+        // run_number is assigned by the trg_workflow_run_number BEFORE INSERT trigger (migration 0100) from the per-team
+        // counter — EF must never write it and must read it back after insert. Same shape as run_kind above.
+        builder.Property(r => r.RunNumber).ValueGeneratedOnAddOrUpdate();
+
         // Inline frozen definition for a SNAPSHOT run (dynamic-workflows substrate). NULL for an
         // authored run, which loads its definition from the pinned WorkflowVersion instead.
         builder.Property(r => r.DefinitionSnapshotJson).HasColumnName("definition_snapshot_jsonb").HasColumnType("jsonb");

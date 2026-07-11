@@ -52,6 +52,13 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public Guid TeamId { get; set; }
 
     /// <summary>
+    /// Team-scoped sequential number — the run's clean-URL handle (<c>/teams/{team}/runs/{RunNumber}</c>).
+    /// Allocated at staging from the per-team <c>team_run_counter</c> via a row-locked atomic claim, so
+    /// concurrent (flow.map) creates get distinct numbers. Gap-tolerant. Unique per team.
+    /// </summary>
+    public long RunNumber { get; set; }
+
+    /// <summary>
     /// FK to the <see cref="WorkflowRunRequest"/> that produced this run. Every run traces
     /// back through exactly one request. The run-detail UI joins here for source / actor /
     /// raw payload.
