@@ -305,7 +305,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
   const onAddFrom = useContext(NodeAddContext);
   const isTry = d.kind === "Try";
   return (
-    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={d.runStatus}>
+    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-tone={nodeTone(d)} data-selected={selected} data-run-status={d.runStatus}>
       {d.runStatus && <RunStatusDot status={d.runStatus} />}
       {/* Drag a corner/edge to resize. Min size = the body's bounding box, so the box never shrinks
           past its items; the new size is persisted to the definition via the editor's onNodesChange. */}
@@ -338,7 +338,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
  */
 function FanoutNode({ d, selected }: { d: WorkflowNodeData; selected: boolean | undefined }) {
   return (
-    <div className="wf-rf-node wf-rf-fanout-node" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={d.runStatus}>
+    <div className="wf-rf-node wf-rf-fanout-node" data-kind={d.kind.toLowerCase()} data-tone={nodeTone(d)} data-selected={selected} data-run-status={d.runStatus}>
       {d.runStatus && <RunStatusDot status={d.runStatus} />}
       <Handle type="target" position={Position.Left} className="wf-rf-handle" />
       <div className="wf-rf-fanout-node-head">
@@ -383,7 +383,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const isLoopStart = d.typeKey === "flow.loop_start" || d.typeKey === "flow.map_start";
 
   return (
-    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={runStatus}>
+    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-tone={nodeTone(d)} data-selected={selected} data-run-status={runStatus}>
       {runStatus && <RunStatusDot status={runStatus} />}
       {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Left} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />
@@ -445,11 +445,11 @@ function effectiveRunStatus(runStatus: NodeStatus | undefined, rows: WorkflowRun
   return runStatus;
 }
 
-/** Manifest iconKey → icon. The author's hint wins; misses fall back to Kind, then category. */
+/** Manifest iconKey → icon. The author's hint always wins over the type/category fallbacks below. */
 const ICON_BY_KEY: Record<string, typeof Ic.Box> = {
   "git-pull-request": Ic.PrOpen,
-  "git-commit-horizontal": Ic.Branch,
-  "file-diff": Ic.Branch,
+  "git-commit-horizontal": Ic.Commit,
+  "file-diff": Ic.Code,
   "message-square": Ic.Chat,
   sparkles: Ic.Sparkles,
   "circle-stop": Ic.CircleStop,
@@ -458,16 +458,100 @@ const ICON_BY_KEY: Record<string, typeof Ic.Box> = {
   workflow: Ic.Workflow,
 };
 
+/**
+ * Per-type icon so each builtin reads at a glance ("一看就知道這是什麼"). This is a fallback layer, not a
+ * registry: a node whose typeKey isn't listed drops to its category, then Kind — so a new or plugin node
+ * still gets a sensible glyph with no edit here. The manifest's own iconKey hint (above) still wins.
+ */
+const ICON_BY_TYPE: Record<string, typeof Ic.Box> = {
+  "trigger.manual": Ic.Play,
+  "trigger.schedule": Ic.Clock,
+  "trigger.pr.opened": Ic.PrOpen,
+  "trigger.pr.updated": Ic.PrDraft,
+  "trigger.pr.merged": Ic.PrMerged,
+  "trigger.push": Ic.Commit,
+  "logic.if": Ic.Fork,
+  "logic.merge": Ic.Sort,
+  "flow.map": Ic.Copy,
+  "flow.loop": Ic.Sync,
+  "flow.iterate": Ic.Copy,
+  "flow.try": Ic.Shield,
+  "flow.sleep": Ic.Clock,
+  "flow.subworkflow": Ic.Workflow,
+  "flow.decision": Ic.Compass,
+  "flow.wait_approval": Ic.Bell,
+  "flow.wait_action": Ic.Bell,
+  "flow.wait_callback": Ic.Link,
+  "http.request": Ic.Globe,
+  "git.open_pr": Ic.PrOpen,
+  "git.merge_pr": Ic.PrMerged,
+  "git.pr_review": Ic.Eye,
+  "git.post_pr_comment": Ic.Chat,
+  "git.fetch_pr_diff": Ic.Code,
+  "git.fetch_pr_checks": Ic.Check,
+  "git.list_prs": Ic.Filter,
+  "git.create_issue": Ic.IssueOpen,
+  "git.comment_issue": Ic.Chat,
+  "git.close_issue": Ic.IssueClosed,
+  "git.integrate": Ic.Fork,
+  "git.open_change_set": Ic.Branch,
+  "agent.code": Ic.Bot,
+  "agent.run_command": Ic.Command,
+  "agent.supervisor": Ic.Team,
+  "llm.complete": Ic.Sparkles,
+  "plan.author": Ic.Milestone,
+  "plan.confirm": Ic.Check,
+  "chat.post_message": Ic.Chat,
+  "builtin.terminal": Ic.CircleStop,
+};
+
+/** Category → icon, the layer below typeKey. Keyed on the manifest's declared category string. */
+const ICON_BY_CATEGORY: Record<string, typeof Ic.Box> = {
+  Triggers: Ic.Zap,
+  AI: Ic.Sparkles,
+  Agent: Ic.Bot,
+  Planning: Ic.Milestone,
+  Git: Ic.Branch,
+  Logic: Ic.Workflow,
+  Chat: Ic.Chat,
+  Tools: Ic.Wrench,
+};
+
 function iconFor(d: WorkflowNodeData) {
-  // The manifest's iconKey hint wins; otherwise infer from Kind, then the declared category.
+  // Author's iconKey hint → per-type icon → per-category icon → Kind → generic box. Each layer is a
+  // fallback, so an unmapped/plugin node always lands on a sensible glyph without a code change here.
   const Icon =
     (d.iconKey ? ICON_BY_KEY[d.iconKey] : undefined)
+    ?? ICON_BY_TYPE[d.typeKey]
+    ?? ICON_BY_CATEGORY[d.category]
     ?? (d.kind === "Trigger" ? Ic.Zap
       : d.kind === "Terminal" ? Ic.CircleStop
-      : d.kind === "Map" ? Ic.Fork
-      : d.category === "AI" ? Ic.Sparkles
-      : d.category === "Git" ? Ic.Branch
+      : d.kind === "Map" ? Ic.Copy
       : Ic.Box);
 
   return <Icon size={13} />;
+}
+
+/**
+ * A node's colour "tone" — a small, stable set derived from its category/kind. Set as `data-tone` on the
+ * card so CSS can tint the left rail + icon chip, letting nodes read by colour at a glance. Generic: an
+ * unknown category falls to the neutral "tool" tone, so a plugin node still paints sanely with no edit here.
+ */
+function nodeTone(d: WorkflowNodeData): string {
+  if (d.kind === "Terminal") return "end";
+  if (d.kind === "Trigger" || d.category === "Triggers") return "start";
+  switch (d.category) {
+    case "AI":
+    case "Agent":
+    case "Planning":
+      return "ai";
+    case "Git":
+      return "git";
+    case "Logic":
+      return "flow";
+    case "Chat":
+      return "human";
+    default:
+      return "tool";
+  }
 }
