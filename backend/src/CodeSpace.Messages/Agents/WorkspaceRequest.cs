@@ -29,9 +29,9 @@ public sealed record WorkspaceRequest
     /// <summary>Basic-auth username paired with <see cref="Token"/> — provider-specific ("x-access-token", "oauth2"). Ignored when <see cref="Token"/> is null; defaults to "x-access-token".</summary>
     public string? TokenUsername { get; init; }
 
-    /// <summary>Shallow-clone depth. 1 (default) fetches only the tip; 0 → a full clone. Ignored (forced full) when <see cref="PinnedSha"/> is set — a shallow tip may not contain the pin.</summary>
+    /// <summary>Shallow-clone depth. 1 (default) fetches only the tip; 0 → a full clone. With <see cref="PinnedSha"/> set the clone STARTS at this depth and only deepens (fetch-by-sha, then unshallow) when the pin is not the fetched tip — the common pin-equals-tip launch stays shallow.</summary>
     public int Depth { get; init; } = 1;
 
-    /// <summary>S1 — the EXACT commit to check out after cloning (see <c>WorkspaceRepositorySpec.PinnedSha</c>): forces a FULL clone, then a hard checkout of this sha; fails LOUD when the pin is missing/unreachable. Null → the tip of <see cref="Ref"/> (byte-identical legacy behaviour).</summary>
+    /// <summary>S1 — the EXACT commit to materialize after cloning (see <c>WorkspaceRepositorySpec.PinnedSha</c>): a hard detached checkout of this sha, deepening the clone only when the tip advanced past the pin; fails LOUD when the pin is missing/unreachable. Null → the tip of <see cref="Ref"/> (byte-identical legacy behaviour).</summary>
     public string? PinnedSha { get; init; }
 }

@@ -297,9 +297,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         var args = new List<string> { "clone" };
 
-        // S1: a pinned base forces a FULL clone — a shallow tip may not contain the pin, and the pin's whole point
-        // is materializing an EXACT historical commit.
-        if (request.Depth > 0 && string.IsNullOrWhiteSpace(request.PinnedSha)) { args.Add("--depth"); args.Add(request.Depth.ToString()); }
+        if (request.Depth > 0) { args.Add("--depth"); args.Add(request.Depth.ToString()); }
         if (!string.IsNullOrWhiteSpace(checkoutRef)) { args.Add("--branch"); args.Add(checkoutRef); }
 
         args.Add(url);
@@ -310,17 +308,39 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
 
-        // S1: hard-checkout the pinned base. The clone above kept Ref's branch context (the push path re-branches
-        // via `checkout -B` anyway, so a detached start is fine); the TREE the agent sees is exactly the pin. A
-        // missing/unreachable pin fails LOUD — the pin is a freshness guarantee, never a suggestion.
         if (!string.IsNullOrWhiteSpace(request.PinnedSha))
-        {
-            var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", request.PinnedSha! }, cancellationToken).ConfigureAwait(false);
-
-            if (checkout.Status != SandboxStatus.Success)
-                throw new WorkspaceException($"the pinned base commit '{request.PinnedSha}' could not be checked out (exit {checkout.ExitCode}): {Redact(Summarize(checkout.Stderr), request.Token)} — the pin guarantees every participant sees the SAME immutable base; a stale or unpushed pin must fail the provision, never silently fall back to the tip");
-        }
+            await MaterializePinAsync(request, directory, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// S1: materialize the pinned base EXACTLY, cheapest rung first. (1) The pin is usually the branch tip the
+    /// shallow clone just fetched — a local object check + detached checkout keeps the clone SHALLOW, so the common
+    /// launch pays nothing over the pre-S1 clone. (2) A tip that advanced since launch: fetch the pin BY SHA
+    /// (best-effort — servers without allow-*-sha1-in-want refuse it). (3) Unshallow the cloned branch's history —
+    /// the pin is an ancestor of the launch-time tip unless the branch was rewritten. Still absent after every rung
+    /// ⇒ the checkout fails LOUD: the pin is a freshness guarantee, never a suggestion (a force-push that orphaned
+    /// the pin must surface, never a silent tip fallback).
+    /// </summary>
+    private async Task MaterializePinAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    {
+        var pin = request.PinnedSha!;
+
+        if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false))
+        {
+            await RunGitAsync(new[] { "-C", directory, "fetch", "origin", pin }, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout below is the arbiter
+
+            if (!await CommitExistsLocallyAsync(directory, pin, cancellationToken).ConfigureAwait(false) && request.Depth > 0)
+                await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
+        }
+
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", pin }, cancellationToken).ConfigureAwait(false);
+
+        if (checkout.Status != SandboxStatus.Success)
+            throw new WorkspaceException($"the pinned base commit '{pin}' could not be checked out (exit {checkout.ExitCode}): {Redact(Summarize(checkout.Stderr), request.Token)} — the pin guarantees every participant sees the SAME immutable base; a stale or unpushed pin must fail the provision, never silently fall back to the tip");
+    }
+
+    private async Task<bool> CommitExistsLocallyAsync(string directory, string sha, CancellationToken cancellationToken) =>
+        (await RunGitAsync(new[] { "-C", directory, "rev-parse", "--verify", "--quiet", $"{sha}^{{commit}}" }, cancellationToken).ConfigureAwait(false)).Status == SandboxStatus.Success;
 
     /// <summary>
     /// The ref to actually check out. A SOFT ref (a session-inherited prior branch — <see cref="WorkspaceRequest.DefaultRef"/>

@@ -94,15 +94,15 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         };
     }
 
-    /// <summary>Null for blank; a trimmed 4-40 lowercase-hex commit id otherwise — anything else fails LOUD (the pin's contract is an EXACT commit; a malformed pin is a caller bug, and rejecting it here also keeps flag-shaped garbage out of the git argv).</summary>
+    /// <summary>Null for blank; a trimmed 4-64 lowercase-hex commit id otherwise (64 = a sha256-object-format repo) — anything else fails LOUD (the pin's contract is an EXACT commit; a malformed pin is a caller bug, and rejecting it here also keeps flag-shaped garbage out of the git argv).</summary>
     internal static string? ValidatePinnedSha(string? pinnedSha)
     {
         if (string.IsNullOrWhiteSpace(pinnedSha)) return null;
 
         var trimmed = pinnedSha.Trim().ToLowerInvariant();
 
-        if (trimmed.Length is < 4 or > 40 || !trimmed.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
-            throw new WorkspaceException($"the pinned base commit '{pinnedSha.Trim()}' is not a valid git commit id (4-40 hex chars) — the pin's contract is an EXACT commit, so a malformed pin fails the provision loud");
+        if (trimmed.Length is < 4 or > 64 || !trimmed.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            throw new WorkspaceException($"the pinned base commit '{pinnedSha.Trim()}' is not a valid git commit id (4-64 hex chars) — the pin's contract is an EXACT commit, so a malformed pin fails the provision loud");
 
         return trimmed;
     }

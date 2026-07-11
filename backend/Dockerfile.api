@@ -6,11 +6,14 @@
 # EXCLUSIVELY in the worker image (backend/Dockerfile.worker — the local sandbox runner). Deploy the two images as
 # SEPARATE deployments so each scales (replica) independently: the API on HTTP load, the worker on job throughput.
 #
-# Because this image is INTERNET-FACING it is kept minimal — NO git, NO bubblewrap/prlimit, NO harness CLIs (those
-# are agent-execution + isolation deps that belong only on the worker). Verified 2026-06: every git / workspace-clone
-# path lives under Services/Agents/* (the executor, workspace providers, integrators, acceptance grader), all of
-# which run inside Hangfire jobs on the worker — no synchronous controller/handler clones a repo. If a synchronous
-# API path ever needs git, reconsider this leanness rather than silently regressing the attack surface.
+# Because this image is INTERNET-FACING it is kept minimal — NO bubblewrap/prlimit, NO harness CLIs (those are
+# agent-execution + isolation deps that belong only on the worker). Every workspace CLONE path lives under
+# Services/Agents/* and runs inside Hangfire jobs on the worker — no synchronous controller/handler clones a repo.
+#
+# git IS installed here (the one sanctioned exception, S1): TaskLaunchService resolves the launch's immutable base
+# vector synchronously via `git ls-remote` (RemoteTipResolver) — a read-only, no-checkout ref listing over the same
+# HTTPS transport + credential the API already uses for provider REST calls. No clone, no working tree, no
+# bubblewrap. If any OTHER synchronous git use appears, reconsider rather than silently regressing the attack surface.
 #
 #   docker build -f backend/Dockerfile.api -t codespace-api backend/        # build context = backend/
 #
@@ -27,6 +30,13 @@ RUN dotnet restore CodeSpace.sln
 RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+
+# git → launch-time immutable-base resolution ONLY (`git ls-remote`, read-only — see the header note; no clones here)
+# ca-certificates → outbound TLS for ls-remote against git remotes (same bundle discipline as the worker image)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /app ./
 

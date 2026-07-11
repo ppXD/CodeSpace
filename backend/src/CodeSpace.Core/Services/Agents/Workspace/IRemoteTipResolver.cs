@@ -13,9 +13,12 @@ public interface IRemoteTipResolver
     /// <summary>
     /// The tip commit sha of <paramref name="request"/>'s effective ref: <see cref="WorkspaceRequest.Ref"/> when set
     /// (falling back to <see cref="WorkspaceRequest.DefaultRef"/> under the request's own SOFT semantics when the ref
-    /// is gone), else the remote's HEAD. Null ONLY for an empty remote (no commits — nothing exists to pin); a
-    /// missing HARD ref or an unreachable remote throws <see cref="WorkspaceException"/> LOUD — the clone would fail
-    /// the same way later, and the pin's contract is early, honest failure over a silently unpinned launch.
+    /// is gone), else the remote's HEAD. An unreachable remote always throws <see cref="WorkspaceException"/> LOUD —
+    /// the clone would fail the same way later, and the pin's contract is early, honest failure. A ref the remote
+    /// does not have: throws when <paramref name="refRequired"/> (an operator/authored pin — its absence is an
+    /// authoring error), returns null when not (an IMPLICIT recorded default branch — an empty just-created repo or
+    /// a stale default-branch record launches UNPINNED, the pre-S1 behaviour, instead of failing an opportunistic
+    /// pin). Null also for an empty remote's HEAD (nothing exists to pin).
     /// </summary>
-    Task<string?> ResolveTipShaAsync(WorkspaceRequest request, CancellationToken cancellationToken);
+    Task<string?> ResolveTipShaAsync(WorkspaceRequest request, bool refRequired, CancellationToken cancellationToken);
 }

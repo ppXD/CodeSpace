@@ -150,6 +150,26 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
+    public void The_launch_base_pin_rides_the_planner_config_only_with_a_grounded_reviewer()
+    {
+        // S1: the grounded plan reviewer must clone the SAME commit the fan-out agents materialize.
+        var repoId = Guid.NewGuid();
+        var profile = new ResolvedAgentProfile { RepositoryId = repoId, ReviewerAgent = true };
+        var pins = new Dictionary<Guid, string> { [repoId] = "abc123def456" };
+
+        var grounded = Context(profile) with { PlannerReviewMode = ReviewMode.Gate, PinnedShas = pins };
+        Builder.Build(grounded).Nodes.Single(n => n.Id == "planner").Config.GetProperty("pinnedSha").GetString().ShouldBe("abc123def456");
+
+        var noReviewer = Context(profile with { ReviewerAgent = false }) with { PlannerReviewMode = ReviewMode.Gate, PinnedShas = pins };
+        Builder.Build(noReviewer).Nodes.Single(n => n.Id == "planner").Config.TryGetProperty("pinnedSha", out _)
+            .ShouldBeFalse("no grounded reviewer ⇒ nothing clones at plan time ⇒ the key is omitted (byte-identical)");
+
+        var noPin = Context(profile) with { PlannerReviewMode = ReviewMode.Gate };
+        Builder.Build(noPin).Nodes.Single(n => n.Id == "planner").Config.TryGetProperty("pinnedSha", out _)
+            .ShouldBeFalse("no vector ⇒ no pin key — the reviewer clones the default tip (legacy)");
+    }
+
+    [Fact]
     public void The_confirm_gate_inserts_the_park_and_rebinds_the_map_to_the_approved_outputs()
     {
         var def = Builder.Build(Context() with { RequirePlanConfirmation = true, PlannerModelRowId = Guid.Parse("99999999-9999-9999-9999-999999999999") });

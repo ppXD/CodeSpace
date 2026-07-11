@@ -1,5 +1,6 @@
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Workflows;
@@ -134,6 +135,15 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
             case KeyNotFoundException:
                 _logger.LogInformation("Not found at {Path}: {Message}", path, context.Exception.Message);
                 context.Result = BuildProblemResult(StatusCodes.Status404NotFound, "not_found", "The requested resource was not found.");
+                break;
+
+            case WorkspaceException workspace:
+                // 422 — the workspace/launch cannot be provisioned as asked (S1: a launch-pinned base ref that
+                // doesn't exist, an unreachable remote at base resolution). The message is deliberately operator-
+                // actionable (it names the ref/remote); masking it as a 500 would defeat the whole point of
+                // failing at launch instead of inside the run.
+                _logger.LogWarning("Workspace resolution rejected at {Path}: {Message}", path, workspace.Message);
+                context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "workspace_unresolvable", workspace.Message);
                 break;
 
             case WorkflowValidationException workflowValidation:

@@ -70,6 +70,7 @@ public class WorkspaceSpecTests
     [Theory]
     [InlineData("abc123", "abc123")]                 // short id OK
     [InlineData("  ABC123DEF  ", "abc123def")]       // trimmed + lowercased
+    [InlineData("aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffff0000", "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffff0000")]   // 64 hex = a sha256-object-format repo
     public void ValidatePinnedSha_normalizes_valid_ids(string raw, string expected)
     {
         Core.Services.Agents.Workspace.RepositoryWorkspaceResolver.ValidatePinnedSha(raw).ShouldBe(expected);

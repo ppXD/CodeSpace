@@ -88,6 +88,39 @@ public class LaunchBasePinFlowTests
     }
 
     [Fact]
+    public async Task An_empty_remote_launches_unpinned_instead_of_failing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        using var remote = new GitRemote();
+        await remote.InitBareAsync();   // a just-created repo: the recorded default branch has no commits yet
+        var repoId = await SeedCloneableRepositoryAsync(teamId, remote.Url);
+
+        var result = await LaunchAsync(FreshRequest(teamId, userId, repoId));
+
+        (await ReadAgentPinAsync(result.RunId)).ShouldBeNull("an IMPLICIT default the remote doesn't have launches UNPINNED (the pre-S1 behaviour) — an opportunistic pin must never fail a brand-new repo's launch");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_skips_the_vector_entirely_until_the_supervisor_lane_consumes_pins()
+    {
+        // The supervisor projection reads neither pins nor Seed.BaseBranch yet (the follow-up threads it) — so a
+        // deep launch must not pay for, or FAIL on, a vector it would drop on the floor. A bogus BaseBranch that
+        // would fail a single-agent launch loud must leave the deep launch untouched.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        using var remote = new GitRemote();
+        await remote.SeedAsync("v1");
+        var repoId = await SeedCloneableRepositoryAsync(teamId, remote.Url);
+
+        var result = await LaunchAsync(FreshRequest(teamId, userId, repoId) with { RequestedEffort = TaskEffortModes.Deep, BaseBranch = "release/9.x" });
+
+        result.RunId.ShouldNotBe(Guid.Empty, "the deep lane never resolves the vector, so the bogus authored ref cannot fail its launch");
+    }
+
+    [Fact]
     public async Task A_url_less_repo_stays_unpinned_byte_identical()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -244,6 +277,8 @@ public class LaunchBasePinFlowTests
             await RunGitAsync("config", "commit.gpgsign", "false");
             return await CommitAsync(content);
         }
+
+        public Task InitBareAsync() => RunGitAsync("init", "--bare", "-b", "main");
 
         public async Task<string> CommitAsync(string content)
         {
