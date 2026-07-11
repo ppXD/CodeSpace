@@ -53,6 +53,7 @@ import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
+import { NodeBadges } from "@/components/workflows/NodeBadges";
 import { nodeIconFor, nodeToneFor } from "@/components/workflows/nodeIcon";
 import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { bodyStartTypeKey, CATCH_HANDLE, isBodyStartTypeKey, isContainerKind, sameContainerScope } from "@/components/workflows/workflowContainers";
@@ -573,6 +574,9 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
         kind: manifest.kind,
         category: manifest.category,
         label: null,
+        isSideEffecting: manifest.isSideEffecting,
+        canSuspend: manifest.canSuspend,
+        alwaysRequiresApproval: manifest.alwaysRequiresApproval,
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
@@ -1224,6 +1228,7 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
       <span className="wf-palette-item-body">
         <span className="wf-palette-item-name">{manifest.displayName}</span>
         <span className="wf-palette-item-key">{manifest.typeKey}</span>
+        <NodeBadges source={manifest} />
       </span>
       <span className="wf-palette-item-add" aria-hidden>{disabled ? "—" : "+"}</span>
     </button>
