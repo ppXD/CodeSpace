@@ -79,6 +79,7 @@ public sealed class AgentCodeNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The PRIMARY repository the agent works in — cloned into its workspace before it runs. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}). Leave empty for an analysis-only run with no repo." },
                 "baseRef": { "type": "string", "description": "The branch/ref to clone the PRIMARY repository at. Leave empty for the repo's default branch. A session follow-up sets this to the prior turn's produced branch so the agent builds on earlier work instead of starting from the default branch." },
+                "pinnedSha": { "type": "string", "description": "The EXACT commit to materialize the PRIMARY repository at (S1 — the launch's immutable base). Leave empty for the tip of baseRef / the default branch. When set, the clone is full and hard-checks-out this commit; a missing/unreachable pin fails the run loud." },
                 "relatedRepositories": {
                   "type": "array",
                   "description": "Multi-repo: ALSO clone these repositories into the workspace (for a coordinated change across e.g. a frontend + backend). The primary is repositoryId; leave empty for a single-repo run.",
@@ -161,7 +162,7 @@ public sealed class AgentCodeNode : INodeRuntime
 
         var cwdMode = WorkspaceCwdModeWire.FromWire(ReadOptionalString(context.Config, "cwdMode")) ?? WorkspaceCwdMode.Auto;
 
-        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode);
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context), cwdMode, ReadPinnedSha(context));
 
         if (!TryReadAcceptance(context.Config, out var acceptance, out var acceptanceError)) return Fail(acceptanceError!);
 
@@ -386,6 +387,12 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <summary>Read the optional <c>baseRefFromSession</c> input — true ONLY when the launch projection set <c>baseRef</c> from a SESSION-inherited prior branch (a transient branch a merged PR can delete). Marks the primary ref SOFT so the clone falls back to the default branch if it was pruned. An author-pinned baseRef never carries this ⇒ stays HARD (fail loud if gone). Absent / non-true → false.</summary>
     private static bool ReadBaseRefFromSession(NodeRunContext context) =>
         context.Inputs.TryGetValue("baseRefFromSession", out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>Read the optional <c>pinnedSha</c> input — the primary repo's launch-resolved base pin (S1): the EXACT commit the workspace materializes. Absent / blank / non-string → null (tip-of-ref, byte-identical).</summary>
+    private static string? ReadPinnedSha(NodeRunContext context) =>
+        context.Inputs.TryGetValue("pinnedSha", out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
+            ? v.GetString()
+            : null;
 
     /// <summary>Read the optional <c>repositoryId</c> input. Absent / empty → no repo (null, an analysis-only run). Present-but-malformed → false (a clean node failure).</summary>
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid? repositoryId)

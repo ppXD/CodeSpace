@@ -71,8 +71,12 @@ public static class AgentWorkspaceAuthoring
     /// entry, its <c>ref</c> is emitted so the agent clones it at the prior turn's produced branch. Null map / a repo
     /// absent from it ⇒ NO <c>ref</c> key for that entry (byte-identical — the repo clones at its default branch). The
     /// agent.code path passes the map; the supervisor passes null (it has no per-repo continuity — out of scope).</para>
+    /// <para><paramref name="pinnedShas"/> (S1 — the launch's immutable base vector) supplies a per-repo base pin:
+    /// when a repo has an entry, its <c>pinnedSha</c> is emitted so the agent materializes that exact commit. Wins
+    /// over a spec-carried pin (the launch vector is fresher than a spec authored earlier); null map / a repo absent
+    /// from it falls back to the spec's own <see cref="WorkspaceRepositorySpec.PinnedSha"/> round-trip (byte-identical).</para>
     /// </summary>
-    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related, IReadOnlyDictionary<Guid, string>? baseRefs = null)
+    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related, IReadOnlyDictionary<Guid, string>? baseRefs = null, IReadOnlyDictionary<Guid, string>? pinnedShas = null)
     {
         if (related is not { Count: > 0 }) return null;
 
@@ -93,8 +97,10 @@ public static class AgentWorkspaceAuthoring
                 entry["refSoftFallback"] = true;
             }
 
-            // S1: the pin survives the projection round-trip (omitted when null — byte-identical to before).
-            if (!string.IsNullOrWhiteSpace(r.PinnedSha)) entry["pinnedSha"] = r.PinnedSha;
+            // S1: the pin survives the projection round-trip — the launch vector's entry when present, else the
+            // spec's own carried pin (omitted when neither — byte-identical to before).
+            var pin = pinnedShas is not null && pinnedShas.TryGetValue(r.RepositoryId, out var vectorPin) && !string.IsNullOrWhiteSpace(vectorPin) ? vectorPin : r.PinnedSha;
+            if (!string.IsNullOrWhiteSpace(pin)) entry["pinnedSha"] = pin;
 
             return entry;
         }).ToList();
@@ -113,18 +119,19 @@ public static class AgentWorkspaceAuthoring
     /// guards a null primary, the analysis-only case.) <paramref name="primaryRef"/> is the primary's authored ref
     /// (null = the repo default).
     /// <para>EXCEPTION: a single-repo run that PINS a primary ref (session branch continuity — start the next turn
-    /// from the prior turn's produced branch) needs an EXPLICIT one-repo spec so the resolver clones at that ref;
-    /// without a ref it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default
-    /// branch). So: related repos ⇒ the multi-repo spec; else a pinned ref ⇒ <c>FromRepository(id, ref)</c>; else null.</para>
+    /// from the prior turn's produced branch) OR a primary base commit (S1 — <paramref name="primaryPinnedSha"/>)
+    /// needs an EXPLICIT one-repo spec so the resolver clones at that ref / materializes that commit; without either
+    /// it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default branch). So:
+    /// related repos ⇒ the multi-repo spec; else a pinned ref or base commit ⇒ <c>FromRepository(id, ref, …, sha)</c>; else null.</para>
     /// </summary>
-    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto)
+    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null)
     {
         if (primaryRepositoryId is not { } primaryId) return null;
 
         // cwdMode only bites a MULTI-repo workspace; a single-repo run always runs at the repo root (the single-repo
-        // invariant), so the pinned-ref single-repo branch below ignores it (byte-identical).
-        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback, cwdMode);
+        // invariant), so the pinned single-repo branch below ignores it (byte-identical).
+        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback, cwdMode, primaryPinnedSha);
 
-        return string.IsNullOrWhiteSpace(primaryRef) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback);
+        return string.IsNullOrWhiteSpace(primaryRef) && string.IsNullOrWhiteSpace(primaryPinnedSha) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback, primaryPinnedSha);
     }
 }

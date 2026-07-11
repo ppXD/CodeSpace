@@ -24,6 +24,13 @@ public sealed record WorkflowPlanRequest
     public Guid? RepositoryId { get; init; }
 
     /// <summary>
+    /// S1 — the exact base commit of <see cref="RepositoryId"/> this plan is authored against (the launch's immutable
+    /// base pin). The grounded plan reviewer clones AT this commit, so the tree it verifies the plan against is the
+    /// same tree the executing agents will materialize. Null ⇒ the default branch's tip at review time (legacy).
+    /// </summary>
+    public string? PinnedSha { get; init; }
+
+    /// <summary>
     /// Optional grounding the planner folds into its prompt (e.g. an honest "top-level repo layout" summary).
     /// The planning service assembles it from <see cref="RepositoryId"/>; the planner is a pure consumer. When
     /// present, the planner frames it honestly (it is supplementary context, not "I analyzed your codebase").

@@ -132,7 +132,8 @@ internal static class AgentNodeMapping
         AddIfPresent(inputs, "repositoryId", repositoryId?.ToString());
         // Session branch continuity: each related repo also clones at its own prior produced branch — the baseRefs map
         // threads a per-entry ref onto the relatedRepositories shape (omitted per entry when none, byte-identical).
-        AddIfPresent(inputs, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(context.AgentProfile?.RelatedRepositories, baseRefs));
+        // S1: each related repo also carries its launch-resolved base pin (omitted per entry when unpinned).
+        AddIfPresent(inputs, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(context.AgentProfile?.RelatedRepositories, baseRefs, context.PinnedShas));
 
         // …and clone the PRIMARY repo at its prior produced branch, else at the operator's launch-pinned BaseBranch
         // (H3 — the field had a complete write chain down to TaskLaunchSeed and ZERO readers, so an operator pinning
@@ -150,6 +151,11 @@ internal static class AgentNodeMapping
             // alongside a SESSION baseRef; the operator's pin (and an author-pinned baseRef) never carries this ⇒
             // stays a HARD ref — a missing pinned branch fails LOUD, never a silent default-branch fallback.
             if (primaryBaseRef is not null) inputs["baseRefFromSession"] = true;
+
+            // S1: the primary's launch-resolved base pin — the exact commit every participant of this run materializes.
+            // Never set alongside a SESSION baseRef (the launch resolver skips soft-ref repos — a pin cannot express
+            // the soft ref's branch-or-default disjunction); absent ⇒ omitted ⇒ tip-of-ref (byte-identical).
+            AddIfPresent(inputs, "pinnedSha", BaseRefFor(context.PinnedShas, primaryId));
         }
 
         return JsonSerializer.SerializeToElement(inputs);

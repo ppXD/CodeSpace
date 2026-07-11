@@ -84,6 +84,66 @@ public class WorkspaceSpecTests
         Should.Throw<Core.Services.Agents.Workspace.WorkspaceException>(() => Core.Services.Agents.Workspace.RepositoryWorkspaceResolver.ValidatePinnedSha(raw));
     }
 
+    // ── S1: the launch vector's pins thread onto the workspace-spec factories. ──────────
+
+    [Fact]
+    public void FromRepository_carries_the_primary_pin()
+    {
+        var spec = WorkspaceSpec.FromRepository(Guid.NewGuid(), @ref: "main", pinnedSha: "abc123def456");
+
+        spec.Repositories.Single().PinnedSha.ShouldBe("abc123def456");
+    }
+
+    [Fact]
+    public void FromAuthoredRepos_carries_the_primary_pin_and_leaves_related_specs_as_authored()
+    {
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Read, PinnedSha = "bbb222bbb222" } };
+
+        var spec = WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), primaryRef: null, related, primaryPinnedSha: "aaa111aaa111")!;
+
+        spec.Repositories.Single(r => r.IsPrimary).PinnedSha.ShouldBe("aaa111aaa111");
+        spec.Repositories.Single(r => !r.IsPrimary).PinnedSha.ShouldBe("bbb222bbb222", "a related spec's own pin survives the projection untouched");
+    }
+
+    [Fact]
+    public void ResolveAuthoredWorkspace_builds_an_explicit_single_repo_spec_for_a_pin_only_run()
+    {
+        // A pin with no authored ref must still produce an explicit spec — a null Workspace would silently drop the
+        // pin when the executor derives FromRepository(id) at the default branch's TIP.
+        var spec = Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.NewGuid(), Array.Empty<WorkspaceRepositorySpec>(), primaryRef: null, primaryPinnedSha: "abc123def456");
+
+        spec.ShouldNotBeNull();
+        spec!.Repositories.Single().PinnedSha.ShouldBe("abc123def456");
+    }
+
+    [Fact]
+    public void ResolveAuthoredWorkspace_stays_null_with_no_ref_and_no_pin_byte_identical()
+    {
+        Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.NewGuid(), Array.Empty<WorkspaceRepositorySpec>())
+            .ShouldBeNull("no related repos, no ref, no pin ⇒ null Workspace ⇒ the executor's legacy single-repo derivation");
+    }
+
+    [Fact]
+    public void SerializeRelatedRepositories_prefers_the_launch_vectors_pin_over_the_spec_carried_pin()
+    {
+        var repoId = Guid.NewGuid();
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = repoId, Access = WorkspaceAccess.Write, PinnedSha = "0ld000000000" } };
+
+        var entry = Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.SerializeRelatedRepositories(related, pinnedShas: new Dictionary<Guid, string> { [repoId] = "fresh1234567" })!.Single();
+
+        entry["pinnedSha"].ShouldBe("fresh1234567", "the launch vector is resolved NOW — a spec-carried pin authored earlier must not shadow it");
+    }
+
+    [Fact]
+    public void SerializeRelatedRepositories_falls_back_to_the_spec_carried_pin_when_the_vector_lacks_the_repo()
+    {
+        var related = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Write, PinnedSha = "abc123def456" } };
+
+        var entry = Core.Services.Agents.Workspace.AgentWorkspaceAuthoring.SerializeRelatedRepositories(related, pinnedShas: new Dictionary<Guid, string>())!.Single();
+
+        entry["pinnedSha"].ShouldBe("abc123def456", "the spec's own round-tripped pin survives when the vector has no entry for the repo");
+    }
+
     [Fact]
     public void FromAuthoredRepos_returns_null_with_no_related_repos_so_single_repo_stays_byte_identical()
     {

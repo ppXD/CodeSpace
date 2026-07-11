@@ -221,4 +221,41 @@ public class AgentNodeMappingTests
 
         inputs.TryGetProperty("baseRef", out _).ShouldBeFalse("an analysis-only run has nothing to clone — the pin is meaningless without a repo");
     }
+
+    // ── S1: the launch's immutable base vector — PinnedShas threads onto the primary's pinnedSha + each related
+    //    entry's pinnedSha, so every participant of the run materializes the SAME base commit. ──
+
+    [Fact]
+    public void BuildAgentInputs_threads_per_repo_pins_onto_pinnedSha_and_related_pinnedSha()
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(baseRefs: null) with
+        {
+            PinnedShas = new Dictionary<Guid, string> { [Primary] = "aaa111aaa111", [Api] = "bbb222bbb222" },
+        });
+
+        inputs.GetProperty("pinnedSha").GetString().ShouldBe("aaa111aaa111", "the primary's pin comes from the vector keyed by its repo id");
+        inputs.GetProperty("relatedRepositories")[0].GetProperty("pinnedSha").GetString().ShouldBe("bbb222bbb222", "each related repo's pin comes from the vector keyed by ITS repo id — no bleed");
+    }
+
+    [Fact]
+    public void BuildAgentInputs_omits_pins_for_repos_absent_from_the_vector()
+    {
+        // The primary was pinned; the related repo was UNPINNABLE (no clone URL / session-soft) → only the primary carries a pin.
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(baseRefs: null) with
+        {
+            PinnedShas = new Dictionary<Guid, string> { [Primary] = "aaa111aaa111" },
+        });
+
+        inputs.GetProperty("pinnedSha").GetString().ShouldBe("aaa111aaa111");
+        inputs.GetProperty("relatedRepositories")[0].TryGetProperty("pinnedSha", out _).ShouldBeFalse("a repo absent from the vector is unpinned ⇒ it clones at its ref's tip (legacy)");
+    }
+
+    [Fact]
+    public void BuildAgentInputs_with_no_pin_vector_omits_pinnedSha_byte_identical()
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(baseRefs: null));
+
+        inputs.TryGetProperty("pinnedSha", out _).ShouldBeFalse("no vector ⇒ no pinnedSha key (tip-of-ref, byte-identical to before S1)");
+        inputs.GetProperty("relatedRepositories")[0].TryGetProperty("pinnedSha", out _).ShouldBeFalse("no vector ⇒ no per-repo pin key");
+    }
 }

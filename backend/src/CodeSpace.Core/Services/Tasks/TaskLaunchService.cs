@@ -35,12 +35,13 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ISessionContextBuilder _sessionContext;
     private readonly ISessionSummarizer _sessionSummarizer;
     private readonly ISessionBranchResolver _sessionBranches;
+    private readonly ILaunchBasePinResolver _basePins;
     private readonly IModelPoolSelector _modelSelector;
     private readonly ILLMClientRegistry _llm;
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<TaskLaunchService> _logger;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
     {
         _seedProviders = seedProviders;
         _router = router;
@@ -49,6 +50,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         _sessionContext = sessionContext;
         _sessionSummarizer = sessionSummarizer;
         _sessionBranches = sessionBranches;
+        _basePins = basePins;
         _modelSelector = modelSelector;
         _llm = llm;
         _db = db;
@@ -86,6 +88,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // on earlier CODE (not just the narrative). Empty on a fresh launch / no repo / no prior branch ⇒ default branches.
         var baseRefs = await ResolveBaseRefsAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
 
+        // S1: the launch's immutable base vector — each repo's tip commit resolved ONCE, over the same git transport
+        // the clones use, so the planner, the grounded plan reviewer, and every dispatched agent materialize the SAME
+        // base even when the remote advances mid-run. Session-soft + URL-less repos stay unpinned (resolver contract).
+        var pinnedShas = await _basePins.ResolveVectorAsync(request.TeamId, seed, profile, baseRefs, cancellationToken).ConfigureAwait(false);
+
         // Deep/Auto: the supervisor's brain model — the operator's pinned "Brain model" chip when set + usable, else
         // self-resolved so the decider has one instead of stopping turn-1. Inert (null) for every non-supervisor
         // projection — single-agent / map launches are byte-identical. PinIneligible flags the ONE case worth
@@ -102,7 +109,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             ? await _sessions.EnsureConversationAsync(session.SessionId, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false)
             : (Guid?)null;
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 

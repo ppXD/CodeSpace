@@ -62,4 +62,23 @@ public sealed class AgentPlanReviewerTests
         task.Autonomy.ShouldBe(AgentAutonomyLevel.Confined, "the reviewer READS — it never writes");
         task.Goal.ShouldContain(AgentReviewRunner.VerdictMarker, customMessage: "the shared final-message contract rides every review goal");
     }
+
+    [Fact]
+    public void A_pinned_plan_review_task_materializes_the_launch_base_commit()
+    {
+        // S1: with a launch pin, the reviewer must judge the plan against the SAME tree the executing agents will
+        // materialize — never the default branch's tip at review time, which may have moved since launch.
+        var task = AgentReviewRunner.BuildReviewTask(new AgentReviewSpec
+        {
+            SubjectInstructions = "verify the plan",
+            RepositoryId = Guid.NewGuid(),
+            BaseRef = null,
+            PinnedSha = "abc123def456",
+            TeamId = Guid.NewGuid(),
+            IterationKey = AgentPlanReviewer.IterationKey,
+        }, "codex-cli");
+
+        task.Workspace.ShouldNotBeNull("a pin needs an explicit spec — a null Workspace would clone the default TIP and silently drop the pin");
+        task.Workspace!.Repositories.Single().PinnedSha.ShouldBe("abc123def456");
+    }
 }

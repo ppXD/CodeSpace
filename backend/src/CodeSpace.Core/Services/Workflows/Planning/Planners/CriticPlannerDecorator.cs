@@ -50,6 +50,7 @@ public sealed class CriticPlannerDecorator : IWorkflowPlanner
                 WorkflowRunId = request.WorkflowRunId,
                 NodeId = request.NodeId,
                 ReviewerModelId = request.ReviewerModelId,
+                PinnedSha = request.PinnedSha,
             }, cancellationToken).ConfigureAwait(false)
             : CriticVerdict.ReviewFailed(request.Review, "agent-reviewer: not requested");
 
