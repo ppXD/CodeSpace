@@ -16,6 +16,16 @@ vi.mock("@/hooks/use-team-members", () => ({
   ] }),
 }));
 
+// CredentialedModelSelector reads useCredentialedModels; ModelCredentialSelector reads useModelCredentials.
+vi.mock("@/hooks/use-model-credentials", () => ({
+  useCredentialedModels: () => ({ isLoading: false, data: [
+    { rowId: "r1", modelId: "claude-opus-4-8", credentialId: "c1", credentialName: "Team Anthropic", provider: "Anthropic", tier: "Frontier", available: true },
+  ] }),
+  useModelCredentials: () => ({ isLoading: false, data: [
+    { id: "c1", provider: "Anthropic", displayName: "Team Anthropic", status: "Active" },
+  ] }),
+}));
+
 /**
  * Generic object-array editing. A property of `array` of `object` renders a repeatable list of
  * sub-forms (one per item), driven purely by `items.properties` — no per-node knowledge. The item
@@ -146,6 +156,61 @@ describe("SchemaForm user multi-selector", () => {
     fireEvent.focus(screen.getByRole("textbox", { name: "Search members" }));
     fireEvent.mouseDown(screen.getByRole("option", { name: /Bob/ }));
     expect(onChange).toHaveBeenCalledWith({ allowed: ["u1", "u2"] });
+  });
+});
+
+/**
+ * The supervisor's brain (`supervisorModelId`), reviewer (`reviewerModelId`) and dispatch allow-list
+ * (`allowedModelIds`) declare `"x-selector": "credentialedModel"` — a key that was UNREGISTERED, so the
+ * field fell through to a raw UUID text box. Now: scalar → a named model picker (dual-mode bindable),
+ * array → a searchable multi-picker; the owning credential uses `"x-selector": "modelCredential"`. Here we
+ * only prove SchemaForm wires them (rich behaviour lives in selectors/CredentialedModelSelector.test.tsx).
+ */
+describe("SchemaForm credentialed-model selector", () => {
+  const brainSchema = { type: "object", properties: { supervisorModelId: { type: "string", "x-selector": "credentialedModel" } } };
+  const poolSchema = { type: "object", properties: { allowedModelIds: { type: "array", items: { type: "string" }, "x-selector": "credentialedModel" } } };
+  const credSchema = { type: "object", properties: { modelCredentialId: { type: "string", "x-selector": "modelCredential" } } };
+
+  it("renders a named model picker for a scalar field, not a raw UUID text box", () => {
+    render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "" }} onChange={vi.fn()} />);
+    expect(screen.getByRole("option", { name: "claude-opus-4-8 · Team Anthropic (Anthropic)" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();   // no hand-typed UUID input
+  });
+
+  it("stays dual-mode bindable in the editor (Pick ⇄ Expression)", () => {
+    const suggestions = [{ path: "trigger.modelId", label: "trigger.modelId", category: "trigger" as const }];
+    render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
+    expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+
+  it("renders a searchable multi-picker for an array field (allowedModelIds)", () => {
+    render(<SchemaForm schema={poolSchema} value={{ allowedModelIds: ["r1"] }} onChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Remove claude-opus-4-8 · Team Anthropic" })).toBeInTheDocument();
+  });
+
+  it("renders the credential picker for a modelCredential field", () => {
+    render(<SchemaForm schema={credSchema} value={{ modelCredentialId: "" }} onChange={vi.fn()} />);
+    expect(screen.getByRole("option", { name: "Team Anthropic (Anthropic)" })).toBeInTheDocument();
+  });
+
+  // The "on-disk value shape unchanged" contract rests on empty → absent-key coercion. Clearing a scalar
+  // model emits undefined (the key drops from the persisted object), matching every other scalar selector.
+  it("clears a scalar model field to an absent key when set to empty", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "r1" }} onChange={onChange} />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith({ supervisorModelId: undefined });
+  });
+
+  // Removing the last allowed model drops the key entirely — absent means "any of the team's models",
+  // so an emptied allow-list must NOT persist as [] (which the engine also treats as all, but the key
+  // should match the pre-edit absent shape).
+  it("drops the array model field to an absent key when the last selection is removed", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={poolSchema} value={{ allowedModelIds: ["r1"] }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove claude-opus-4-8 · Team Anthropic" }));
+    expect(onChange).toHaveBeenCalledWith({ allowedModelIds: undefined });
   });
 });
 
