@@ -126,3 +126,28 @@ export function nodeToneFor(m: NodeVisual): string {
       return "tool";
   }
 }
+
+/** The badge-driving manifest flags — a manifest DTO and a placed node's data both carry these (optional). */
+export interface NodeBadgeSource {
+  isSideEffecting?: boolean;
+  canSuspend?: boolean;
+  alwaysRequiresApproval?: boolean;
+}
+
+export interface NodeBadge {
+  kind: "write" | "wait" | "approval";
+  label: string;
+}
+
+/**
+ * The "what does this step do" badges shown on a node card / palette row, derived from manifest flags so a
+ * node opts in purely by its manifest — no per-node UI. Order = most consequential first (approval → write →
+ * wait). A plain node (none set) gets no badges, so the canvas stays quiet except where a step actually acts.
+ */
+export function nodeBadges(m: NodeBadgeSource): NodeBadge[] {
+  const badges: NodeBadge[] = [];
+  if (m.alwaysRequiresApproval) badges.push({ kind: "approval", label: "Approval" });
+  if (m.isSideEffecting) badges.push({ kind: "write", label: "Writes" });
+  if (m.canSuspend) badges.push({ kind: "wait", label: "Waits" });
+  return badges;
+}

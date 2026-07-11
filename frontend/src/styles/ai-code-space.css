@@ -3331,6 +3331,16 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-node-body { min-width: 0; flex: 1; }
 .acs-root .wf-rf-node-title { font-weight: 600; font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acs-root .wf-rf-node-ref   { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* "What this step does" badges — shared by the canvas card and the palette row (nodeBadges). Semantic,
+   warm-compatible: Writes = amber, Waits = flow-blue, Approval = danger-clay. Absent when a node has none. */
+.acs-root .wf-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.acs-root .wf-badge {
+  font-size: 9.5px; font-weight: 600; line-height: 1.5; letter-spacing: 0.01em;
+  padding: 0 6px; border-radius: 20px; border: 1px solid; white-space: nowrap;
+}
+.acs-root .wf-badge[data-badge="write"]    { color: var(--warn);    background: #F7ECD6; border-color: #EAD6B4; }
+.acs-root .wf-badge[data-badge="wait"]     { color: var(--wf-flow);  background: var(--wf-flow-soft); border-color: color-mix(in srgb, var(--wf-flow) 28%, transparent); }
+.acs-root .wf-badge[data-badge="approval"] { color: var(--danger);  background: #F6E0DB; border-color: #E6C3B8; }
 /* Handles — slightly larger so they're easy to grab. The visible dot is 10px but a
  * pseudo-element extends the hit area to 22px without affecting layout, so the user
  * can grab anywhere near the dot. Accent ring on hover signals "connect from here".

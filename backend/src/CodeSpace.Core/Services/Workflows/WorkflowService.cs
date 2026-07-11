@@ -1633,6 +1633,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             InputSchema = n.Manifest.InputSchema,
             OutputSchema = n.Manifest.OutputSchema,
             IsManual = n.Manifest.IsManual,
+            IsSideEffecting = n.Manifest.IsSideEffecting,
+            CanSuspend = n.Manifest.CanSuspend,
+            AlwaysRequiresApproval = n.Manifest.AlwaysRequiresApproval,
             Presets = n.Manifest.Presets?.Select(p => new NodePresetDto { Id = p.Id, Label = p.Label, Description = p.Description, Config = p.Config, Inputs = p.Inputs }).ToList()
         }).ToList();
     }

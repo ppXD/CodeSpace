@@ -16,6 +16,7 @@ import { loopMinSize } from "./loopResize";
 import { fanBranches, fanoutSummary, nodeIterationLabel } from "./mapBranches";
 import { MapFanout } from "./MapFanout";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
+import { NodeBadges } from "./NodeBadges";
 import { nodeIconFor, nodeToneFor } from "./nodeIcon";
 import { RunOpenContext } from "./runOpenContext";
 import { CATCH_HANDLE, isContainerKind } from "./workflowContainers";
@@ -58,6 +59,10 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   kind: NodeKind;
   /** Manifest-declared category ("AI", "Git", "Logic", …). Drives the icon fallback when iconKey is null. */
   category: string;
+  /** Manifest side-effect / suspend / approval flags → the "Writes / Waits / Approval" badges on the card. */
+  isSideEffecting?: boolean;
+  canSuspend?: boolean;
+  alwaysRequiresApproval?: boolean;
   label: string | null;
   /**
    * Manual Start node only: the workflow's declared input fields, rendered on the card so the
@@ -395,6 +400,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
             muted sub-line so it's visible to copy but no longer dominates the card. */}
         <div className="wf-rf-node-title">{d.label ?? d.displayName}</div>
         <div className="wf-rf-node-ref">{d.nodeId}</div>
+        <NodeBadges source={d} />
         <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-node-rerun" />
         {fields.length > 0 && (
           <ul className="wf-rf-node-fields">

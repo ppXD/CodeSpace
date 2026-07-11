@@ -423,6 +423,12 @@ export interface NodeManifestDto {
    * row); the runs view uses it to collect inputs before a manual run. Default false/undefined.
    */
   isManual?: boolean;
+  /** True when the node has external side effects (opens a PR, comments, merges, runs a command). Badged "Writes". */
+  isSideEffecting?: boolean;
+  /** True when the node can SUSPEND the run (agent run, human decision, sleep, sub-workflow). Badged "Waits". */
+  canSuspend?: boolean;
+  /** True when the node always parks on a human-approval gate before its effect. Badged "Approval". */
+  alwaysRequiresApproval?: boolean;
   /** Starter templates the editor offers as "start from a template". Absent/empty ⇒ none. */
   presets?: NodePreset[];
 }

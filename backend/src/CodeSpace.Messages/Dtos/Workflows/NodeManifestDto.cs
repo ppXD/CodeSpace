@@ -28,6 +28,24 @@ public sealed record NodeManifestDto
     /// </summary>
     public bool IsManual { get; init; }
 
+    /// <summary>
+    /// True when the node has external side effects (creates/modifies remote state — opens a PR, comments,
+    /// merges, runs a command). The editor badges it "Writes" so an author sees at a glance which steps act.
+    /// </summary>
+    public bool IsSideEffecting { get; init; }
+
+    /// <summary>
+    /// True when the node can SUSPEND the run (an agent run, a human decision, a sleep, a sub-workflow). The
+    /// editor badges it "Waits" so an author knows the step pauses rather than completing inline.
+    /// </summary>
+    public bool CanSuspend { get; init; }
+
+    /// <summary>
+    /// True when the node always parks on a human-approval gate before its effect. The editor badges it
+    /// "Approval" so an author sees the step needs a person before it proceeds.
+    /// </summary>
+    public bool AlwaysRequiresApproval { get; init; }
+
     /// <summary>Author-facing starter templates the editor offers as "start from a template". Null/empty ⇒ none.</summary>
     public IReadOnlyList<NodePresetDto>? Presets { get; init; }
 }
