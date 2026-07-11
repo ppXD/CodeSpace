@@ -533,7 +533,7 @@ public sealed partial class SupervisorTurnService
             // only (the multi-repo per-repo baseline is a named follow-up, mirroring this fold's own S2 scope trim);
             // a unit with no recorded base is simply not baselined (null-omitted, byte-identical).
             var baseline = results[i].RepositoryResults.Count == 0
-                ? await CaptureUnitBaselineAsync(results[i], subtaskId, repoOverrides, goalConfig, fullSpec, baselines, teamId, cancellationToken).ConfigureAwait(false)
+                ? await CaptureUnitBaselineAsync(results[i], grade, subtaskId, repoOverrides, goalConfig, fullSpec, baselines, teamId, cancellationToken).ConfigureAwait(false)
                 : null;
 
             graded.Add(results[i] with
@@ -611,10 +611,15 @@ public sealed partial class SupervisorTurnService
     /// never a throw: the grader is fail-closed, and an unexpected escape here degrades to an unmeasured baseline
     /// (the candidate grade must never be stranded by its own baseline's failure).
     /// </summary>
-    private async Task<BenchmarkGrade?> CaptureUnitBaselineAsync(SupervisorAgentResult result, string? subtaskId, IReadOnlyDictionary<string, Guid> repoOverrides, SupervisorGoalConfig? goalConfig, SupervisorAcceptanceSpec spec, Dictionary<string, BenchmarkGrade> baselines, Guid teamId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade?> CaptureUnitBaselineAsync(SupervisorAgentResult result, BenchmarkGrade candidateGrade, string? subtaskId, IReadOnlyDictionary<string, Guid> repoOverrides, SupervisorGoalConfig? goalConfig, SupervisorAcceptanceSpec spec, Dictionary<string, BenchmarkGrade> baselines, Guid teamId, CancellationToken cancellationToken)
     {
         try
         {
+            // A candidate grade that never actually RAN (an infra-classed detail — clone/setup/timeout faults) has
+            // nothing a differential could compare against: skip the baseline entirely instead of paying a second
+            // full clone against the same unreachable repo / doubling a judge's model spend for an unusable pair.
+            if (Agents.AgentAcceptanceContract.IsInfraFailure(candidateGrade.Detail, workPresent: !string.IsNullOrEmpty(result.ProducedBranch))) return null;
+
             var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                ?? goalConfig?.AgentProfile?.RepositoryId;
 
@@ -624,13 +629,28 @@ public sealed partial class SupervisorTurnService
 
             if (string.IsNullOrWhiteSpace(manifest?.BaseSha)) return null;
 
-            var key = $"{repositoryId}@{manifest!.BaseSha}#{string.Join('\u001f', spec.Command ?? Array.Empty<string>())}";
+            // The store's single-manifest fallback may hand back ANOTHER repo's manifest (a retry of a
+            // repo-overridden unit) — a base sha from repo Y must never baseline repo X (a fork could even
+            // "succeed" against the wrong history). No manifest for THIS repo ⇒ no baseline.
+            if (manifest!.RepositoryId != repositoryId.Value) return null;
+
+            // The unit must have produced something the candidate grade actually measured — a vacuous/fail-closed
+            // no-branch-no-patch verdict leaves nothing to differentiate.
+            if (string.IsNullOrEmpty(result.ProducedBranch) && manifest.PatchArtifactId is null) return null;
+
+            // The memo key is the FULL spec identity, not just the argv: Kind routes a different oracle, and
+            // SetupCommand/Rubric/Schema change what the same argv means — two subtasks may share a Command yet
+            // measure different contracts (adversarial-scan M1).
+            var key = $"{repositoryId}@{manifest.BaseSha}#{System.Text.Json.JsonSerializer.Serialize(spec, Agents.AgentJson.Options)}";
 
             if (baselines.TryGetValue(key, out var memoized)) return memoized;
 
             var grade = await _acceptanceGrader.GradeBaseAsync(repositoryId.Value, teamId, manifest.BaseSha!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
 
-            baselines[key] = grade;
+            // A MEASURED baseline is shareable; an infra-classed one (a transient clone fault) is not — stamping it
+            // onto every sibling off the same base would spread one blip across the whole fan-out.
+            if (!Agents.AgentAcceptanceContract.IsInfraFailure(grade.Detail, workPresent: true)) baselines[key] = grade;
+
             return grade;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
