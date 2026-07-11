@@ -19,6 +19,29 @@ const WINDOWS: { v: string; l: string; days: number | null }[] = [
   { v: "30", l: "Last 30 days", days: 30 },
   { v: "all", l: "All time", days: null },
 ];
+const DEFAULT_WINDOW = "7";
+const ORIGINS: readonly OriginFilter[] = ["all", "Authored", "Imported"];
+
+/** URL search contract for the roster — the search text, origin tab and stats window are deep-linkable so a filtered
+ *  roster view is shareable / bookmarkable and Back/Forward work. The defaults (empty search, "all" origin, 7-day
+ *  window) are omitted for a clean URL. Exported for unit test. */
+type AgentsSearch = { q?: string; origin?: OriginFilter; window?: string };
+
+/** Coerce a URL search value to a string — TanStack's JSON parser turns `window=30` / `q=2024` into NUMBERS, so a
+ *  string-only guard would silently drop a valid shared link. */
+const asStr = (v: unknown): string | undefined => (typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined);
+
+export function validateAgentsSearch(search: Record<string, unknown>): AgentsSearch {
+  const q = asStr(search.q) || undefined;
+  const origin = ORIGINS.find((o) => o === search.origin);
+  const w = asStr(search.window);
+  const window = w && WINDOWS.some((x) => x.v === w) ? w : undefined;
+  return {
+    ...(q ? { q } : {}),
+    ...(origin && origin !== "all" ? { origin } : {}),
+    ...(window && window !== DEFAULT_WINDOW ? { window } : {}),
+  };
+}
 
 /**
  * Agents — the team's reusable personas as a working roster. Each agent is a row that reads left-to-right: identity,
@@ -29,18 +52,28 @@ const WINDOWS: { v: string; l: string; days: number | null }[] = [
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/agents/")({
   component: AgentsListPage,
+  validateSearch: validateAgentsSearch,
 });
 
 function AgentsListPage() {
   const { teamSlug } = Route.useParams();
+  const search = Route.useSearch();
   const navigate = useNavigate();
 
   const agents = useAgentDefinitions();
   const rows = agents.data ?? [];
 
-  const [query, setQuery] = useState("");
-  const [origin, setOrigin] = useState<OriginFilter>("all");
-  const [windowSel, setWindowSel] = useState("7");
+  // The roster view (search text · origin tab · stats window) is URL-driven so it's shareable and Back/Forward work.
+  // Typing replaces the history entry (no per-keystroke spam); the discrete tabs push so Back undoes a tab switch.
+  const query = search.q ?? "";
+  const origin = search.origin ?? "all";
+  const windowSel = search.window ?? DEFAULT_WINDOW;
+  const patch = (p: Partial<AgentsSearch>, replace = false) =>
+    navigate({ to: "/teams/$teamSlug/agents", params: { teamSlug }, search: (prev) => ({ ...prev, ...p }), replace });
+  const setQuery = (q: string) => patch({ q: q || undefined }, true);
+  const setOrigin = (o: OriginFilter) => patch({ origin: o === "all" ? undefined : o });
+  const setWindowSel = (w: string) => patch({ window: w === DEFAULT_WINDOW ? undefined : w });
+
   const [editor, setEditor] = useState<EditorState>(null);
   const [importing, setImporting] = useState(false);
   const [choosing, setChoosing] = useState(false);
