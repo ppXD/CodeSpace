@@ -12,7 +12,7 @@ import { RunDetailView, type RunView } from "./RunDetailView";
  * Holds a small drill stack: a sub-workflow node can open its child run in place (Back returns to the
  * parent), so drilling into nested runs never leaves the viewer. Reset when the host opens a new run.
  */
-export function RunViewerDialog({ runId, onClose, defaultView }: { runId: string; onClose: () => void; defaultView?: RunView }) {
+export function RunViewerDialog({ runId, onClose, defaultView, view, onViewChange }: { runId: string; onClose: () => void; defaultView?: RunView; view?: RunView; onViewChange?: (v: RunView) => void }) {
   const [stack, setStack] = useState<string[]>([runId]);
   const [topRun, setTopRun] = useState(runId);
   if (runId !== topRun) {
@@ -48,7 +48,8 @@ export function RunViewerDialog({ runId, onClose, defaultView }: { runId: string
           <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
-          <RunDetailView runId={current} defaultView={defaultView} onOpenRun={(childId) => setStack((s) => [...s, childId])} />
+          {/* The deep-linked ?view= applies only to the BASE run — a drilled-in sub-workflow run keeps its own view. */}
+          <RunDetailView runId={current} defaultView={defaultView} view={current === runId ? view : undefined} onViewChange={current === runId ? onViewChange : undefined} onOpenRun={(childId) => setStack((s) => [...s, childId])} />
         </div>
       </div>
     </>

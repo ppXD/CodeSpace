@@ -1,11 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { ApiError } from "@/api/request";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
+import type { RunView } from "@/components/workflows/RunDetailView";
 import { useWorkflowRun } from "@/hooks/use-workflows";
 import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
+
+/** The raw-trace modal is deep-linkable: `?trace=` = which run's modal is open, `?view=` = its inner tab. */
+type RunDetailSearch = { trace?: string; view?: RunView };
+const RUN_VIEWS: readonly RunView[] = ["activity", "canvas", "changes", "trace"];
+
+/** Parse + whitelist the run-detail URL search — an unknown view and an empty trace drop for a clean URL. Exported for unit test. */
+export function validateRunDetailSearch(search: Record<string, unknown>): RunDetailSearch {
+  const view = RUN_VIEWS.find((v) => v === search.view);
+  const trace = typeof search.trace === "string" && search.trace ? search.trace : undefined;
+  return { ...(trace ? { trace } : {}), ...(view ? { view } : {}) };
+}
 
 /**
  * The canonical run-detail page. A run is run-neutral (manual, scheduled, webhook, replay, task, child), so it lives
@@ -17,6 +29,7 @@ import { SessionRoomView } from "@/components/sessions/SessionRoomView";
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/runs/$runNumber")({
   component: RunDetailPage,
+  validateSearch: validateRunDetailSearch,
 });
 
 // The URL segment is a ref — the canonical team-scoped run number, or a legacy GUID. Resolve it to the
@@ -46,23 +59,29 @@ function RunDetailPage() {
     );
   }
 
-  return <RunDetail key={run.data.id} teamSlug={teamSlug} runId={run.data.id} />;
+  return <RunDetail key={run.data.id} teamSlug={teamSlug} runNumber={String(run.data.runNumber)} runId={run.data.id} />;
 }
 
 // The Session — the Room frame with the Journal's chronological steps ③ as its middle. The strangler rebuild is complete:
 // the Journal is now the only view (the old room/journal toggle is gone). The room fetch drives the page frame + its
 // retained rich/live blocks; the journal supplies the ③ transcript (undefined until it loads — the frame still renders).
-function RunDetail({ teamSlug, runId }: { teamSlug: string; runId: string }) {
+function RunDetail({ teamSlug, runNumber, runId }: { teamSlug: string; runNumber: string; runId: string }) {
   const navigate = useNavigate();
+  const search = Route.useSearch();
   const room = useRunRoom(runId);
   const journal = useRunJournal(runId);
-  const [detailRunId, setDetailRunId] = useState<string | null>(null);
+
+  // The raw-trace modal is URL-driven: ?trace= names the open run, ?view= its inner tab — so an opened trace is
+  // shareable and Back closes it. The modal's default tab is "trace", so ?view is omitted when it equals the default.
+  const patch = (p: Partial<RunDetailSearch>) =>
+    navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber }, search: (prev) => ({ ...prev, ...p }) });
+  const onViewChange = (v: RunView) => patch({ view: v === "trace" ? undefined : v });
 
   if (room.data) {
     return (
       <>
-        <SessionRoomView teamSlug={teamSlug} room={room.data} journal={journal.data ?? undefined} onOpenRoom={(rid) => setDetailRunId(rid ?? runId)} />
-        {detailRunId && <RunViewerDialog runId={detailRunId} onClose={() => setDetailRunId(null)} defaultView="trace" />}
+        <SessionRoomView teamSlug={teamSlug} room={room.data} journal={journal.data ?? undefined} onOpenRoom={(rid) => patch({ trace: rid ?? runId })} />
+        {search.trace && <RunViewerDialog runId={search.trace} view={search.view} onViewChange={onViewChange} onClose={() => patch({ trace: undefined, view: undefined })} defaultView="trace" />}
       </>
     );
   }
@@ -82,5 +101,5 @@ function RunDetail({ teamSlug, runId }: { teamSlug: string; runId: string }) {
 
   // Session-less (legacy / pre-release) run — the fetch succeeded with no session (404 → null). There's no Session to host
   // the transcript, so open the raw run detail directly in the SAME modal, returning to the Runs index on close.
-  return <RunViewerDialog runId={runId} onClose={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })} defaultView="trace" />;
+  return <RunViewerDialog runId={runId} view={search.view} onViewChange={onViewChange} onClose={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })} defaultView="trace" />;
 }
