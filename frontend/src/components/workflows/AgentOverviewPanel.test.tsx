@@ -16,6 +16,7 @@ import { AgentOverviewPanel } from "./AgentOverviewPanel";
 const wf = (over: Partial<WorkflowDetail> = {}): WorkflowDetail => ({
   id: "w1",
   teamId: "t1",
+  slug: "pr-security-reviewer",
   name: "PR Security Reviewer",
   description: "Reviews every PR for security issues.",
   enabled: true,

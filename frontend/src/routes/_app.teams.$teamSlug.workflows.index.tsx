@@ -37,24 +37,24 @@ function WorkflowsListPage() {
     const result = await createEmpty.mutateAsync();
     // The canvas IS the workflow detail (Dify pattern) — no separate /edit route.
     navigate({
-      to: "/teams/$teamSlug/workflows/$workflowId",
-      params: { teamSlug, workflowId: result.id },
+      to: "/teams/$teamSlug/workflows/$workflowSlug",
+      params: { teamSlug, workflowSlug: result.id },
     });
   };
 
   const handleTask = async (task: string) => {
     const result = await fromTask.mutateAsync(task);
     navigate({
-      to: "/teams/$teamSlug/workflows/$workflowId",
-      params: { teamSlug, workflowId: result.id },
+      to: "/teams/$teamSlug/workflows/$workflowSlug",
+      params: { teamSlug, workflowSlug: result.id },
     });
   };
 
   const handleTemplate = async (template: WorkflowTemplate) => {
     const result = await fromTemplate.mutateAsync(template);
     navigate({
-      to: "/teams/$teamSlug/workflows/$workflowId",
-      params: { teamSlug, workflowId: result.id },
+      to: "/teams/$teamSlug/workflows/$workflowSlug",
+      params: { teamSlug, workflowSlug: result.id },
     });
   };
 
@@ -131,8 +131,8 @@ function WorkflowsListPage() {
                   data-status={w.enabled ? "active" : "paused"}
                   onClick={() =>
                     navigate({
-                      to: "/teams/$teamSlug/workflows/$workflowId",
-                      params: { teamSlug, workflowId: w.id },
+                      to: "/teams/$teamSlug/workflows/$workflowSlug",
+                      params: { teamSlug, workflowSlug: w.slug },
                     })
                   }
                 >
@@ -175,8 +175,8 @@ function WorkflowsListPage() {
                         className="btn btn-ghost"
                         onClick={() =>
                           navigate({
-                            to: "/teams/$teamSlug/workflows/$workflowId",
-                            params: { teamSlug, workflowId: w.id },
+                            to: "/teams/$teamSlug/workflows/$workflowSlug",
+                            params: { teamSlug, workflowSlug: w.slug },
                           })
                         }
                         title="View activity"

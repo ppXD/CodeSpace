@@ -29,11 +29,12 @@ export function useWorkflows() {
   });
 }
 
-export function useWorkflow(workflowId: string | null) {
+/** Read one workflow by ref — its GUID (legacy link) or team-unique slug (canonical clean URL). */
+export function useWorkflow(ref: string | null) {
   return useQuery({
-    queryKey: ["workflow", workflowId],
-    queryFn: () => workflowsApi.get(workflowId!),
-    enabled: workflowId != null,
+    queryKey: ["workflow", ref],
+    queryFn: () => workflowsApi.get(ref!),
+    enabled: ref != null,
   });
 }
 

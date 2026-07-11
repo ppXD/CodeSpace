@@ -98,7 +98,7 @@ import { useQueries } from "@tanstack/react-query";
  */
 type AgentDetailTab = "overview" | "source";
 
-export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowId/")({
+export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowSlug/")({
   // Tab choice is URL-driven (?tab=source) for shareable deep links; overview is the default and
   // omitted from the URL for a clean path (mirrors the Project detail page's ?tab=variables).
   validateSearch: (raw: Record<string, unknown>): { tab?: AgentDetailTab } => {
@@ -112,17 +112,31 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowI
 });
 
 function WorkflowEditorPage() {
-  const { teamSlug, workflowId } = Route.useParams();
+  const { teamSlug, workflowSlug } = Route.useParams();
   const { tab } = Route.useSearch();
   const activeTab: AgentDetailTab = tab ?? "overview";
   const navigate = useNavigate();
-  const workflow = useWorkflow(workflowId);
+  // The URL segment is a ref — the canonical slug, or a legacy GUID from an old bookmark.
+  const workflow = useWorkflow(workflowSlug);
   const name = workflow.data?.name ?? "Workflow";
+
+  // Canonicalise a legacy-GUID (or wrong-case) URL to the slug URL, preserving ?tab=.
+  useEffect(() => {
+    const resolved = workflow.data;
+    if (resolved && resolved.slug !== workflowSlug) {
+      navigate({
+        to: "/teams/$teamSlug/workflows/$workflowSlug",
+        params: { teamSlug, workflowSlug: resolved.slug },
+        search: tab ? { tab } : {},
+        replace: true,
+      });
+    }
+  }, [workflow.data, workflowSlug, teamSlug, tab, navigate]);
 
   const setTab = (next: string) =>
     navigate({
-      to: "/teams/$teamSlug/workflows/$workflowId",
-      params: { teamSlug, workflowId },
+      to: "/teams/$teamSlug/workflows/$workflowSlug",
+      params: { teamSlug, workflowSlug },
       search: next === "overview" ? {} : { tab: next as AgentDetailTab },
     });
 
@@ -150,21 +164,25 @@ function WorkflowEditorPage() {
               real <Link> (href + keyboard-operable), not an onClick-only anchor. Overview is the no-search default. */}
           {activeTab === "overview"
             ? <span className="cur">{name}</span>
-            : <Link to="/teams/$teamSlug/workflows/$workflowId" params={{ teamSlug, workflowId }}>{name}</Link>}
+            : <Link to="/teams/$teamSlug/workflows/$workflowSlug" params={{ teamSlug, workflowSlug }}>{name}</Link>}
         </>
       }
       render={(key, api) =>
         // ReactFlowProvider must wrap any component that calls useReactFlow().
         key === "source" ? <ReactFlowProvider><EditorShell /></ReactFlowProvider>
-        : <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} onDeleted={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} />
+        // OverviewTab drives GUID-keyed routes (/runs, /run, /enabled, DELETE), so gate it on the
+        // resolved workflow and hand it the real id — never the slug from the URL.
+        : workflow.data
+          ? <OverviewTab workflowId={workflow.data.id} onEditSource={() => api.goTo("source")} onDeleted={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} />
+          : <section className="ct"><div className="ct-body"><div className="ct-empty"><div className="ct-empty-h">Loading…</div></div></div></section>
       }
     />
   );
 }
 
 function EditorShell() {
-  const { workflowId } = Route.useParams();
-  const workflow = useWorkflow(workflowId);
+  const { workflowSlug } = Route.useParams();
+  const workflow = useWorkflow(workflowSlug);
   const manifests = useNodeManifests();
   const update = useUpdateWorkflow();
 
@@ -194,7 +212,7 @@ function EditorShell() {
       workflow={workflow.data}
       manifests={manifests.data ?? []}
       saving={update.isPending}
-      onSave={(input) => update.mutateAsync({ workflowId, input })}
+      onSave={(input) => update.mutateAsync({ workflowId: workflow.data.id, input })}
     />
   );
 }
