@@ -150,6 +150,73 @@ public class ProjectFlowTests
     }
 
     [Fact]
+    public async Task GetByRef_resolves_by_slug_and_by_guid_to_the_same_project()
+    {
+        // The clean-URL router hits ONE endpoint with either the slug (canonical URL) or the
+        // GUID (legacy link). Both must resolve to the identical canonical row so the router
+        // can redirect a legacy-GUID URL to the slug URL using the returned Slug.
+        var (teamId, userId) = await SeedTeamAsync();
+
+        Guid projectId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            projectId = await scope.Resolve<IMediator>().Send(new CreateProjectCommand { Name = "Backend Services" });
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = verify.Resolve<IMediator>();
+
+        var bySlug = await mediator.Send(new GetProjectByRefQuery { IdOrSlug = "backend-services" });
+        var byGuid = await mediator.Send(new GetProjectByRefQuery { IdOrSlug = projectId.ToString() });
+
+        bySlug.ShouldNotBeNull(customMessage: "the canonical clean URL resolves the project by its team-unique slug");
+        bySlug!.Id.ShouldBe(projectId);
+        bySlug.Slug.ShouldBe("backend-services");
+
+        byGuid.ShouldNotBeNull(customMessage: "a legacy GUID URL must still resolve — the router redirects it to the slug URL");
+        byGuid!.Id.ShouldBe(projectId);
+        byGuid.Slug.ShouldBe(bySlug.Slug, "both refs resolve to the identical canonical row");
+    }
+
+    [Theory]
+    [InlineData("does-not-exist")]   // well-formed but unmatched slug
+    [InlineData("")]                 // empty ref → whitespace guard short-circuits to null before touching the DB
+    [InlineData("   ")]              // whitespace ref → same
+    public async Task GetByRef_returns_null_for_a_ref_that_matches_nothing(string idOrSlug)
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+
+        var result = await scope.Resolve<IMediator>().Send(new GetProjectByRefQuery { IdOrSlug = idOrSlug });
+
+        result.ShouldBeNull(
+            customMessage: "an unresolvable ref is a real miss — the router turns null into a 404, never a silent home-redirect");
+    }
+
+    [Fact]
+    public async Task GetByRef_by_slug_is_team_scoped()
+    {
+        // Team A and Team B each create a project whose name derives the SAME slug ("shared").
+        // Team B's by-slug lookup MUST return B's own row, never A's — the slug is unique only
+        // per team, so the resolver has to scope by team_id. Otherwise one tenant's clean URL
+        // would resolve into another tenant's data, which is worse than the GUID it replaced.
+        var (teamA, userA) = await SeedTeamAsync();
+        var (teamB, userB) = await SeedTeamAsync();
+
+        Guid projectInA, projectInB;
+        using (var scope = _fixture.BeginScopeAs(userA, teamA, Roles.Admin))
+            projectInA = await scope.Resolve<IMediator>().Send(new CreateProjectCommand { Name = "Shared" });
+        using (var scope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin))
+            projectInB = await scope.Resolve<IMediator>().Send(new CreateProjectCommand { Name = "Shared" });
+
+        using var teamBScope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var resolved = await teamBScope.Resolve<IMediator>().Send(new GetProjectByRefQuery { IdOrSlug = "shared" });
+
+        resolved.ShouldNotBeNull();
+        resolved!.Id.ShouldBe(projectInB,
+            customMessage: "team B's /projects/shared MUST resolve team B's own row, not team A's identically-slugged project");
+        resolved.Id.ShouldNotBe(projectInA, "resolving another team's row through a shared slug is a cross-team data leak");
+    }
+
+    [Fact]
     public async Task Project_variable_round_trips_through_mediator_surface()
     {
         var (teamId, userId) = await SeedTeamAsync();

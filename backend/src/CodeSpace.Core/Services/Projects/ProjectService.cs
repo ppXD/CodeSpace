@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
@@ -67,10 +68,28 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         }).ToList();
     }
 
-    public async Task<ProjectSummary?> GetAsync(Guid teamId, Guid projectId, CancellationToken cancellationToken)
+    public Task<ProjectSummary?> GetAsync(Guid teamId, Guid projectId, CancellationToken cancellationToken) =>
+        FindAsync(teamId, p => p.Id == projectId, cancellationToken);
+
+    public Task<ProjectSummary?> GetByRefAsync(Guid teamId, string idOrSlug, CancellationToken cancellationToken)
     {
-        var match = await _db.Project.AsNoTracking()
-            .Where(p => p.Id == projectId && p.TeamId == teamId && p.DeletedDate == null)
+        if (string.IsNullOrWhiteSpace(idOrSlug)) return Task.FromResult<ProjectSummary?>(null);
+
+        return Guid.TryParse(idOrSlug, out var id)
+            ? FindAsync(teamId, p => p.Id == id, cancellationToken)
+            : FindAsync(teamId, p => p.Slug == idOrSlug, cancellationToken);
+    }
+
+    /// <summary>
+    /// Single shared read + projection for both by-GUID and by-slug lookups. Always scopes by
+    /// team_id + alive so a stolen id/slug can't cross the tenant boundary; <paramref name="match"/>
+    /// carries the id-vs-slug predicate on top.
+    /// </summary>
+    private async Task<ProjectSummary?> FindAsync(Guid teamId, Expression<Func<Project, bool>> match, CancellationToken cancellationToken)
+    {
+        var row = await _db.Project.AsNoTracking()
+            .Where(p => p.TeamId == teamId && p.DeletedDate == null)
+            .Where(match)
             .Select(p => new
             {
                 p.Id,
@@ -84,18 +103,18 @@ public sealed class ProjectService : IProjectService, IScopedDependency
             })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (match == null) return null;
+        if (row == null) return null;
 
         return new ProjectSummary
         {
-            Id = match.Id,
-            TeamId = match.TeamId,
-            Slug = match.Slug,
-            Name = match.Name,
-            Description = match.Description,
-            CreatedDate = match.CreatedDate,
-            ActiveRepositoryCount = match.ActiveRepositoryCount,
-            ActiveVariableCount = match.ActiveVariableCount,
+            Id = row.Id,
+            TeamId = row.TeamId,
+            Slug = row.Slug,
+            Name = row.Name,
+            Description = row.Description,
+            CreatedDate = row.CreatedDate,
+            ActiveRepositoryCount = row.ActiveRepositoryCount,
+            ActiveVariableCount = row.ActiveVariableCount,
         };
     }
 

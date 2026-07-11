@@ -18,6 +18,16 @@ public interface IProjectService
     Task<ProjectSummary?> GetAsync(Guid teamId, Guid projectId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Resolves a project by EITHER its GUID or its team-unique slug — the single lookup the
+    /// clean-URL router uses. <paramref name="idOrSlug"/> is a raw GUID when the caller followed
+    /// a legacy link, or the slug (the <c>project.{Slug}.X</c> variable-path key) when it followed
+    /// the canonical URL. Returns null on miss / not-this-team. Slug match is exact: slugs are
+    /// lower-cased at creation (<c>ProjectService.SlugifyName</c>) and unique per team
+    /// (<c>uq_project_team_slug_active</c>), so one URL resolves to at most one live row.
+    /// </summary>
+    Task<ProjectSummary?> GetByRefAsync(Guid teamId, string idOrSlug, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Create a new project. The slug is derived from <paramref name="name"/> by
     /// <c>ProjectService.SlugifyName</c> — operators never type identifiers directly.
     /// Throws when the derived slug collides with an existing active project; the
