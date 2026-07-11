@@ -4,11 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MapEditor } from "./MapEditor";
 import { resultKeyError } from "./mapResultKey";
+import type { ScopeSuggestion } from "./scope-introspection";
 
 // The {{}} picker is exercised elsewhere; here a plain input keeps the focus on MapEditor's logic.
 vi.mock("./VariablePickerInput", () => ({
-  VariablePickerInput: ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) => (
-    <input aria-label={placeholder} value={value} onChange={(e) => onChange(e.target.value)} />
+  VariablePickerInput: ({ value, onChange, placeholder, suggestions }: { value: string; onChange: (v: string) => void; placeholder?: string; suggestions?: { path: string }[] }) => (
+    <input aria-label={placeholder} value={value} onChange={(e) => onChange(e.target.value)} data-suggestions={(suggestions ?? []).map((s) => s.path).join(",")} />
   ),
 }));
 
@@ -35,7 +36,7 @@ describe("MapEditor", () => {
     );
 
     // items → the collection picker (mocked input)
-    expect((within(section("Collection")).getByRole("textbox") as HTMLInputElement).value).toBe("{{nodes.planner.outputs.json.subtasks}}");
+    expect((within(section("For each item in")).getByRole("textbox") as HTMLInputElement).value).toBe("{{nodes.planner.outputs.json.subtasks}}");
     // maxParallelism → the branch-parallelism number
     expect((within(section("Branch parallelism")).getByRole("spinbutton") as HTMLInputElement).value).toBe("4");
     // errorHandling → the selector
@@ -47,7 +48,7 @@ describe("MapEditor", () => {
   it("defaults: empty items, inherit parallelism, terminate, blank result key (placeholder 'results')", () => {
     render(<Harness />);
 
-    expect((within(section("Collection")).getByRole("textbox") as HTMLInputElement).value).toBe("");
+    expect((within(section("For each item in")).getByRole("textbox") as HTMLInputElement).value).toBe("");
     expect((within(section("Branch parallelism")).getByRole("spinbutton") as HTMLInputElement).value).toBe(""); // inherit
     expect((within(section("Error handling")).getByRole("combobox") as HTMLSelectElement).value).toBe("terminate");
 
@@ -60,8 +61,23 @@ describe("MapEditor", () => {
     const onInputsChange = vi.fn();
     render(<MapEditor config={{}} inputs={{}} onConfigChange={() => {}} onInputsChange={onInputsChange} suggestions={[]} />);
 
-    fireEvent.change(within(section("Collection")).getByRole("textbox"), { target: { value: "{{nodes.p.outputs.json.items}}" } });
+    fireEvent.change(within(section("For each item in")).getByRole("textbox"), { target: { value: "{{nodes.p.outputs.json.items}}" } });
     expect(onInputsChange).toHaveBeenLastCalledWith({ items: "{{nodes.p.outputs.json.items}}" });
+  });
+
+  it("offers only list-typed (or untyped) outputs in the 'for each' picker, hiding scalars", () => {
+    const suggestions: ScopeSuggestion[] = [
+      { path: "nodes.p.outputs.items", label: "P → items", category: "node", type: "array" },
+      { path: "nodes.p.outputs.status", label: "P → status", category: "node", type: "string" },
+      { path: "nodes.p.outputs.blob", label: "P → blob", category: "node" },   // untyped → kept (may be a list)
+    ];
+    render(<MapEditor config={{}} inputs={{}} onConfigChange={() => {}} onInputsChange={() => {}} suggestions={suggestions} />);
+
+    const picker = within(section("For each item in")).getByRole("textbox");
+    const offered = (picker.getAttribute("data-suggestions") ?? "").split(",").filter(Boolean);
+    expect(offered).toContain("nodes.p.outputs.items");     // array → offered
+    expect(offered).toContain("nodes.p.outputs.blob");      // untyped → offered
+    expect(offered).not.toContain("nodes.p.outputs.status"); // scalar → hidden (you can't map over a string)
   });
 
   it("branch parallelism is empty by default (inherit), accepts a value, and clamps to [1, 64]", () => {

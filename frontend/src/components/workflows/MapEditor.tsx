@@ -32,6 +32,11 @@ export function MapEditor({ config, inputs, onConfigChange, onInputsChange, sugg
   const resultKey = typeof config.resultKey === "string" ? config.resultKey : "";
   const resultKeyProblem = resultKeyError(resultKey);
 
+  // The collection must be a LIST, so the "for each" picker only offers array-typed (or untyped) outputs —
+  // a scalar like a step's status string is hidden. Non-restrictive: the author can still hand-type any
+  // {{ref}}; this only trims the @ autocomplete down to the sensible options.
+  const listSuggestions = suggestions.filter((s) => !s.type || /array|list|\[\]/i.test(s.type));
+
   // Empty input ⇒ remove the key (inherit the engine-wide default); a value clamps to [1, 64].
   const setMaxParallelism = (raw: string) => {
     const next = { ...config };
@@ -53,15 +58,15 @@ export function MapEditor({ config, inputs, onConfigChange, onInputsChange, sugg
     <>
       {/* ── Collection (items) ────────────────────────────────────────────── */}
       <section className="wf-inspector-section">
-        <div className="wf-inspector-section-h">Collection</div>
+        <div className="wf-inspector-section-h">For each item in</div>
         <VariablePickerInput
           value={items}
           onChange={(next) => onInputsChange({ ...inputs, items: next })}
-          suggestions={suggestions}
-          placeholder="Array to fan out — e.g. {{nodes.planner.outputs.json.subtasks}}"
+          suggestions={listSuggestions}
+          placeholder="Pick a list from an earlier step — type @"
         />
         <p className="wf-retry-hint">
-          The body runs once per element of this array, in parallel branches. Each branch reads its element as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. Required — bind a non-empty collection (e.g. <code>{"{{nodes.planner.outputs.json.subtasks}}"}</code>); a missing or empty binding is a validation error.
+          The body runs once per item of this list, in parallel branches — each branch reads its item as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. Type <code>@</code> to pick a list output (e.g. the planner's items). Required — a missing or empty binding is a validation error.
         </p>
       </section>
 
