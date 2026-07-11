@@ -36,7 +36,7 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
         _logger = logger;
     }
 
-    public async Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, CancellationToken cancellationToken)
+    public async Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken)
     {
         if (repositoryId == null) return null;
 
@@ -46,9 +46,9 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
 
             if (repo == null) return null;
 
-            var entries = await ListRootAsync(repo, cancellationToken).ConfigureAwait(false);
+            var entries = await ListRootAsync(repo, reference, cancellationToken).ConfigureAwait(false);
 
-            return BuildSummary(repo, entries);
+            return BuildSummary(repo, entries, reference);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -68,7 +68,7 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
             .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
     /// <summary>Mirrors RepositorySourceService.ResolveAsync: credential check → source-read scope → capability + context → one root listing.</summary>
-    private async Task<IReadOnlyList<RemoteTreeEntry>> ListRootAsync(Repository repo, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<RemoteTreeEntry>> ListRootAsync(Repository repo, string? reference, CancellationToken cancellationToken)
     {
         if (repo.Credential == null) return Array.Empty<RemoteTreeEntry>();
 
@@ -77,15 +77,19 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
         var source = _registry.Require<IRepositorySourceCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, repo.Credential);
 
-        return await source.ListTreeAsync(context, repo.ToRemoteRepository(), path: null, reference: null, cancellationToken).ConfigureAwait(false);
+        // S2/S1: list at the caller's reference — the run's immutable base pin — so what the brain plans over
+        // is the SAME tree every spawned agent materializes. Null → the provider's default-branch fold (legacy).
+        return await source.ListTreeAsync(context, repo.ToRemoteRepository(), path: null, reference: reference, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Honest framing: a top-level layout only, never "I analyzed your codebase". Lists up to <see cref="MaxEntries"/> root entries with their dir/file kind. Internal so the pure string assembly is unit-pinned directly (InternalsVisibleTo) — not only through integration coverage.</summary>
-    internal static string BuildSummary(Repository repo, IReadOnlyList<RemoteTreeEntry> entries)
+    internal static string BuildSummary(Repository repo, IReadOnlyList<RemoteTreeEntry> entries, string? reference = null)
     {
         var builder = new StringBuilder();
 
-        builder.AppendLine($"Repository top-level layout for {repo.FullPath} (provider: {repo.ProviderInstance.Provider}, default branch: {repo.DefaultBranch}).");
+        builder.AppendLine(reference is null
+            ? $"Repository top-level layout for {repo.FullPath} (provider: {repo.ProviderInstance.Provider}, default branch: {repo.DefaultBranch})."
+            : $"Repository top-level layout for {repo.FullPath} at this run's immutable base ({reference}).");
         builder.AppendLine("This is a top-level listing only, not a full code analysis.");
 
         if (entries.Count == 0)

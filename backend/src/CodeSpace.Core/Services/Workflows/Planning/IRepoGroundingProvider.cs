@@ -11,5 +11,5 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// </summary>
 public interface IRepoGroundingProvider
 {
-    Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, CancellationToken cancellationToken);
+    Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken);
 }

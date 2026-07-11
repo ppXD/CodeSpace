@@ -189,6 +189,9 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public SupervisorTapeSummary? TapeSummary { get; init; }
 
+    /// <summary>S2 (G1) — the repository's top-level grounding summary, listed at this run's immutable base pin (S1), fetched by the decider once per turn and folded into its prompt so the brain plans over the SAME tree every spawned agent materializes. Null = no repo / grounding unavailable (fail-soft — the prompt simply omits the section).</summary>
+    public string? RepoGrounding { get; init; }
+
     /// <summary>
     /// The PENDING decisions this run's CHILD agent runs raised and are blocked on (Decision substrate D4c-2), read off
     /// the cross-grain queue on rehydrate (soonest-deadline first). The arbiter drains these BEFORE the decider each turn:

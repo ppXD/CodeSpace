@@ -103,7 +103,7 @@ public class SupervisorDecisionEvalDeciderTests
     private static async Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, string cannedModelJson)
     {
         var registry = new LLMClientRegistry(new ILLMClient[] { new CannedStructuredClient(cannedModelJson) });
-        var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore());
+        var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding());
 
         return await decider.DecideAsync(scenario.Context, CancellationToken.None);
     }
