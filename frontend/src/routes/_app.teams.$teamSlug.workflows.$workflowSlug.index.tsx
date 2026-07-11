@@ -53,7 +53,7 @@ import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
-import { nodeIconFor } from "@/components/workflows/nodeIcon";
+import { nodeIconFor, nodeToneFor } from "@/components/workflows/nodeIcon";
 import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { bodyStartTypeKey, CATCH_HANDLE, isBodyStartTypeKey, isContainerKind, sameContainerScope } from "@/components/workflows/workflowContainers";
 import { useAlert } from "@/components/dialog";
@@ -1170,6 +1170,7 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
     <button
       type="button"
       className="wf-palette-item"
+      data-tone={nodeToneFor(manifest)}
       data-disabled={disabled}
       // draggable=false on disabled items so the user can't bypass the click guard via drag.
       draggable={!disabled}
