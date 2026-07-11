@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -442,12 +443,28 @@ public sealed class AgentSupervisorNode : INodeRuntime
     /// null config → all SupervisorLane defaults (pre-E5 behaviour). The lenient clamp/default lives in the
     /// plan, not here — the node only lifts the bytes.
     /// </summary>
-    private static SupervisorGoalConfig? ReadGoalConfig(IReadOnlyDictionary<string, JsonElement> bag)
+    /// <summary>
+    /// Deserialize the raw config bag into the goal config. TOLERANT by design: the editor stores every enum as a
+    /// STRING (SchemaForm's {{ref}}-unification), so a review mode arrives as e.g. <c>"1"</c> not <c>1</c> — without the
+    /// string-enum + number-from-string handling in <see cref="GoalConfigOptions"/> that throws a <see cref="JsonException"/>
+    /// and the catch would drop the ENTIRE config (goal, caps, approval, review all silently lost). Internal (not
+    /// private) so the tolerance is unit-pinned directly (InternalsVisibleTo).
+    /// </summary>
+    internal static SupervisorGoalConfig? ReadGoalConfig(IReadOnlyDictionary<string, JsonElement> bag)
     {
         try { return JsonSerializer.Deserialize<SupervisorGoalConfig>(JsonSerializer.Serialize(bag), GoalConfigOptions); }
         catch (JsonException) { return null; }
     }
 
-    /// <summary>Case-insensitive options for deserializing the node's <see cref="SupervisorGoalConfig"/> bag (the camelCase config keys the ConfigSchema declares).</summary>
-    private static readonly JsonSerializerOptions GoalConfigOptions = new() { PropertyNameCaseInsensitive = true };
+    /// <summary>
+    /// Options for deserializing the node's <see cref="SupervisorGoalConfig"/> bag: case-insensitive (the camelCase
+    /// config keys) AND tolerant of string-encoded numbers/enums (the editor stores enums as strings), so a stray
+    /// <c>"1"</c> for a review mode is read as the enum value rather than throwing and dropping the whole config.
+    /// </summary>
+    private static readonly JsonSerializerOptions GoalConfigOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+        Converters = { new JsonStringEnumConverter() },
+    };
 }
