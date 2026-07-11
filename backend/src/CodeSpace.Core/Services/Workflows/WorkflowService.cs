@@ -131,15 +131,15 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     {
         if (string.IsNullOrWhiteSpace(idOrSlug)) return null;
 
-        // Resolve the URL ref (a GUID from a legacy link, or the team-unique slug from the clean
-        // URL) to the workflow id, then reuse GetAsync — which loads the full detail and enforces
-        // the same team-scope. Slug match is exact + team-scoped (uq_workflow_team_slug_active).
-        var workflowId = Guid.TryParse(idOrSlug, out var id)
-            ? id
-            : await _db.Workflow.AsNoTracking()
-                .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug == idOrSlug)
-                .Select(w => (Guid?)w.Id)
-                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? Guid.Empty;
+        // Resolve the URL ref to the workflow id, then reuse GetAsync (full detail + team-scope). Slug
+        // FIRST, then a GUID fallback: a slug can be GUID-shaped (the CHECK allows 32 hex), so a GUID-first
+        // branch would look up a random id and 404 a real row. Only a ref that matches no slug AND parses
+        // as a GUID falls through to the legacy-id lookup — keeping old GUID links working.
+        var workflowId = await _db.Workflow.AsNoTracking()
+            .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug == idOrSlug)
+            .Select(w => (Guid?)w.Id)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            ?? (Guid.TryParse(idOrSlug, out var id) ? id : Guid.Empty);
 
         if (workflowId == Guid.Empty) return null;
 
@@ -1711,7 +1711,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
 
-        if (!taken.Contains(baseSlug)) return baseSlug;
+        if (!taken.Contains(baseSlug) && !ReservedSlugs.Contains(baseSlug)) return baseSlug;
 
         for (var n = 2; n < 10000; n++)
         {
@@ -1719,11 +1719,19 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
             var candidate = trimmed + suffix;
 
-            if (!taken.Contains(candidate)) return candidate;
+            if (!taken.Contains(candidate) && !ReservedSlugs.Contains(candidate)) return candidate;
         }
 
         throw new InvalidOperationException($"Could not derive a free slug from workflow name '{name}'.");
     }
+
+    /// <summary>
+    /// Slugs that would be shadowed by a literal <c>api/workflows/…</c> GET route — ASP.NET gives those
+    /// literals precedence over the <c>{idOrSlug}</c> parameter, so a workflow slugged to one would be
+    /// unreachable. Forced to a <c>-N</c> variant at derivation. Keep in sync with the 0099 backfill list.
+    /// </summary>
+    private static readonly HashSet<string> ReservedSlugs =
+        new(new[] { "runs", "node-manifests", "system-variables", "decisions" }, StringComparer.Ordinal);
 
     private static bool IsWorkflowSlugUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg

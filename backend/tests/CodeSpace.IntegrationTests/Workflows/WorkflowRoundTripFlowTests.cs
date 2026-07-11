@@ -454,6 +454,47 @@ public class WorkflowRoundTripFlowTests
         result.ShouldBeNull(customMessage: "an unresolvable ref is a real miss — the router turns null into a 404");
     }
 
+    [Theory]
+    [InlineData("Runs", "runs-2")]                          // shadows GET api/workflows/runs
+    [InlineData("Node Manifests", "node-manifests-2")]      // shadows api/workflows/node-manifests
+    [InlineData("System Variables", "system-variables-2")]  // shadows api/workflows/system-variables
+    [InlineData("Decisions", "decisions-2")]                // shadows api/workflows/decisions
+    public async Task Create_forces_a_suffix_when_the_slug_would_shadow_a_literal_route(string name, string expectedSlug)
+    {
+        // A workflow slugged to a literal sibling GET route (runs / node-manifests / system-variables / decisions)
+        // is unreachable — ASP.NET gives the literal precedence over {idOrSlug}. DeriveAvailableSlugAsync pushes it
+        // to a -N variant so the clean URL always resolves.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+
+        var id = await mediator.Send(new CreateWorkflowCommand { Name = name, Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+        var wf = await mediator.Send(new GetWorkflowByRefQuery { IdOrSlug = id.ToString() });
+
+        wf!.Slug.ShouldBe(expectedSlug, customMessage: $"'{name}' must not slug to the reserved literal route — it would be URL-unreachable");
+    }
+
+    [Fact]
+    public async Task GetByRef_resolves_a_GUID_shaped_slug_by_the_slug_not_a_random_id()
+    {
+        // The slug CHECK admits 32 hex, so a name can produce a GUID-shaped slug. A GUID-first resolver would
+        // look that string up as an id (miss → 404). Slug-first resolution reaches the real row.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        const string hexName = "deadbeefdeadbeefdeadbeefdeadbeef";   // valid slug AND a valid Guid N-format
+
+        Guid id;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            id = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = hexName, Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>() });
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var resolved = await verify.Resolve<IMediator>().Send(new GetWorkflowByRefQuery { IdOrSlug = hexName });
+
+        resolved.ShouldNotBeNull(customMessage: "a GUID-shaped slug must resolve by its slug, not fall through to a random-id lookup");
+        resolved!.Id.ShouldBe(id);
+        resolved.Slug.ShouldBe(hexName);
+    }
+
     private async Task<Guid> CreateAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
