@@ -739,6 +739,19 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public async Task An_unpinned_run_grounds_at_the_operators_branch_never_a_drifting_default_tip()
+    {
+        // Scan M2: with no pin, the operator's launch-pinned branch is the next-most-stable anchor — grounding on
+        // the default branch would show the brain a DIFFERENT tree than the one its agents clone.
+        var grounding = new RecordingRepoGrounding();
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding);
+
+        await decider.DecideAsync(Context() with { AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), BaseRef = "release/2.x" } }, CancellationToken.None);
+
+        grounding.Reference.ShouldBe("release/2.x");
+    }
+
+    [Fact]
     public async Task A_run_without_a_repo_never_looks_up_grounding()
     {
         var grounding = new RecordingRepoGrounding();
