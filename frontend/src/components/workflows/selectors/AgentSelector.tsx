@@ -1,38 +1,47 @@
 import type { AgentDefinitionSummary } from "@/api/agents";
 import { useAgentDefinitions } from "@/hooks/use-agents";
 
-interface AgentSelectorProps {
-  /** Selected agent-persona UUID ("" = none chosen yet). */
-  value: string;
-  onChange: (next: string) => void;
-}
+import { SearchSelect, type SearchOption } from "./SearchSelect";
 
 /**
- * Single-persona picker. Lists the team's Agent personas; the saved value is the chosen persona's
- * UUID, which the `agent.code` node carries as `agentDefinitionId` and the dispatch-time resolver
- * merges into the run.
- *
- * Used by the schema-driven form whenever a field declares `"x-selector": "agent"` — generic, not
- * tied to any one node.
+ * Persona pickers for a `"x-selector": "agent"` field — the saved value is the persona's UUID (single) or an
+ * array of them (multi, e.g. the supervisor's allowedAgentDefinitionIds). Both render the shared
+ * {@link SearchSelect} combobox so agent dropdowns match the model / repo ones.
  */
-export function AgentSelector({ value, onChange }: AgentSelectorProps) {
+function toOption(a: AgentDefinitionSummary): SearchOption {
+  return { id: a.id, label: a.name || `@${a.slug}`, meta: a.name ? `@${a.slug}` : undefined };
+}
+
+/** Single-persona picker. */
+export function AgentSelector({ value, onChange }: { value: string; onChange: (next: string) => void }) {
   const agents = useAgentDefinitions();
-  const rows = agents.data ?? [];
+  const options = (agents.data ?? []).map(toOption);
 
   return (
-    <select
-      className="wf-form-input"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      aria-label="Agent persona"
-    >
-      <option value="">{agents.isLoading ? "Loading…" : "Pick an agent…"}</option>
-      {rows.map((a) => <option key={a.id} value={a.id}>{agentLabel(a)}</option>)}
-    </select>
+    <SearchSelect
+      options={options}
+      value={value ? [value] : []}
+      onChange={(ids) => onChange(ids[0] ?? "")}
+      loading={agents.isLoading}
+      placeholder="Pick an agent…"
+    />
   );
 }
 
-/** Persona name, with the @-handle as a disambiguating hint; falls back to the handle if unnamed. */
-function agentLabel(a: AgentDefinitionSummary): string {
-  return a.name ? `${a.name} (@${a.slug})` : `@${a.slug}`;
+/** Multi-persona picker. Value = an array of persona UUIDs. Empty = the whole team pool is allowed. */
+export function AgentMultiSelector({ value, onChange }: { value: string[]; onChange: (next: string[]) => void }) {
+  const agents = useAgentDefinitions();
+  const options = (agents.data ?? []).map(toOption);
+
+  return (
+    <SearchSelect
+      multi
+      options={options}
+      value={value}
+      onChange={onChange}
+      loading={agents.isLoading}
+      placeholder="Search agents…"
+      hint={value.length === 0 ? "None selected — any of the team's personas may be used." : `${value.length} selected — dispatched agents must use one of these.`}
+    />
+  );
 }

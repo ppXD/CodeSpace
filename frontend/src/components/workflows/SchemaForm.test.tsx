@@ -171,22 +171,22 @@ describe("SchemaForm credentialed-model selector", () => {
   const poolSchema = { type: "object", properties: { allowedModelIds: { type: "array", items: { type: "string" }, "x-selector": "credentialedModel" } } };
   const credSchema = { type: "object", properties: { modelCredentialId: { type: "string", "x-selector": "modelCredential" } } };
 
-  it("renders a named model picker for a scalar field, not a raw UUID text box", () => {
+  it("renders a searchable model picker for a scalar field, not a raw UUID text box", () => {
     render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "" }} onChange={vi.fn()} />);
-    expect(screen.getByRole("option", { name: "claude-opus-4-8 · Team Anthropic (Anthropic)" })).toBeInTheDocument();
-    expect(screen.queryByRole("textbox")).toBeNull();   // no hand-typed UUID input
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick a model…" }));   // the combobox search, not a free-text uuid
+    expect(screen.getByRole("option", { name: /claude-opus-4-8/ })).toBeInTheDocument();   // a picker of real models
   });
 
   it("stays dual-mode bindable in the editor (Pick ⇄ Expression)", () => {
     const suggestions = [{ path: "trigger.modelId", label: "trigger.modelId", category: "trigger" as const }];
     render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
     expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Pick a model…" })).toBeInTheDocument();   // Pick mode = the search combobox
   });
 
   it("renders a searchable multi-picker for an array field (allowedModelIds)", () => {
     render(<SchemaForm schema={poolSchema} value={{ allowedModelIds: ["r1"] }} onChange={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Remove claude-opus-4-8 · Team Anthropic" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove claude-opus-4-8" })).toBeInTheDocument();   // chip shows the model id
   });
 
   it("renders the credential picker for a modelCredential field", () => {
@@ -199,7 +199,7 @@ describe("SchemaForm credentialed-model selector", () => {
   it("clears a scalar model field to an absent key when set to empty", () => {
     const onChange = vi.fn();
     render(<SchemaForm schema={brainSchema} value={{ supervisorModelId: "r1" }} onChange={onChange} />);
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove claude-opus-4-8" }));   // clear the single chip
     expect(onChange).toHaveBeenCalledWith({ supervisorModelId: undefined });
   });
 
@@ -209,7 +209,7 @@ describe("SchemaForm credentialed-model selector", () => {
   it("drops the array model field to an absent key when the last selection is removed", () => {
     const onChange = vi.fn();
     render(<SchemaForm schema={poolSchema} value={{ allowedModelIds: ["r1"] }} onChange={onChange} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remove claude-opus-4-8 · Team Anthropic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove claude-opus-4-8" }));
     expect(onChange).toHaveBeenCalledWith({ allowedModelIds: undefined });
   });
 });

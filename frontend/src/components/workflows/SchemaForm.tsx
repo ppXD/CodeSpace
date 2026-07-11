@@ -4,7 +4,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
 
 import type { ScopeSuggestion } from "./scope-introspection";
-import { AgentSelector } from "./selectors/AgentSelector";
+import { AgentMultiSelector, AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
 import { CredentialedModelMultiSelector, CredentialedModelSelector } from "./selectors/CredentialedModelSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
@@ -460,12 +460,10 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
         />
       );
     case "agent":
-      return (
-        <AgentSelector
-          value={typeof value === "string" ? value : ""}
-          onChange={(next) => onChange(next === "" ? undefined : next)}
-        />
-      );
+      // Array field → multi-persona chips (e.g. the supervisor's allowedAgentDefinitionIds); scalar → single.
+      return schema.type === "array"
+        ? <AgentMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
+        : <AgentSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
     case "harness":
       return (
         <HarnessSelector

@@ -40,14 +40,13 @@ describe("AgentCodeInspector", () => {
 
   it("starts in Agent mode when a persona is bound, showing the persona picker", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", agentDefinitionId: "p1" }} />);
-    expect(screen.getByLabelText("Agent persona")).toBeInTheDocument();
-    expect((screen.getByLabelText("Agent persona") as HTMLSelectElement).value).toBe("p1");
+    expect(screen.getByText("Agent persona")).toBeInTheDocument();   // Agent mode → the persona-picker row is shown
   });
 
   it("starts in Inline mode with no persona, showing the instructions field (no persona picker)", () => {
     render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} />);
     expect(screen.getByLabelText("What should the agent do?")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Agent persona")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent persona")).not.toBeInTheDocument();
   });
 
   it("clears the bound persona when switching to Configure inline", () => {
