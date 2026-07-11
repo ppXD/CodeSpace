@@ -88,6 +88,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         {
             Id = w.Id,
             TeamId = w.TeamId,
+            Slug = w.Slug,
             Name = w.Name,
             Description = w.Description,
             Enabled = w.Enabled,
@@ -114,6 +115,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         {
             Id = workflow.Id,
             TeamId = workflow.TeamId,
+            Slug = workflow.Slug,
             Name = workflow.Name,
             Description = workflow.Description,
             Enabled = workflow.Enabled,
@@ -125,9 +127,30 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         };
     }
 
+    public async Task<WorkflowDetail?> GetByRefAsync(string idOrSlug, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(idOrSlug)) return null;
+
+        // Resolve the URL ref (a GUID from a legacy link, or the team-unique slug from the clean
+        // URL) to the workflow id, then reuse GetAsync — which loads the full detail and enforces
+        // the same team-scope. Slug match is exact + team-scoped (uq_workflow_team_slug_active).
+        var workflowId = Guid.TryParse(idOrSlug, out var id)
+            ? id
+            : await _db.Workflow.AsNoTracking()
+                .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug == idOrSlug)
+                .Select(w => (Guid?)w.Id)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? Guid.Empty;
+
+        if (workflowId == Guid.Empty) return null;
+
+        return await GetAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
+
+        var slug = await DeriveAvailableSlugAsync(teamId, name, cancellationToken).ConfigureAwait(false);
 
         var workflowId = Guid.NewGuid();
         var definitionJson = JsonSerializer.Serialize(definition, WorkflowJson.Options);
@@ -137,6 +160,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         {
             Id = workflowId,
             TeamId = teamId,
+            Slug = slug,
             Name = name,
             Description = description,
             DefinitionJson = definitionJson,
@@ -159,11 +183,21 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         foreach (var activation in activations) _db.WorkflowActivation.Add(BuildActivationRow(workflowId, activation));
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (IsWorkflowSlugUniqueViolation(ex))
+        {
+            // Race-loss: a concurrent create derived the same slug before either write landed and
+            // uq_workflow_team_slug_active caught the loser. The slug is auto-derived, so the caller
+            // just retries the create (the pre-check then yields the next free -N variant).
+            throw new InvalidOperationException($"A workflow with slug '{slug}' was created concurrently in this team. Please retry.", ex);
+        }
 
         _logger.LogInformation(
-            "Workflow created. WorkflowId={WorkflowId} TeamId={TeamId} Name={Name} Nodes={NodeCount} Edges={EdgeCount} Activations={ActivationCount} Enabled={Enabled}",
-            workflowId, teamId, name, definition.Nodes.Count, definition.Edges.Count, activations.Count, enabled);
+            "Workflow created. WorkflowId={WorkflowId} TeamId={TeamId} Slug={Slug} Name={Name} Nodes={NodeCount} Edges={EdgeCount} Activations={ActivationCount} Enabled={Enabled}",
+            workflowId, teamId, slug, name, definition.Nodes.Count, definition.Edges.Count, activations.Count, enabled);
 
         return workflowId;
     }
@@ -1596,6 +1630,80 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         throw new WorkflowValidationException(result.Errors);
     }
+
+    // ── Slug generation ── the workflow's clean-URL handle. Display-only (never a variable-path
+    // contract key like Project's), so it auto-suffixes on collision instead of refusing, and an
+    // unusable name falls back to "workflow" rather than throwing — a workflow name is free text.
+
+    private const string FallbackSlug = "workflow";
+
+    /// <summary>
+    /// Kebab-case slug from a name: lowercase, keep <c>[a-z0-9_]</c>, collapse every other run to a
+    /// single hyphen, trim, cap 64. Mirrors <c>ProjectService.SlugifyName</c> / the 0099 backfill SQL
+    /// exactly (pinned by unit test). Empty (punctuation-only name) → <see cref="FallbackSlug"/>.
+    /// Public + static so it's unit-tested directly and stays in lockstep with the migration.
+    /// </summary>
+    public static string SlugifyName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return FallbackSlug;
+
+        var sb = new System.Text.StringBuilder(name.Length);
+        var lastWasHyphen = true;   // suppresses a leading hyphen
+        foreach (var c in name)
+        {
+            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
+            {
+                sb.Append(char.ToLowerInvariant(c));
+                lastWasHyphen = false;
+            }
+            else if (!lastWasHyphen)
+            {
+                sb.Append('-');
+                lastWasHyphen = true;
+            }
+        }
+
+        var result = sb.ToString().TrimEnd('-');
+        if (result.Length > 64) result = result[..64].TrimEnd('-');
+        return result.Length == 0 ? FallbackSlug : result;
+    }
+
+    /// <summary>
+    /// The base slug, or a <c>-N</c> variant when the base (or a prior variant) is already taken by an
+    /// alive workflow in the team. Mirrors <c>AgentDefinitionService.DeriveAvailableSlugAsync</c>; the
+    /// final SaveChanges still translates a lost race via <see cref="IsWorkflowSlugUniqueViolation"/>.
+    /// </summary>
+    private async Task<string> DeriveAvailableSlugAsync(Guid teamId, string? name, CancellationToken cancellationToken)
+    {
+        var baseSlug = SlugifyName(name);
+
+        // A 50-char prefix is a prefix of baseSlug AND of every trimmed -N variant, so one StartsWith
+        // prefetch covers the truncation case; the exact Contains check below stays precise.
+        var probe = baseSlug.Length <= 50 ? baseSlug : baseSlug[..50];
+
+        var taken = (await _db.Workflow.AsNoTracking()
+            .Where(w => w.TeamId == teamId && w.DeletedDate == null && w.Slug.StartsWith(probe))
+            .Select(w => w.Slug)
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToHashSet(StringComparer.Ordinal);
+
+        if (!taken.Contains(baseSlug)) return baseSlug;
+
+        for (var n = 2; n < 10000; n++)
+        {
+            var suffix = $"-{n}";
+            var trimmed = baseSlug.Length + suffix.Length <= 64 ? baseSlug : baseSlug[..(64 - suffix.Length)].TrimEnd('-');
+            var candidate = trimmed + suffix;
+
+            if (!taken.Contains(candidate)) return candidate;
+        }
+
+        throw new InvalidOperationException($"Could not derive a free slug from workflow name '{name}'.");
+    }
+
+    private static bool IsWorkflowSlugUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg
+            && (pg.ConstraintName?.Contains("uq_workflow_team_slug", StringComparison.Ordinal) ?? false);
 
     private async Task<Workflow?> LoadWorkflowAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken)
     {

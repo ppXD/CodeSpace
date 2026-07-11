@@ -132,9 +132,9 @@ public class MeQueryTests
 
         // Two active workflows + one soft-deleted — the count must include only the active two.
         db.Workflow.AddRange(
-            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-1", DefinitionJson = "{}" },
-            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-2", DefinitionJson = "{}" },
-            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-deleted", DefinitionJson = "{}", DeletedDate = DateTimeOffset.UtcNow });
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Slug = "wf-1", Name = "wf-1", DefinitionJson = "{}" },
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Slug = "wf-2", Name = "wf-2", DefinitionJson = "{}" },
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Slug = "wf-deleted", Name = "wf-deleted", DefinitionJson = "{}", DeletedDate = DateTimeOffset.UtcNow });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
 

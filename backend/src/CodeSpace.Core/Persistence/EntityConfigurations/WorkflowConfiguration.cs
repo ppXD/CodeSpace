@@ -10,6 +10,8 @@ public class WorkflowConfiguration : IEntityTypeConfiguration<Workflow>
     {
         builder.HasKey(w => w.Id);
 
+        builder.Property(w => w.Slug).HasMaxLength(64);
+
         builder.Property(w => w.DefinitionJson).HasColumnName("definition_jsonb").HasColumnType("jsonb");
 
         builder.HasOne(w => w.Team).WithMany().HasForeignKey(w => w.TeamId);

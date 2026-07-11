@@ -326,6 +326,7 @@ public class RunRecordLedgerFlowTests
             Id = workflowId,
             TeamId = teamId,
             Name = "ledger-test-" + Guid.NewGuid().ToString("N")[..6],
+            Slug = "ledger-" + workflowId.ToString("N")[..8],
             DefinitionJson = "{}",
             LatestVersion = 1,
             Enabled = true,

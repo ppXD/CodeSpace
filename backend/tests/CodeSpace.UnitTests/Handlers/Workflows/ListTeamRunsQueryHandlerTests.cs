@@ -75,6 +75,7 @@ public class ListTeamRunsQueryHandlerTests
         public Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<IReadOnlyList<WorkflowSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<WorkflowDetail?> GetAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<WorkflowDetail?> GetByRefAsync(string idOrSlug, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task DeleteAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
