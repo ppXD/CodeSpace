@@ -4,6 +4,8 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
 import { useRepositories } from "@/hooks/use-repositories";
 
+import { SearchSelect } from "./SearchSelect";
+
 /**
  * agent.code "Add related repositories" editor (multi-repo PR5). Authors the ADDITIONAL repos an agent's
  * workspace clones alongside the primary (the `repositoryId` row above it) — the way to make a coordinated
@@ -160,22 +162,22 @@ function RelatedRepoRow({
       <div className="wf-trigger-repos-row-controls">
         <label className="wf-trigger-repos-field">
           <span className="wf-trigger-repos-field-label">Project:</span>
-          <select className="wf-trigger-repos-select" value={projectId} onChange={(e) => onPickProject(e.target.value)} aria-label="Project">
-            <option value="">All projects</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
+          <SearchSelect
+            options={projects.map((p) => ({ id: p.id, label: p.name }))}
+            value={projectId ? [projectId] : []}
+            onChange={(ids) => onPickProject(ids[0] ?? "")}
+            placeholder="All projects"
+          />
         </label>
 
         <label className="wf-trigger-repos-field">
           <span className="wf-trigger-repos-field-label">Repository:</span>
-          <select className="wf-trigger-repos-select" value={entry.repositoryId} onChange={(e) => onPickRepo(e.target.value)} aria-label="Repository">
-            <option value="">Pick a repository…</option>
-            {visibleRepos.map((r) => (
-              <option key={r.id} value={r.id}>{r.fullPath}</option>
-            ))}
-          </select>
+          <SearchSelect
+            options={visibleRepos.map((r) => ({ id: r.id, label: r.fullPath }))}
+            value={entry.repositoryId ? [entry.repositoryId] : []}
+            onChange={(ids) => onPickRepo(ids[0] ?? "")}
+            placeholder="Pick a repository…"
+          />
         </label>
 
         <label className="wf-trigger-repos-field">

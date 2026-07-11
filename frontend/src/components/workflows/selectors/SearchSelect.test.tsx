@@ -24,12 +24,17 @@ describe("SearchSelect — single", () => {
     expect(onChange).toHaveBeenCalledWith(["b"]);   // single = array of one
   });
 
-  it("renders the chosen value as a chip and hides the input (remove to re-pick)", () => {
-    render(<SearchSelect options={opts} value={["a"]} onChange={() => {}} placeholder="Pick…" />);
+  it("renders the chosen value as a chip but keeps the input so you can switch directly", () => {
+    const onChange = vi.fn();
+    render(<SearchSelect options={opts} value={["a"]} onChange={onChange} placeholder="Pick…" />);
 
     expect(screen.getByText("Alpha")).toBeInTheDocument();
-    expect(screen.queryByRole("textbox")).toBeNull();          // a set single value hides the search box
     expect(screen.getByRole("button", { name: "Remove Alpha" })).toBeInTheDocument();
+
+    // No remove-first needed: picking a different option replaces the single value.
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick…" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: /Beta/ }));
+    expect(onChange).toHaveBeenCalledWith(["b"]);   // replaced, not appended
   });
 
   it("keeps a saved id no longer in options visible as an 'Unavailable' chip", () => {

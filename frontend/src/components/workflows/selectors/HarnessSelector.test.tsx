@@ -4,9 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { HarnessSelector } from "./HarnessSelector";
 
 /**
- * The harness picker is dispatched via `x-selector: "harness"` on the `agent.code` node's config.
- * It lists the engine's registered harnesses and saves the chosen `kind` as a plain string.
- * Hook mocked: useHarnesses.
+ * The harness picker (`x-selector: "harness"`) renders the shared SearchSelect combobox and saves the chosen
+ * `kind`. Options appear once the search box is focused. Hook mocked: useHarnesses.
  */
 vi.mock("@/hooks/use-agents", () => ({
   useHarnesses: () => ({
@@ -23,15 +22,16 @@ describe("HarnessSelector", () => {
     const onChange = vi.fn();
     render(<HarnessSelector value="" onChange={onChange} />);
 
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick a harness…" }));
     expect(screen.getByRole("option", { name: "codex-cli" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "claude-code" })).toBeInTheDocument();
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "claude-code" } });
+    fireEvent.mouseDown(screen.getByRole("option", { name: "claude-code" }));
     expect(onChange).toHaveBeenCalledWith("claude-code");
   });
 
-  it("reflects the currently-selected harness kind", () => {
+  it("reflects the currently-selected harness as a chip", () => {
     render(<HarnessSelector value="codex-cli" onChange={() => {}} />);
-    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("codex-cli");
+    expect(screen.getByText("codex-cli")).toBeInTheDocument();
   });
 });

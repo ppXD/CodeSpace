@@ -1,39 +1,28 @@
 import type { ConversationSummary } from "@/api/chat";
 import { useConversations } from "@/hooks/use-chat";
 
-interface ConversationSelectorProps {
-  /** Selected conversation UUID ("" = none chosen yet). */
-  value: string;
-  onChange: (next: string) => void;
-}
+import { SearchSelect, type SearchOption } from "./SearchSelect";
 
 /**
- * Single-conversation picker. Lists the team's conversations; the saved value is the chosen
- * conversation's UUID, which flows downstream as a plain `{{input.<name>}}` string.
- *
- * Used by the schema-driven form whenever a field declares `"x-selector": "conversation"` — generic,
- * not tied to any one node (e.g. a chat-posting node can let the author pick the target channel).
+ * Single-conversation picker (`"x-selector": "conversation"`). Saves the chosen conversation's UUID.
+ * Renders the shared {@link SearchSelect} combobox so it matches every other dropdown.
  */
-export function ConversationSelector({ value, onChange }: ConversationSelectorProps) {
-  const conversations = useConversations();
-  const rows = conversations.data ?? [];
-
-  return (
-    <select
-      className="wf-form-input"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      aria-label="Conversation"
-    >
-      <option value="">{conversations.isLoading ? "Loading…" : "Pick a conversation…"}</option>
-      {rows.map((c) => <option key={c.id} value={c.id}>{conversationLabel(c)}</option>)}
-    </select>
-  );
+function toOption(c: ConversationSummary): SearchOption {
+  const label = c.kind === "Channel" ? `#${c.slug ?? c.name ?? "channel"}` : (c.name || "(direct message)");
+  return { id: c.id, label };
 }
 
-/** Channel → `#slug`; named group → its name; otherwise a generic DM label. */
-function conversationLabel(c: ConversationSummary): string {
-  if (c.kind === "Channel") return `#${c.slug ?? c.name ?? "channel"}`;
-  if (c.name) return c.name;
-  return "(direct message)";
+export function ConversationSelector({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  const conversations = useConversations();
+  const options = (conversations.data ?? []).map(toOption);
+
+  return (
+    <SearchSelect
+      options={options}
+      value={value ? [value] : []}
+      onChange={(ids) => onChange(ids[0] ?? "")}
+      loading={conversations.isLoading}
+      placeholder="Pick a conversation…"
+    />
+  );
 }

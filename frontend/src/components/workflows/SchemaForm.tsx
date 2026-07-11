@@ -10,6 +10,7 @@ import { CredentialedModelMultiSelector, CredentialedModelSelector } from "./sel
 import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
+import { RelatedRepositoriesEditor } from "./selectors/RelatedRepositoriesEditor";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
@@ -487,6 +488,11 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />
       );
+    case "relatedRepositories":
+      // The { repositoryId, alias?, access }[] multi-repo editor — a project→repo cascade per row with an
+      // auto alias, instead of the generic array editor's raw repo-id text boxes. Handles the array shape
+      // itself; empty ⇒ undefined so the key drops (single-repo byte-identical).
+      return <RelatedRepositoriesEditor value={value} onChange={(next) => onChange(next)} />;
     case "trigger.repositories":
       // List editor for the { repositoryId, labels? }[] shape used by PR-trigger
       // activation configs. The selector handles legacy { repositoryId, labels? }

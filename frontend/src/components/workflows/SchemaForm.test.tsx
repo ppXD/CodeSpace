@@ -113,7 +113,7 @@ describe("SchemaForm scalar selector dual-mode", () => {
     renderConv({ conversationId: "" }, true);
     expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Expression" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox")).toBeInTheDocument();   // the conversation dropdown
+    expect(screen.getByRole("textbox", { name: "Pick a conversation…" })).toBeInTheDocument();   // the conversation combobox
   });
 
   it("switches to the expression input when Expression is chosen", () => {
@@ -131,7 +131,7 @@ describe("SchemaForm scalar selector dual-mode", () => {
   it("stays a plain picker with no toggle when there are no variable suggestions (run form)", () => {
     renderConv({ conversationId: "" }, false);
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Pick a conversation…" })).toBeInTheDocument();
   });
 });
 
@@ -191,7 +191,8 @@ describe("SchemaForm credentialed-model selector", () => {
 
   it("renders the credential picker for a modelCredential field", () => {
     render(<SchemaForm schema={credSchema} value={{ modelCredentialId: "" }} onChange={vi.fn()} />);
-    expect(screen.getByRole("option", { name: "Team Anthropic (Anthropic)" })).toBeInTheDocument();
+    fireEvent.focus(screen.getByRole("textbox", { name: "Team / operator default" }));
+    expect(screen.getByRole("option", { name: /Team Anthropic/ })).toBeInTheDocument();
   });
 
   // The "on-disk value shape unchanged" contract rests on empty → absent-key coercion. Clearing a scalar

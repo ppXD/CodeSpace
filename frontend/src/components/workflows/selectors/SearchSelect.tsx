@@ -70,10 +70,6 @@ export function SearchSelect({ options, value, onChange, multi = false, loading 
     else if (e.key === "Backspace" && query === "" && value.length > 0) { remove(value[value.length - 1]!); }
   };
 
-  // Single mode hides the search input once a value is chosen (the chip IS the value); clicking the chip's
-  // control area or removing it reopens search. Multi always keeps the trailing input for adding more.
-  const showInput = multi || value.length === 0;
-
   return (
     <div className="wf-userpick">
       <div className="wf-userpick-control">
@@ -91,22 +87,22 @@ export function SearchSelect({ options, value, onChange, multi = false, loading 
           );
         })}
 
-        {showInput && (
-          <input
-            type="text"
-            className="wf-userpick-input"
-            value={query}
-            placeholder={value.length === 0 ? placeholder : "Add another…"}
-            aria-label={placeholder}
-            onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIndex(0); }}
-            onFocus={() => setOpen(true)}
-            onBlur={() => setOpen(false)}
-            onKeyDown={onKeyDown}
-          />
-        )}
+        {/* The input is ALWAYS present — in single mode you click it to switch to another option without
+            removing the current one first (picking replaces). Multi keeps it to add more. */}
+        <input
+          type="text"
+          className="wf-userpick-input"
+          value={query}
+          placeholder={value.length === 0 ? placeholder : (multi ? "Add another…" : "Change…")}
+          aria-label={placeholder}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIndex(0); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onKeyDown={onKeyDown}
+        />
       </div>
 
-      {open && showInput && (
+      {open && (
         <div className="wf-userpick-pop" role="listbox">
           {loading ? (
             <div className="wf-userpick-empty">Loading…</div>
@@ -120,6 +116,9 @@ export function SearchSelect({ options, value, onChange, multi = false, loading 
                   type="button"
                   role="option"
                   aria-selected={i === activeIndex}
+                  // Explicit name — the option renders its label + meta as spans, but a surrounding <label>
+                  // (some fields wrap the picker in one) would otherwise capture the button's accessible name.
+                  aria-label={o.meta ? `${o.label} · ${o.meta}` : o.label}
                   className="wf-userpick-opt"
                   data-active={i === activeIndex}
                   onMouseDown={(e) => { e.preventDefault(); pick(o.id); }}

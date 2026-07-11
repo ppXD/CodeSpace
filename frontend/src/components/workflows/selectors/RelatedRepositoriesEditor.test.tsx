@@ -75,14 +75,19 @@ describe("RelatedRepositoriesEditor", () => {
     render(<RelatedRepositoriesEditor value={[{ repositoryId: "", access: "read" }]} onChange={vi.fn()} />);
 
     const row = screen.getByTestId("related-repositories-row");
-    const projectSelect = within(row).getByLabelText("Project") as HTMLSelectElement;
-    let repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
-    expect(Array.from(repoSelect.options).map((o) => o.value).filter(Boolean)).toEqual(["repo-1", "repo-2", "repo-3"]);
 
-    fireEvent.change(projectSelect, { target: { value: "proj-beta" } });
+    // The repo combobox initially offers every repo (by fullPath).
+    fireEvent.focus(within(row).getByRole("textbox", { name: "Pick a repository…" }));
+    expect(within(row).getByRole("option", { name: "acme/api" })).toBeInTheDocument();
+    expect(within(row).getByRole("option", { name: "labs/exp" })).toBeInTheDocument();
 
-    repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
-    expect(Array.from(repoSelect.options).map((o) => o.value).filter(Boolean)).toEqual(["repo-3"]);
+    // Narrow by project Beta → the repo list drops to that project's repos only.
+    fireEvent.focus(within(row).getByRole("textbox", { name: "All projects" }));
+    fireEvent.mouseDown(within(row).getByRole("option", { name: "Beta" }));
+
+    fireEvent.focus(within(row).getByRole("textbox", { name: "Pick a repository…" }));
+    expect(within(row).getByRole("option", { name: "labs/exp" })).toBeInTheDocument();
+    expect(within(row).queryByRole("option", { name: "acme/api" })).toBeNull();
   });
 
   it("typing an alias emits it on the entry", () => {
@@ -118,11 +123,11 @@ describe("RelatedRepositoriesEditor", () => {
     const rows = screen.getAllByTestId("related-repositories-row");
     expect(rows).toHaveLength(3);   // null + non-object dropped; 3 survive
 
-    // The surviving entries keep their repo + access (not corrupted), in order — assert via the row selects.
-    expect((within(rows[0]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("repo-1");
+    // The surviving entries keep their repo (chip) + access (select), in order.
+    expect(within(rows[0]!).getByText("acme/api")).toBeInTheDocument();                    // repo-1
     expect((within(rows[0]!).getByLabelText("Access") as HTMLSelectElement).value).toBe("read");
-    expect((within(rows[1]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("");   // coerced empty-id
-    expect((within(rows[2]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("repo-2");
+    expect(within(rows[1]!).queryByText(/acme|labs/)).toBeNull();                          // coerced empty-id → no repo chip
+    expect(within(rows[2]!).getByText("acme/web")).toBeInTheDocument();                    // repo-2
     expect((within(rows[2]!).getByLabelText("Access") as HTMLSelectElement).value).toBe("write");
   });
 });
