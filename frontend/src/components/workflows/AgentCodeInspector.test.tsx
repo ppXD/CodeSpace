@@ -16,8 +16,8 @@ vi.mock("@/hooks/use-model-credentials", () => ({
 vi.mock("@/hooks/use-chat", () => ({
   useConversations: () => ({ isLoading: false, data: [{ id: "conv1", kind: "Channel", slug: "review", name: "Review" }] }),
 }));
-vi.mock("./selectors/ProjectRepositorySelector", () => ({
-  ProjectRepositorySelector: ({ value }: { value: string }) => <div data-testid="repo-selector">{value}</div>,
+vi.mock("./selectors/RepositoryWorkspacePicker", () => ({
+  RepositoryWorkspacePicker: ({ repositoryId }: { repositoryId: string }) => <div data-testid="repo-selector">{repositoryId}</div>,
 }));
 vi.mock("./VariablePickerInput", () => ({
   VariablePickerInput: ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) => (

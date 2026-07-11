@@ -4228,6 +4228,23 @@ textarea:-webkit-autofill {
 .acs-root .wf-relrepo-add:hover { border-color: var(--accent); background: var(--accent-soft); }
 .acs-root .wf-relrepo-hint { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); line-height: 1.4; }
 
+/* Unified repository-workspace picker (RepositoryWorkspacePicker) — one flat list, row 0 = primary.
+   Reuses .wf-relrepo container/field/add/hint; the row gets an inline head (badge + actions) instead of
+   the absolute remove, so it drops the reserved right padding. */
+.acs-root .wf-wsrepo-row { padding: 10px 12px 12px; }
+.acs-root .wf-wsrepo-row-primary { border-color: var(--accent-line, var(--accent)); background: var(--accent-soft); }
+.acs-root .wf-relrepo-rowhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.acs-root .wf-relrepo-badge { font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 999px; }
+.acs-root .wf-relrepo-badge-primary { color: var(--accent); border-color: var(--accent); background: var(--panel); }
+.acs-root .wf-relrepo-rowactions { display: inline-flex; align-items: center; gap: 6px; }
+.acs-root .wf-relrepo-makeprimary { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel); color: var(--muted); font-family: inherit; font-size: 10.5px; cursor: pointer; }
+.acs-root .wf-relrepo-makeprimary:hover { border-color: var(--accent); color: var(--accent); }
+.acs-root .wf-relrepo-remove-inline { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel); color: var(--muted); cursor: pointer; }
+.acs-root .wf-relrepo-remove-inline:hover { border-color: var(--danger); color: var(--danger); }
+.acs-root .wf-relrepo-primarymark { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--text-2, var(--muted)); padding-top: 2px; }
+.acs-root .wf-relrepo-primarymark strong { color: var(--accent); font-weight: 600; }
+.acs-root .wf-relrepo-primaryhint { font-size: 10px; color: var(--muted); }
+
 /* ── Outputs hint card (Provides section in inspector) ──────────────────────── */
 .acs-root .wf-outputs-hint { display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
 .acs-root .wf-outputs-hint-intro { color: var(--muted); line-height: 1.4; }
