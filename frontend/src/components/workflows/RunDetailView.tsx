@@ -40,14 +40,18 @@ const MAX_EMBED_DEPTH = 3;
  */
 export type RunView = "activity" | "canvas" | "changes" | "trace";
 
-export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", view: controlledView, onViewChange, selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; view?: RunView; onViewChange?: (v: RunView) => void; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   const run = useWorkflowRun(runId);
   // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
   // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
   // node icons/kinds for definitionToRfNodes.
   const manifests = useNodeManifests();
   const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
-  const [view, setView] = useState<RunView>(defaultView);
+  // The view tab is controlled when a host lifts it via onViewChange (the run-detail route deep-links it as
+  // ?view=); otherwise own it locally (a nested embed, the workflow editor). Presence of the setter marks control.
+  const [localView, setLocalView] = useState<RunView>(defaultView);
+  const view = onViewChange ? (controlledView ?? defaultView) : localView;
+  const setView = onViewChange ?? setLocalView;
   // The Activity terminal's expand/collapse is a single selected-agent id. A host (e.g. an outline that shares the
   // selection) can LIFT it via onSelectAgent; when it doesn't (the modal, a nested embed), own it locally so a tile
   // click still expands its terminal. Presence of the setter marks the controlled case.
