@@ -25,10 +25,16 @@ public class ProjectsController : ControllerBase
         return Ok(result);
     }
 
-    [HttpGet("{projectId:guid}")]
-    public async Task<IActionResult> Get([FromRoute] Guid projectId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Read a single project by a URL reference — either its GUID (legacy link) or its
+    /// team-unique slug (canonical clean URL, e.g. <c>/api/projects/squid</c>). The response
+    /// carries the canonical <c>Slug</c> so the router can redirect a legacy-GUID URL to the
+    /// slug URL. Mutations (PUT/DELETE) stay GUID-keyed — the caller already holds the id.
+    /// </summary>
+    [HttpGet("{idOrSlug}")]
+    public async Task<IActionResult> Get([FromRoute] string idOrSlug, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new GetProjectQuery { ProjectId = projectId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send(new GetProjectByRefQuery { IdOrSlug = idOrSlug }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 
@@ -36,7 +42,7 @@ public class ProjectsController : ControllerBase
     public async Task<IActionResult> Create([FromBody] CreateProjectCommand command, CancellationToken cancellationToken)
     {
         var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
-        return CreatedAtAction(nameof(Get), new { projectId = id }, new { id });
+        return CreatedAtAction(nameof(Get), new { idOrSlug = id.ToString() }, new { id });
     }
 
     [HttpPut("{projectId:guid}")]
