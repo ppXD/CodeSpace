@@ -76,7 +76,11 @@ export function runDuration(run: WorkflowRunSummary, nowMs: number): string {
   if (run.status === "Running") return compactAge(run.startedAt ?? run.createdDate, nowMs);
   if (run.status === "Pending" || run.status === "Enqueued") return "";
 
-  return formatDuration(run.createdDate, run.completedAt);   // Success / Failure / Cancelled
+  // A terminal run that ever parked: createdDate→completedAt is a lifespan dominated by wait time, not runtime — show
+  // it as a coarse "open Nd" span (honest) rather than the bogus multi-hour clock a parked-then-cancelled run yields.
+  if (run.wasSuspended && run.completedAt) return `open ${compactAge(run.createdDate, new Date(run.completedAt).getTime())}`;
+
+  return formatDuration(run.createdDate, run.completedAt);   // Success / Failure / Cancelled that ran straight through
 }
 
 /** The Needs-decision card: how many decisions wait on a human, the oldest one's age, and how many are high-risk. */

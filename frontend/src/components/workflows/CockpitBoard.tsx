@@ -199,6 +199,8 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
   const tone = runStatusTone(run.status);
   const version = run.workflowVersion != null ? `v${run.workflowVersion}` : null;
   const duration = runDuration(run, nowMs);
+  // A parked-then-terminal run shows a lifespan ("open 5d"), not a runtime — so it drops the clock glyph (which would imply work).
+  const lifespan = run.wasSuspended && (run.status === "Success" || run.status === "Failure" || run.status === "Cancelled");
   const when = run.completedAt ?? run.startedAt ?? run.createdDate;
   const error = run.status === "Failure" ? run.error : null;
   // Launch-scope repos resolved to names from the team set; unresolved ids (archived / not yet loaded) drop out silently.
@@ -230,7 +232,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
             </span>
           )}
           <span className="run-row2-gap" />
-          {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
+          {duration && <span className="run-row2-dur">{!lifespan && <Ic.Clock size={11} />}{duration}</span>}
         </div>
         {error && (
           <div className="run-row2-l3">

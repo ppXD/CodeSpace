@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
+  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", wasSuspended: false, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 

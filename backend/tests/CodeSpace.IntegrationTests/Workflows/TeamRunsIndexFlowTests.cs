@@ -888,6 +888,22 @@ public class TeamRunsIndexFlowTests
         result.Single(r => r.Id == unscoped).RepositoryIds.ShouldBeEmpty("a run with no launch scope carries no repo ids");
     }
 
+    [Fact]
+    public async Task Flags_a_run_that_ever_parked_on_a_wait_so_the_row_can_show_a_lifespan()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var parked = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null, status: WorkflowRunStatus.Cancelled);
+        await SeedWaitAsync(parked, WorkflowWaitKinds.Decision, WorkflowWaitStatuses.Resolved);   // it suspended at least once, then resumed
+        var neverParked = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Success);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Single(r => r.Id == parked).WasSuspended.ShouldBeTrue("a run with a WorkflowRunWait ever parked — its span is lifespan, not runtime");
+        result.Single(r => r.Id == neverParked).WasSuspended.ShouldBeFalse("a run that never waited ran straight through");
+    }
+
     /// <summary>Seed a minimal work session whose <c>Title</c> the run summary joins. Mirrors the LaunchBasePinFlow seed.</summary>
     private async Task<Guid> SeedSessionAsync(Guid teamId, string title)
     {
