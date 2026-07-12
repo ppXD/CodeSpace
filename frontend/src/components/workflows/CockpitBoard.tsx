@@ -139,7 +139,7 @@ function SuspendedRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: 
 
   return (
     <div className="cockpit-attn-row" onClick={() => onOpen(run)}>
-      <span className="cockpit-attn-glyph" data-tone="suspended" aria-hidden="true"><Ic.Pause size={12} /></span>
+      <span className="run-row2-tile" data-tone="suspended" aria-hidden="true"><Ic.Pause size={13} /></span>
       <div className="cockpit-attn-body">
         <div className="cockpit-attn-title">{title} <span className="cockpit-attn-sub">suspended</span></div>
         <div className="cockpit-attn-meta">{sourceLabel(run.rootSourceType)} · waiting {compactAge(run.startedAt ?? run.createdDate, nowMs)}</div>
@@ -164,7 +164,7 @@ function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phas
 
   return (
     <div className="cockpit-live-row" onClick={() => onOpen(run)}>
-      <span className="cockpit-live-dot" aria-hidden="true" />
+      <span className="run-row2-tile" data-tone="running" aria-hidden="true"><span className="runs-row-spin" /></span>
       <div className="cockpit-live-body">
         <div className="cockpit-live-title">
           <span className="cockpit-live-name">{title}</span>
