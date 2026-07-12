@@ -417,3 +417,68 @@ describe("SchemaForm grouped layout (x-group)", () => {
     expect(screen.getByText("A")).toBeInTheDocument();
   });
 });
+
+/**
+ * x-control: "segmented" — the FIRST widget through the new x-control discriminator. An enum renders as
+ * a lifted button-group instead of a <select>, storing the RAW enum value as a string (byte-identical to
+ * the <select> path), and falls through to the <select> whenever x-control is absent or unrecognised.
+ */
+describe("SchemaForm x-control: segmented", () => {
+  const segSchema = (control?: unknown) => ({
+    type: "object",
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["a", "b", "c"],
+        "x-control": control,
+        "x-enumLabels": { a: "Alpha", b: "Bravo", c: "Charlie" },
+      },
+    },
+  });
+
+  it("renders enum options as a segmented button-group (not a <select>) with friendly labels", () => {
+    render(<SchemaForm schema={segSchema("segmented")} value={{ mode: "b" }} onChange={vi.fn()} />);
+    expect(screen.queryByRole("combobox")).toBeNull();                           // no <select>
+    const group = screen.getByRole("radiogroup");
+    expect(group.classList.contains("wf-segmented")).toBe(true);
+    expect(screen.getByRole("radio", { name: "Bravo" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "Alpha" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("stores the raw enum value as a string on click — byte-identical to the <select> path", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={segSchema("segmented")} value={{ mode: "a" }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("radio", { name: "Charlie" }));
+    expect(onChange).toHaveBeenCalledWith({ mode: "c" });                        // "c", exactly like <select>
+  });
+
+  it("is a single tab stop with a roving tabindex (only the checked radio is tabbable)", () => {
+    render(<SchemaForm schema={segSchema("segmented")} value={{ mode: "b" }} onChange={vi.fn()} />);
+    expect(screen.getByRole("radio", { name: "Bravo" }).getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("radio", { name: "Alpha" }).getAttribute("tabindex")).toBe("-1");
+    expect(screen.getByRole("radio", { name: "Charlie" }).getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("moves the selection with arrow keys, wrapping at the ends", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={segSchema("segmented")} value={{ mode: "c" }} onChange={onChange} />);
+    fireEvent.keyDown(screen.getByRole("radiogroup"), { key: "ArrowRight" });   // c -> wrap to a
+    expect(onChange).toHaveBeenLastCalledWith({ mode: "a" });
+    fireEvent.keyDown(screen.getByRole("radiogroup"), { key: "Home" });         // -> a
+    expect(onChange).toHaveBeenLastCalledWith({ mode: "a" });
+    fireEvent.keyDown(screen.getByRole("radiogroup"), { key: "End" });          // -> c
+    expect(onChange).toHaveBeenLastCalledWith({ mode: "c" });
+  });
+
+  it("falls through to the <select> when x-control is absent (non-breaking default)", () => {
+    render(<SchemaForm schema={segSchema(undefined)} value={{ mode: "a" }} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+
+  it("falls through to the <select> for an unrecognised x-control value", () => {
+    render(<SchemaForm schema={segSchema("bogus")} value={{ mode: "a" }} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+});

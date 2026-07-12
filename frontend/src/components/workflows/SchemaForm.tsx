@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
@@ -88,6 +88,15 @@ interface Schema {
   /** Root-level only: the section order for the grouped layout (group names). Groups not listed are appended
    *  in first-seen order. Ignored when no field declares x-group. */
   "x-sections"?: string[];
+  /**
+   * Explicit control discriminator: pick WHICH widget renders this field, independent of its JSON type.
+   * The SAME stored value can render as a different control — e.g. a closed enum as "segmented" (a lifted
+   * button-group) instead of the default &lt;select&gt;. renderControl reads this FIRST; when the value is
+   * absent OR unrecognised for the field's shape it falls through to today's x-selector / enum / type
+   * dispatch, so this is purely additive and non-breaking (the on-disk value shape is unchanged).
+   * Known values: "segmented".
+   */
+  "x-control"?: string;
 }
 
 interface SchemaFormProps {
@@ -244,7 +253,68 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
   );
 }
 
+/**
+ * A themed button-group for a short closed enum — a glanceable, one-click alternative to the
+ * &lt;select&gt; for fields that declare "x-control": "segmented". It stores the RAW enum value as a
+ * string (identical to the &lt;select&gt; path's `e.target.value`), so it is a purely visual swap and
+ * fully non-breaking. Option text comes from x-enumLabels when present.
+ */
+function SegmentedControl({ schema, value, onChange }: { schema: Schema; value: unknown; onChange: (next: unknown) => void }) {
+  const enumLabels = schema["x-enumLabels"] ?? {};
+  const options = (schema.enum ?? []).map((v) => String(v));
+  const current = value == null ? "" : String(value);
+  const activeIdx = options.indexOf(current);
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Proper radiogroup keyboard semantics: arrows move the selection (wrapping), Home/End jump to the
+  // ends, and a roving tabindex keeps the group a single tab stop. Focus follows selection.
+  const select = (i: number) => { onChange(options[i]); refs.current[i]?.focus(); };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (options.length === 0) return;
+    const from = activeIdx < 0 ? 0 : activeIdx;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); select((from + 1) % options.length); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); select((from - 1 + options.length) % options.length); }
+    else if (e.key === "Home") { e.preventDefault(); select(0); }
+    else if (e.key === "End") { e.preventDefault(); select(options.length - 1); }
+  };
+
+  return (
+    <div className="wf-segmented" role="radiogroup" onKeyDown={onKeyDown}>
+      {options.map((key, i) => {
+        const active = current === key;
+        return (
+          <button
+            key={key}
+            ref={(el) => { refs.current[i] = el; }}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            tabIndex={active || (activeIdx < 0 && i === 0) ? 0 : -1}
+            className="wf-segmented-opt"
+            data-active={active || undefined}
+            onClick={() => onChange(key)}
+          >
+            {enumLabels[key] ?? key}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function renderControl(schema: Schema, value: unknown, onChange: (next: unknown) => void, templateHint: boolean, variableSuggestions?: ScopeSuggestion[]) {
+  // x-control — an explicit widget discriminator, read FIRST. When a property declares a recognised
+  // "x-control" for its shape we render that widget for the SAME stored value (e.g. an enum as a
+  // segmented button-group). Absent OR unrecognised falls through to the x-selector / enum / type
+  // dispatch below, so this is additive and non-breaking. A segmented enum keeps the same Pick ⇄
+  // Expression affordance the <select> gets, so it can still be bound to a dynamic {{ref}}.
+  if (schema["x-control"] === "segmented" && Array.isArray(schema.enum)) {
+    const segmented = <SegmentedControl schema={schema} value={value} onChange={onChange} />;
+    return variableSuggestions != null && variableSuggestions.length > 0
+      ? <DualModeSelector pick={segmented} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />
+      : segmented;
+  }
+
   // Custom selector takes the highest precedence — when a property carries
   // "x-selector": "<key>" we hand off to renderCustomSelector. The on-disk value
   // stays the schema-declared shape (string for repository, etc.).
