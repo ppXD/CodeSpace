@@ -54,7 +54,23 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
         // sits downstream of an interactive wait feeding actAsUserId, the engine gates the responder's
         // linked identity — no chat/engine changes for future act-as-user nodes.
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestWriteCapability) },
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: the always-first plain-language summary the inspector composes from the live inputs
+        // (repositoryId resolves to the repo NAME; a bound {{ref}} shows as a chip; unset fields show the
+        // x-intentPlaceholders prompt). Display-only metadata — the engine never reads it. The fields live
+        // in InputSchema; the composer reads the merged {config, inputs} scope.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Open a {draft?draft }pull request titled \"{title}\" from {sourceBranch} into {targetBranch} on {repositoryId}.",
+              "x-intentPlaceholders": {
+                "title": "an untitled PR",
+                "sourceBranch": "a source branch",
+                "targetBranch": "a target branch",
+                "repositoryId": "a repository"
+              }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
@@ -65,7 +81,7 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
                 "targetBranch": { "type": "string", "description": "The branch to merge into (base / target). Must already exist on the remote." },
                 "body": { "type": "string", "x-long": true, "description": "Optional markdown description. Supports {{ }} references." },
                 "draft": { "type": "boolean", "description": "Open as a draft / work-in-progress when the provider supports it." },
-                "actAsUserId": { "type": "string", "format": "uuid", "description": "Open the PR AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by that person. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Open the PR AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by that person. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","title","sourceBranch","targetBranch"]
             }
