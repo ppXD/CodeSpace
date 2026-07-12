@@ -37,7 +37,7 @@ export interface RunAttentionView {
  * Recent (compact history). Arming a card narrows to one view. Decisions answer inline; suspended runs open the Run
  * Room (the right resume affordance depends on the wait kind, so we send the operator there rather than guess).
  */
-export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, filter, history, nowMs, onOpen, onFilter }: {
+export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, filter, history, nowMs, onOpen, onFilter, repoName }: {
   runs: readonly WorkflowRunSummary[];
   decisions: readonly PendingDecision[];
   live: readonly WorkflowRunSummary[];
@@ -48,12 +48,14 @@ export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, fi
   nowMs: number;
   onOpen: (run: WorkflowRunSummary) => void;
   onFilter: (filter: CockpitFilter) => void;
+  /** Resolves a launch-scope repository id to its display name (from the already-loaded team repo set); the row shows a repo chip for the ones that resolve. */
+  repoName?: (id: string) => string | undefined;
 }) {
   if (filter === "failed") {
-    return <Zone label="Failed"><CompactList runs={runs.filter((r) => r.status === "Failure")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed." /></Zone>;
+    return <Zone label="Failed"><CompactList runs={runs.filter((r) => r.status === "Failure")} nowMs={nowMs} onOpen={onOpen} repoName={repoName} empty="Nothing failed." /></Zone>;
   }
   if (filter === "today") {
-    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nowMs={nowMs} onOpen={onOpen} empty="No runs today yet." /></Zone>;
+    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nowMs={nowMs} onOpen={onOpen} repoName={repoName} empty="No runs today yet." /></Zone>;
   }
 
   const showAttention = filter === null || filter === "attention";
@@ -103,7 +105,7 @@ export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, fi
             ? <div className="cockpit-empty">Loading…</div>
             : (
               <>
-                <CompactList runs={history.items} nowMs={nowMs} onOpen={onOpen} empty="No past runs yet." />
+                <CompactList runs={history.items} nowMs={nowMs} onOpen={onOpen} repoName={repoName} empty="No past runs yet." />
                 <Pager page={history.page} pageSize={history.pageSize} total={history.total} onPage={history.onPage} />
               </>
             )}
@@ -175,23 +177,23 @@ function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phas
 }
 
 /** The run list used for History + the failed/today filter views — info-dense two-line rows. */
-function CompactList({ runs, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[]; nowMs: number; onOpen: (run: WorkflowRunSummary) => void; empty: string }) {
+function CompactList({ runs, nowMs, onOpen, repoName, empty }: { runs: WorkflowRunSummary[]; nowMs: number; onOpen: (run: WorkflowRunSummary) => void; repoName?: (id: string) => string | undefined; empty: string }) {
   if (runs.length === 0) return <div className="cockpit-empty">{empty}</div>;
 
   return (
     <ul className="runs-list">
-      {runs.map((r) => <RunRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} />)}
+      {runs.map((r) => <RunRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} repoName={repoName} />)}
     </ul>
   );
 }
 
 /**
  * A run row, reading top-down: the run NAME with its Workflow/Task type + version as labels beside it (and when it
- * ran on the right); then the status word in its tone + the run's wall-clock duration; and, only for a failed run,
- * a third line that boxes the error in a red label sized to the message. The status tone is carried by a tinted tile
- * on the left and the status word, so the state reads at a glance without a separate badge column.
+ * ran on the right); then the status word in its tone, the launch repository, and the run's wall-clock duration; and,
+ * only for a failed run, a third line that boxes the error in a red label sized to the message. The status tone is
+ * carried by a tinted tile on the left and the status word, so the state reads at a glance without a separate badge column.
  */
-function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (run: WorkflowRunSummary) => void }) {
+function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; nowMs: number; onOpen: (run: WorkflowRunSummary) => void; repoName?: (id: string) => string | undefined }) {
   const title = lineageTitle(run);
   const type = runType(run);
   const tone = runStatusTone(run.status);
@@ -199,6 +201,8 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
   const duration = runDuration(run, nowMs);
   const when = run.completedAt ?? run.startedAt ?? run.createdDate;
   const error = run.status === "Failure" ? run.error : null;
+  // Launch-scope repos resolved to names from the team set; unresolved ids (archived / not yet loaded) drop out silently.
+  const repos = repoName ? run.repositoryIds.map(repoName).filter((n): n is string => !!n) : [];
 
   return (
     <li className="run-row2" onClick={() => onOpen(run)}>
@@ -218,6 +222,13 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
         </div>
         <div className="run-row2-l2">
           <span className="run-row2-sw" data-tone={tone}>{runStatusWord(run.status)}</span>
+          {repos.length > 0 && (
+            <span className="run-row2-repo" title={repos.join(", ")}>
+              <Ic.Repo size={11} aria-hidden="true" />
+              <span className="run-row2-repo-name">{repos[0]}</span>
+              {repos.length > 1 && <span className="run-row2-repo-more">+{repos.length - 1}</span>}
+            </span>
+          )}
           <span className="run-row2-gap" />
           {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
         </div>

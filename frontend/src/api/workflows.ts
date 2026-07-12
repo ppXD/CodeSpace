@@ -165,6 +165,8 @@ export interface WorkflowRunSummary {
   workflowName: string | null;
   /** The run's work-session title (the launching task's human goal), joined from `WorkSession.Title`; `null` for a session-less run. A task row prefers this over the raw source token so it reads as the work. */
   sessionTitle: string | null;
+  /** The run's launch-scope repository ids (empty for an authored workflow run). The row resolves display names from the already-loaded team repo set — no per-row name join on the server. */
+  repositoryIds: string[];
   /** Sourced from upstream run_request.source_type. */
   sourceType: WorkflowRunSourceType;
   status: WorkflowRunStatus;

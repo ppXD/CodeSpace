@@ -29,7 +29,7 @@ const wf = (over: Partial<WorkflowDetail> = {}): WorkflowDetail => ({
 });
 
 const run = (over: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary => ({
-  id: "run-aaaa1111", runNumber: 1, workflowId: "w1", workflowVersion: 3, workflowName: null, sessionTitle: null, sourceType: "manual",
+  id: "run-aaaa1111", runNumber: 1, workflowId: "w1", workflowVersion: 3, workflowName: null, sessionTitle: null, repositoryIds: [], sourceType: "manual",
   status: "Success", error: null, startedAt: "2026-01-01T00:00:00Z", completedAt: null, createdDate: "",
   rootRunId: "run-aaaa1111", attemptCount: 1, rootSourceType: "manual", hasSession: true,
   ...over,

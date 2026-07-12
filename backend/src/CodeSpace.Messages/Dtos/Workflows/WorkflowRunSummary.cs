@@ -39,6 +39,13 @@ public sealed record WorkflowRunSummary
     /// </summary>
     public required string RunKind { get; init; }
 
+    /// <summary>
+    /// The run's launch-scope repositories (<c>WorkflowRun.ScopeRepositoryIds</c>) — the projects it was scoped to at
+    /// launch. Empty for an authored workflow run. The index carries the raw ids and resolves display names client-side
+    /// from the already-loaded team repository set, so no per-row name join burdens the polling query.
+    /// </summary>
+    public IReadOnlyList<Guid> RepositoryIds { get; init; } = [];
+
     public required WorkflowRunStatus Status { get; init; }
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
