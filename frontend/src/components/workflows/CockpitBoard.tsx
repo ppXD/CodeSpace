@@ -4,7 +4,7 @@ import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
-import { compactAge, runDuration, runStatusTone, runStatusWord, runType, type CockpitFilter } from "./cockpit";
+import { compactAge, humanizeRunError, runDuration, runStatusTone, runStatusWord, runType, type CockpitFilter } from "./cockpit";
 import { sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
@@ -234,7 +234,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
         </div>
         {error && (
           <div className="run-row2-l3">
-            <span className="run-row2-err" title={error}><Ic.Triangle size={12} /><span>{error}</span></span>
+            <span className="run-row2-err" title={error}><Ic.Triangle size={12} /><span>{humanizeRunError(error)}</span></span>
           </div>
         )}
       </div>
