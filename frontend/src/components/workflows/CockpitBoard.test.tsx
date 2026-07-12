@@ -139,10 +139,10 @@ describe("CockpitBoard", () => {
     expect(container.querySelector(".cockpit-live-rerun")).toBeNull();
   });
 
-  it("filter='failed' shows only failed + suspended runs", () => {
+  it("filter='failed' shows only failed runs (suspended lives in Needs attention)", () => {
     const { container } = board({ filter: "failed", runs: [run("f", "Failure"), run("s", "Suspended"), run("ok", "Success"), run("live", "Running")] });
-    expect(screen.getByText("Failed / stuck")).toBeTruthy();
-    expect(container.querySelectorAll(".run-row2").length).toBe(2);   // Failure + Suspended only
+    expect(container.querySelector(".cockpit-zone-label")?.textContent).toBe("Failed");   // zone label (distinct from the run's "Failed" status word)
+    expect(container.querySelectorAll(".run-row2").length).toBe(1);   // Failure only
   });
 
   it("falls back to the run status in the Live row before its phases + start load", () => {

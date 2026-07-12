@@ -50,7 +50,7 @@ export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, fi
   onFilter: (filter: CockpitFilter) => void;
 }) {
   if (filter === "failed") {
-    return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
+    return <Zone label="Failed"><CompactList runs={runs.filter((r) => r.status === "Failure")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed." /></Zone>;
   }
   if (filter === "today") {
     return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nowMs={nowMs} onOpen={onOpen} empty="No runs today yet." /></Zone>;

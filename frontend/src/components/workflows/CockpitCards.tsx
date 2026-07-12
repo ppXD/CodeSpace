@@ -17,18 +17,16 @@ export interface CockpitMetrics {
   liveCount: number;
   agentsActive: number;
   failed: number;
-  suspended: number;
   today: TodaySummary;
 }
 
 export function CockpitCards({ metrics, filter, onFilter }: { metrics: CockpitMetrics; filter: CockpitFilter; onFilter: (f: CockpitFilter) => void }) {
-  const { decisions, suspendedReview, liveCount, agentsActive, failed, suspended, today } = metrics;
+  const { decisions, suspendedReview, liveCount, agentsActive, failed, today } = metrics;
   // The attention card counts EXACTLY what the Needs-attention zone lists (decisions + suspended-needing-review), so
   // the headline number and the rows below can never disagree.
   const attention = decisions.count + suspendedReview;
-  const stuck = failed + suspended;
-  // Failed/stuck stays calm — it only highlights briefly when the count GROWS (a new failure arrived), never a steady blink.
-  const flashFailed = useFlashOnIncrease(stuck);
+  // The Failed card stays calm — it only highlights briefly when the count GROWS (a new failure arrived), never a steady blink.
+  const flashFailed = useFlashOnIncrease(failed);
 
   return (
     <div className="cockpit-cards">
@@ -42,9 +40,9 @@ export function CockpitCards({ metrics, filter, onFilter }: { metrics: CockpitMe
         {liveCount > 0 && <span className="cockpit-flow" aria-hidden="true"><i /><i /><i /></span>}
       </StatusCard>
 
-      <StatusCard tone="failed" label="Failed / stuck" value={stuck} armed={filter === "failed"} flash={flashFailed} onClick={() => onFilter("failed")}
-        sub={stuck === 0 ? "None" : joinDot([failed > 0 && `${failed} failed`, suspended > 0 && `${suspended} suspended`])}>
-        {stuck > 0 && <Ic.Triangle size={12} aria-hidden="true" />}
+      <StatusCard tone="failed" label="Failed" value={failed} armed={filter === "failed"} flash={flashFailed} onClick={() => onFilter("failed")}
+        sub={failed === 0 ? "None" : `${failed} failed`}>
+        {failed > 0 && <Ic.Triangle size={12} aria-hidden="true" />}
       </StatusCard>
 
       <StatusCard tone="today" label="Runs today" value={today.count} armed={filter === "today"} onClick={() => onFilter("today")}
