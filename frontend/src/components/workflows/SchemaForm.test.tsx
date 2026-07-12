@@ -605,3 +605,59 @@ describe("SchemaForm array of string → chips", () => {
     expect(opts).toEqual(["tue", "wed"]);
   });
 });
+
+/**
+ * x-control: "radioCards" — a closed enum as stacked cards, each with a friendly label (x-enumLabels) and a
+ * one-line consequence (x-optionConsequence). Stores the raw enum value as a string; keyboard-navigable as a
+ * radiogroup; falls through to the <select> when x-control is absent or unrecognised.
+ */
+describe("SchemaForm x-control: radioCards", () => {
+  const rcSchema = (control: unknown = "radioCards") => ({
+    type: "object",
+    properties: {
+      reviewMode: {
+        type: "integer", enum: [0, 1, 2], "x-control": control,
+        "x-enumLabels": { 0: "Skip review", 1: "Gate", 2: "Improve" },
+        "x-optionConsequence": { 0: "runs without a check", 1: "parks until you approve", 2: "auto-revises once" },
+      },
+    },
+  });
+
+  it("renders stacked cards with a label and a consequence line, not a <select>", () => {
+    render(<SchemaForm schema={rcSchema()} value={{ reviewMode: 1 }} onChange={vi.fn()} />);
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByRole("radiogroup").classList.contains("wf-radiocards")).toBe(true);
+    expect(screen.getByText("Gate")).toBeTruthy();
+    expect(screen.getByText("parks until you approve")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Gate/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("stores the raw enum value as a string on click", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={rcSchema()} value={{ reviewMode: 0 }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("radio", { name: /Improve/ }));
+    expect(onChange).toHaveBeenCalledWith({ reviewMode: "2" });
+  });
+
+  it("moves the selection with arrow keys and keeps a single tab stop", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={rcSchema()} value={{ reviewMode: 2 }} onChange={onChange} />);
+    fireEvent.keyDown(screen.getByRole("radiogroup"), { key: "ArrowRight" });   // 2 → wrap to 0
+    expect(onChange).toHaveBeenCalledWith({ reviewMode: "0" });
+    expect(screen.getByRole("radio", { name: /Improve/ }).getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("radio", { name: /Skip review/ }).getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("falls through to the <select> when x-control is absent", () => {
+    const plain = { type: "object", properties: { reviewMode: { type: "integer", enum: [0, 1, 2], "x-enumLabels": { 0: "Off", 1: "Gate", 2: "Improve" } } } };
+    render(<SchemaForm schema={plain} value={{ reviewMode: 0 }} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+
+  it("falls through to the <select> for an unrecognised x-control value", () => {
+    render(<SchemaForm schema={rcSchema("bogus")} value={{ reviewMode: 0 }} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+});

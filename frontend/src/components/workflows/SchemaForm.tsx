@@ -71,6 +71,9 @@ interface Schema {
   title?: string;
   /** Friendly display text per enum value (e.g. {"first":"First response wins"}). The stored value is unchanged. */
   "x-enumLabels"?: Record<string, string>;
+  /** One-line consequence per enum value, shown under the label on a radioCards control (e.g.
+   *  {"1":"the run parks until you approve"}). Display-only; the stored value is unchanged. */
+  "x-optionConsequence"?: Record<string, string>;
   /** Marks a property as an "interaction field" — a mutually-exclusive component slot. The
    * PostMessageInputsEditor reads this to build the interaction-type picker instead of showing
    * all interaction fields at once. Never read by SchemaForm itself. */
@@ -94,7 +97,7 @@ interface Schema {
    * button-group) instead of the default &lt;select&gt;. renderControl reads this FIRST; when the value is
    * absent OR unrecognised for the field's shape it falls through to today's x-selector / enum / type
    * dispatch, so this is purely additive and non-breaking (the on-disk value shape is unchanged).
-   * Known values: "segmented", "stepper".
+   * Known values: "segmented", "stepper", "radioCards".
    */
   "x-control"?: string;
   /** Short unit shown after a stepper's value (e.g. "min", "sec", "×"). Display-only; the stored value is
@@ -257,6 +260,28 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
 }
 
 /**
+ * Shared radiogroup keyboard + roving-tabindex behaviour for the enum controls that present options as
+ * buttons (Segmented, RadioCards). Arrows move the selection (wrapping), Home/End jump to the ends, a
+ * roving tabindex keeps the group a single tab stop, and focus follows selection.
+ */
+function useRovingRadio(options: string[], current: string, onSelect: (value: string) => void) {
+  const activeIdx = options.indexOf(current);
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const select = (i: number) => { onSelect(options[i]); refs.current[i]?.focus(); };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (options.length === 0) return;
+    const from = activeIdx < 0 ? 0 : activeIdx;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); select((from + 1) % options.length); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); select((from - 1 + options.length) % options.length); }
+    else if (e.key === "Home") { e.preventDefault(); select(0); }
+    else if (e.key === "End") { e.preventDefault(); select(options.length - 1); }
+  };
+  const tabIndex = (i: number) => (options[i] === current || (activeIdx < 0 && i === 0) ? 0 : -1);
+  const setRef = (i: number) => (el: HTMLButtonElement | null) => { refs.current[i] = el; };
+  return { onKeyDown, tabIndex, setRef };
+}
+
+/**
  * A themed button-group for a short closed enum — a glanceable, one-click alternative to the
  * &lt;select&gt; for fields that declare "x-control": "segmented". It stores the RAW enum value as a
  * string (identical to the &lt;select&gt; path's `e.target.value`), so it is a purely visual swap and
@@ -266,41 +291,63 @@ function SegmentedControl({ schema, value, onChange }: { schema: Schema; value: 
   const enumLabels = schema["x-enumLabels"] ?? {};
   const options = (schema.enum ?? []).map((v) => String(v));
   const current = value == null ? "" : String(value);
-  const activeIdx = options.indexOf(current);
-  const refs = useRef<(HTMLButtonElement | null)[]>([]);
-
-  // Proper radiogroup keyboard semantics: arrows move the selection (wrapping), Home/End jump to the
-  // ends, and a roving tabindex keeps the group a single tab stop. Focus follows selection.
-  const select = (i: number) => { onChange(options[i]); refs.current[i]?.focus(); };
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (options.length === 0) return;
-    const from = activeIdx < 0 ? 0 : activeIdx;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); select((from + 1) % options.length); }
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); select((from - 1 + options.length) % options.length); }
-    else if (e.key === "Home") { e.preventDefault(); select(0); }
-    else if (e.key === "End") { e.preventDefault(); select(options.length - 1); }
-  };
+  const { onKeyDown, tabIndex, setRef } = useRovingRadio(options, current, onChange);
 
   return (
     <div className="wf-segmented" role="radiogroup" onKeyDown={onKeyDown}>
-      {options.map((key, i) => {
-        const active = current === key;
-        return (
-          <button
-            key={key}
-            ref={(el) => { refs.current[i] = el; }}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            tabIndex={active || (activeIdx < 0 && i === 0) ? 0 : -1}
-            className="wf-segmented-opt"
-            data-active={active || undefined}
-            onClick={() => onChange(key)}
-          >
-            {enumLabels[key] ?? key}
-          </button>
-        );
-      })}
+      {options.map((key, i) => (
+        <button
+          key={key}
+          ref={setRef(i)}
+          type="button"
+          role="radio"
+          aria-checked={current === key}
+          tabIndex={tabIndex(i)}
+          className="wf-segmented-opt"
+          data-active={current === key || undefined}
+          onClick={() => onChange(key)}
+        >
+          {enumLabels[key] ?? key}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A short closed enum as stacked full-width cards, one per option, each showing its friendly label
+ * (x-enumLabels) and a one-line consequence (x-optionConsequence) — for a fork in behaviour a reader must
+ * understand before choosing (review mode, decision type, on-failure policy). Stores the RAW enum value as
+ * a string (identical to the &lt;select&gt; path), so it is a purely visual swap and fully non-breaking.
+ */
+function RadioCardsControl({ schema, value, onChange }: { schema: Schema; value: unknown; onChange: (next: unknown) => void }) {
+  const enumLabels = schema["x-enumLabels"] ?? {};
+  const consequences = schema["x-optionConsequence"] ?? {};
+  const options = (schema.enum ?? []).map((v) => String(v));
+  const current = value == null ? "" : String(value);
+  const { onKeyDown, tabIndex, setRef } = useRovingRadio(options, current, onChange);
+
+  return (
+    <div className="wf-radiocards" role="radiogroup" onKeyDown={onKeyDown}>
+      {options.map((key, i) => (
+        <button
+          key={key}
+          ref={setRef(i)}
+          type="button"
+          role="radio"
+          aria-checked={current === key}
+          tabIndex={tabIndex(i)}
+          className="wf-radiocard"
+          data-active={current === key || undefined}
+          onClick={() => onChange(key)}
+        >
+          <span className="wf-radiocard-dot" aria-hidden="true" />
+          <span className="wf-radiocard-body">
+            <span className="wf-radiocard-label">{enumLabels[key] ?? key}</span>
+            {consequences[key] && <span className="wf-radiocard-desc">{consequences[key]}</span>}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -422,6 +469,9 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
   if (schema["x-control"] === "stepper" && (schema.type === "integer" || schema.type === "number")) {
     return <StepperControl schema={schema} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />;
+  }
+  if (schema["x-control"] === "radioCards" && Array.isArray(schema.enum)) {
+    return <RadioCardsControl schema={schema} value={value} onChange={onChange} />;
   }
 
   // Custom selector takes the highest precedence — when a property carries

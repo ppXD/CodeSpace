@@ -3694,6 +3694,27 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-chip-input::placeholder { color: var(--muted-2); }
 
+/* ── RadioCards (x-control:"radioCards") — a closed enum as stacked cards, each with a label + a one-line
+   consequence. The stored value stays the raw enum; this replaces the <select> for behaviour forks. ── */
+.acs-root .wf-radiocards { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-radiocard {
+  appearance: none; text-align: left; font: inherit; cursor: pointer;
+  display: flex; align-items: flex-start; gap: 10px; width: 100%;
+  padding: 9px 11px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--panel);
+  transition: border-color .1s, background .1s;
+}
+.acs-root .wf-radiocard:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
+.acs-root .wf-radiocard[data-active] { border-color: var(--accent); background: var(--accent-soft); }
+.acs-root .wf-radiocard:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .wf-radiocard-dot {
+  flex-shrink: 0; width: 15px; height: 15px; margin-top: 1px; border-radius: 50%;
+  border: 1.5px solid var(--line-2); background: var(--bg); transition: border-color .1s, box-shadow .1s;
+}
+.acs-root .wf-radiocard[data-active] .wf-radiocard-dot { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--accent); background: var(--panel); }
+.acs-root .wf-radiocard-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acs-root .wf-radiocard-label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.acs-root .wf-radiocard-desc { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
