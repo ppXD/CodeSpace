@@ -22,8 +22,22 @@ public sealed record WorkflowRunSummary
     /// <summary>The parent workflow's display name (LEFT JOIN). <c>null</c> for a snapshot / task run (no parent workflow), so the index can label a row without a second lookup.</summary>
     public string? WorkflowName { get; init; }
 
+    /// <summary>
+    /// The run's work-session title — the human goal of the launching task ("Remove unused usings"), from
+    /// <c>WorkSession.Title</c> via the run's <c>SessionId</c>. <c>null</c> for a session-less run. The index prefers
+    /// <see cref="WorkflowName"/> for an authored run (whose session title is just the workflow name) and falls back to
+    /// this for a task / snapshot run, so a row reads as the work — never the raw "snapshot" source token.
+    /// </summary>
+    public string? SessionTitle { get; init; }
+
     /// <summary>Open-string source identifier. Examples: "manual", "replay", "provider.github.pull_request".</summary>
     public required string SourceType { get; init; }
+
+    /// <summary>
+    /// The DB-computed origin class of the run (workflow / task / event / replay / schedule / …; see <c>RunKinds</c>).
+    /// Drives the row's type chip with a friendlier grain than the <c>WorkflowId != null</c> Workflow/Task binary.
+    /// </summary>
+    public required string RunKind { get; init; }
 
     public required WorkflowRunStatus Status { get; init; }
     public string? Error { get; init; }
