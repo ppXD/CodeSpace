@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { VariablePickerInput } from "./VariablePickerInput";
 import type { ScopeSuggestion } from "./scope-introspection";
@@ -36,6 +36,15 @@ describe("VariablePickerInput initial hydration", () => {
     );
     expect(container.querySelector(".wf-picker-chip")).toBeNull();
   });
+
+  it("re-hydrates an INDEXED ref (arr[0].field) into a chip on mount", () => {
+    // The picker emits `pullRequests[0].url` refs; reopening a saved workflow must render them as chips, not
+    // raw text (regression guard for the rehydration regex that once rejected `[` `]`).
+    const { container } = render(
+      <VariablePickerInput value="{{nodes.list.outputs.pullRequests[0].url}}" onChange={() => {}} suggestions={[]} />,
+    );
+    expect(container.querySelector(".wf-picker-chip")?.getAttribute("data-path")).toBe("nodes.list.outputs.pullRequests[0].url");
+  });
 });
 
 const treeSuggestions: ScopeSuggestion[] = [
@@ -65,17 +74,32 @@ describe("VariablePickerInput tree interaction", () => {
     expect(screen.getByText("First item")).toBeTruthy();     // the [0] drill level
   });
 
-  it("routes a click on a selectable field to insert (closes the picker), not expand", () => {
-    // A whole-array row is BOTH selectable and expandable: clicking its LABEL selects (and closes the
-    // picker); its twist expands. Clicking a non-selectable branch label only expands (picker stays open).
-    render(<VariablePickerInput value="" onChange={() => {}} suggestions={treeSuggestions} />);
+  it("routes a click on a selectable field to insert (closes the picker); a branch only expands", () => {
+    // A whole-array row is BOTH selectable and expandable: clicking its LABEL selects (and closes the picker);
+    // clicking a non-selectable branch label only expands (picker stays open, writes nothing).
+    const onChange = vi.fn();
+    render(<VariablePickerInput value="" onChange={onChange} suggestions={treeSuggestions} />);
     openPicker();
 
     fireEvent.mouseDown(screen.getByText("Create plan"));    // branch → expands, picker stays open
     expect(screen.getByText("Items")).toBeTruthy();
+    expect(onChange).not.toHaveBeenCalled();                 // expanding a branch writes nothing
 
     fireEvent.mouseDown(screen.getByText("Items"));          // selectable → insert → picker closes
-    expect(screen.queryByText("Items")).toBeNull();
     expect(screen.queryByText("Create plan")).toBeNull();
+  });
+
+  it("serializes a chip back to its exact {{ref}} value (the emission a regression could silently drop)", () => {
+    // jsdom can't drive the picker-click chip insert, but the load-bearing chip→value path (nodeToValue must
+    // wrap the chip's data-path in {{ }}) IS testable via a flush: append text to a hydrated chip, blur, and
+    // assert onChange carries the ref verbatim. A regression dropping the braces or emitting chip text fails here.
+    const onChange = vi.fn();
+    const { container } = render(
+      <VariablePickerInput value="{{nodes.plan.outputs.items}}" onChange={onChange} suggestions={[]} />,
+    );
+    const editor = container.querySelector(".wf-picker-editor") as HTMLElement;
+    editor.appendChild(document.createTextNode(" x"));
+    fireEvent.blur(editor);
+    expect(onChange).toHaveBeenLastCalledWith("{{nodes.plan.outputs.items}} x");
   });
 });

@@ -343,7 +343,10 @@ function mapItemChildPaths(definition: WorkflowDefinition, currentNodeId: string
   if (!ref) return [];   // literal list, a nested/indexed source, or an unresolvable binding → bare item only
 
   const sourceNode = definition.nodes.find((n) => n.id === ref[1]);
-  const outputSchema = sourceNode ? (manifestByType.get(sourceNode.typeKey)?.outputSchema as SchemaNode | undefined) : undefined;
+  const sourceManifest = sourceNode ? manifestByType.get(sourceNode.typeKey) : undefined;
+  // Route through outputSchemaFor so a dynamic-output source (HTTP body / LLM json with a pasted sample) drills
+  // its inferred item shape too — same splice every other output path uses, instead of the opaque manifest schema.
+  const outputSchema = sourceNode && sourceManifest ? (outputSchemaFor(sourceNode, sourceManifest) as SchemaNode | undefined) : undefined;
   const arraySchema = outputSchema?.properties?.[ref[2]] as SchemaNode | undefined;
   const itemSchema = typeof arraySchema?.items === "object" && arraySchema.items != null ? arraySchema.items : undefined;
   if (!itemSchema) return [];

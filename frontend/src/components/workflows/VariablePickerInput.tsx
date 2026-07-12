@@ -360,7 +360,9 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
     } else if (e.key === "ArrowRight") {
       if (row?.expandable && !row.expanded) { e.preventDefault(); toggleExpand(row.node.id); }
     } else if (e.key === "ArrowLeft") {
-      if (row?.expandable && row.expanded) { e.preventDefault(); toggleExpand(row.node.id); }
+      // While a filter is active every branch is force-open (effectiveExpanded), so collapse is a no-op — don't
+      // present it as a working affordance.
+      if (!filter && row?.expandable && row.expanded) { e.preventDefault(); toggleExpand(row.node.id); }
     } else if (e.key === "Tab") {
       if (row) { e.preventDefault(); activateRow(row); }
     } else if (e.key === "Escape") {
@@ -480,8 +482,8 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
                 >
                   <span
                     className="wf-picker-twist"
-                    data-on={row.expandable ? "true" : undefined}
-                    onMouseDown={(e) => { if (row.expandable) { e.preventDefault(); e.stopPropagation(); toggleExpand(row.node.id); } }}
+                    data-on={row.expandable && !filter ? "true" : undefined}
+                    onMouseDown={(e) => { if (row.expandable && !filter) { e.preventDefault(); e.stopPropagation(); toggleExpand(row.node.id); } }}
                   >
                     {row.expandable ? (row.expanded ? "▾" : "▸") : ""}
                   </span>
@@ -509,9 +511,11 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
  * running filter; typing any character outside that set (e.g. `}`, space, punctuation)
  * stops the match and closes the picker.
  */
-const TRIGGER_RE = /(\{\{|\{|@)([a-zA-Z0-9_.]*)$/;
+const TRIGGER_RE = /(\{\{|\{|@)([a-zA-Z0-9_.[\]]*)$/;
 
-const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}/g;
+// Include `[` `]` so the picker's own indexed refs (`{{nodes.x.outputs.pullRequests[0].url}}`, `{{item.tags[0]}}`)
+// re-hydrate into a chip when a saved workflow reopens — without the brackets they'd render as raw literal text.
+const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.[\]]*)\s*\}\}/g;
 
 function valueToHtml(value: string): string {
   let out = "";
