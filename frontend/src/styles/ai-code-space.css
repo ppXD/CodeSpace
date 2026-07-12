@@ -3606,6 +3606,18 @@ textarea:-webkit-autofill {
 .acs-root .wf-interaction-opt[data-active] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .acs-root .wf-interaction-body { padding-top: 4px; }
 
+/* ── Segmented control (x-control:"segmented") — a lifted-pill button group for short closed enums.
+   The stored value stays the raw enum string; this is a visual alternative to the <select>. ── */
+.acs-root .wf-segmented { display: inline-flex; flex-wrap: wrap; gap: 3px; max-width: 100%; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.acs-root .wf-segmented-opt {
+  appearance: none; border: 1px solid transparent; background: none; font: inherit; font-size: 12px;
+  font-weight: 500; color: var(--muted); padding: 5px 11px; border-radius: 6px; cursor: pointer;
+  transition: background .1s, color .1s, box-shadow .1s;
+}
+.acs-root .wf-segmented-opt:hover { color: var(--ink); }
+.acs-root .wf-segmented-opt[data-active] { background: var(--panel); color: var(--ink); font-weight: 600; border-color: var(--line-2); box-shadow: var(--shadow-1); }
+.acs-root .wf-segmented-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
