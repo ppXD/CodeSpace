@@ -55,7 +55,28 @@ public sealed class GitListPullRequestsNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "pullRequests": { "type": "array" },
+                "pullRequests": {
+                  "type": "array",
+                  "description": "The pull requests — bindable whole as flow.map items, or drill a field of the first.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "externalId": { "type": "string", "description": "Provider-side id." },
+                      "number": { "type": "integer", "description": "Human PR / MR number." },
+                      "title": { "type": "string" },
+                      "state": { "type": "string", "enum": ["Open","Draft","Merged","Closed"], "description": "PR state." },
+                      "sourceBranch": { "type": "string" },
+                      "targetBranch": { "type": "string" },
+                      "authorLogin": { "type": ["string","null"] },
+                      "webUrl": { "type": "string", "description": "Browser URL of the PR." },
+                      "commentsCount": { "type": "integer" },
+                      "createdDate": { "type": "string", "description": "ISO-8601." },
+                      "updatedDate": { "type": "string", "description": "ISO-8601." },
+                      "body": { "type": ["string","null"], "description": "PR description (null on list responses)." },
+                      "labels": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": ["string","null"] } } } }
+                    }
+                  }
+                },
                 "count": { "type": "integer" }
               }
             }
@@ -84,7 +105,7 @@ public sealed class GitListPullRequestsNode : INodeRuntime
 
         var outputs = new Dictionary<string, JsonElement>
         {
-            ["pullRequests"] = JsonSerializer.SerializeToElement(pullRequests),
+            ["pullRequests"] = JsonSerializer.SerializeToElement(pullRequests, WorkflowJson.Options),
             ["count"] = JsonSerializer.SerializeToElement(pullRequests.Count)
         };
 

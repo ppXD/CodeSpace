@@ -70,9 +70,10 @@ public class GitListPullRequestsNodeTests
         stub.RepoId.ShouldBe(Guid.Parse(Repo));
         result.Outputs["count"].GetInt32().ShouldBe(3);
         result.Outputs["pullRequests"].GetArrayLength().ShouldBe(3);
-        // DTOs serialize with default (PascalCase) property names — the same convention git.fetch_pr_diff uses
-        // for its files[] output (consumed by the AI-review template), so downstream binding is consistent.
-        result.Outputs["pullRequests"][0].GetProperty("Number").GetInt32().ShouldBe(1);
+        // Items serialize with WorkflowJson.Options (camelCase + string enums) — consistent with every other
+        // node output (git.open_change_set's pullRequests[], plan items) so the {{ref}} picker drills clean paths.
+        result.Outputs["pullRequests"][0].GetProperty("number").GetInt32().ShouldBe(1);
+        result.Outputs["pullRequests"][0].GetProperty("state").GetString().ShouldBe("Open");
     }
 
     [Fact]
