@@ -3089,8 +3089,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             ResumePayload = exec.ResumePayload,
             PriorAttemptPayload = exec.PriorAttemptPayload,
             NodeId = exec.Node.Id,
+            IncomingNodeIds = DirectPredecessorIds(exec),
         };
     }
+
+    /// <summary>
+    /// This node's direct graph predecessors: the distinct source ids of every edge pointing into it, read from the
+    /// walk scope's pre-computed <see cref="WalkerState.IncomingByNodeId"/> index (so a node inside a loop/map body
+    /// resolves against that body's edges, not the top-level graph). Feeds <see cref="NodeRunContext.IncomingNodeIds"/>.
+    /// </summary>
+    private static IReadOnlyList<string> DirectPredecessorIds(NodeExecution exec) =>
+        exec.State.IncomingByNodeId.TryGetValue(exec.Node.Id, out var incoming)
+            ? incoming.Select(e => e.From).Distinct().ToList()
+            : Array.Empty<string>();
 
     /// <summary>
     /// Write the <c>node.completed</c> / <c>node.failed</c> ledger record for a node whose

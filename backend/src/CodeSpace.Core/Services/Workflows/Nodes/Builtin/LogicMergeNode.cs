@@ -55,16 +55,15 @@ public sealed class LogicMergeNode : INodeRuntime
     public Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         var strategy = ReadString(context.Config, "strategy", "first-non-empty");
-        var nodes = context.Scope.Nodes;
 
-        // The engine doesn't tell us which upstreams we have edges from — that's a graph
-        // property. We approximate by looking at scope.Nodes: anything present here is a
-        // node that successfully completed BEFORE us in topo order. Skipped nodes don't
-        // write to scope, so they naturally drop out of the merge.
-        //
-        // This is intentionally a "soft" merge — see logic.merge tests for the edge cases.
-        // A stricter "barrier" semantic would require the engine to pass the list of
-        // direct upstreams.
+        // Join only our DIRECT graph predecessors, not every node that happened to complete earlier in the run.
+        // The engine hands us those predecessor ids (context.IncomingNodeIds — the source of every edge into us);
+        // we intersect them with scope.Nodes (which holds only nodes that actually completed, so skipped branches
+        // drop out for free). Insertion order in scope.Nodes is completion order, and Where preserves it — so
+        // first-non-empty's Reverse() still means "the last predecessor that fired".
+        var incoming = context.IncomingNodeIds.ToHashSet();
+        var nodes = context.Scope.Nodes.Where(kv => incoming.Contains(kv.Key)).ToList();
+
         if (nodes.Count == 0)
         {
             context.Logger.LogInformation("Merge: no upstream produced outputs; emitting empty.");
@@ -81,9 +80,9 @@ public sealed class LogicMergeNode : INodeRuntime
             return Task.FromResult(NodeResult.Ok(merged));
         }
 
-        // first-non-empty (default): pick the most recently-added upstream that has outputs.
-        // Dictionary preserves insertion order, so iterating in reverse gives us "last fired".
-        foreach (var (id, outputs) in nodes.Reverse())
+        // first-non-empty (default): pick the most recently-completed predecessor that has outputs.
+        // scope.Nodes preserves completion order, so iterating our filtered list in reverse gives "last fired".
+        foreach (var (id, outputs) in Enumerable.Reverse(nodes))
         {
             if (outputs.Count == 0) continue;
             context.Logger.LogInformation("Merge: forwarding outputs from {UpstreamId}", id);
