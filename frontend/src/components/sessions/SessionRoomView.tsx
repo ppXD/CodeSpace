@@ -120,9 +120,9 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamS
       <header className="room-head">
         <div className="room-head-top">
           <nav className="room-crumbs">
-            <a onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Sessions</a>
+            <a onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Runs</a>
             <span className="room-crumb-sep">/</span>
-            <span className="room-crumb-cur">{room.sessionId.slice(0, 6)}</span>
+            <span className="room-crumb-cur" title={room.title}>{room.title}</span>
           </nav>
           <div className="room-head-icons">
             <button className="room-icon-btn" title="Run details — the raw graph, trace, decisions" onClick={() => onOpenRoom()}><Sym n="terminal" s={16} /></button>
