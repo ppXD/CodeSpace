@@ -3588,7 +3588,39 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-form-textarea:focus { border-color: var(--accent); background: var(--panel); }
 .acs-root .wf-form-textarea-mono { font-family: inherit; font-size: 11.5px; color: var(--ink-2); }
-.acs-root .wf-form-checkbox { align-self: flex-start; }
+/* ── Boolean fields render as a themed switch: the native <input type="checkbox"> restyled in place, so
+   the value, the "checkbox" role and full keyboard behaviour are unchanged — only the look is upgraded
+   from a default check to a glanceable on/off toggle. Covers the inspector (.acs-root) and run modal (.mdl). ── */
+.acs-root input[type="checkbox"].wf-form-checkbox,
+.mdl input[type="checkbox"].wf-form-checkbox {
+  appearance: none; -webkit-appearance: none;
+  box-sizing: border-box; margin: 0; padding: 0; border: none;
+  position: relative; flex-shrink: 0; align-self: flex-start;
+  width: 30px; height: 18px; border-radius: 999px;
+  background: var(--line-2); cursor: pointer;
+  transition: background .16s ease;
+}
+.acs-root input[type="checkbox"].wf-form-checkbox::before,
+.mdl input[type="checkbox"].wf-form-checkbox::before {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(20, 15, 8, .25);
+  transition: transform .16s ease;
+}
+.acs-root input[type="checkbox"].wf-form-checkbox:checked,
+.mdl input[type="checkbox"].wf-form-checkbox:checked { background: var(--accent); }
+.acs-root input[type="checkbox"].wf-form-checkbox:checked::before,
+.mdl input[type="checkbox"].wf-form-checkbox:checked::before { transform: translateX(12px); }
+/* The generic checkbox draws a ::after tick when checked; the switch uses ::before as its thumb, so
+   suppress the inherited tick (this selector outranks the generic input[type=checkbox]:checked::after). */
+.acs-root input[type="checkbox"].wf-form-checkbox:checked::after,
+.mdl input[type="checkbox"].wf-form-checkbox:checked::after { content: none; }
+.acs-root input[type="checkbox"].wf-form-checkbox:hover,
+.mdl input[type="checkbox"].wf-form-checkbox:hover { background: color-mix(in srgb, var(--line-2) 82%, var(--ink)); }
+.acs-root input[type="checkbox"].wf-form-checkbox:checked:hover,
+.mdl input[type="checkbox"].wf-form-checkbox:checked:hover { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
+.acs-root input[type="checkbox"].wf-form-checkbox:focus-visible,
+.mdl input[type="checkbox"].wf-form-checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Nested object (e.g. resolve { mode, count }) → its recursive sub-form, grouped by a left rule + indent. */
 .acs-root .wf-form-nested { border-left: 2px solid var(--line); padding-left: 12px; }
 /* Secondary fields tucked under a collapsed "Advanced" disclosure (e.g. a button's requiresComment / resolvesWait / vetoes). */
