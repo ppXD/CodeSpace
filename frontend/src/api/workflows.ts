@@ -163,6 +163,8 @@ export interface WorkflowRunSummary {
   workflowVersion: number | null;
   /** Parent workflow's display name (`null` for a snapshot / task run) — lets a row show a name without a second lookup. */
   workflowName: string | null;
+  /** The run's work-session title (the launching task's human goal), joined from `WorkSession.Title`; `null` for a session-less run. A task row prefers this over the raw source token so it reads as the work. */
+  sessionTitle: string | null;
   /** Sourced from upstream run_request.source_type. */
   sourceType: WorkflowRunSourceType;
   status: WorkflowRunStatus;

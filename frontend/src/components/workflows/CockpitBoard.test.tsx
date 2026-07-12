@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
+  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 
@@ -59,15 +59,17 @@ describe("CockpitBoard", () => {
     expect(recent.querySelector(".run-row2-sw")?.textContent).toBe("Success");      // status word in its tone
   });
 
-  it("titles a row with the workflow name, falling back to the source label when there is none", () => {
+  it("titles a row with the workflow name, then the session title, then a neutral fallback — never the source token", () => {
     const { container } = board({ history: hist([
       run("named", "Success", { workflowName: "Deploy Pipeline" }),
-      run("anon", "Success", { workflowName: null, sourceType: "webhook" }),
+      run("task", "Success", { workflowName: null, sessionTitle: "Remove unused usings" }),
+      run("anon", "Success", { workflowName: null, sessionTitle: null, sourceType: "snapshot" }),
     ]) });
 
     const titles = [...container.querySelectorAll(".run-row2-title")].map((n) => n.textContent);
-    expect(titles).toContain("Deploy Pipeline");   // authored run shows its workflow name (from run.workflowName)
-    expect(titles).toContain("Webhook");           // null name → title-cased source label
+    expect(titles).toContain("Deploy Pipeline");        // authored run → its workflow name
+    expect(titles).toContain("Remove unused usings");   // task run → its session title, never the "snapshot" token
+    expect(titles).toContain("Untitled task");          // no name + no session → neutral fallback, never a source label
   });
 
   it("renders the Needs-attention zone from its own fetched suspended set (decisions + suspended rows)", () => {
@@ -111,10 +113,10 @@ describe("CockpitBoard", () => {
   it("a reran row shows the ORIGINAL run's id + title and opens the original, not the fork", () => {
     const onOpen = vi.fn();
     // The representative is the latest fork (own id forkrun9, sourceType replay) but the lineage root is origrun1.
-    const { container } = board({ history: hist([run("forkrun9", "Success", { rootRunId: "origrun1", attemptCount: 3, workflowName: null, sourceType: "replay", rootSourceType: "snapshot" })]), onOpen });
+    const { container } = board({ history: hist([run("forkrun9", "Success", { rootRunId: "origrun1", attemptCount: 3, workflowName: null, sessionTitle: "Remove unused usings", sourceType: "replay", rootSourceType: "snapshot" })]), onOpen });
 
     expect(container.querySelector(".run-row2-id")?.textContent).toBe("origrun1");   // the original's id, not the fork's
-    expect(container.querySelector(".run-row2-title")?.textContent).toBe("Snapshot");  // titles as the original (rootSourceType), never "Replay"
+    expect(container.querySelector(".run-row2-title")?.textContent).toBe("Remove unused usings");  // titles as the task's own goal, never "Replay" or the "snapshot" token
     expect(container.querySelector(".run-row2-attempts")?.textContent).toContain("3 attempts");
 
     fireEvent.click(container.querySelector(".run-row2")!);

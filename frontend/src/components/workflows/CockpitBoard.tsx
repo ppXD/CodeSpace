@@ -124,8 +124,9 @@ function Zone({ label, children }: { label: string; children: React.ReactNode })
 
 // Every cockpit row represents a LINEAGE, shown by its ORIGINAL run's identity — so opening a row that's actually the
 // latest rerun lands on the original (no confusing "Replay of …"), and a reran task titles as the task, not "Replay".
-/** The lineage's display title — the original run's name / source, never the fork's. */
-function lineageTitle(run: WorkflowRunSummary): string { return run.workflowName ?? sourceLabel(run.rootSourceType); }
+/** The lineage's display title — the workflow name for an authored run, else the launching task's session title, else a
+ *  neutral fallback. NEVER the raw source token ("Snapshot" / "Manual"), which names how the engine stored the run, not the work. */
+function lineageTitle(run: WorkflowRunSummary): string { return run.workflowName ?? run.sessionTitle ?? "Untitled task"; }
 /** True when this row's representative is itself a rerun fork (its root is a different run) — drives the "rerunning" brief. */
 function isRerun(run: WorkflowRunSummary): boolean { return run.rootRunId !== run.id; }
 
