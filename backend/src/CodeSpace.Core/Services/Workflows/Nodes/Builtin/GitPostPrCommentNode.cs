@@ -43,7 +43,16 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         // tool-invoked comment acts as the repo CONNECTION credential, not a specific user. The ledger's
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Comment on pull request #{number} on {repositoryId}.",
+              "x-intentPlaceholders": { "number": "a PR number", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
