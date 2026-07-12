@@ -1,4 +1,5 @@
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Dtos.Providers;
 
 namespace CodeSpace.Core.Services.Providers.Identity;
 
@@ -19,4 +20,12 @@ public interface IActorIdentityResolver
     /// credential resolves to null exactly like "never linked".
     /// </summary>
     Task<UserProviderIdentity?> ResolveAsync(Guid actorUserId, Guid providerInstanceId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Every teammate who can be an AUTHOR on the repository — those with a live, usable identity on the
+    /// repo's provider instance. Uses the SAME predicate as <see cref="ResolveAsync"/>, so an offered
+    /// candidate is guaranteed to resolve (never throws ActorIdentityRequiredException) at write time.
+    /// Empty when none qualify or the repo is not the team's. Bots are excluded (they can't link one).
+    /// </summary>
+    Task<IReadOnlyList<ActAsCandidateSummary>> ListCandidatesAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
 }

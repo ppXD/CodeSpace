@@ -75,6 +75,14 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Teammates who can AUTHOR an attributable write on this repo (a live linked identity on its provider) — the actAsUserId picker's source, so it only offers usable authors.</summary>
+    [HttpGet("{repositoryId:guid}/act-as-candidates")]
+    public async Task<IActionResult> ListActAsCandidates([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListActAsCandidatesQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// One level of the file tree. `path` (query) is the repo-root-relative folder — omit for the root;
     /// `ref` is the branch/tag/SHA — omit for the default branch. Non-recursive: the browser drills in lazily.
