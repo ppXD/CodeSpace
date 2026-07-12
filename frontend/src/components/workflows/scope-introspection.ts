@@ -256,6 +256,9 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
       { path: "item",  label: "item",  category: "iteration", description: "Current iteration element" },
       { path: "index", label: "index", category: "iteration", type: "integer", description: "0-based iteration index" },
     );
+
+    // Type {{item}} inside a flow.map body: drill the source array's item shape into `item.<field>` rows.
+    if (currentNodeId != null) suggestions.push(...mapItemChildPaths(definition, currentNodeId, manifestByType));
   }
 
   // 7. Project variables — backend resolves `project.{slug}.{name}` against every
@@ -298,13 +301,13 @@ function collectErrorSources(definition: WorkflowDefinition, currentNodeId: stri
 }
 
 /**
- * True when a node lives inside a flow.map body — i.e. some ancestor up its `parentId` chain is a
- * flow.map node. Walking the whole chain (not just the direct parent) covers a node nested deeper —
- * inside a flow.loop / flow.try body that is itself inside a map — because that body inherits the
- * enclosing map's Iteration scope, so bare {{item}} / {{index}} genuinely resolve there. A guard
- * against a malformed parentId cycle caps the walk at the node count.
+ * The flow.map node whose body a node lives in — the first flow.map found walking up the `parentId` chain,
+ * or null. Walking the whole chain (not just the direct parent) covers a node nested deeper — inside a
+ * flow.loop / flow.try body that is itself inside a map — because that body inherits the enclosing map's
+ * Iteration scope, so bare {{item}} / {{index}} genuinely resolve there. A guard against a malformed
+ * parentId cycle caps the walk at the node count.
  */
-function isInsideMapBody(definition: WorkflowDefinition, nodeId: string): boolean {
+function enclosingMapNode(definition: WorkflowDefinition, nodeId: string): NodeDefinition | null {
   const byId = new Map(definition.nodes.map((n) => [n.id, n]));
 
   let parent = byId.get(nodeId)?.parentId ?? null;
@@ -312,10 +315,58 @@ function isInsideMapBody(definition: WorkflowDefinition, nodeId: string): boolea
   while (parent && !seen.has(parent)) {
     seen.add(parent);
     const p = byId.get(parent);
-    if (p?.typeKey === "flow.map") return true;
+    if (p?.typeKey === "flow.map") return p;
     parent = p?.parentId ?? null;
   }
-  return false;
+  return null;
+}
+
+function isInsideMapBody(definition: WorkflowDefinition, nodeId: string): boolean {
+  return enclosingMapNode(definition, nodeId) != null;
+}
+
+/**
+ * Inside a flow.map body, {{item}} is ONE element of the array bound to the map's `items` input. When that
+ * source array declares a typed item shape, surface each field as `item.<field>` ("Current item → instruction")
+ * so the author binds a real field instead of hand-typing the path. The resolver walks INTO the iteration
+ * element ({{item.instruction}} → the element's `instruction`), so every emitted path resolves. Purely additive
+ * — bare {{item}} / {{index}} are still offered. Only the flow.map case is typed (its item scope IS the array
+ * element); a flow.iterate-downstream node keeps bare item/index.
+ */
+function mapItemChildPaths(definition: WorkflowDefinition, currentNodeId: string, manifestByType: Map<string, NodeManifestDto>): ScopeSuggestion[] {
+  const map = enclosingMapNode(definition, currentNodeId);
+  if (!map) return [];
+
+  const inner = unwrapTemplate(readRef(asObject(map.inputs)?.items));
+  const ref = inner?.match(/^nodes\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (!ref) return [];   // literal list, a nested/indexed source, or an unresolvable binding → bare item only
+
+  const sourceNode = definition.nodes.find((n) => n.id === ref[1]);
+  const outputSchema = sourceNode ? (manifestByType.get(sourceNode.typeKey)?.outputSchema as SchemaNode | undefined) : undefined;
+  const arraySchema = outputSchema?.properties?.[ref[2]] as SchemaNode | undefined;
+  const itemSchema = typeof arraySchema?.items === "object" && arraySchema.items != null ? arraySchema.items : undefined;
+  if (!itemSchema) return [];
+
+  const nested: OutputKey[] = [];
+  collectSchemaPaths(itemSchema, "item", 0, nested);
+  const mapName = map.label || manifestByType.get(map.typeKey)?.displayName || "map";
+
+  return nested
+    .filter((k) => k.name !== "item")   // drop the whole-item branch — bare {{item}} already covers it
+    .map((k) => ({
+      path: k.name,
+      label: `Current item → ${k.name.slice("item.".length)}`,
+      category: "iteration" as const,
+      type: k.type,
+      description: `${mapName}: ${k.name}`,
+    }));
+}
+
+/** Strip a surrounding `{{ … }}` from a ref string, leaving the inner path; a bare / $ref path passes through. */
+function unwrapTemplate(raw: string | null): string | null {
+  if (raw == null) return null;
+  const m = raw.match(/^\{\{\s*(.+?)\s*\}\}$/);
+  return m ? m[1] : raw;
 }
 
 /** BFS backwards from a node along incoming edges. Returns ids of every ancestor. */
