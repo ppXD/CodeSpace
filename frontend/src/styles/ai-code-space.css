@@ -5692,6 +5692,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); flex: none; }
 .room-status-dot { width: 6px; height: 6px; border-radius: 50%; display: block; background: var(--rm-good); }
 .room-status-closed .room-status-dot { background: var(--muted-2); }
+/* The session Open/Closed pill, demoted to a small secondary cue beside the primary run-outcome pill (it gates the composer, so it stays visible). */
+.room-status-cue { background: transparent; border-color: transparent; color: var(--muted); font-size: 9.5px; padding: 3px 5px; }
 .room-head-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
 .room-meta-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); }
 .room-meta-ic { color: var(--muted); }

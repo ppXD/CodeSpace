@@ -90,6 +90,12 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamS
   const turnCount = room.blocks.filter((b) => b.type === "assistant_turn").length;
   const startedAt = room.blocks.map((b) => ("at" in b ? b.at : null)).find(Boolean) as string | undefined;
 
+  // The header's PRIMARY status is the run OUTCOME from the latest turn (Working / Done / Failed / Waiting / Stopped),
+  // NOT the session's Open/Closed — a failed run must never read "OPEN". Open/Closed stays a demoted cue (it gates the composer).
+  const latestTurn = [...room.blocks].reverse().find((b): b is AssistantTurnBlock => b.type === "assistant_turn");
+  const outcomeTone = latestTurn ? statusTone(latestTurn.status, isRunActive(latestTurn.status)) : null;
+  const outcomeLabel = latestTurn ? pillLabel(latestTurn.status, isRunActive(latestTurn.status)) : null;
+
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(room.title);
   // Reset the editable title when the session's title changes upstream (rename / switching session) — done during
@@ -135,7 +141,13 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamS
           ) : (
             <h1 role="button" tabIndex={0} title="Click to rename" onClick={() => setEditing(true)}>{title}</h1>
           )}
-          <span className={`room-status-pill room-status-${room.status === "Open" ? "open" : "closed"}`}>
+          {outcomeTone && (
+            <span className={`room-pill room-pill-${outcomeTone}`}>
+              {outcomeTone === "run" ? <i className="room-pill-dot" /> : <Sym n={pillIcon(outcomeTone)} s={11} />}
+              {outcomeLabel}
+            </span>
+          )}
+          <span className={`room-status-pill room-status-cue room-status-${room.status === "Open" ? "open" : "closed"}`}>
             <i className="room-status-dot" /> {room.status}
           </span>
         </div>
