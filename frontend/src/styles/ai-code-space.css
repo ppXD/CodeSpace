@@ -3002,7 +3002,6 @@ textarea:-webkit-autofill {
 /* Failed/stuck stays calm — a one-shot red ring only when the count grows (a new failure), never a steady blink. */
 .acs-root .cockpit-card[data-flash] { animation: cockpitFlash 1.2s ease-out; }
 @keyframes cockpitPulseAmber { 0%, 100% { box-shadow: 0 0 0 0 rgba(168,89,14,.4); } 50% { box-shadow: 0 0 0 5px rgba(168,89,14,0); } }
-@keyframes cockpitPulseAccent { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 5px rgba(217,119,87,0); } }
 @keyframes cockpitFlow { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 @keyframes cockpitDraw { to { stroke-dashoffset: 0; } }
 @keyframes cockpitFlash { 0% { box-shadow: 0 0 0 0 rgba(158,53,53,.5); } 100% { box-shadow: 0 0 0 6px rgba(158,53,53,0); } }
@@ -3029,7 +3028,6 @@ textarea:-webkit-autofill {
 .acs-root .cockpit-viewall:hover > svg { transform: translateX(2px); }
 .acs-root .cockpit-zone-note { font-size: 11.5px; color: var(--muted); padding: 4px 2px 0; }
 .acs-root .cockpit-attn-row { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid #E3B8A0; border-radius: 12px; background: var(--accent-soft); cursor: pointer; }
-.acs-root .cockpit-attn-glyph { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 6px; background: var(--panel); color: #A8590E; }
 .acs-root .cockpit-attn-body { flex: 1; min-width: 0; }
 .acs-root .cockpit-attn-title { font-size: 13.5px; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .cockpit-attn-sub { font-size: 10.5px; color: #A8590E; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
@@ -3040,15 +3038,12 @@ textarea:-webkit-autofill {
 .acs-root .cockpit-live { display: flex; flex-direction: column; gap: 8px; }
 .acs-root .cockpit-live-row { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; transition: border-color .12s ease; }
 .acs-root .cockpit-live-row:hover { border-color: var(--accent-soft); }
-.acs-root .cockpit-live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--accent); animation: cockpitPulseAccent 1.8s ease-in-out infinite; }
 .acs-root .cockpit-live-body { flex: 1; min-width: 0; }
 .acs-root .cockpit-live-title { display: flex; align-items: center; min-width: 0; font-size: 13.5px; font-weight: 500; color: var(--ink); }
 .acs-root .cockpit-live-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .cockpit-live-rerun { flex: none; display: inline-flex; align-items: center; gap: 3px; margin-left: 7px; font-size: 11px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border-radius: 20px; padding: 1px 8px; }
 .acs-root .cockpit-live-meta { font-size: 11.5px; color: var(--ink-2); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .cockpit-live-status { flex: none; font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
-/* The live dot is defined below the cards' reduced-motion block, so it needs its own override (equal specificity, source order wins). */
-@media (prefers-reduced-motion: reduce) { .acs-root .cockpit-live-dot { animation: none; } }
 
 /* Run rows — History + the failed/today filter views. A tinted status tile + a status word carry the state; the
    Workflow/Task type and version sit as labels beside the name; a failed run boxes its error on a third line. */
