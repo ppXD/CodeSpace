@@ -52,18 +52,27 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         IsAgentToolEligible = true,
         AlwaysRequiresApproval = true,
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestWriteCapability) },
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Merge pull request #{number} on {repositoryId}.",
+              "x-intentPlaceholders": { "number": "a PR number", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The pull/merge request number to merge." },
-                "method": { "type": "string", "enum": ["merge","squash","rebase"], "x-enumLabels": { "merge": "Merge commit", "squash": "Squash", "rebase": "Rebase" }, "description": "How to integrate the commits. Default: merge commit." },
+                "method": { "type": "string", "enum": ["merge","squash","rebase"], "x-control": "segmented", "x-enumLabels": { "merge": "Merge commit", "squash": "Squash", "rebase": "Rebase" }, "description": "How to integrate the commits. Default: merge commit." },
                 "commitTitle": { "type": "string", "description": "Optional merge-commit title (squash/merge). Provider default when empty." },
                 "commitMessage": { "type": "string", "x-long": true, "description": "Optional merge-commit message body." },
                 "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge." },
-                "actAsUserId": { "type": "string", "format": "uuid", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]
             }

@@ -54,16 +54,25 @@ public sealed class GitPrReviewNode : INodeRuntime
         // the responder's linked identity when this node sits downstream of an interactive wait whose
         // responder feeds actAsUserId — no chat/engine changes needed for future act-as-user nodes.
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestReviewCapability) },
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Review pull request #{number} on {repositoryId}.",
+              "x-intentPlaceholders": { "number": "a PR number", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The pull/merge request number." },
-                "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "x-enumLabels": { "approve": "Approve", "request_changes": "Request changes", "comment": "Comment" }, "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
+                "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "x-control": "segmented", "x-enumLabels": { "approve": "Approve", "request_changes": "Request changes", "comment": "Comment" }, "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
                 "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." },
-                "actAsUserId": { "type": "string", "format": "uuid", "description": "Submit the review AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by the person who approved. Bind {{nodes.<wait>.outputs.by}} from an approval step. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Submit the review AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by the person who approved. Bind {{nodes.<wait>.outputs.by}} from an approval step. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number","verdict"]
             }
