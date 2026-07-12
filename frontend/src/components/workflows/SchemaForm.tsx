@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
@@ -31,7 +31,7 @@ import { VariablePickerInput } from "./VariablePickerInput";
  *   - integer → number input (step=1)
  *   - boolean → checkbox
  *   - enum    → select
- *   - array of string → comma-separated text (one line per entry on Enter)
+ *   - array of string → token chips (removable tags; items.enum feeds autocomplete)
  *   - array of object → a repeatable list of sub-forms (one per item), built from items.properties
  *   - object (with properties) → a nested sub-form, recursing into its declared properties
  *
@@ -359,6 +359,55 @@ function StepperControl({ schema, value, onChange, variableSuggestions }: { sche
   );
 }
 
+/**
+ * A token/tag input for an array of strings — each entry is a removable chip and a trailing input adds
+ * more (Enter or comma commits; Backspace on an empty input removes the last; paste splits on commas /
+ * newlines). Replaces the comma-separated text box so the author sees and edits each item. When
+ * items.enum is present the input offers those values as native autocomplete. Stores the same string[].
+ */
+function ChipsControl({ schema, value, onChange }: { schema: Schema; value: unknown; onChange: (next: unknown) => void }) {
+  const arr = Array.isArray(value) ? (value as unknown[]).map(String) : [];
+  const [draft, setDraft] = useState("");
+  const listId = useId();
+  const options = Array.isArray(schema.items?.enum) ? schema.items!.enum!.map(String) : undefined;
+
+  const commit = (raw: string) => {
+    const parts = raw.split(/[,\n]/).map((s) => s.trim()).filter((s) => s.length > 0 && !arr.includes(s));
+    if (parts.length > 0) onChange([...arr, ...parts]);
+    setDraft("");
+  };
+  const removeAt = (i: number) => onChange(arr.filter((_, j) => j !== i));
+
+  return (
+    <div className="wf-chips">
+      {arr.map((tok, i) => (
+        <span key={`${tok}-${i}`} className="wf-chip">
+          {tok}
+          <button type="button" className="wf-chip-x" aria-label={`Remove ${tok}`} onClick={() => removeAt(i)}>&times;</button>
+        </span>
+      ))}
+      <input
+        className="wf-chip-input"
+        type="text"
+        value={draft}
+        placeholder={arr.length === 0 ? "Add and press Enter…" : ""}
+        list={options ? listId : undefined}
+        onChange={(e) => { const v = e.target.value; if (v.endsWith(",")) commit(v); else setDraft(v); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && draft.trim()) { e.preventDefault(); commit(draft); }
+          else if (e.key === "Backspace" && draft === "" && arr.length > 0) { removeAt(arr.length - 1); }
+        }}
+        onBlur={() => { if (draft.trim()) commit(draft); }}
+      />
+      {options && (
+        <datalist id={listId}>
+          {options.filter((o) => !arr.includes(o)).map((o) => <option key={o} value={o} />)}
+        </datalist>
+      )}
+    </div>
+  );
+}
+
 function renderControl(schema: Schema, value: unknown, onChange: (next: unknown) => void, templateHint: boolean, variableSuggestions?: ScopeSuggestion[]) {
   // x-control — an explicit widget discriminator, read FIRST. When a property declares a recognised
   // "x-control" for its shape we render that widget for the SAME stored value (e.g. an enum as a
@@ -495,19 +544,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   if (type === "array" && schema.items?.type === "string") {
-    const arr = Array.isArray(value) ? value as string[] : [];
-    return (
-      <input
-        type="text"
-        className="wf-form-input"
-        placeholder="comma-separated"
-        value={arr.join(", ")}
-        onChange={(e) => {
-          const parts = e.target.value.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-          onChange(parts);
-        }}
-      />
-    );
+    return <ChipsControl schema={schema} value={value} onChange={onChange} />;
   }
 
   if (type === "array" && schema.items?.type === "object" && schema.items.properties) {

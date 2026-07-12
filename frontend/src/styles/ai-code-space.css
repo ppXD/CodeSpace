@@ -3668,6 +3668,32 @@ textarea:-webkit-autofill {
 .acs-root .wf-stepper-val::placeholder { color: var(--muted-2); }
 .acs-root .wf-stepper-unit { font-size: 11.5px; color: var(--muted); padding: 0 8px 0 2px; }
 
+/* ── Chips (token input for an array of strings) — each entry a removable tag, a trailing input adds
+   more. Replaces the comma-separated text box; stores the same string[]. ── */
+.acs-root .wf-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  padding: 5px 6px; min-height: 32px;
+  border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel);
+  transition: border-color .1s;
+}
+.acs-root .wf-chips:focus-within { border-color: var(--accent); }
+.acs-root .wf-chip {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--ink);
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  padding: 2px 4px 2px 9px; border-radius: 999px; max-width: 100%;
+}
+.acs-root .wf-chip-x {
+  appearance: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; width: 16px; height: 16px; border-radius: 50%;
+  display: grid; place-items: center; transition: background .1s, color .1s;
+}
+.acs-root .wf-chip-x:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.acs-root .wf-chip-input {
+  flex: 1; min-width: 90px; appearance: none; border: 0; background: transparent; font: inherit;
+  font-size: 12.5px; color: var(--ink); outline: none; padding: 2px;
+}
+.acs-root .wf-chip-input::placeholder { color: var(--muted-2); }
+
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
