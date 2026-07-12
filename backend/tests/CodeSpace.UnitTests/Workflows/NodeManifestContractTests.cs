@@ -54,6 +54,23 @@ public class NodeManifestContractTests
     }
 
     [Fact]
+    public void Dynamic_output_hint_names_a_declared_output_property()
+    {
+        // A node that declares an x-dynamic-output hint (HTTP body / LLM json) MUST point it at a real declared
+        // output property — otherwise the FE splices a pasted sample under a key the engine never emits, a silent
+        // null dead-ref for every drilled path. Pairs with the node's own output tests, which pin the runtime key.
+        foreach (var node in new INodeRuntime[] { new HttpRequestNode(null!), new LlmCompleteNode(null!, null!) })
+        {
+            var schema = node.Manifest.OutputSchema;
+            schema.TryGetProperty("x-dynamic-output", out var hint).ShouldBeTrue($"{node.TypeKey} should declare x-dynamic-output");
+
+            var key = hint.GetString();
+            key.ShouldNotBeNullOrWhiteSpace();
+            schema.GetProperty("properties").TryGetProperty(key!, out _).ShouldBeTrue($"{node.TypeKey}'s x-dynamic-output '{key}' must name a declared output property");
+        }
+    }
+
+    [Fact]
     public void Trigger_nodes_declare_trigger_kind()
     {
         new TriggerPrOpenedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);

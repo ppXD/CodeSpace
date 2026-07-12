@@ -97,7 +97,7 @@ public sealed class PlanAuthorNode : INodeRuntime
                         "description": "Objective per-item acceptance — a command the supervisor runs to grade the item.",
                         "properties": {
                           "command": { "type": "array", "items": { "type": "string" }, "description": "The acceptance command argv." },
-                          "kind": { "type": ["string","null"], "enum": ["TestsPass","ArtifactPresent","LlmJudge","ArtifactSchema"], "description": "How the command's result is graded." },
+                          "kind": { "type": ["string","null"], "enum": ["TestsPass","ArtifactPresent","LlmJudge","ArtifactSchema","CitationsResolve"], "description": "How the command's result is graded." },
                           "description": { "type": ["string","null"] },
                           "timeoutSeconds": { "type": ["integer","null"] },
                           "setupCommand": { "type": ["array","null"], "items": { "type": "string" } }
