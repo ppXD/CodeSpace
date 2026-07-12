@@ -4067,6 +4067,19 @@ textarea:-webkit-autofill {
 .acs-root .wf-picker-item-type[data-kind="Object"] { color: var(--wf-ai);    background: var(--wf-ai-soft);    border-color: color-mix(in srgb, var(--wf-ai) 22%, transparent); }
 .acs-root .wf-picker-item-type[data-kind="Yes/No"] { color: var(--wf-human); background: var(--wf-human-soft); border-color: color-mix(in srgb, var(--wf-human) 22%, transparent); }
 
+/* Guided logic.if editor — a subtle text link for the raw-expression escape hatch + a monospace preview of
+   the expression the guided parts compile to. */
+.acs-root .wf-linkish {
+  align-self: flex-start; background: none; border: none; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 11px; color: var(--accent);
+}
+.acs-root .wf-linkish:hover { text-decoration: underline; }
+.acs-root .wf-if-preview { margin: 0; }
+.acs-root .wf-if-preview code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--ink);
+}
+
 /* ── Custom selectors (x-selector dispatch) ────────────────────────────────────
  * Generic visual shell for any per-domain picker that replaces a plain string
  * input. Today: repository picker. Future: credential picker, branch picker, etc.

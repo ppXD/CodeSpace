@@ -51,6 +51,7 @@ import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
 import { TerminalEditor } from "@/components/workflows/TerminalEditor";
 import { NodeInspectorStatus } from "@/components/workflows/NodeInspectorStatus";
 import { NodeConsequences } from "@/components/workflows/NodeConsequences";
+import { LogicIfEditor } from "@/components/workflows/LogicIfEditor";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
@@ -1476,6 +1477,10 @@ function NodeInspector({
           onInputsChange={onInputsChange}
           suggestions={suggestions}
         />
+      ) : manifest.typeKey === "logic.if" ? (
+        // The condition is one expression string; the guided editor authors it as value / operator / value
+        // (type-aware operators) so an ordinary user never writes the DSL. Reads + writes the same string.
+        <LogicIfEditor config={config} onConfigChange={onConfigChange} suggestions={suggestions} />
       ) : (
         <>
           <section className="wf-inspector-section">
