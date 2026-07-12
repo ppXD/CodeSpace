@@ -15,6 +15,17 @@ export interface BindRepositoriesBulkInput {
   projectId?: string;
 }
 
+/** A teammate who can be the AUTHOR of an attributable git write on a repo (has a live linked identity on
+ *  its provider). `userId` is the value the actAsUserId field stores. */
+export interface ActAsCandidate {
+  userId: string;
+  name: string;
+  email: string;
+  providerUsername: string;
+  providerUserId: string;
+  avatarUrl: string | null;
+}
+
 export const repositoriesApi = {
   list: (providerInstanceId?: string, projectId?: string) => {
     const params = new URLSearchParams();
@@ -26,6 +37,10 @@ export const repositoriesApi = {
 
   get: (repositoryId: string, refresh = false) =>
     fetchJson<RepositoryDetail>(`/api/repositories/${repositoryId}${refresh ? "?refresh=true" : ""}`),
+
+  /** Teammates who can author an attributable write on this repo — the actAsUserId picker source. */
+  listActAsCandidates: (repositoryId: string) =>
+    fetchJson<ActAsCandidate[]>(`/api/repositories/${repositoryId}/act-as-candidates`),
 
   bind: (input: BindRepositoryInput) => fetchJson<{ id: string }>("/api/repositories/bind", {
     method: "POST",

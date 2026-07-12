@@ -50,6 +50,23 @@ export function useRepository(repositoryId: string | null) {
   });
 }
 
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Teammates who can be the AUTHOR of an attributable git write on a repository — those with a live linked
+ * identity on the repo's provider. Feeds the actAsUserId picker. Gated on a literal repository UUID: when
+ * the sibling repositoryId is unset or a bound {{ref}} (non-uuid), the query stays disabled.
+ */
+export function useActAsCandidates(repositoryId: string | undefined) {
+  const enabled = repositoryId != null && UUID_RE.test(repositoryId);
+  return useQuery({
+    queryKey: ["act-as-candidates", repositoryId],
+    queryFn: () => repositoriesApi.listActAsCandidates(repositoryId!),
+    enabled,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
 /**
  * Resolve a repo by its provider-side fullPath ("acme/postboy.api") within the active
  * team's scope, then fetch its detail. URL-driven navigation uses fullPath (readable);
