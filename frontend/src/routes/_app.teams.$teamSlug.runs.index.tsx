@@ -143,7 +143,6 @@ function TeamRunsPage() {
     liveCount: s?.live ?? 0,
     agentsActive,
     failed: s?.failed ?? 0,
-    suspended: s?.suspended ?? 0,
     today: { count: s?.today ?? 0, hourly: summarizeToday(runList, nowMs).hourly },
   };
   // Open the LATEST attempt — the row IS the lineage's latest (WorkflowRunSummary.id), so the room lands on the most

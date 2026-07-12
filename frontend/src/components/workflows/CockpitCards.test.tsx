@@ -7,7 +7,7 @@ function metrics(o: Partial<CockpitMetrics> = {}): CockpitMetrics {
   return {
     decisions: { count: 0, oldestAge: null, highRisk: 0 },
     suspendedReview: 0,
-    liveCount: 0, agentsActive: 0, failed: 0, suspended: 0,
+    liveCount: 0, agentsActive: 0, failed: 0,
     today: { count: 0, hourly: new Array(24).fill(0) },
     ...o,
   };
@@ -17,14 +17,14 @@ describe("CockpitCards", () => {
   it("renders the four cards with values + composed subtext", () => {
     const { container } = render(<CockpitCards filter={null} onFilter={() => {}} metrics={metrics({
       decisions: { count: 2, oldestAge: "14m", highRisk: 1 },
-      liveCount: 3, agentsActive: 9, failed: 1, suspended: 1,
+      liveCount: 3, agentsActive: 9, failed: 1,
       today: { count: 28, hourly: new Array(24).fill(1) },
     })} />);
 
     expect(screen.getByText("Needs attention").closest("button")?.querySelector(".cockpit-card-value")?.textContent).toBe("2");   // decisions(2) + suspendedReview(0)
     expect(screen.getByText("oldest 14m · 1 high risk")).toBeTruthy();   // decisions-only → rich detail
     expect(screen.getByText("9 agents active")).toBeTruthy();
-    expect(screen.getByText("1 failed · 1 suspended")).toBeTruthy();
+    expect(screen.getByText("1 failed")).toBeTruthy();   // the Failed card counts only real failures now
     expect(screen.getByText("28 runs")).toBeTruthy();
     expect(container.querySelectorAll(".cockpit-card").length).toBe(4);
     expect(container.querySelector(".cockpit-spark")).not.toBeNull();   // today sparkline
