@@ -66,9 +66,11 @@ public sealed class PlanConfirmNode : INodeRuntime
             {
               "type": "object",
               "x-sections": ["Revisions", "Review"],
+              "x-intent": "Pause for a person to approve the plan — revisions reason on {plannerModelId}.",
+              "x-intentPlaceholders": { "plannerModelId": "the team's strongest model" },
               "properties": {
                 "plannerModelId": { "x-group": "Revisions", "type": "string", "format": "uuid", "title": "Planner model", "x-selector": "credentialedModel", "description": "The model revisions reason on (mirrors plan.author). Leave empty to auto-pick." },
-                "reviewMode": { "x-group": "Review", "type": "integer", "enum": [0, 1, 2], "default": 0, "title": "Review each revision", "x-enumLabels": { "0": "Off", "1": "Gate", "2": "Improve" }, "description": "An independent reviewer over each revised plan — the same critic the original planner ran under." },
+                "reviewMode": { "x-group": "Review", "type": "integer", "enum": [0, 1, 2], "default": 0, "title": "Review each revision", "x-control": "radioCards", "x-enumLabels": { "0": "Off", "1": "Gate", "2": "Improve" }, "x-optionConsequence": { "0": "No independent review of revisions.", "1": "A reviewer flags concerns onto each revised plan's risks.", "2": "A reviewer makes one bounded revision against its own critique." }, "description": "An independent reviewer over each revised plan — the same critic the original planner ran under." },
                 "reviewerModelId": { "x-group": "Review", "type": "string", "format": "uuid", "title": "Reviewer model", "x-selector": "credentialedModel", "x-advanced": true, "description": "The model the revision reviewer runs on. Leave empty to auto-pick." },
                 "flatPlan": { "x-group": "Revisions", "type": "boolean", "default": false, "title": "Independent subtasks only", "x-advanced": true, "description": "Constrain revisions to independent subtasks (no dependsOn) — set by parallel fan-out projections, mirroring the plan.author upstream." },
                 "maxRevisions": { "x-group": "Revisions", "type": "integer", "minimum": 1, "default": 5, "title": "Max revisions", "x-advanced": true, "description": "Revisions allowed before the node fails legibly instead of looping the planner forever." },

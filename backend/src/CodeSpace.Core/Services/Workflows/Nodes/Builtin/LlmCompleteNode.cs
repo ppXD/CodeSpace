@@ -49,8 +49,10 @@ public sealed class LlmCompleteNode : INodeRuntime
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
+              "x-intent": "Complete a prompt with {provider}, using {model}.",
+              "x-intentPlaceholders": { "provider": "Anthropic", "model": "the pool's recommended model" },
               "properties": {
-                "provider": { "type": "string", "enum": ["Anthropic", "OpenAI"], "default": "Anthropic", "description": "The wire to use. 'OpenAI' covers any OpenAI-compatible gateway (LiteLLM/OpenRouter/vLLM/…) configured as a model credential." },
+                "provider": { "type": "string", "enum": ["Anthropic", "OpenAI"], "default": "Anthropic", "x-control": "radioCards", "x-enumLabels": { "Anthropic": "Anthropic (Claude)", "OpenAI": "OpenAI-compatible" }, "x-optionConsequence": { "Anthropic": "Calls Anthropic's Claude models on their native wire.", "OpenAI": "Any OpenAI-compatible gateway (OpenAI, LiteLLM, OpenRouter, vLLM…) set up as a model credential." }, "description": "The wire to use. 'OpenAI' covers any OpenAI-compatible gateway (LiteLLM/OpenRouter/vLLM/…) configured as a model credential." },
                 "model": { "type": "string", "description": "Optional. Pins ONE model from the team's credentialed-model pool for this provider; it must be an enabled pool model. Omit to let the pool pick (its recommended model)." },
                 "maxTokens": { "type": "integer", "minimum": 1, "default": 2048, "description": "Output-token cap. No artificial ceiling — the transport clamps it to the MODEL's real output ceiling, so pinning a high value never limits a model below its true limit. A value above the streaming threshold (~21k) is STREAMED on the wire so a long generation can't idle-timeout. The default stays small so an ordinary output remains a single buffered call." },
                 "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
