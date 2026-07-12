@@ -43,8 +43,13 @@ public class GitPrOutputSchemaTests
         var itemProps = ItemProps(new GitListPullRequestsNode(null!).Manifest.OutputSchema, "pullRequests");
         AssertDeclaredKeysAreEmitted(itemProps, emitted, "pullRequests[]");
 
-        // string enum + nested label shape (labels[0].name / .color) resolve, not int / PascalCase.
+        // string enum, not int / PascalCase.
         emitted.GetProperty("state").GetString().ShouldBe("Open");
+
+        // The NESTED labels[] item shape is drill-guarded too — every declared labels[].<key> (name, color)
+        // must be a real serialized key, so a LabelRef rename can't leave a schema-declared dead-ref.
+        var labelProps = itemProps.GetProperty("labels").GetProperty("items").GetProperty("properties");
+        AssertDeclaredKeysAreEmitted(labelProps, emitted.GetProperty("labels")[0], "pullRequests[].labels[]");
         emitted.GetProperty("labels")[0].GetProperty("name").GetString().ShouldBe("bug");
     }
 
