@@ -41,6 +41,14 @@ describe("NodeAddMenu", () => {
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ typeKey: "http.request" }));
   });
 
+  it("tags each item with its category tone so the icon chip is coloured like the palette", () => {
+    render(<NodeAddMenu at={{ x: 0, y: 0 }} manifests={manifests} onPick={() => {}} onClose={() => {}} />);
+
+    // git.* → git tone, flow container → flow tone (nodeToneFor), regardless of the manifest's Category text.
+    expect(screen.getByText("Loop").closest(".wf-addmenu-item")!.getAttribute("data-tone")).toBe("flow");
+    expect(screen.getByText("Done").closest(".wf-addmenu-item")!.getAttribute("data-tone")).toBe("end");
+  });
+
   it("closes when the backdrop is clicked", () => {
     const onClose = vi.fn();
     render(<NodeAddMenu at={{ x: 0, y: 0 }} manifests={manifests} onPick={() => {}} onClose={onClose} />);
