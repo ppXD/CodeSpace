@@ -75,7 +75,7 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
     const node = definition.nodes.find((n) => n.id === nodeId);
     if (!node) continue;
     const manifest = manifestByType.get(node.typeKey);
-    const outputKeys = manifest ? extractOutputKeys(manifest) : [];
+    const outputKeys = manifest ? extractOutputPaths(manifest) : [];
 
     if (outputKeys.length === 0) {
       // Node has no typed outputs declared — still show a generic placeholder so the
@@ -177,7 +177,7 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
   const triggerNode = definition.nodes.find((n) => manifestByType.get(n.typeKey)?.kind === "Trigger");
   if (triggerNode) {
     const triggerManifest = manifestByType.get(triggerNode.typeKey);
-    const triggerKeys = triggerManifest ? extractOutputKeys(triggerManifest) : [];
+    const triggerKeys = triggerManifest ? extractOutputPaths(triggerManifest) : [];
 
     if (triggerKeys.length === 0) {
       suggestions.push({
@@ -369,15 +369,80 @@ function readRef(value: unknown): string | null {
   return typeof ref === "string" ? ref : null;
 }
 
-interface OutputKey { name: string; type?: string; }
+interface OutputKey {
+  /** Sub-path under `nodes.<id>.outputs.` (or `trigger.`) — e.g. "status", "pr.number", "pullRequests[0].url". */
+  name: string;
+  type?: string;
+}
 
-function extractOutputKeys(manifest: NodeManifestDto): OutputKey[] {
-  const schema = manifest.outputSchema as { properties?: Record<string, { type?: string | string[] }> } | undefined;
-  if (!schema?.properties) return [];
-  return Object.entries(schema.properties).map(([name, prop]) => ({
-    name,
-    type: Array.isArray(prop.type) ? prop.type.join("|") : prop.type,
-  }));
+interface SchemaNode {
+  type?: string | string[];
+  properties?: Record<string, unknown>;
+  items?: unknown;
+}
+
+/** How deep to drill into a nested OutputSchema. Bounds the walk so an exotic/deep schema can't flood the
+ *  picker — realistic node outputs nest 1–2 levels, so 5 is generous headroom, not a functional limit. */
+const MAX_OUTPUT_DEPTH = 5;
+
+/** A path segment the resolver's template grammar accepts (VariableResolver TemplatePattern): a JS-identifier
+ *  key. A property/field name outside this set (a hyphen, dot, space, '@', '$' — e.g. an HTTP header key like
+ *  "content-type") can't be walked as a dotted ref, so we never emit it — offering it would insert a
+ *  `{{…}}` the engine leaves as literal, un-substituted text (a silent dead ref). */
+const RESOLVABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Every reference path an upstream node's OutputSchema exposes, driven PURELY by the schema shape — no
+ * per-node or per-typeKey knowledge. It mirrors exactly what {@link VariableResolver} can resolve so the
+ * picker never offers a path that silently resolves to null at run time:
+ *   - an object with declared `properties` descends by key         → `result.data.count`
+ *   - a typed-item array (its `items` declare `properties`) descends under an explicit `[0]` index, because
+ *     the resolver supports index access but NOT `[]`/`[*]` projection → `pullRequests[0].url`
+ *   - a scalar, a bare `{type:"array"}`, or an opaque `{type:"object"}` is a leaf → one path carrying its type
+ * A nested object / typed array also yields the branch itself (bind the whole object / array), so a
+ * downstream map can take the array while a scalar consumer takes one field. Depth-bounded; acyclic by
+ * construction (manifest schemas are literals, no `$ref`).
+ */
+function extractOutputPaths(manifest: NodeManifestDto): OutputKey[] {
+  const out: OutputKey[] = [];
+  collectSchemaPaths(manifest.outputSchema, "", 0, out);
+  return out;
+}
+
+function collectSchemaPaths(schema: unknown, prefix: string, depth: number, out: OutputKey[]): void {
+  if (depth > MAX_OUTPUT_DEPTH) return;
+  if (typeof schema !== "object" || schema == null) return;
+  const s = schema as SchemaNode;
+
+  // Descend an object by key — but ONLY when it isn't ALSO array-typed. A union like `["object","array"]`
+  // (or a malformed `{type:"array", properties}`) resolves to an array at run time, which the resolver can't
+  // key-walk, so it falls through to the whole-value leaf instead of emitting dead `prefix.key` paths.
+  if (s.properties && typeof s.properties === "object" && !typeIncludes(s.type, "array")) {
+    if (prefix !== "") out.push({ name: prefix, type: extractSchemaType(s) ?? "object" });   // bindable whole object (never the root bag)
+    for (const [name, child] of Object.entries(s.properties)) {
+      if (!RESOLVABLE_KEY.test(name)) continue;
+      collectSchemaPaths(child, prefix === "" ? name : `${prefix}.${name}`, depth + 1, out);
+    }
+    return;
+  }
+
+  const itemProps = typeof s.items === "object" && s.items != null ? (s.items as SchemaNode).properties : undefined;
+  // A typed-item array descends under `[0]`, which needs a real parent path — at the root (prefix "") the
+  // outputs bag is an object, so a root array has no resolvable ref and drills nothing (→ generic placeholder).
+  if (typeIncludes(s.type, "array") && itemProps && typeof itemProps === "object" && prefix !== "") {
+    out.push({ name: prefix, type: extractSchemaType(s) ?? "array" });    // bindable whole array (e.g. a map's items)
+    for (const [name, child] of Object.entries(itemProps)) {
+      if (!RESOLVABLE_KEY.test(name)) continue;
+      collectSchemaPaths(child, `${prefix}[0].${name}`, depth + 1, out);
+    }
+    return;
+  }
+
+  if (prefix !== "") out.push({ name: prefix, type: extractSchemaType(s) });   // leaf
+}
+
+function typeIncludes(type: string | string[] | undefined, wanted: string): boolean {
+  return Array.isArray(type) ? type.includes(wanted) : type === wanted;
 }
 
 function extractSchemaType(schema: unknown): string | undefined {

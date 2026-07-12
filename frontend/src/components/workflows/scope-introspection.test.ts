@@ -231,6 +231,146 @@ describe("introspectScope — {{item}} / {{index}} in a map body", () => {
   });
 });
 
+/**
+ * The picker drills into an OutputSchema's shape, but ONLY along paths the engine's VariableResolver can
+ * actually resolve — object keys (`result.data.count`) and typed array items under an explicit `[0]` index
+ * (`pullRequests[0].url`), NEVER a `[]` projection (which the resolver leaves unresolved → a silent null
+ * dead-ref). Bare arrays and opaque objects stay single leaves. Driven purely by the schema shape.
+ */
+describe("introspectScope — recursive nested & typed-array outputs", () => {
+  const richManifest = (typeKey: string, outputSchema: unknown): NodeManifestDto => ({
+    typeKey, displayName: typeKey, category: "Test", kind: "Regular",
+    description: null, iconKey: null, configSchema: {}, inputSchema: {}, outputSchema,
+  });
+
+  // start(trigger) → s(src, the schema under test) → t. Introspect from t so s is upstream.
+  const build = (srcSchema: unknown) => {
+    const mbt = new Map<string, NodeManifestDto>([
+      ["trigger.x", manifest("trigger.x", "Trigger")],
+      ["src", richManifest("src", srcSchema)],
+      ["target", manifest("target", "Regular")],
+    ]);
+    const def: WorkflowDefinition = {
+      schemaVersion: 1,
+      nodes: [
+        { id: "start", typeKey: "trigger.x", config: {}, inputs: {} },
+        { id: "s", typeKey: "src", config: {}, inputs: {} },
+        { id: "t", typeKey: "target", config: {}, inputs: {} },
+      ],
+      edges: [{ from: "start", to: "s" }, { from: "s", to: "t" }],
+    };
+    return introspectScope({ definition: def, currentNodeId: "t", manifestByType: mbt });
+  };
+  const pathsOf = (schema: unknown) => build(schema).map((x) => x.path);
+  const under = (all: string[], prefix: string) => all.filter((x) => x.startsWith(prefix));
+
+  it("drills a typed-item array under [0] — whole array + each item field, no projection dead-ref", () => {
+    const p = pathsOf({ type: "object", properties: {
+      count: { type: "integer" },
+      pullRequests: { type: "array", items: { type: "object", properties: { number: { type: "integer" }, url: { type: "string" } } } },
+    } });
+
+    expect(p).toContain("nodes.s.outputs.count");
+    expect(p).toContain("nodes.s.outputs.pullRequests");             // bind the whole array (e.g. a map's items)
+    expect(p).toContain("nodes.s.outputs.pullRequests[0].number");   // resolvable index form
+    expect(p).toContain("nodes.s.outputs.pullRequests[0].url");
+    expect(p).not.toContain("nodes.s.outputs.pullRequests.number");  // the resolver can't walk an array by key
+    expect(p).not.toContain("nodes.s.outputs.pullRequests[].number"); // projection is never resolvable
+  });
+
+  it("drills a nested object by key at each level (whole object + fields)", () => {
+    const p = pathsOf({ type: "object", properties: {
+      result: { type: "object", properties: { data: { type: "object", properties: { count: { type: "integer" } } } } },
+    } });
+
+    expect(p).toContain("nodes.s.outputs.result");
+    expect(p).toContain("nodes.s.outputs.result.data");
+    expect(p).toContain("nodes.s.outputs.result.data.count");
+  });
+
+  it("leaves a bare {type:array} as a single leaf (no invented item keys)", () => {
+    expect(under(pathsOf({ type: "object", properties: { files: { type: "array" } } }), "nodes.s.outputs.files"))
+      .toEqual(["nodes.s.outputs.files"]);
+  });
+
+  it("leaves an opaque {type:object} (no properties) as a single leaf", () => {
+    expect(under(pathsOf({ type: "object", properties: { json: { type: "object" } } }), "nodes.s.outputs.json"))
+      .toEqual(["nodes.s.outputs.json"]);
+  });
+
+  it("drills a union-typed array ([\"array\",\"null\"]) with typed items", () => {
+    const p = pathsOf({ type: "object", properties: {
+      rows: { type: ["array", "null"], items: { type: "object", properties: { x: { type: "string" } } } },
+    } });
+
+    expect(p).toContain("nodes.s.outputs.rows");
+    expect(p).toContain("nodes.s.outputs.rows[0].x");
+  });
+
+  it("bounds recursion depth so a pathological schema can't flood the picker", () => {
+    const deep = { type: "object", properties: { l1: { type: "object", properties: { l2: { type: "object", properties: {
+      l3: { type: "object", properties: { l4: { type: "object", properties: { l5: { type: "object", properties: {
+        l6: { type: "object", properties: { leaf: { type: "string" } } },
+      } } } } } } } } } } } };
+    const p = pathsOf(deep);
+
+    expect(p).toContain("nodes.s.outputs.l1.l2.l3.l4.l5");   // reached the bound
+    expect(p.some((x) => x.includes("l6"))).toBe(false);      // stopped before going deeper
+  });
+
+  it("carries the leaf/branch type hint and a readable nested label", () => {
+    const all = build({ type: "object", properties: {
+      pullRequests: { type: "array", items: { type: "object", properties: { number: { type: "integer" } } } },
+    } });
+
+    expect(all.find((x) => x.path === "nodes.s.outputs.pullRequests")?.type).toBe("array");
+    const field = all.find((x) => x.path === "nodes.s.outputs.pullRequests[0].number");
+    expect(field?.type).toBe("integer");
+    expect(field?.label).toBe("src → pullRequests[0].number");
+  });
+
+  it("keeps a flat scalar output identical to before (backward compatible)", () => {
+    const p = pathsOf({ type: "object", properties: { status: { type: "string" }, ok: { type: "boolean" } } });
+    expect(under(p, "nodes.s.outputs.status")).toEqual(["nodes.s.outputs.status"]);
+    expect(under(p, "nodes.s.outputs.ok")).toEqual(["nodes.s.outputs.ok"]);
+  });
+
+  it("does NOT key-walk a union that is also array-typed — emits the whole value, not dead `.key` paths", () => {
+    const p = pathsOf({ type: "object", properties: {
+      rows: { type: ["object", "array"], properties: { name: { type: "string" } } },
+    } });
+    expect(p).toContain("nodes.s.outputs.rows");            // bind the whole value ($ref resolves whichever kind)
+    expect(p).not.toContain("nodes.s.outputs.rows.name");   // the resolver can't key-walk an array → never emit
+  });
+
+  it("skips non-identifier keys the resolver grammar can't match (hyphen, @, dot)", () => {
+    const p = pathsOf({ type: "object", properties: {
+      "content-type": { type: "string" },
+      "@id": { type: "string" },
+      contentType: { type: "string" },
+    } });
+    expect(p).toContain("nodes.s.outputs.contentType");        // identifier → offered
+    expect(p).not.toContain("nodes.s.outputs.content-type");   // hyphen → would insert a literal dead ref
+    expect(p.some((x) => x.includes("@id"))).toBe(false);
+  });
+
+  it("a root-level typed-item array drills nothing (no malformed leading-[0] path)", () => {
+    const p = pathsOf({ type: "array", items: { type: "object", properties: { x: { type: "string" } } } });
+    expect(p.some((x) => x.includes("[0]"))).toBe(false);
+    expect(p.some((x) => x.startsWith("nodes.s.outputs.["))).toBe(false);
+    expect(p).toContain("nodes.s.outputs");   // falls back to the generic "outputs not typed" placeholder
+  });
+
+  it("preserves union type hints on the whole-object / whole-array branch suggestions", () => {
+    const all = build({ type: "object", properties: {
+      result: { type: ["object", "null"], properties: { count: { type: "integer" } } },
+      rows: { type: ["array", "null"], items: { type: "object", properties: { x: { type: "string" } } } },
+    } });
+    expect(all.find((x) => x.path === "nodes.s.outputs.result")?.type).toBe("object|null");
+    expect(all.find((x) => x.path === "nodes.s.outputs.rows")?.type).toBe("array|null");
+  });
+});
+
 describe("introspectScope — human labels (display-only, ref preserved)", () => {
   const find = (nodeId: string, path: string) =>
     introspectScope({ definition, currentNodeId: nodeId, manifestByType }).find((s) => s.path === path);
