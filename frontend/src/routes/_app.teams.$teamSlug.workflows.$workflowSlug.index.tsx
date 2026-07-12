@@ -49,6 +49,7 @@ import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { MapEditor } from "@/components/workflows/MapEditor";
 import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
 import { TerminalEditor } from "@/components/workflows/TerminalEditor";
+import { NodeInspectorStatus } from "@/components/workflows/NodeInspectorStatus";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
@@ -1381,6 +1382,10 @@ function NodeInspector({
         <div className="wf-inspector-h-ref">{nodeId}</div>
         <code className="wf-inspector-h-key">{manifest.typeKey}</code>
       </header>
+
+      {/* Readiness at a glance: green when every required field is set, amber (naming them) when not.
+          Rendered only when the node has required fields — driven by the manifest, not per-node code. */}
+      <NodeInspectorStatus configSchema={manifest.configSchema} config={config} inputSchema={manifest.inputSchema} inputs={inputs} />
 
       <section className="wf-inspector-section">
         <label className="wf-form-row">
