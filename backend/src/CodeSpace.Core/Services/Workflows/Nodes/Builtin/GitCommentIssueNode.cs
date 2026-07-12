@@ -39,7 +39,16 @@ public sealed class GitCommentIssueNode : INodeRuntime
         // on abandoned runs so we don't double-post.
         IsSideEffecting = true,
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IIssueWriteCapability) },
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Comment on issue #{number} on {repositoryId}.",
+              "x-intentPlaceholders": { "number": "an issue number", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
@@ -47,7 +56,7 @@ public sealed class GitCommentIssueNode : INodeRuntime
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The issue number." },
                 "body": { "type": "string", "minLength": 1, "x-long": true, "description": "Markdown comment body. Supports {{ }} references." },
-                "actAsUserId": { "type": "string", "format": "uuid", "description": "Comment AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Comment AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number","body"]
             }
