@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 
 import type { ScopeSuggestion } from "./scope-introspection";
+import { allBranchIds, buildSuggestionTree, flattenVisible, type VisibleRow } from "./suggestionTree";
 
 /**
  * Dify-style templated input field with chip rendering. Every {{ref}} token in the value
@@ -42,6 +43,8 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [highlightIndex, setHighlightIndex] = useState(0);
+  /** Branch ids the user has opened. While a filter is active every branch is opened so matches show. */
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   /**
    * Where the chip will go when a suggestion is picked. Two forms:
    *
@@ -90,13 +93,25 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
   // and a later blur would flush that empty DOM back as "", silently dropping the value.
   const lastSerializedRef = useRef<string | null>(null);
 
-  // Group + filter suggestions for the popover.
+  // Filter → tree → the flat list of VISIBLE rows the popover renders and the keyboard navigates. A row is a
+  // branch (expandable) and/or a leaf (selectable); nav + Enter work off `visibleRows[highlightIndex]`.
   const filtered = useMemo(() => filterSuggestions(suggestions, filter), [suggestions, filter]);
-  const grouped = useMemo(() => groupSuggestions(filtered), [filtered]);
-  // Reset the highlight to the first suggestion whenever the filter text or open-state changes. The write
-  // is idempotent (0 → 0 is a no-op for React), so there's no cascading-render risk the rule guards against.
+  const tree = useMemo(() => buildSuggestionTree(filtered), [filtered]);
+  // While searching, open every branch so a matching deep field is actually visible; otherwise honour the
+  // user's own expand/collapse.
+  const effectiveExpanded = useMemo(() => (filter ? allBranchIds(tree) : expandedIds), [filter, tree, expandedIds]);
+  const visibleRows = useMemo(() => flattenVisible(tree, effectiveExpanded), [tree, effectiveExpanded]);
+
+  const toggleExpand = (id: string) =>
+    setExpandedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+
+  // Reset the highlight to the first row whenever the filter text or open-state changes. The write is
+  // idempotent (0 → 0 is a no-op for React), so there's no cascading-render risk the rule guards against.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setHighlightIndex(0); }, [filter, open]);
+  // Keep the highlight in range when a collapse shrinks the visible list.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setHighlightIndex((i) => Math.min(i, Math.max(0, visibleRows.length - 1))); }, [visibleRows.length]);
 
   // Hydrate / rehydrate the editor when `value` changes from outside. We DON'T rebuild on
   // every render — only when the externally-provided value diverges from our last serialized
@@ -292,6 +307,13 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
 
   // ─── Keyboard handling ────────────────────────────────────────────────────
 
+  /** Enter / click on a tree row: a selectable row inserts its {{ref}}; a pure branch toggles open. */
+  const activateRow = (row: VisibleRow | undefined) => {
+    if (!row) return;
+    if (row.node.suggestion) { insertChipForPick(row.node.suggestion); return; }
+    if (row.expandable) toggleExpand(row.node.id);
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     // Backspace / Delete adjacent to a chip: remove the WHOLE chip in one keystroke.
     // contenteditable=false handles this in most browsers, but Safari + some Chromium
@@ -309,13 +331,12 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
       }
     }
 
-    // Multi-line: Enter inserts a real newline. Single-line: Enter is "pick highlighted
-    // suggestion" when the picker is open, otherwise prevent default to avoid creating a
-    // newline the user can't see.
+    // Multi-line: Enter inserts a real newline. Single-line: Enter selects the highlighted row (a leaf
+    // inserts its ref; a branch opens) when the picker is open, otherwise prevent an invisible newline.
     if (e.key === "Enter") {
-      if (open && filtered[highlightIndex]) {
+      if (open && visibleRows[highlightIndex]) {
         e.preventDefault();
-        insertChipForPick(filtered[highlightIndex]);
+        activateRow(visibleRows[highlightIndex]);
         return;
       }
       if (!expanded) {
@@ -326,17 +347,19 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
 
     if (!open) return;
 
+    const row = visibleRows[highlightIndex];
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlightIndex((i) => Math.min(i + 1, filtered.length - 1));
+      setHighlightIndex((i) => Math.min(i + 1, visibleRows.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setHighlightIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === "ArrowRight") {
+      if (row?.expandable && !row.expanded) { e.preventDefault(); toggleExpand(row.node.id); }
+    } else if (e.key === "ArrowLeft") {
+      if (row?.expandable && row.expanded) { e.preventDefault(); toggleExpand(row.node.id); }
     } else if (e.key === "Tab") {
-      if (filtered[highlightIndex]) {
-        e.preventDefault();
-        insertChipForPick(filtered[highlightIndex]);
-      }
+      if (row) { e.preventDefault(); activateRow(row); }
     } else if (e.key === "Escape") {
       e.preventDefault();
       closePicker();
@@ -431,33 +454,41 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
         >{expanded ? <Ic.Collapse size={11} /> : <Ic.Expand size={11} />}</button>
       </div>
 
-      {open && filtered.length > 0 && (
-        <div className="wf-picker-popover" role="listbox">
-          {grouped.map(({ category, items }) => (
-            <div key={category} className="wf-picker-group">
-              <div className="wf-picker-group-h">{categoryLabel(category)}</div>
-              {items.map((item) => {
-                const flatIndex = filtered.indexOf(item);
-                return (
-                  <div
-                    key={item.path}
-                    role="option"
-                    className="wf-picker-item"
-                    data-highlighted={flatIndex === highlightIndex}
-                    onMouseDown={(e) => { e.preventDefault(); insertChipForPick(item); }}
-                    onMouseEnter={() => setHighlightIndex(flatIndex)}
+      {open && visibleRows.length > 0 && (
+        <div className="wf-picker-popover" role="tree">
+          {visibleRows.map((row, i) => {
+            const newGroup = i === 0 || visibleRows[i - 1].groupCategory !== row.groupCategory;
+            const selectable = row.node.suggestion != null;
+            const highlighted = i === highlightIndex;
+            return (
+              <div key={row.node.id}>
+                {newGroup && <div className="wf-picker-group-h">{row.groupLabel}</div>}
+                <div
+                  role="treeitem"
+                  className="wf-picker-item"
+                  data-highlighted={highlighted}
+                  data-selectable={selectable}
+                  aria-expanded={row.expandable ? row.expanded : undefined}
+                  style={{ paddingLeft: `${8 + row.depth * 15}px` }}
+                  onMouseEnter={() => setHighlightIndex(i)}
+                  onMouseDown={(e) => { e.preventDefault(); activateRow(row); }}
+                >
+                  <span
+                    className="wf-picker-twist"
+                    data-on={row.expandable ? "true" : undefined}
+                    onMouseDown={(e) => { if (row.expandable) { e.preventDefault(); e.stopPropagation(); toggleExpand(row.node.id); } }}
                   >
-                    <span className="wf-picker-item-cat">{categoryIcon(category)}</span>
-                    <span className="wf-picker-item-body">
-                      <span className="wf-picker-item-path">{item.label}</span>
-                      {item.description && <span className="wf-picker-item-desc">{item.description}</span>}
-                    </span>
-                    {item.type && <span className="wf-picker-item-type">{item.type}</span>}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+                    {row.expandable ? (row.expanded ? "▾" : "▸") : ""}
+                  </span>
+                  <span className="wf-picker-item-body">
+                    <span className="wf-picker-item-path">{row.node.label}</span>
+                    {highlighted && selectable && <span className="wf-picker-item-desc">{`{{${row.node.suggestion!.path}}}`}</span>}
+                  </span>
+                  {row.node.typeHint && <span className="wf-picker-item-type" data-kind={row.node.typeHint}>{row.node.typeHint}</span>}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -599,31 +630,3 @@ function filterSuggestions(all: ScopeSuggestion[], filter: string): ScopeSuggest
   return all.filter((s) => s.path.toLowerCase().includes(f) || s.label.toLowerCase().includes(f));
 }
 
-function groupSuggestions(items: ScopeSuggestion[]): { category: ScopeSuggestion["category"]; items: ScopeSuggestion[] }[] {
-  // Order: node-local → workflow-local → trigger/iteration → broader scopes (sys, team, project).
-  // Project sits last because it's the most "shared" scope (visible across every workflow in
-  // the team), so it should appear after the more workflow-specific groups.
-  const order: ScopeSuggestion["category"][] = ["node", "wf", "input", "trigger", "iteration", "sys", "team", "project"];
-  const groups: Record<string, ScopeSuggestion[]> = {};
-  for (const item of items) {
-    (groups[item.category] ??= []).push(item);
-  }
-  return order.flatMap((c) => groups[c]?.length ? [{ category: c, items: groups[c] }] : []);
-}
-
-function categoryLabel(c: ScopeSuggestion["category"]): string {
-  return {
-    node: "Upstream node outputs",
-    wf: "Workflow variables",
-    input: "Workflow inputs",
-    trigger: "Trigger payload",
-    iteration: "Iteration",
-    sys: "System variables",
-    team: "Team variables",
-    project: "Project variables",
-  }[c];
-}
-
-function categoryIcon(c: ScopeSuggestion["category"]): string {
-  return { node: "▸", wf: "•", input: "→", trigger: "⚡", iteration: "↻", sys: "x", team: "$", project: "▣" }[c];
-}
