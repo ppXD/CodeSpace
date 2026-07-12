@@ -371,6 +371,78 @@ describe("introspectScope — recursive nested & typed-array outputs", () => {
   });
 });
 
+/**
+ * Slice 2 — inside a flow.map body, {{item}} is one element of the array bound to the map's `items` input.
+ * When that source array declares a typed item shape, the picker drills `item.<field>` ("Current item →
+ * instruction") on top of bare {{item}} / {{index}}. The engine walks into the iteration element, so every
+ * emitted path resolves. Untyped/literal sources fall back to bare item/index only.
+ */
+describe("introspectScope — typed {{item.*}} inside a map body", () => {
+  const richManifest = (typeKey: string, kind: NodeManifestDto["kind"], outputSchema: unknown): NodeManifestDto => ({
+    typeKey, displayName: typeKey, category: "Test", kind,
+    description: null, iconKey: null, configSchema: {}, inputSchema: {}, outputSchema,
+  });
+
+  const planItems = { type: "object", properties: { items: { type: "array", items: { type: "object", properties: {
+    instruction: { type: "string" },
+    acceptance: { type: "object", properties: { command: { type: "array", items: { type: "string" } } } },
+  } } } } };
+
+  const baseManifests = (planSchema: unknown) => new Map<string, NodeManifestDto>([
+    ["trigger.x", manifest("trigger.x", "Trigger")],
+    ["plan", richManifest("plan", "Regular", planSchema)],
+    ["flow.map", manifest("flow.map", "Map")],
+    ["flow.map_start", manifest("flow.map_start", "Regular")],
+    ["regular.a", manifest("regular.a", "Regular", { value: { type: "string" } })],
+  ]);
+
+  // trigger → plan(typed items[]) → map(items ← plan) ; map body: mapStart → body(parentId map)
+  const build = (mapItemsBinding: unknown): WorkflowDefinition => ({
+    schemaVersion: 1,
+    nodes: [
+      { id: "trigger", typeKey: "trigger.x", config: {}, inputs: {} },
+      { id: "plan", typeKey: "plan", config: {}, inputs: {} },
+      { id: "map", typeKey: "flow.map", config: {}, inputs: { items: mapItemsBinding } },
+      { id: "mapStart", typeKey: "flow.map_start", parentId: "map", config: {}, inputs: {} },
+      { id: "body", typeKey: "regular.a", parentId: "map", config: {}, inputs: {} },
+    ],
+    edges: [{ from: "trigger", to: "plan" }, { from: "plan", to: "map" }, { from: "mapStart", to: "body" }],
+  });
+
+  const iterPaths = (def: WorkflowDefinition, mbt = baseManifests(planItems)) =>
+    introspectScope({ definition: def, currentNodeId: "body", manifestByType: mbt }).filter((s) => s.category === "iteration").map((s) => s.path);
+
+  it("drills the bound array's item shape into item.<field> (nested too), keeping bare item/index", () => {
+    const p = iterPaths(build("{{nodes.plan.outputs.items}}"));
+    expect(p).toContain("item");
+    expect(p).toContain("index");
+    expect(p).toContain("item.instruction");
+    expect(p).toContain("item.acceptance");
+    expect(p).toContain("item.acceptance.command");
+    expect(p).not.toContain("item.item");   // the whole-item branch is dropped (bare {{item}} covers it)
+  });
+
+  it("labels the typed rows 'Current item → <field>' and keeps the ref path in the description", () => {
+    const s = introspectScope({ definition: build("{{nodes.plan.outputs.items}}"), currentNodeId: "body", manifestByType: baseManifests(planItems) })
+      .find((x) => x.path === "item.instruction");
+    expect(s?.label).toBe("Current item → instruction");
+    expect(s?.description).toContain("item.instruction");
+  });
+
+  it("resolves the { $ref } binding form too", () => {
+    expect(iterPaths(build({ $ref: "nodes.plan.outputs.items" }))).toContain("item.instruction");
+  });
+
+  it("falls back to bare item/index when the source array has no typed item shape", () => {
+    const untyped = baseManifests({ type: "object", properties: { items: { type: "array" } } });
+    expect(iterPaths(build("{{nodes.plan.outputs.items}}"), untyped)).toEqual(["item", "index"]);
+  });
+
+  it("falls back to bare item/index when items is a literal list, not a ref", () => {
+    expect(iterPaths(build([{ instruction: "x" }]))).toEqual(["item", "index"]);
+  });
+});
+
 describe("introspectScope — human labels (display-only, ref preserved)", () => {
   const find = (nodeId: string, path: string) =>
     introspectScope({ definition, currentNodeId: nodeId, manifestByType }).find((s) => s.path === path);
