@@ -4036,6 +4036,25 @@ textarea:-webkit-autofill {
   flex-shrink: 0;
 }
 
+/* ── Tree picker ───────────────────────────────────────────────────────────────
+ * A collapsible tree: a chevron twist per branch, depth via inline padding, a plain-word type chip
+ * (List / Text / Number / Yes-No). Branch labels (a source / structural level) read muted; a selectable
+ * field reads in ink. The raw {{ref}} only surfaces on the highlighted row — legible, never cluttered. */
+.acs-root .wf-picker-twist {
+  width: 12px; flex-shrink: 0; text-align: center; color: var(--muted-2); font-size: 10px; line-height: 1;
+  cursor: default; transition: color .1s ease;
+}
+.acs-root .wf-picker-twist[data-on="true"] { cursor: pointer; color: var(--muted); }
+.acs-root .wf-picker-item:hover .wf-picker-twist[data-on="true"] { color: var(--accent); }
+.acs-root .wf-picker-item[data-selectable="false"] { cursor: default; }
+.acs-root .wf-picker-item[data-selectable="false"] .wf-picker-item-path { color: var(--muted); font-weight: 500; }
+.acs-root .wf-picker-item[data-highlighted="true"] .wf-picker-item-path { color: var(--ink); }
+.acs-root .wf-picker-item-desc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Type chip tinted by the plain-word kind so List / Object / Yes-No read at a glance. */
+.acs-root .wf-picker-item-type[data-kind="List"]   { color: var(--wf-flow);  background: var(--wf-flow-soft);  border-color: color-mix(in srgb, var(--wf-flow) 22%, transparent); }
+.acs-root .wf-picker-item-type[data-kind="Object"] { color: var(--wf-ai);    background: var(--wf-ai-soft);    border-color: color-mix(in srgb, var(--wf-ai) 22%, transparent); }
+.acs-root .wf-picker-item-type[data-kind="Yes/No"] { color: var(--wf-human); background: var(--wf-human-soft); border-color: color-mix(in srgb, var(--wf-human) 22%, transparent); }
+
 /* ── Custom selectors (x-selector dispatch) ────────────────────────────────────
  * Generic visual shell for any per-domain picker that replaces a plain string
  * input. Today: repository picker. Future: credential picker, branch picker, etc.
