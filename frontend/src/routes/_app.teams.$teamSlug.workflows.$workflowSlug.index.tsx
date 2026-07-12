@@ -51,6 +51,7 @@ import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
 import { TerminalEditor } from "@/components/workflows/TerminalEditor";
 import { NodeInspectorStatus } from "@/components/workflows/NodeInspectorStatus";
 import { NodeConsequences } from "@/components/workflows/NodeConsequences";
+import { IntentLine } from "@/components/workflows/IntentLine";
 import { LogicIfEditor } from "@/components/workflows/LogicIfEditor";
 import { ResponseShapeEditor } from "@/components/workflows/ResponseShapeEditor";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
@@ -1392,6 +1393,10 @@ function NodeInspector({
         <div className="wf-inspector-h-ref">{nodeId}</div>
         <code className="wf-inspector-h-key">{manifest.typeKey}</code>
       </header>
+
+      {/* Always-first plain-language summary of what this node WILL DO, composed from its live config.
+          Opt-in per node (a manifest x-intent template); renders nothing when a node declares none. */}
+      <IntentLine configSchema={manifest.configSchema} inputSchema={manifest.inputSchema} config={config} inputs={inputs} />
 
       {/* Readiness at a glance: green when every required field is set, amber (naming them) when not.
           Rendered only when the node has required fields — driven by the manifest, not per-node code. */}
