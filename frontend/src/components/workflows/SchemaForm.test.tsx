@@ -543,3 +543,65 @@ describe("SchemaForm x-control: stepper", () => {
     expect(screen.queryByRole("button", { name: "Increase" })).toBeNull();
   });
 });
+
+/**
+ * An array of strings renders as removable token chips (replacing the comma-separated box). Each entry is
+ * a chip with a remove button; the trailing input adds more (Enter / comma commits, Backspace removes the
+ * last), de-dupes, and offers items.enum as autocomplete. Stores the same string[].
+ */
+describe("SchemaForm array of string → chips", () => {
+  const chipSchema = (items: Record<string, unknown> = {}) => ({
+    type: "object",
+    properties: { labels: { type: "array", items: { type: "string", ...items } } },
+  });
+
+  it("renders each string as a removable chip, not a comma box", () => {
+    const { container } = render(<SchemaForm schema={chipSchema()} value={{ labels: ["bug", "urgent"] }} onChange={vi.fn()} />);
+    const chips = container.querySelectorAll(".wf-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("bug");
+    expect(screen.getByRole("button", { name: "Remove urgent" })).toBeTruthy();
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("");   // empty add-input, not "bug, urgent"
+  });
+
+  it("adds a token on Enter and stores the string array", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={chipSchema()} value={{ labels: ["bug"] }} onChange={onChange} />);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "urgent" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith({ labels: ["bug", "urgent"] });
+  });
+
+  it("commits on a trailing comma and de-dupes existing tokens", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={chipSchema()} value={{ labels: ["bug"] }} onChange={onChange} />);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "bug," } });        // duplicate → dropped
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "new," } });
+    expect(onChange).toHaveBeenCalledWith({ labels: ["bug", "new"] });
+  });
+
+  it("removes a chip via its × button", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={chipSchema()} value={{ labels: ["bug", "urgent"] }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove bug" }));
+    expect(onChange).toHaveBeenCalledWith({ labels: ["urgent"] });
+  });
+
+  it("removes the last chip on Backspace when the input is empty", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={chipSchema()} value={{ labels: ["a", "b"] }} onChange={onChange} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Backspace" });
+    expect(onChange).toHaveBeenCalledWith({ labels: ["a"] });
+  });
+
+  it("offers items.enum values as autocomplete, minus the ones already chosen", () => {
+    const { container } = render(<SchemaForm schema={chipSchema({ enum: ["mon", "tue", "wed"] })} value={{ labels: ["mon"] }} onChange={vi.fn()} />);
+    const dl = container.querySelector("datalist");
+    expect(dl).not.toBeNull();
+    const opts = Array.from(dl!.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+    expect(opts).toEqual(["tue", "wed"]);
+  });
+});
