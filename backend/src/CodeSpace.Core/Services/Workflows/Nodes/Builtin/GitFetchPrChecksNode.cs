@@ -54,7 +54,22 @@ public sealed class GitFetchPrChecksNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "checks": { "type": "array" },
+                "checks": {
+                  "type": "array",
+                  "description": "The PR's checks — bindable whole, or drill a field of the first.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string", "description": "Check display name (e.g. 'build / test')." },
+                      "status": { "type": "string", "enum": ["Pending","Success","Failure","Cancelled","Skipped","Neutral"], "description": "Normalized check status." },
+                      "conclusion": { "type": ["string","null"], "description": "Provider raw conclusion (null while running)." },
+                      "startedAt": { "type": ["string","null"], "description": "ISO-8601." },
+                      "completedAt": { "type": ["string","null"], "description": "ISO-8601." },
+                      "durationSeconds": { "type": ["integer","null"] },
+                      "detailsUrl": { "type": ["string","null"] }
+                    }
+                  }
+                },
                 "state": { "type": "string" },
                 "allPassed": { "type": "boolean" },
                 "total": { "type": "integer" },
@@ -91,7 +106,7 @@ public sealed class GitFetchPrChecksNode : INodeRuntime
 
         var outputs = new Dictionary<string, JsonElement>
         {
-            ["checks"] = JsonSerializer.SerializeToElement(checks),
+            ["checks"] = JsonSerializer.SerializeToElement(checks, WorkflowJson.Options),
             ["state"] = JsonSerializer.SerializeToElement(summary.State),
             ["allPassed"] = JsonSerializer.SerializeToElement(summary.AllPassed),
             ["total"] = JsonSerializer.SerializeToElement(summary.Total),

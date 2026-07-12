@@ -49,7 +49,21 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "files": { "type": "array" },
+                "files": {
+                  "type": "array",
+                  "description": "The PR's changed files — bindable whole, or drill a field of the first.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "fileName": { "type": "string", "description": "Path in the PR diff." },
+                      "previousFileName": { "type": ["string","null"], "description": "Prior path when the file was renamed." },
+                      "status": { "type": "string", "enum": ["Added","Modified","Removed","Renamed"], "description": "Change kind." },
+                      "additions": { "type": "integer" },
+                      "deletions": { "type": "integer" },
+                      "patch": { "type": ["string","null"], "description": "Unified-diff hunk (null when the provider suppresses it)." }
+                    }
+                  }
+                },
                 "additions": { "type": "integer" },
                 "deletions": { "type": "integer" }
               }
@@ -87,7 +101,7 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
 
         var outputs = new Dictionary<string, JsonElement>
         {
-            ["files"] = JsonSerializer.SerializeToElement(files),
+            ["files"] = JsonSerializer.SerializeToElement(files, WorkflowJson.Options),
             ["additions"] = JsonSerializer.SerializeToElement(totalAdditions),
             ["deletions"] = JsonSerializer.SerializeToElement(totalDeletions)
         };
