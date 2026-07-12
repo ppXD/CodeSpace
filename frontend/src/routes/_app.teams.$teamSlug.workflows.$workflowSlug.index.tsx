@@ -52,6 +52,7 @@ import { TerminalEditor } from "@/components/workflows/TerminalEditor";
 import { NodeInspectorStatus } from "@/components/workflows/NodeInspectorStatus";
 import { NodeConsequences } from "@/components/workflows/NodeConsequences";
 import { LogicIfEditor } from "@/components/workflows/LogicIfEditor";
+import { ResponseShapeEditor } from "@/components/workflows/ResponseShapeEditor";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
@@ -1288,6 +1289,13 @@ function ToolbarButton({ icon, label, count, active, onClick, tooltip }: {
 
 // ─── Inspector ────────────────────────────────────────────────────────────────
 
+/** A node whose manifest OutputSchema declares `x-dynamic-output` has an opaque output (HTTP body / LLM json)
+ *  whose shape only exists at run time — it gets the "paste a sample response" editor. */
+function hasDynamicOutput(outputSchema: unknown): boolean {
+  return typeof outputSchema === "object" && outputSchema != null
+    && typeof (outputSchema as Record<string, unknown>)["x-dynamic-output"] === "string";
+}
+
 function NodeInspector({
   nodeId,
   manifest,
@@ -1518,6 +1526,12 @@ function NodeInspector({
               />
             )}
           </section>
+
+          {/* Dynamic-output nodes (HTTP body / LLM json) — paste a sample response to unlock field-by-field
+              binding in the picker. Driven by the manifest's x-dynamic-output hint, so any such node opts in. */}
+          {hasDynamicOutput(manifest.outputSchema) && (
+            <ResponseShapeEditor config={config} onConfigChange={onConfigChange} />
+          )}
         </>
       )}
 

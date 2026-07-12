@@ -6,6 +6,7 @@ import type {
   WorkflowDefinition,
 } from "@/api/workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
+import { inferSchemaFromSample } from "./jsonShape";
 
 /**
  * Computes the set of variables ACTUALLY in scope at a specific node's position in the
@@ -75,7 +76,7 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
     const node = definition.nodes.find((n) => n.id === nodeId);
     if (!node) continue;
     const manifest = manifestByType.get(node.typeKey);
-    const outputKeys = manifest ? extractOutputPaths(manifest) : [];
+    const outputKeys = manifest ? extractOutputPaths(outputSchemaFor(node, manifest)) : [];
 
     if (outputKeys.length === 0) {
       // Node has no typed outputs declared — still show a generic placeholder so the
@@ -177,7 +178,7 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
   const triggerNode = definition.nodes.find((n) => manifestByType.get(n.typeKey)?.kind === "Trigger");
   if (triggerNode) {
     const triggerManifest = manifestByType.get(triggerNode.typeKey);
-    const triggerKeys = triggerManifest ? extractOutputPaths(triggerManifest) : [];
+    const triggerKeys = triggerManifest ? extractOutputPaths(triggerManifest.outputSchema) : [];
 
     if (triggerKeys.length === 0) {
       suggestions.push({
@@ -454,10 +455,30 @@ const RESOLVABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * downstream map can take the array while a scalar consumer takes one field. Depth-bounded; acyclic by
  * construction (manifest schemas are literals, no `$ref`).
  */
-function extractOutputPaths(manifest: NodeManifestDto): OutputKey[] {
+function extractOutputPaths(outputSchema: unknown): OutputKey[] {
   const out: OutputKey[] = [];
-  collectSchemaPaths(manifest.outputSchema, "", 0, out);
+  collectSchemaPaths(outputSchema, "", 0, out);
   return out;
+}
+
+/**
+ * A node whose manifest declares `x-dynamic-output: "<key>"` (HTTP body / LLM json) has an OPAQUE output whose
+ * real shape only exists at run time. When the author has pasted a sample response into the node's config
+ * (`responseSample`), infer its shape and splice it in at that key, so the picker drills the actual fields
+ * (Response → Customer → Email) instead of a dead opaque object. No sample → the manifest's opaque output stands.
+ */
+function outputSchemaFor(node: NodeDefinition, manifest: NodeManifestDto): unknown {
+  const schema = manifest.outputSchema;
+  const dynamicKey = asObject(schema)?.["x-dynamic-output"];
+  if (typeof dynamicKey !== "string") return schema;
+
+  const sample = asObject(node.config)?.responseSample;
+  const inferred = typeof sample === "string" ? inferSchemaFromSample(sample) : null;
+  if (!inferred) return schema;
+
+  const s = asObject(schema) ?? {};
+  const props = asObject(s.properties) ?? {};
+  return { ...s, properties: { ...props, [dynamicKey]: inferred } };
 }
 
 function collectSchemaPaths(schema: unknown, prefix: string, depth: number, out: OutputKey[]): void {

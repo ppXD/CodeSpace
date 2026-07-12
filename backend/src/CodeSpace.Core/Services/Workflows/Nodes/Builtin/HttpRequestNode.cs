@@ -73,6 +73,7 @@ public sealed class HttpRequestNode : INodeRuntime
         OutputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
+              "x-dynamic-output": "body",
               "properties": {
                 "status":  { "type": "integer" },
                 "ok":      { "type": "boolean" },

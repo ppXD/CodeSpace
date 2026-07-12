@@ -443,6 +443,52 @@ describe("introspectScope — typed {{item.*}} inside a map body", () => {
   });
 });
 
+/**
+ * Slice 5 — an HTTP / LLM node's dynamic output (manifest `x-dynamic-output`) is opaque until the author pastes
+ * a sample response into the node's `responseSample` config. Then the picker drills the sample's real fields
+ * under that key; without a sample (or with invalid JSON) the opaque output stands, so nothing dead-refs.
+ */
+describe("introspectScope — dynamic JSON output from a pasted sample", () => {
+  const httpManifest: NodeManifestDto = {
+    typeKey: "http.request", displayName: "HTTP request", category: "Test", kind: "Regular",
+    description: null, iconKey: null, configSchema: {}, inputSchema: {},
+    outputSchema: { type: "object", "x-dynamic-output": "body", properties: { status: { type: "integer" }, body: {} } },
+  };
+  const mbt = new Map<string, NodeManifestDto>([
+    ["trigger.x", manifest("trigger.x", "Trigger")],
+    ["http.request", httpManifest],
+    ["regular.a", manifest("regular.a", "Regular")],
+  ]);
+  const build = (config: Record<string, unknown>): WorkflowDefinition => ({
+    schemaVersion: 1,
+    nodes: [
+      { id: "start", typeKey: "trigger.x", config: {}, inputs: {} },
+      { id: "http", typeKey: "http.request", config, inputs: {} },
+      { id: "t", typeKey: "regular.a", config: {}, inputs: {} },
+    ],
+    edges: [{ from: "start", to: "http" }, { from: "http", to: "t" }],
+  });
+  const paths = (config: Record<string, unknown>) =>
+    introspectScope({ definition: build(config), currentNodeId: "t", manifestByType: mbt }).map((s) => s.path);
+
+  it("drills the pasted sample's fields under the dynamic output key", () => {
+    const p = paths({ responseSample: '{"customer":{"email":"a@b.com"},"total":9}' });
+    expect(p).toContain("nodes.http.outputs.body.customer.email");
+    expect(p).toContain("nodes.http.outputs.body.total");
+    expect(p).toContain("nodes.http.outputs.status");   // the static outputs are untouched
+  });
+
+  it("keeps the opaque body (no field drill) when no sample is pasted", () => {
+    const p = paths({});
+    expect(p).toContain("nodes.http.outputs.body");
+    expect(p.some((x) => x.startsWith("nodes.http.outputs.body."))).toBe(false);
+  });
+
+  it("ignores an invalid sample — no dead-ref field paths", () => {
+    expect(paths({ responseSample: "not json" }).some((x) => x.startsWith("nodes.http.outputs.body."))).toBe(false);
+  });
+});
+
 describe("introspectScope — human labels (display-only, ref preserved)", () => {
   const find = (nodeId: string, path: string) =>
     introspectScope({ definition, currentNodeId: nodeId, manifestByType }).find((s) => s.path === path);
