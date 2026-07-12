@@ -1,10 +1,11 @@
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 import { relativeTime } from "@/lib/codeTree";
+import { statusWord } from "@/lib/runStatus";
 
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
-import { compactAge, humanizeRunError, runDuration, runStatusTone, runStatusWord, runType, type CockpitFilter } from "./cockpit";
+import { compactAge, humanizeRunError, runDuration, runStatusTone, runType, type CockpitFilter } from "./cockpit";
 import { sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
@@ -221,7 +222,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
           <span className="run-row2-when">{relativeTime(when)}</span>
         </div>
         <div className="run-row2-l2">
-          <span className="run-row2-sw" data-tone={tone}>{runStatusWord(run.status)}</span>
+          <span className="run-row2-sw" data-tone={tone}>{statusWord(run.status)}</span>
           {repos.length > 0 && (
             <span className="run-row2-repo" title={repos.join(", ")}>
               <Ic.Repo size={11} aria-hidden="true" />
