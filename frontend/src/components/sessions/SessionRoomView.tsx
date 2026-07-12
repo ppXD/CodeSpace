@@ -44,6 +44,7 @@ import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planState
 import { useAlert, useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+import { statusWord } from "@/lib/runStatus";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 import { liveRunSummary } from "./live-run-summary";
 import { partitionForFailureHoist } from "./room-blocks";
@@ -1818,11 +1819,11 @@ function pillIcon(tone: string): SymName {
 }
 
 function pillLabel(status: WorkflowRunStatus, live: boolean): string {
-  if (status === "Success") return "Done";
-  if (status === "Failure") return "Failed";
-  if (status === "Cancelled") return "Stopped";
-  if (status === "Suspended") return "Waiting";
-  return live ? "Working" : status;
+  // An in-flight turn is "Working" (or "Waiting" when parked on a human); a terminal turn uses the shared lexicon so the
+  // Room and the Runs list speak the same words.
+  if (live) return status === "Suspended" ? "Waiting" : "Working";
+
+  return statusWord(status);
 }
 
 /** The turn's meta line after "Turn N" — the start time (when it ran) then the duration: " · Jun 29, 13:47 · 28m" (or " · running 38s" live). */

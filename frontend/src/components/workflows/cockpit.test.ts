@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, formatDuration, humanizeRunError, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday } from "./cockpit";
+import { compactAge, formatDuration, humanizeRunError, runDuration, runStatusTone, runType, summarizeDecisions, summarizeToday } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -42,16 +42,6 @@ describe("runStatusTone", () => {
     expect(runStatusTone("Cancelled")).toBe("cancelled");
     expect(runStatusTone("Pending")).toBe("queued");
     expect(runStatusTone("Enqueued")).toBe("queued");
-  });
-});
-
-describe("runStatusWord", () => {
-  it("softens Failure→Failed and Enqueued→Queued, passes the rest through", () => {
-    expect(runStatusWord("Failure")).toBe("Failed");
-    expect(runStatusWord("Enqueued")).toBe("Queued");
-    expect(runStatusWord("Success")).toBe("Success");
-    expect(runStatusWord("Running")).toBe("Running");
-    expect(runStatusWord("Cancelled")).toBe("Cancelled");
   });
 });
 

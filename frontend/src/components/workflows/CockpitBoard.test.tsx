@@ -56,7 +56,7 @@ describe("CockpitBoard", () => {
     const recent = container.querySelector(".run-row2")!;
     expect(recent.querySelector(".run-row2-type")?.textContent).toBe("Workflow");   // type label beside the name
     expect(recent.querySelector(".run-row2-ver")?.textContent).toBe("v1");          // version label
-    expect(recent.querySelector(".run-row2-sw")?.textContent).toBe("Success");      // status word in its tone
+    expect(recent.querySelector(".run-row2-sw")?.textContent).toBe("Done");         // friendly status word (shared lexicon), in its tone
   });
 
   it("titles a row with the workflow name, then the session title, then a neutral fallback — never the source token", () => {

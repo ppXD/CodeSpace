@@ -53,14 +53,6 @@ export function runStatusTone(status: WorkflowRunStatus): RunStatusTone {
   return "queued";   // Pending / Enqueued
 }
 
-/** The status as a friendly word — "Failed" over the enum's "Failure", "Queued" over "Enqueued". */
-export function runStatusWord(status: WorkflowRunStatus): string {
-  if (status === "Failure") return "Failed";
-  if (status === "Enqueued") return "Queued";
-
-  return status;   // Success / Running / Suspended / Cancelled / Pending
-}
-
 /** The 2-3 highest-frequency synthesized node ids → a plain-English name. Kept intentionally small; any other id falls
  *  back to a de-quoted form, so a new engine node never produces a broken label. */
 const NODE_LABELS: Record<string, string> = { sup: "coordinator", map: "fan-out", syn: "synthesizer" };
