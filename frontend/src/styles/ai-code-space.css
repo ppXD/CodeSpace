@@ -3650,6 +3650,24 @@ textarea:-webkit-autofill {
 .acs-root .wf-segmented-opt[data-active] { background: var(--panel); color: var(--ink); font-weight: 600; border-color: var(--line-2); box-shadow: var(--shadow-1); }
 .acs-root .wf-segmented-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* ── Stepper (x-control:"stepper") — a −/+ control for bounded integers. The value stays a bare number;
+   an empty field shows the effective default as placeholder so it never reads as a required blank. ── */
+.acs-root .wf-stepper { display: inline-flex; align-self: flex-start; align-items: center; gap: 1px; padding: 2px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); }
+.acs-root .wf-stepper-btn {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  width: 26px; height: 26px; border-radius: 6px; font-size: 16px; line-height: 1; cursor: pointer;
+  display: grid; place-items: center; transition: background .1s, color .1s;
+}
+.acs-root .wf-stepper-btn:hover:not(:disabled) { background: var(--panel); color: var(--ink); }
+.acs-root .wf-stepper-btn:disabled { opacity: .35; cursor: default; }
+.acs-root .wf-stepper-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acs-root .wf-stepper-val {
+  appearance: none; border: 0; background: transparent; font: inherit; font-size: 12.5px; color: var(--ink);
+  width: 62px; text-align: center; outline: none; font-variant-numeric: tabular-nums; padding: 0;
+}
+.acs-root .wf-stepper-val::placeholder { color: var(--muted-2); }
+.acs-root .wf-stepper-unit { font-size: 11.5px; color: var(--muted); padding: 0 8px 0 2px; }
+
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
 .mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
