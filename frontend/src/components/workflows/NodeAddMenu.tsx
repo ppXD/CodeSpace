@@ -2,7 +2,7 @@ import { createPortal } from "react-dom";
 
 import type { NodeManifestDto } from "@/api/workflows";
 
-import { nodeIconFor } from "./nodeIcon";
+import { nodeIconFor, nodeToneFor } from "./nodeIcon";
 import { isBodyStartTypeKey, isContainerKind } from "./workflowContainers";
 
 export interface NodeAddMenuProps {
@@ -28,7 +28,7 @@ export function NodeAddMenu({ at, manifests, onPick, onClose }: NodeAddMenuProps
       <div className="wf-addmenu-section">
         <div className="wf-addmenu-h">{title}</div>
         {items.map((m) => (
-          <button key={m.typeKey} type="button" className="wf-addmenu-item" onClick={() => onPick(m)}>
+          <button key={m.typeKey} type="button" className="wf-addmenu-item" data-tone={nodeToneFor(m)} onClick={() => onPick(m)}>
             <span className="wf-addmenu-item-icon">{nodeIconFor(m, 13)}</span>
             <span className="wf-addmenu-item-name">{m.displayName}</span>
             <span className="wf-addmenu-item-cat">{m.category}</span>
