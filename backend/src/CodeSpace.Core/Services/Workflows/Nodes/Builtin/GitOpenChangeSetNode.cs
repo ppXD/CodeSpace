@@ -55,7 +55,17 @@ public sealed class GitOpenChangeSetNode : INodeRuntime
         // Opening PRs is a permanent externally-visible side effect — the engine refuses auto-resume on abandoned runs
         // so a re-run routes the side-effect approval gate (it does not duplicate opened PRs automatically).
         IsSideEffecting = true,
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (a bound {{ref}} →
+        // chip; unset → the x-intentPlaceholders prompt). Display-only metadata. The per-repo list is a
+        // fan-out bind, so the sentence speaks to the shared title rather than naming each repo.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Open a {draft?draft }pull request titled \"{title}\" for each repo in the change-set.",
+              "x-intentPlaceholders": { "title": "an untitled PR" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",

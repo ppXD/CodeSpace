@@ -38,15 +38,24 @@ public sealed class GitListPullRequestsNode : INodeRuntime
         Description = "Lists the pull/merge requests on a repository, optionally filtered by state.",
         // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
         IsAgentToolEligible = true,
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "List pull requests on {repositoryId}.",
+              "x-intentPlaceholders": { "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind from the trigger (e.g. {{trigger.repositoryId}})." },
                 "state": { "type": "string", "enum": ["Open","Draft","Merged","Closed"], "description": "Only list requests in this state. Leave empty to list all." },
-                "page": { "type": "integer", "minimum": 1, "description": "Page of results (default 1)." },
-                "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Results per page (default 30, max 100)." }
+                "page": { "type": "integer", "minimum": 1, "x-control": "stepper", "x-advanced": true, "description": "Page of results (default 1)." },
+                "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30, "x-control": "stepper", "x-advanced": true, "description": "Results per page (default 30, max 100)." }
               },
               "required": ["repositoryId"]
             }

@@ -34,7 +34,16 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
         Description = "Fetches the unified diff for a pull/merge request.",
         // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
         IsAgentToolEligible = true,
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Fetch the diff of pull request #{number} on {repositoryId}.",
+              "x-intentPlaceholders": { "number": "a PR number", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
