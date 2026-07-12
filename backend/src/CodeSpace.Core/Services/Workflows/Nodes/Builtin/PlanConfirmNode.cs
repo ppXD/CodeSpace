@@ -65,14 +65,15 @@ public sealed class PlanConfirmNode : INodeRuntime
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
+              "x-sections": ["Revisions", "Review"],
               "properties": {
-                "plannerModelId": { "type": "string", "format": "uuid", "title": "Planner model", "x-selector": "credentialedModel", "description": "The model revisions reason on (mirrors plan.author). Leave empty to auto-pick." },
-                "reviewMode": { "type": "integer", "enum": [0, 1, 2], "default": 0, "title": "Review each revision", "x-enumLabels": { "0": "Off", "1": "Gate", "2": "Improve" }, "description": "An independent reviewer over each revised plan — the same critic the original planner ran under." },
-                "reviewerModelId": { "type": "string", "format": "uuid", "title": "Reviewer model", "x-selector": "credentialedModel", "x-advanced": true, "description": "The model the revision reviewer runs on. Leave empty to auto-pick." },
-                "flatPlan": { "type": "boolean", "default": false, "title": "Independent subtasks only", "x-advanced": true, "description": "Constrain revisions to independent subtasks (no dependsOn) — set by parallel fan-out projections, mirroring the plan.author upstream." },
-                "maxRevisions": { "type": "integer", "minimum": 1, "default": 5, "title": "Max revisions", "x-advanced": true, "description": "Revisions allowed before the node fails legibly instead of looping the planner forever." },
-                "reviewerAgent": { "type": "boolean", "default": false, "title": "Review against the real repo", "x-advanced": true, "description": "Review each revised plan with a real independent agent that clones the repository below and verifies it against the actual code, instead of only the in-process model critic. Only used when a review mode is on AND a repository is set." },
-                "repositoryId": { "type": "string", "format": "uuid", "title": "Repository (for grounded review)", "x-selector": "repository", "x-advanced": true, "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when \"Review against the real repo\" is on." }
+                "plannerModelId": { "x-group": "Revisions", "type": "string", "format": "uuid", "title": "Planner model", "x-selector": "credentialedModel", "description": "The model revisions reason on (mirrors plan.author). Leave empty to auto-pick." },
+                "reviewMode": { "x-group": "Review", "type": "integer", "enum": [0, 1, 2], "default": 0, "title": "Review each revision", "x-enumLabels": { "0": "Off", "1": "Gate", "2": "Improve" }, "description": "An independent reviewer over each revised plan — the same critic the original planner ran under." },
+                "reviewerModelId": { "x-group": "Review", "type": "string", "format": "uuid", "title": "Reviewer model", "x-selector": "credentialedModel", "x-advanced": true, "description": "The model the revision reviewer runs on. Leave empty to auto-pick." },
+                "flatPlan": { "x-group": "Revisions", "type": "boolean", "default": false, "title": "Independent subtasks only", "x-advanced": true, "description": "Constrain revisions to independent subtasks (no dependsOn) — set by parallel fan-out projections, mirroring the plan.author upstream." },
+                "maxRevisions": { "x-group": "Revisions", "type": "integer", "minimum": 1, "default": 5, "title": "Max revisions", "x-advanced": true, "description": "Revisions allowed before the node fails legibly instead of looping the planner forever." },
+                "reviewerAgent": { "x-group": "Review", "type": "boolean", "default": false, "title": "Review against the real repo", "x-advanced": true, "description": "Review each revised plan with a real independent agent that clones the repository below and verifies it against the actual code, instead of only the in-process model critic. Only used when a review mode is on AND a repository is set." },
+                "repositoryId": { "x-group": "Review", "type": "string", "format": "uuid", "title": "Repository (for grounded review)", "x-selector": "repository", "x-advanced": true, "description": "The repository the plan targets — what the grounded plan reviewer clones (read-only). Only used when \"Review against the real repo\" is on." }
               }
             }
             """),

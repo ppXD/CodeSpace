@@ -55,6 +55,26 @@ public class PlanNodeManifestCopyTests
         props.GetProperty("plannerModelId").GetProperty("title").GetString().ShouldBe("Planner model");
     }
 
+    // The plan nodes' config is sectioned via x-group (Planning/Revisions + Review), mirroring the supervisor —
+    // every top-level field must belong to a section declared in x-sections, so the grouped layout has no stray
+    // "More" bucket. Presentation-only; the config VALUE shape is unchanged.
+    [Theory]
+    [MemberData(nameof(PlanNodes))]
+    public void Every_top_level_field_is_grouped_into_a_declared_section(string node)
+    {
+        var config = Config(node);
+
+        var sections = new HashSet<string?>();
+        foreach (var s in config.GetProperty("x-sections").EnumerateArray()) sections.Add(s.GetString());
+        sections.Count.ShouldBe(2);
+
+        foreach (var prop in config.GetProperty("properties").EnumerateObject())
+        {
+            prop.Value.TryGetProperty("x-group", out var group).ShouldBeTrue($"{node} field '{prop.Name}' has no x-group");
+            sections.ShouldContain(group.GetString(), $"{node} '{prop.Name}' is in a section not listed in x-sections");
+        }
+    }
+
     private static IEnumerable<(string Path, JsonElement Prop)> EnumProperties(JsonElement schema, string path = "")
     {
         if (schema.ValueKind != JsonValueKind.Object) yield break;
