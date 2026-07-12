@@ -40,7 +40,16 @@ public sealed class GitCreateIssueNode : INodeRuntime
         IsSideEffecting = true,
         // Acts AS the actor's own identity (Model B), same generic gating as git.open_pr.
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IIssueWriteCapability) },
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Create an issue titled \"{title}\" on {repositoryId}.",
+              "x-intentPlaceholders": { "title": "an untitled issue", "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
@@ -49,7 +58,7 @@ public sealed class GitCreateIssueNode : INodeRuntime
                 "title": { "type": "string", "description": "The issue title." },
                 "body": { "type": "string", "x-long": true, "description": "Optional markdown body. Supports {{ }} references." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Optional label names to attach (comma-separated)." },
-                "actAsUserId": { "type": "string", "format": "uuid", "description": "Create the issue AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Create the issue AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","title"]
             }
