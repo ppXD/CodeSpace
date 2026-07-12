@@ -110,12 +110,11 @@ describe("CockpitBoard", () => {
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ rootRunId: "r1" }));
   });
 
-  it("a reran row shows the ORIGINAL run's id + title and opens the original, not the fork", () => {
+  it("a reran row titles as the original task and opens the original, not the fork", () => {
     const onOpen = vi.fn();
     // The representative is the latest fork (own id forkrun9, sourceType replay) but the lineage root is origrun1.
     const { container } = board({ history: hist([run("forkrun9", "Success", { rootRunId: "origrun1", attemptCount: 3, workflowName: null, sessionTitle: "Remove unused usings", sourceType: "replay", rootSourceType: "snapshot" })]), onOpen });
 
-    expect(container.querySelector(".run-row2-id")?.textContent).toBe("origrun1");   // the original's id, not the fork's
     expect(container.querySelector(".run-row2-title")?.textContent).toBe("Remove unused usings");  // titles as the task's own goal, never "Replay" or the "snapshot" token
     expect(container.querySelector(".run-row2-attempts")?.textContent).toContain("3 attempts");
 
@@ -195,13 +194,13 @@ describe("CockpitBoard", () => {
 
   it("shows an 'N attempts' chip only on a collapsed lineage (attemptCount > 1)", () => {
     const { container } = board({ history: hist([
-      run("rerun", "Success", { attemptCount: 3 }),   // a run + 2 reruns, collapsed to this latest attempt
-      run("once", "Success", { attemptCount: 1 }),    // a never-rerun run
+      run("rerun", "Success", { attemptCount: 3, sessionTitle: "Reran task" }),   // a run + 2 reruns, collapsed to this latest attempt
+      run("once", "Success", { attemptCount: 1, sessionTitle: "Single task" }),   // a never-rerun run
     ]) });
 
     const rows = [...container.querySelectorAll(".run-row2")];
-    const collapsed = rows.find((r) => r.querySelector(".run-row2-id")?.textContent === "rerun")!;
-    const single = rows.find((r) => r.querySelector(".run-row2-id")?.textContent === "once")!;
+    const collapsed = rows.find((r) => r.querySelector(".run-row2-title")?.textContent === "Reran task")!;
+    const single = rows.find((r) => r.querySelector(".run-row2-title")?.textContent === "Single task")!;
 
     expect(collapsed.querySelector(".run-row2-attempts")?.textContent).toContain("3 attempts");
     expect(single.querySelector(".run-row2-attempts")).toBeNull();   // no chip when there's only one attempt

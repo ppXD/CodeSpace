@@ -3066,11 +3066,10 @@ textarea:-webkit-autofill {
 .acs-root .run-row2-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .run-row2-l1, .acs-root .run-row2-l2, .acs-root .run-row2-l3 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .acs-root .run-row2-gap { flex: 1; }
-.acs-root .run-row2-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-root .run-row2-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; font-weight: 600; color: var(--ink); }
 .acs-root .run-row2-type { flex: none; font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 5px; white-space: nowrap; color: var(--ink-2); background: var(--soft); }
-.acs-root .run-row2-type[data-type="workflow"] { color: #9E4A2C; background: var(--accent-soft); }
 .acs-root .run-row2-ver { flex: none; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
-.acs-root .run-row2-attempts { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 1px 7px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.acs-root .run-row2-attempts { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; color: var(--muted); background: var(--soft); border-radius: 5px; padding: 1px 7px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .acs-root .run-row2-when { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .acs-root .run-row2-sw { flex: none; font-size: 12px; font-weight: 500; color: var(--muted); }
 .acs-root .run-row2-sw[data-tone="ok"]        { color: #1F6B3F; }
@@ -3080,7 +3079,6 @@ textarea:-webkit-autofill {
 .acs-root .run-row2-sw[data-tone="queued"]    { color: #2A5485; }
 .acs-root .run-row2-dur { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .acs-root .run-row2-dur > svg { display: block; }
-.acs-root .run-row2-id { flex: none; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
 .acs-root .run-row2-err { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; font-size: 11.5px; color: #9E3535; background: #FCEDED; border: 1px solid #F0C6C6; border-radius: 5px; padding: 2px 8px 2px 7px; }
 .acs-root .run-row2-err > svg { flex: none; }
 .acs-root .run-row2-err > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

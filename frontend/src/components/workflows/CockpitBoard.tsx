@@ -218,9 +218,8 @@ function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number
         </div>
         <div className="run-row2-l2">
           <span className="run-row2-sw" data-tone={tone}>{runStatusWord(run.status)}</span>
-          {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
           <span className="run-row2-gap" />
-          <span className="run-row2-id">{run.rootRunId.slice(0, 8)}</span>
+          {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
         </div>
         {error && (
           <div className="run-row2-l3">
