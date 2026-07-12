@@ -53,4 +53,27 @@ public class AiNodeFoolproofManifestTests
             consequence.GetString().ShouldNotBeNullOrWhiteSpace();
         }
     }
+
+    // The provider feeds ILLMClientRegistry.Resolve — only the three registered ILLMProviderModule wires resolve.
+    // "OpenRouter"/"Ollama" are OpenAI-wire credential TAGS, not modules, so they must NOT appear here (they would
+    // fail to resolve). Pin the exact set so a well-meaning "add every credential tag" edit can't strand a run.
+    [Fact]
+    public void LlmComplete_provider_enum_is_exactly_the_registered_wire_modules()
+    {
+        var provider = new LlmCompleteNode(null!, null!).Manifest.ConfigSchema.GetProperty("properties").GetProperty("provider");
+
+        var values = provider.GetProperty("enum").EnumerateArray().Select(v => v.GetString()).ToArray();
+        values.ShouldBe(new[] { "Anthropic", "OpenAI", "Custom" });
+    }
+
+    // The Model field pins the bare model-id STRING; a "poolModel" selector lists the team's pool for the chosen
+    // provider and stores that string — NOT the "credentialedModel" ROW id (a Guid the model-id pin never matches).
+    [Fact]
+    public void LlmComplete_model_is_a_pool_scoped_picker()
+    {
+        var model = new LlmCompleteNode(null!, null!).Manifest.ConfigSchema.GetProperty("properties").GetProperty("model");
+
+        model.GetProperty("x-selector").GetString().ShouldBe("poolModel");
+        model.GetProperty("type").GetString().ShouldBe("string");
+    }
 }

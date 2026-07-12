@@ -9,6 +9,7 @@ import { ConversationSelector } from "./selectors/ConversationSelector";
 import { CredentialedModelMultiSelector, CredentialedModelSelector } from "./selectors/CredentialedModelSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
+import { PoolModelSelector } from "./selectors/PoolModelSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { RelatedRepositoriesEditor } from "./selectors/RelatedRepositoriesEditor";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
@@ -713,6 +714,16 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
       return schema.type === "array"
         ? <CredentialedModelMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
         : <CredentialedModelSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
+    case "poolModel":
+      // llm.complete's Model: pins the bare MODEL-ID string (what ModelPoolSelector matches), scoped to the
+      // SIBLING provider so a picked model can't mismatch the wire. Distinct from credentialedModel (row id).
+      return (
+        <PoolModelSelector
+          provider={typeof siblings?.provider === "string" ? siblings.provider : undefined}
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
     case "modelCredential":
       // Value = the owning ModelCredential id (not a model row). Scalar in current manifests; harness-provider
       // filtering belongs to the agent-profile composite (which has the sibling harness), not this generic case.
