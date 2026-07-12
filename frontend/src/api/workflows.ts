@@ -176,6 +176,8 @@ export interface WorkflowRunSummary {
   startedAt: string | null;
   completedAt: string | null;
   createdDate: string;
+  /** Whether the run ever parked on a wait. A terminal run that did shows its createdDate→completedAt as a lifespan ("open 5d"), not a runtime clock — the span is dominated by wait time, not work. */
+  wasSuspended: boolean;
   /** Lineage key (`rootRunId ?? id`) the index collapses on — a row is always the LATEST attempt of its lineage. */
   rootRunId: string;
   /** How many runs share this lineage root (1 = a never-rerun run). Drives the "N attempts" chip. */

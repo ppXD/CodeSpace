@@ -53,6 +53,13 @@ public sealed record WorkflowRunSummary
     public required DateTimeOffset CreatedDate { get; init; }
 
     /// <summary>
+    /// Whether the run ever parked on a wait (a <c>WorkflowRunWait</c> row exists). A terminal run that was suspended
+    /// has a <see cref="CreatedDate"/>→<see cref="CompletedAt"/> span dominated by wait time, not runtime (StartedAt is
+    /// reset on each resume), so the row shows it as a lifespan ("open 5d") rather than a bogus runtime clock.
+    /// </summary>
+    public bool WasSuspended { get; init; }
+
+    /// <summary>
     /// Lineage key for this entry — the <c>RootRunId ?? Id</c> the team index collapses on. A row in the index is
     /// always the LATEST attempt of its lineage; <see cref="AttemptCount"/> counts how many runs share it.
     /// </summary>

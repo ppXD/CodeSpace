@@ -12,7 +12,7 @@ function decision(o: Partial<PendingDecision>): PendingDecision {
 }
 
 function run(id: string, status: WorkflowRunStatus, createdDate = "2026-06-22T00:00:00Z"): WorkflowRunSummary {
-  return { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1, rootSourceType: "manual", hasSession: true };
+  return { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", wasSuspended: false, sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1, rootSourceType: "manual", hasSession: true };
 }
 
 describe("formatDuration", () => {
@@ -48,6 +48,11 @@ describe("runDuration", () => {
     expect(runDuration({ ...run("d", "Running"), startedAt: "2026-06-22T00:58:00Z" }, now)).toBe("2m");  // elapsed from startedAt
     expect(runDuration({ ...run("e", "Suspended"), createdDate: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
     expect(runDuration(run("f", "Pending"), now)).toBe("");
+  });
+
+  it("shows a lifespan span (not the inflated runtime) for a terminal run that ever parked", () => {
+    const parked = { ...run("p", "Cancelled"), wasSuspended: true, createdDate: "2026-06-17T00:00:00Z", completedAt: "2026-06-22T00:00:00Z" };
+    expect(runDuration(parked, now)).toBe("open 5d");   // createdDate→completedAt as a coarse span, never "120h"
   });
 });
 
