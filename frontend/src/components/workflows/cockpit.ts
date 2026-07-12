@@ -61,6 +61,23 @@ export function runStatusWord(status: WorkflowRunStatus): string {
   return status;   // Success / Running / Suspended / Cancelled / Pending
 }
 
+/** The 2-3 highest-frequency synthesized node ids → a plain-English name. Kept intentionally small; any other id falls
+ *  back to a de-quoted form, so a new engine node never produces a broken label. */
+const NODE_LABELS: Record<string, string> = { sup: "coordinator", map: "fan-out", syn: "synthesizer" };
+
+/**
+ * Humanize a raw engine run-error for display. The engine reports a step failure as `Node '<id>' failed.`
+ * (optionally `… in map '<id>' failed.`) using the node's internal id — meaningless to a user. Rewrite it to
+ * "The coordinator step failed." (mapping the common ids, else a de-quoted fallback). Any error that isn't this
+ * shape is returned VERBATIM, so a real message is never mangled. Pure + total.
+ */
+export function humanizeRunError(error: string): string {
+  const m = /^Node '([^']+)'(?: in map '[^']+')? failed\.$/.exec(error.trim());
+  if (!m) return error;
+
+  return `The ${NODE_LABELS[m[1]] ?? m[1]} step failed.`;
+}
+
 /**
  * The run's wall-clock time for the row's clock chip. A terminal run shows its total duration (createdDate→completedAt,
  * NOT startedAt→completedAt — startedAt is reset on every suspend→resume re-dispatch, so it collapses to ~0s for any

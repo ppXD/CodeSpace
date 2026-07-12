@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, formatDuration, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday } from "./cockpit";
+import { compactAge, formatDuration, humanizeRunError, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -111,5 +111,26 @@ describe("summarizeToday", () => {
     expect(s.hourly[2]).toBe(2);
     expect(s.hourly[9]).toBe(1);
     expect(s.hourly.reduce((a, b) => a + b, 0)).toBe(3);
+  });
+});
+
+describe("humanizeRunError", () => {
+  it("maps the common synthesized node ids to plain names", () => {
+    expect(humanizeRunError("Node 'sup' failed.")).toBe("The coordinator step failed.");
+    expect(humanizeRunError("Node 'map' failed.")).toBe("The fan-out step failed.");
+    expect(humanizeRunError("Node 'syn' failed.")).toBe("The synthesizer step failed.");
+  });
+
+  it("de-quotes an unknown node id rather than showing the raw 'Node' form", () => {
+    expect(humanizeRunError("Node 'build-step' failed.")).toBe("The build-step step failed.");
+  });
+
+  it("handles the map-branch variant", () => {
+    expect(humanizeRunError("Node 'sup' in map 'fanout' failed.")).toBe("The coordinator step failed.");
+  });
+
+  it("returns a non-matching error verbatim — never mangles a real message", () => {
+    expect(humanizeRunError("Timed out after 3600s")).toBe("Timed out after 3600s");
+    expect(humanizeRunError("The build didn't compile.")).toBe("The build didn't compile.");
   });
 });
