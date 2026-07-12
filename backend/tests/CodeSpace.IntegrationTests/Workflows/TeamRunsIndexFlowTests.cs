@@ -851,6 +851,39 @@ public class TeamRunsIndexFlowTests
         s.Today.ShouldBe(2, "createdDate >= the day-start is inclusive; the earlier run is excluded");
     }
 
+    [Fact]
+    public async Task Projects_the_session_title_and_run_kind_so_a_task_row_reads_as_the_work()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var sessionId = await SeedSessionAsync(teamA, "Remove unused usings");
+        var withSession = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null, sessionId: sessionId);
+        var sessionless = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-1), workflowId: null);   // no SessionId
+
+        var result = await ListAsync(teamA, 50);
+
+        var titled = result.Single(r => r.Id == withSession);
+        titled.SessionTitle.ShouldBe("Remove unused usings", "the human goal is joined from WorkSession.Title, not the 'snapshot' source token");
+        titled.WorkflowName.ShouldBeNull("a task run has no parent workflow");
+        titled.RunKind.ShouldBe(RunKinds.Task, "a snapshot source_type maps to the 'task' run kind (migration 0067)");
+
+        result.Single(r => r.Id == sessionless).SessionTitle.ShouldBeNull("a session-less run has no title to project");
+    }
+
+    /// <summary>Seed a minimal work session whose <c>Title</c> the run summary joins. Mirrors the LaunchBasePinFlow seed.</summary>
+    private async Task<Guid> SeedSessionAsync(Guid teamId, string title)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var sessionId = Guid.NewGuid();
+        db.WorkSession.Add(new WorkSession { Id = sessionId, TeamId = teamId, Title = title, Kind = WorkSessionKind.Task, Status = WorkSessionStatus.Open });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        return sessionId;
+    }
+
     /// <summary>The backfill body of migration 0082, verbatim — walks each fork's parent_run_id up to the root. Mirror of an IMMUTABLE journaled migration (it can't drift), run again to exercise the recursive CTE against real chains.</summary>
     private async Task RunBackfillAsync()
     {
