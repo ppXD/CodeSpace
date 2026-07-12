@@ -44,7 +44,16 @@ public sealed class GitIntegrateNode : INodeRuntime
         // A clean integration pushes a branch — a permanent externally-visible side effect — so the engine refuses
         // auto-resume on abandoned runs / gates a re-run through the side-effect approval card (mirrors git.open_pr).
         IsSideEffecting = true,
-        ConfigSchema = SchemaBuilder.EmptyObject(),
+        // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
+        // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
+        ConfigSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {},
+              "x-intent": "Integrate agent branches into {repositoryId}.",
+              "x-intentPlaceholders": { "repositoryId": "a repository" }
+            }
+            """),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
