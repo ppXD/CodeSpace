@@ -482,3 +482,64 @@ describe("SchemaForm x-control: segmented", () => {
     expect(screen.queryByRole("radiogroup")).toBeNull();
   });
 });
+
+/**
+ * x-control: "stepper" — a bounded integer as a −/+ control. Clamps to the schema min/max, shows the
+ * effective default as placeholder when empty, stores a bare number, and falls through to the plain
+ * number input when x-control is absent.
+ */
+describe("SchemaForm x-control: stepper", () => {
+  const stepSchema = (control: unknown = "stepper") => ({
+    type: "object",
+    properties: {
+      parallelism: { type: "integer", minimum: 1, maximum: 4, default: 2, "x-control": control, "x-unit": "×" },
+    },
+  });
+
+  it("renders a −/+ stepper with the default shown as placeholder (never a required-looking blank)", () => {
+    render(<SchemaForm schema={stepSchema()} value={{}} onChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Decrease" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Increase" })).toBeTruthy();
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    expect(input.getAttribute("placeholder")).toBe("2");   // default (unit shows in its own span)
+    expect(input.value).toBe("");
+    expect(screen.getByText("×")).toBeTruthy();             // the x-unit label
+  });
+
+  it("steps up by one and stores a number", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={stepSchema()} value={{ parallelism: 2 }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Increase" }));
+    expect(onChange).toHaveBeenCalledWith({ parallelism: 3 });
+  });
+
+  it("steps up from the default when the value is empty", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={stepSchema()} value={{}} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Increase" }));
+    expect(onChange).toHaveBeenCalledWith({ parallelism: 3 });   // 2 (default) + 1
+  });
+
+  it("disables Increase at max and Decrease at min", () => {
+    const { rerender } = render(<SchemaForm schema={stepSchema()} value={{ parallelism: 4 }} onChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Increase" })).toBeDisabled();
+    rerender(<SchemaForm schema={stepSchema()} value={{ parallelism: 1 }} onChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Decrease" })).toBeDisabled();
+  });
+
+  it("clamps a typed value into range, and clears to undefined when emptied", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={stepSchema()} value={{ parallelism: 2 }} onChange={onChange} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "9" } });
+    expect(onChange).toHaveBeenLastCalledWith({ parallelism: 4 });   // clamped to max, numeric
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+    expect(onChange).toHaveBeenLastCalledWith({ parallelism: undefined });
+  });
+
+  it("falls through to the plain number input when x-control is absent", () => {
+    const plain = { type: "object", properties: { parallelism: { type: "integer", minimum: 1, maximum: 4, default: 2 } } };
+    render(<SchemaForm schema={plain} value={{}} onChange={vi.fn()} />);
+    expect(screen.getByRole("spinbutton")).toBeTruthy();          // <input type="number">
+    expect(screen.queryByRole("button", { name: "Increase" })).toBeNull();
+  });
+});

@@ -94,9 +94,12 @@ interface Schema {
    * button-group) instead of the default &lt;select&gt;. renderControl reads this FIRST; when the value is
    * absent OR unrecognised for the field's shape it falls through to today's x-selector / enum / type
    * dispatch, so this is purely additive and non-breaking (the on-disk value shape is unchanged).
-   * Known values: "segmented".
+   * Known values: "segmented", "stepper".
    */
   "x-control"?: string;
+  /** Short unit shown after a stepper's value (e.g. "min", "sec", "×"). Display-only; the stored value is
+   *  the bare number. */
+  "x-unit"?: string;
 }
 
 interface SchemaFormProps {
@@ -302,6 +305,60 @@ function SegmentedControl({ schema, value, onChange }: { schema: Schema; value: 
   );
 }
 
+/**
+ * A bounded integer/number as a −/+ stepper for fields that declare "x-control": "stepper". Clamps to the
+ * schema's min/max, shows the effective default as placeholder when empty (so a defaulted knob never reads
+ * as a required blank), and renders an optional x-unit. Stores a bare JSON number (identical to the plain
+ * number input) — or undefined when cleared. A value that is already a dynamic {{ref}} stays editable via
+ * the picker input so it is never stranded.
+ */
+function StepperControl({ schema, value, onChange, variableSuggestions }: { schema: Schema; value: unknown; onChange: (next: unknown) => void; variableSuggestions?: ScopeSuggestion[] }) {
+  const min = schema.minimum;
+  const max = schema.maximum;
+  const unit = schema["x-unit"];
+  const def = typeof schema.default === "number" ? schema.default : undefined;
+
+  if (typeof value === "string" && value.includes("{{") && variableSuggestions && variableSuggestions.length > 0) {
+    return (
+      <VariablePickerInput
+        value={value}
+        onChange={(next) => onChange(coerceNumberInput(next))}
+        suggestions={variableSuggestions}
+        placeholder="Type @ to insert a value"
+      />
+    );
+  }
+
+  const clamp = (n: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, n));
+  const num = typeof value === "number" ? value
+    : (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value)) ? Number(value) : undefined);
+  const stepBy = (delta: number) => onChange(clamp((num ?? def ?? min ?? 0) + delta));
+  const atMin = num != null && min != null && num <= min;
+  const atMax = num != null && max != null && num >= max;
+  const placeholder = def != null ? String(def) : (min != null ? String(min) : "");   // unit shows in its own span
+
+  return (
+    <div className="wf-stepper">
+      <button type="button" className="wf-stepper-btn" aria-label="Decrease" disabled={atMin} onClick={() => stepBy(-1)}>&minus;</button>
+      <input
+        className="wf-stepper-val"
+        type="text"
+        inputMode="numeric"
+        value={num != null ? String(num) : ""}
+        placeholder={placeholder}
+        onChange={(e) => {
+          const v = e.target.value.trim();
+          if (v === "") { onChange(undefined); return; }
+          const n = Number(v);
+          if (!Number.isNaN(n)) onChange(clamp(n));
+        }}
+      />
+      {unit && <span className="wf-stepper-unit">{unit}</span>}
+      <button type="button" className="wf-stepper-btn" aria-label="Increase" disabled={atMax} onClick={() => stepBy(1)}>+</button>
+    </div>
+  );
+}
+
 function renderControl(schema: Schema, value: unknown, onChange: (next: unknown) => void, templateHint: boolean, variableSuggestions?: ScopeSuggestion[]) {
   // x-control — an explicit widget discriminator, read FIRST. When a property declares a recognised
   // "x-control" for its shape we render that widget for the SAME stored value (e.g. an enum as a
@@ -313,6 +370,9 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
     return variableSuggestions != null && variableSuggestions.length > 0
       ? <DualModeSelector pick={segmented} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />
       : segmented;
+  }
+  if (schema["x-control"] === "stepper" && (schema.type === "integer" || schema.type === "number")) {
+    return <StepperControl schema={schema} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />;
   }
 
   // Custom selector takes the highest precedence — when a property carries
