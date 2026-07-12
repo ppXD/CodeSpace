@@ -18,8 +18,26 @@ describe("parse/serialize condition round-trip (matches the engine grammar)", ()
     '{{a}} == {{b}}',                                             // ref on both sides
     '{{n}} == 42',                                                // number literal
     '{{flag}} == true',                                          // bool literal
+    '{{x}} == ""',                                                // empty-string literal (must NOT drop the op)
+    '{{trigger.zip}} == "01234"',                                // numeric-STRING literal (must stay quoted)
+    '{{v}} == "5.00"',                                            // ditto — quotes preserved
+    '{{s}} == "true"',                                            // the string "true", not the bool
+    '{{pr.title}} != "this contains that"',                      // op token INSIDE the literal must not mis-split
+    '{{x}} < "a > b"',                                            // symbol op inside the literal
+    '{{x}} == "a"b"',                                             // embedded double-quote (no escaping)
   ])("round-trips %s unchanged", (expr) => {
     expect(roundtrip(expr)).toBe(expr);
+  });
+
+  it("does not mis-split on an operator token inside a quoted literal", () => {
+    expect(parseCondition('{{pr.title}} != "this contains that"')).toEqual({ left: "{{pr.title}}", op: "!=", right: "this contains that" });
+    expect(parseCondition('{{x}} < "a > b"')).toEqual({ left: "{{x}}", op: "<", right: "a > b" });
+  });
+
+  it("distinguishes an empty-string literal from a not-yet-typed right value", () => {
+    // `== ""` keeps the comparison; a genuinely empty right (new condition) degrades to bare truthiness.
+    expect(serializeCondition(parseCondition('{{x}} == ""'))).toBe('{{x}} == ""');
+    expect(serializeCondition({ left: "{{x}}", op: "==", right: "" })).toBe("{{x}}");
   });
 
   it("parses the parts of a binary condition", () => {

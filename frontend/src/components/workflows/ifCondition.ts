@@ -41,9 +41,19 @@ const UNARY = ["is_empty", "is_not_empty"];
 // and our split matches the engine's exactly.
 const BINARY_BY_LENGTH = ["startsWith", "contains", "endsWith", "==", "!=", ">=", "<=", ">", "<"];
 
+const NUMBER_RE = /^-?\d+(\.\d+)?$/;
+const isNumberBoolRefOrEmpty = (v: string) =>
+  v === "" || v.startsWith("{{") || NUMBER_RE.test(v) || ["true", "false", "null"].includes(v.toLowerCase());
+
 /** A right-hand token as the DSL wire-form (quoted string / ref / number / bool) → the plain text the editor shows. */
 function unquote(s: string): string {
-  if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) return s.slice(1, -1);
+  if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) {
+    const inner = s.slice(1, -1);
+    // Keep the quotes when dropping them would change meaning on re-serialize: quoteRight passes an empty
+    // string / number / bool·null / {{ref}} through UNQUOTED, so a quoted "" / "01234" / "true" / "{{x}}" would
+    // otherwise round-trip as a dropped comparison / a number / a bool / a ref. Keeping the quotes is byte-exact.
+    return isNumberBoolRefOrEmpty(inner) ? s : inner;
+  }
   return s;
 }
 
@@ -52,24 +62,41 @@ export function quoteRight(text: string): string {
   const v = text.trim();
   if (v === "") return v;
   if (v.startsWith("{{")) return v;                                  // a {{ref}} expression
-  if (/^-?\d+(\.\d+)?$/.test(v)) return v;                            // a number literal
+  if (NUMBER_RE.test(v)) return v;                                   // a number literal
   if (["true", "false", "null"].includes(v.toLowerCase())) return v; // bool / null
   if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v; // already quoted
-  return `"${v.replace(/"/g, '\\"')}"`;                              // a string literal
+  // The engine strips only the OUTER quotes (no unescape — ConditionEvaluator.Resolve does token[1..^1]), so
+  // an escaped \" would survive verbatim into the compared value. Emit a naive wrap; the engine's own strip
+  // handles an embedded quote symmetrically (`"a"b"` → `a"b`), keeping the round-trip byte-exact.
+  return `"${v}"`;                                                   // a string literal
 }
 
-/** Expression string → structured form. The grammar is total, so every valid condition maps cleanly. */
+/** Replace every char inside a quoted span (delimiters included) with a filler, preserving length/positions, so
+ *  an operator token INSIDE a string literal (`"release contains fix"`) can't be chosen as the split point. */
+function maskQuotes(s: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (const c of s) {
+    if (quote) { out += "\x01"; if (c === quote) quote = null; }
+    else if (c === '"' || c === "'") { quote = c; out += "\x01"; }
+    else out += c;
+  }
+  return out;
+}
+
+/** Expression string → structured form. The operator search runs over the quote-MASKED string so a literal
+ *  containing an op token doesn't mis-split; indices map back to the original. The grammar is otherwise total. */
 export function parseCondition(raw: string | undefined): IfCondition {
   const t = (raw ?? "").trim();
   if (!t) return { left: "", op: "truthy", right: "" };
+  const masked = maskQuotes(t);
 
   for (const op of UNARY) {
-    if (t.endsWith(` ${op}`)) return { left: t.slice(0, t.length - op.length - 1).trim(), op, right: "" };
+    if (masked.endsWith(` ${op}`)) return { left: t.slice(0, t.length - op.length - 1).trim(), op, right: "" };
   }
   for (const op of BINARY_BY_LENGTH) {
-    const marker = ` ${op} `;
-    const idx = t.indexOf(marker);
-    if (idx >= 0) return { left: t.slice(0, idx).trim(), op, right: unquote(t.slice(idx + marker.length).trim()) };
+    const idx = masked.indexOf(` ${op} `);
+    if (idx >= 0) return { left: t.slice(0, idx).trim(), op, right: unquote(t.slice(idx + op.length + 2).trim()) };
   }
   return { left: t, op: "truthy", right: "" };
 }

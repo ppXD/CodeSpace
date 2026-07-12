@@ -44,6 +44,12 @@ public class ConditionEvaluatorTests
     [InlineData("{{trigger.title}} startsWith \"fix\"", true)]
     [InlineData("{{trigger.title}} endsWith \"bug\"", true)]
     [InlineData("{{trigger.title}} contains \"missing\"", false)]
+    // An operator token INSIDE a quoted literal must NOT be chosen as the split point (quote-masked scan).
+    // Each of these was mis-evaluated (split on the inner op → false) before MaskQuotes; the real op is !=.
+    [InlineData("{{trigger.title}} != \"this contains that\"", true)]
+    [InlineData("{{trigger.title}} != \"a startsWith b\"", true)]
+    [InlineData("{{trigger.title}} != \"a < b\"", true)]
+    [InlineData("{{trigger.empty_str}} == \"\"", true)]
     // Booleans
     [InlineData("{{trigger.open}} == true", true)]
     [InlineData("{{trigger.open}} == false", false)]

@@ -49,11 +49,16 @@ public static class ConditionEvaluator
 
         var trimmed = expression.Trim();
 
+        // Search for the operator over a QUOTE-MASKED copy so an operator token inside a string literal
+        // (e.g. `{{x}} == "release contains fix"`) can't be chosen as the split point; indices map 1:1 back
+        // to `trimmed` (masking preserves length). Splits + resolution still use the original text.
+        var masked = MaskQuotes(trimmed);
+
         // Try unary first (suffix operators).
         foreach (var op in UnaryOps)
         {
             var marker = " " + op;
-            if (trimmed.EndsWith(marker, StringComparison.Ordinal))
+            if (masked.EndsWith(marker, StringComparison.Ordinal))
             {
                 var left = trimmed[..^marker.Length].Trim();
                 var leftValue = Resolve(left, scope);
@@ -65,7 +70,7 @@ public static class ConditionEvaluator
         foreach (var op in BinaryOps.OrderByDescending(o => o.Length))
         {
             var marker = " " + op + " ";
-            var idx = trimmed.IndexOf(marker, StringComparison.Ordinal);
+            var idx = masked.IndexOf(marker, StringComparison.Ordinal);
             if (idx < 0) continue;
 
             var leftRaw = trimmed[..idx].Trim();
@@ -80,6 +85,25 @@ public static class ConditionEvaluator
         // Bare truthiness fallback — `{{some.value}}` alone, or a literal.
         var value = Resolve(trimmed, scope);
         return Truthy(value);
+    }
+
+    /// <summary>
+    /// Blank out every character inside a quoted span (delimiters included) with U+0001, preserving length so
+    /// indices map back to the original. Lets the operator search skip operator tokens that appear inside a
+    /// string literal — <c>{{x}} == "release contains fix"</c> must split on <c> == </c>, not the inner
+    /// <c> contains </c>. The FE guided editor (ifCondition.ts) masks identically so both agree.
+    /// </summary>
+    private static string MaskQuotes(string s)
+    {
+        var chars = s.ToCharArray();
+        var quote = '\0';
+        for (var i = 0; i < chars.Length; i++)
+        {
+            var c = chars[i];
+            if (quote != '\0') { if (c == quote) quote = '\0'; chars[i] = '\u0001'; }
+            else if (c is '"' or '\'') { quote = c; chars[i] = '\u0001'; }
+        }
+        return new string(chars);
     }
 
     // ── Structured comparison ───────────────────────────────────────────────────
