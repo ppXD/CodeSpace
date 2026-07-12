@@ -3487,6 +3487,19 @@ textarea:-webkit-autofill {
 .acs-root .wf-inspector-h-ref  { font-size: 11.5px; color: var(--muted); }
 .acs-root .wf-inspector-h-key  { font-size: 10.5px; color: var(--muted); font-family: inherit; }
 
+/* At-a-glance readiness line under the header: green when every required field is set, amber (with the
+   missing field names) when not. Same soft-fill palette as the node's Write/Approval badges so the two
+   read as one visual language. */
+.acs-root .wf-inspector-status {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-radius: 9px; border: 1px solid var(--line-2);
+  font-size: 11.5px; font-weight: 500; line-height: 1.35;
+}
+.acs-root .wf-inspector-status svg { flex-shrink: 0; }
+.acs-root .wf-inspector-status-ready   { color: #1F6B3F;    background: #E6F4EC; border-color: #BFE0CD; }
+.acs-root .wf-inspector-status-missing { color: var(--warn); background: #F7ECD6; border-color: #EAD6B4; }
+.acs-root .wf-inspector-status-missing b { font-weight: 650; }
+
 .acs-root .wf-inspector-section { padding: 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel); box-shadow: 0 1px 2px rgba(31,30,29,.05); }
 /* Plain sections stack their fields with a clear gap so each label binds to ITS input: tight 4px
    label→input inside .wf-form-row, looser 16px between fields. The collapsible variant keeps its own
