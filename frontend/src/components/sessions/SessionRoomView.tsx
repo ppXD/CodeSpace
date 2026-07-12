@@ -46,6 +46,7 @@ import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 import { liveRunSummary } from "./live-run-summary";
+import { partitionForFailureHoist } from "./room-blocks";
 
 /** What the right-side preview drawer is showing — an agent (its terminal) or a file (its content + download). */
 type DrawerTarget =
@@ -400,6 +401,11 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
   const hasOutcome = turn.blocks.some((b) => b.type === "final_answer" || b.type === "diagnostic");
   const lead = turn.summary && !GENERIC_SUMMARY.has(turn.summary) && !hasOutcome ? turn.summary : null;
 
+  // Failure-first ordering: lift the diagnostic (humanized cause + typed remediation) out of the bottom result stack so
+  // it renders directly under the execution rail — WHY it failed and how to recover, before the narrative. `bodyBlocks`
+  // is the rest, in original order; a success / running turn has no diagnostic, so nothing moves.
+  const { hoisted: failureCard, rest: bodyBlocks } = partitionForFailureHoist(turn.blocks);
+
   return (
     <RunActionsContext.Provider value={{ runId: turn.runId, isTerminal: !live }}>
       <RunOpenContext.Provider value={onOpenRun}>
@@ -424,6 +430,8 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
 
               {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} turnStatus={turn.status} />}
 
+              {failureCard && <InnerBlock key={failureCard.id} block={failureCard} pdById={pdById} onOpenRoom={onOpenRoom} />}
+
               {journalTurn ? (() => {
                 // Curated journal frame: TOP keeps only the primary plan checklist ② (execution map ① is already above).
                 // The middle is the decision skeleton ③, then the live "working…" ticker while the turn runs, then the
@@ -441,7 +449,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
                 // — the same component the room shows, not a re-implemented plain list.
                 const planCard = turn.blocks.find((b): b is PlanChecklistBlock => b.type === "plan_checklist");
                 const topPlan = hasInlinePlan ? undefined : (planCard ?? turn.blocks.find((b) => b.type === "stat" && b.kind === "subtasks"));
-                const resultBlocks = turn.blocks.filter((b) => JOURNAL_RESULT.has(b.type));
+                const resultBlocks = bodyBlocks.filter((b) => JOURNAL_RESULT.has(b.type));
                 // A plain run with NO agent-carrying beat (a single agent, or a linear agent chain — no supervisor
                 // spawn, no map dispatch) has no beat to hang its agent cards on, so the ③ skeleton would show only
                 // folded lifecycle and the agent's work would vanish. Render the room's own agent_group block(s) in
@@ -475,7 +483,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
               })() : (
                 // The live ticker is suppressed here — its "working…" line + the run's Stop button are unified into the
                 // pinned LiveRunBar below, so the running signal + the Stop action live together in ONE place.
-                turn.blocks.filter((b) => b.type !== "live_activity").map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
+                bodyBlocks.filter((b) => b.type !== "live_activity").map((b) => <InnerBlock key={b.id} block={b} pdById={pdById} onOpenRoom={onOpenRoom} />)
               )}
 
               {live && <TurnLiveStream runId={turn.runId} />}
