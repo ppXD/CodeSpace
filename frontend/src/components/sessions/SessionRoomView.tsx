@@ -687,8 +687,8 @@ function JournalNarrative({ turn, planCard }: { turn: JournalTurn; planCard?: Pl
       {hasDecision && (
         <div className="room-jactor">
           <span className="room-jactor-dot" />
-          <span className="room-jactor-name">{isSupervised ? "Supervisor" : "Workflow"}</span>
-          <span className="room-jactor-sub">{isSupervised ? "· coordinating this turn" : "· running this turn"}</span>
+          <span className="room-jactor-name">CodeSpace</span>
+          <span className="room-jactor-sub">{isSupervised ? "· planning this turn" : "· running this turn"}</span>
         </div>
       )}
       <div className="room-jrnl">
@@ -795,19 +795,18 @@ function formatLatencyMs(ms: number): string {
 /** The display category of a folded background step — so the fold reads "3 model calls · 25.6k tokens" not a flat "N
  *  background steps" that hides cost + intelligence. Model calls / tool calls / reasoning each get their own class; the
  *  rest (lifecycle housekeeping, and any other non-beat kind) stays generic. */
-function stepCategory(kind: string): "model" | "tool" | "reasoning" | "lifecycle" | "review" | "background" {
+function stepCategory(kind: string): "model" | "tool" | "reasoning" | "review" | "background" {
   switch (kind) {
     case "model_call": return "model";
     case "tool": return "tool";
     case "thinking": return "reasoning";
-    case "lifecycle": return "lifecycle";
     case "review": return "review";
-    default: return "background";
+    default: return "background";   // lifecycle housekeeping + any other non-beat kind fold into plain "background steps"
   }
 }
 
 /** A consecutive run of folded background steps, split into typed groups by category (first-appearance order preserved),
- *  so model calls / tool calls / reasoning / lifecycle each collapse into their OWN labeled fold instead of one opaque
+ *  so model calls / tool calls / reasoning each collapse into their OWN labeled fold instead of one opaque
  *  "N background steps". */
 function partitionBackground(steps: JournalStep[]): { category: string; steps: JournalStep[] }[] {
   const order: string[] = [];
@@ -839,7 +838,6 @@ function foldLabel(category: string, steps: JournalStep[]): string {
     }
     case "tool": return `${n} tool call${plural}`;
     case "reasoning": return `${n} reasoning step${plural}`;
-    case "lifecycle": return `${n} lifecycle step${plural}`;
     case "review": return `${n} reviewer step${plural}`;
     default: return `${n} background step${plural}`;
   }
@@ -927,8 +925,8 @@ function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
                 <span className="room-jmodel-x"> — a real {review.scope === "plan" ? "grounded plan" : "output"} review</span>
               </>
             : <>
-                <span className="room-jmodel-model">model critic</span>
-                <span className="room-jmodel-x"> — independently prompted, {review.scope} review</span>
+                <span className="room-jmodel-model">a second AI</span>
+                <span className="room-jmodel-x"> — an independent {review.scope} review</span>
               </>}
           {run && reviewerRunId && (
             <button className="room-jverdict-open" onClick={(e) => { e.stopPropagation(); openDrawer({ kind: "agent", agent: reviewerCard(review, reviewerRunId), runId: run.runId }); }}>
