@@ -388,6 +388,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
           value={value == null ? "" : String(value)}
           onChange={(next) => onChange(coerceNumberInput(next))}
           suggestions={variableSuggestions}
+          expectType={type}
           placeholder="Type @ to insert an input or step output"
         />
       );

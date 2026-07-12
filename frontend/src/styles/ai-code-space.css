@@ -4066,6 +4066,12 @@ textarea:-webkit-autofill {
 .acs-root .wf-picker-item-type[data-kind="List"]   { color: var(--wf-flow);  background: var(--wf-flow-soft);  border-color: color-mix(in srgb, var(--wf-flow) 22%, transparent); }
 .acs-root .wf-picker-item-type[data-kind="Object"] { color: var(--wf-ai);    background: var(--wf-ai-soft);    border-color: color-mix(in srgb, var(--wf-ai) 22%, transparent); }
 .acs-root .wf-picker-item-type[data-kind="Yes/No"] { color: var(--wf-human); background: var(--wf-human-soft); border-color: color-mix(in srgb, var(--wf-human) 22%, transparent); }
+/* "Fits this field": when the field expects a selective type, its matching values get a green-accented chip so
+   the right kind of value pops. Guidance only — nothing is filtered out. */
+.acs-root .wf-picker-item[data-fit="true"] .wf-picker-item-type {
+  color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); border-color: color-mix(in srgb, var(--good) 32%, transparent); font-weight: 600;
+}
+.acs-root .wf-picker-item[data-fit="true"] .wf-picker-item-type::before { content: "✓ "; }
 
 /* Guided logic.if editor — a subtle text link for the raw-expression escape hatch + a monospace preview of
    the expression the guided parts compile to. */

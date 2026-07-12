@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ScopeSuggestion } from "./scope-introspection";
-import { ancestorIds, buildSuggestionTree, flattenVisible, friendlyType, type SuggestionTreeNode } from "./suggestionTree";
+import { ancestorIds, buildSuggestionTree, flattenVisible, friendlyType, typeFits, type SuggestionTreeNode } from "./suggestionTree";
 
 const node = (path: string, label: string, type?: string): ScopeSuggestion => ({ path, label, category: "node", type, description: path });
 const iter = (path: string, label: string, type?: string): ScopeSuggestion => ({ path, label, category: "iteration", type, description: path });
@@ -107,6 +107,26 @@ describe("ancestorIds", () => {
       "node:plan/items/[0]",
     ]);
     expect(ancestorIds("wf.maxRetries")).toEqual([]);
+  });
+});
+
+describe("typeFits — only selective field types single a value out", () => {
+  it("an array field fits List values", () => {
+    expect(typeFits("array", "array")).toBe(true);
+    expect(typeFits("string", "array")).toBe(false);
+  });
+  it("a number field fits number/integer (either way), not strings", () => {
+    expect(typeFits("integer", "number")).toBe(true);
+    expect(typeFits("number", "integer")).toBe(true);
+    expect(typeFits("string", "number")).toBe(false);
+  });
+  it("a boolean field fits booleans, tolerating a union", () => {
+    expect(typeFits("boolean|null", "boolean")).toBe(true);
+    expect(typeFits("integer", "boolean")).toBe(false);
+  });
+  it("a string field (or no expectation) singles nothing out — everything fits it", () => {
+    expect(typeFits("integer", "string")).toBe(false);
+    expect(typeFits("array", undefined)).toBe(false);
   });
 });
 
