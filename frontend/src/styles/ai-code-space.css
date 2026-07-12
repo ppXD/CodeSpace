@@ -5744,6 +5744,7 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-exec { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 15px 18px 14px; }
 .room-exec-label { font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted-2); margin-bottom: 13px; }
 .room-exec-flow { display: flex; align-items: flex-start; }
+.room-exec-note { margin: 13px 0 0; font-size: 11.5px; color: var(--muted); }
 .room-exec-node { flex: 0 0 auto; width: 72px; display: flex; flex-direction: column; align-items: center; gap: 7px; text-align: center; }
 .room-exec-node[data-idle] { opacity: .45; }
 .room-exec-dot { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; }

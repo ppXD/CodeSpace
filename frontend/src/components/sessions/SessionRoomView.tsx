@@ -422,7 +422,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onOpenRoom }: { turn:
             <div className="room-turn-body">
               {lead && <p className="room-lead"><Inline text={lead} /></p>}
 
-              {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} />}
+              {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} turnStatus={turn.status} />}
 
               {journalTurn ? (() => {
                 // Curated journal frame: TOP keeps only the primary plan checklist ② (execution map ① is already above).
@@ -540,7 +540,12 @@ function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttemp
 
 /** The execution map — the design's bordered EXECUTION panel: backend-ordered stages as status circles with a label
  *  + per-stage detail, joined by connectors that read solid / dashed / animated by the surrounding stage states. */
-function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
+function RoomExecution({ steps, turnStatus }: { steps: ExecutionMapStep[]; turnStatus: WorkflowRunStatus }) {
+  // A halted run's later stages never ran — so an idle stage reads "not reached", not the backend's "stopped" (which
+  // implies it was doing something). The caption names why the tail is empty; "stopped" now means only a user cancel.
+  const failed = turnStatus === "Failure";
+  const halted = failed || turnStatus === "Cancelled";
+
   return (
     <div className="room-exec">
       <div className="room-exec-label">Execution</div>
@@ -548,6 +553,7 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
         {steps.map((s, i) => {
           const idle = s.status === "Queued" || s.status === "Skipped" || s.status === "Pending";
           const deliver = s.label === "Deliver" && s.status === "Done";
+          const detail = halted && idle ? "not reached" : s.detail;
           return (
             <Fragment key={s.id}>
               {i > 0 && <span className={`room-exec-conn room-exec-conn-${connKind(steps[i - 1].status, s.status)}`} aria-hidden="true" />}
@@ -555,13 +561,14 @@ function RoomExecution({ steps }: { steps: ExecutionMapStep[] }) {
                 <span className={`room-exec-dot room-exec-dot-${execDotClass(s.status)}`} aria-hidden="true"><Sym n={execDotIcon(s.status, deliver)} s={s.status === "Running" ? 13 : idle ? 11 : 13} cls={s.status === "Running" ? "room-spin" : undefined} /></span>
                 <div className="room-exec-text">
                   <span className="room-exec-name">{s.label}</span>
-                  {s.detail && <span className={`room-exec-detail room-exec-detail-${execDotClass(s.status)}`}>{s.detail}</span>}
+                  {detail && <span className={`room-exec-detail room-exec-detail-${execDotClass(s.status)}`}>{detail}</span>}
                 </div>
               </div>
             </Fragment>
           );
         })}
       </div>
+      {halted && <p className="room-exec-note">{failed ? "A failed step stopped the run — the steps after it didn't run." : "Stopped — the remaining steps didn't run."}</p>}
     </div>
   );
 }
