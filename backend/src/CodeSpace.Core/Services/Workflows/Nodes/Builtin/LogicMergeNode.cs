@@ -37,7 +37,9 @@ public sealed class LogicMergeNode : INodeRuntime
                   "type": "string",
                   "enum": ["first-non-empty", "all"],
                   "default": "first-non-empty",
+                  "x-control": "radioCards",
                   "x-enumLabels": { "first-non-empty": "First branch that ran", "all": "Wait for all (barrier)" },
+                  "x-optionConsequence": { "first-non-empty": "Emits the first upstream branch that actually ran; the others are ignored.", "all": "Waits for every upstream branch, then emits one merged object." },
                   "description": "first-non-empty: emit the first upstream that actually ran. all: wait for everyone and emit a merged object."
                 }
               }
