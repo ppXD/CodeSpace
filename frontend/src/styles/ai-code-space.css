@@ -5695,11 +5695,11 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* header */
 .room-head { flex: none; padding: 14px 26px 13px; border-bottom: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 11px; }
 .room-head-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.room-crumbs { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.room-crumbs a { cursor: pointer; }
+.room-crumbs { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); min-width: 0; }
+.room-crumbs a { cursor: pointer; flex: none; }
 .room-crumbs a:hover { color: var(--ink-2); }
-.room-crumb-sep { color: var(--muted-2); }
-.room-crumb-cur { color: var(--ink-2); }
+.room-crumb-sep { color: var(--muted-2); flex: none; }
+.room-crumb-cur { color: var(--ink-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-head-icons { display: flex; align-items: center; gap: 6px; }
 .room-icon-btn { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
 .room-icon-btn:hover { background: rgba(31,30,29,.06); color: var(--ink); }
