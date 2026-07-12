@@ -78,6 +78,16 @@ public sealed record NodeRunContext
     public string NodeId { get; init; } = "";
 
     /// <summary>
+    /// The ids of this node's DIRECT graph predecessors — the source of every edge whose target is this node,
+    /// within the node's own walk scope (so a node inside a loop/map body sees only that body's predecessors).
+    /// A fan-in node (<c>logic.merge</c>) intersects <see cref="NodeRunScope.Nodes"/> with this set so it joins
+    /// only the branches that actually feed it, not every node that happened to complete earlier in the run.
+    /// Empty when the engine can't attribute predecessors (e.g. a node invoked as an agent tool) — a merge then
+    /// naturally emits empty rather than reaching across the whole run.
+    /// </summary>
+    public IReadOnlyList<string> IncomingNodeIds { get; init; } = Array.Empty<string>();
+
+    /// <summary>
     /// Per-node observability handle. Nodes use this to wrap external calls (HTTP, LLM, Git
     /// provider APIs) and to persist large payloads as artifacts. See
     /// <see cref="INodeObservability"/> for the contract.
