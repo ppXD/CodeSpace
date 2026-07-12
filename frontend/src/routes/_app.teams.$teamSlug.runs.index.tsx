@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { ApiError } from "@/api/request";
@@ -10,6 +10,7 @@ import { RunFilterBar } from "@/components/workflows/RunFilterBar";
 import { BAR_DIMS, summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunSummary, useTeamRunsHistory } from "@/hooks/use-workflows";
+import { useRepositories } from "@/hooks/use-repositories";
 
 /** History = terminal runs only; the live + attention runs live in the pinned zones above, so History never duplicates them. */
 const TERMINAL_STATUSES: WorkflowRunStatus[] = ["Success", "Failure", "Cancelled"];
@@ -104,6 +105,12 @@ function TeamRunsPage() {
   const attentionRuns = useTeamRuns({ ...scope, statuses: ["Suspended"], needsAttention: true, hasPendingDecision: false }, ATTENTION_LIMIT);
   // History is its own numbered page of TERMINAL runs, only fetched on the default board (an armed card hides it).
   const history = useTeamRunsHistory({ ...scope, statuses: TERMINAL_STATUSES }, historyPage, HISTORY_PAGE_SIZE, filter === null);
+  // Team repositories (cached, shared with the filter bar) → resolve a run's launch-scope ids to display names for the row's repo chip.
+  const repos = useRepositories();
+  const repoName = useMemo(() => {
+    const byId = new Map((repos.data ?? []).map((r) => [r.id, r.name]));
+    return (id: string) => byId.get(id);
+  }, [repos.data]);
 
   const runList = runs.data ?? [];
   const decisionList = decisions.data ?? [];
@@ -196,6 +203,7 @@ function TeamRunsPage() {
                   nowMs={nowMs}
                   onOpen={openRun}
                   onFilter={toggleFilter}
+                  repoName={repoName}
                 />
               </>
             ) : !runs.error ? (

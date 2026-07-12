@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
+  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 
@@ -70,6 +70,18 @@ describe("CockpitBoard", () => {
     expect(titles).toContain("Deploy Pipeline");        // authored run → its workflow name
     expect(titles).toContain("Remove unused usings");   // task run → its session title, never the "snapshot" token
     expect(titles).toContain("Untitled task");          // no name + no session → neutral fallback, never a source label
+  });
+
+  it("shows a repository chip (primary name + overflow) resolved via repoName, and none for a run with no repos", () => {
+    const { container } = board({ history: hist([
+      run("scoped", "Success", { repositoryIds: ["repo-a", "repo-b"] }),
+      run("bare", "Success", { repositoryIds: [] }),
+    ]), repoName: (id) => (id === "repo-a" ? "api-gateway" : id === "repo-b" ? "web-client" : undefined) });
+
+    const chips = [...container.querySelectorAll(".run-row2-repo")];
+    expect(chips.length).toBe(1);                                                        // only the scoped run gets a chip
+    expect(chips[0].querySelector(".run-row2-repo-name")?.textContent).toBe("api-gateway");   // primary repo name, not the id
+    expect(chips[0].querySelector(".run-row2-repo-more")?.textContent).toBe("+1");            // the second repo folds into a count
   });
 
   it("renders the Needs-attention zone from its own fetched suspended set (decisions + suspended rows)", () => {

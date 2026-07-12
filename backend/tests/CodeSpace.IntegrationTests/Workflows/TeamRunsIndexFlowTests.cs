@@ -871,6 +871,23 @@ public class TeamRunsIndexFlowTests
         result.Single(r => r.Id == sessionless).SessionTitle.ShouldBeNull("a session-less run has no title to project");
     }
 
+    [Fact]
+    public async Task Projects_the_launch_scope_repository_ids_so_the_row_can_show_a_repo_chip()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+        var repoA = Guid.NewGuid();
+        var repoB = Guid.NewGuid();
+
+        var scoped = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null, repositoryIds: [repoA, repoB]);
+        var unscoped = await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(-1), workflowId: null);   // authored-style: empty scope
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Single(r => r.Id == scoped).RepositoryIds.ShouldBe(new[] { repoA, repoB }, "the launch-scope repos travel to the row so the FE resolves names client-side");
+        result.Single(r => r.Id == unscoped).RepositoryIds.ShouldBeEmpty("a run with no launch scope carries no repo ids");
+    }
+
     /// <summary>Seed a minimal work session whose <c>Title</c> the run summary joins. Mirrors the LaunchBasePinFlow seed.</summary>
     private async Task<Guid> SeedSessionAsync(Guid teamId, string title)
     {

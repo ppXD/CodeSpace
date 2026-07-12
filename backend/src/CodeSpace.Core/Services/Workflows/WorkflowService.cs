@@ -1395,6 +1395,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         SessionTitle = r.SessionId == null ? null : _db.WorkSession.Where(s => s.Id == r.SessionId).Select(s => s.Title).FirstOrDefault(),
         SourceType = r.SourceType,
         RunKind = r.RunKind,
+        RepositoryIds = r.ScopeRepositoryIds,
         Status = r.Status,
         Error = r.Error,
         StartedAt = r.StartedAt,
