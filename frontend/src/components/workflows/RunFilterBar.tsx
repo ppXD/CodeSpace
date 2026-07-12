@@ -8,13 +8,14 @@ import { useTeamMembers } from "@/hooks/use-team-members";
 import { FilterSelect, type FilterOption } from "./FilterSelect";
 import { BAR_DIMS } from "./cockpit";
 
-/** Coarse origin kinds offered in the bar — the user-meaningful run_kind tokens (child runs never reach the index). */
+/** Coarse origin kinds offered in the bar — plain-language labels over the run_kind wire tokens (child runs never reach
+ *  the index). The `value` is the wire token the server filters by; only the display label is friendly. */
 const KIND_OPTIONS: FilterOption[] = [
-  { value: "workflow", label: "Workflow" },
+  { value: "workflow", label: "Automation" },
   { value: "task", label: "Task" },
-  { value: "event", label: "Event" },
-  { value: "replay", label: "Replay" },
-  { value: "schedule", label: "Schedule" },
+  { value: "event", label: "Triggered" },
+  { value: "replay", label: "Re-run" },
+  { value: "schedule", label: "Scheduled" },
 ];
 
 /**

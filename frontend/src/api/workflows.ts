@@ -167,6 +167,8 @@ export interface WorkflowRunSummary {
   sessionTitle: string | null;
   /** The run's launch-scope repository ids (empty for an authored workflow run). The row resolves display names from the already-loaded team repo set — no per-row name join on the server. */
   repositoryIds: string[];
+  /** DB-computed origin class (workflow / task / event / replay / schedule / …). Drives the row's type chip at a friendlier grain than the Workflow/Task binary. */
+  runKind: string;
   /** Sourced from upstream run_request.source_type. */
   sourceType: WorkflowRunSourceType;
   status: WorkflowRunStatus;

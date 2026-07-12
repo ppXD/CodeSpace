@@ -5,8 +5,8 @@ import { statusWord } from "@/lib/runStatus";
 
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
-import { compactAge, humanizeRunError, runDuration, runStatusTone, runType, type CockpitFilter } from "./cockpit";
-import { sourceLabel } from "./runsIndex";
+import { compactAge, humanizeRunError, runDuration, runStatusTone, type CockpitFilter } from "./cockpit";
+import { runKindLabel, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
 /** How many suspended runs the default-board Needs-attention zone previews before it collapses to "View all N". */
@@ -196,7 +196,6 @@ function CompactList({ runs, nowMs, onOpen, repoName, empty }: { runs: WorkflowR
  */
 function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; nowMs: number; onOpen: (run: WorkflowRunSummary) => void; repoName?: (id: string) => string | undefined }) {
   const title = lineageTitle(run);
-  const type = runType(run);
   const tone = runStatusTone(run.status);
   const version = run.workflowVersion != null ? `v${run.workflowVersion}` : null;
   const duration = runDuration(run, nowMs);
@@ -211,7 +210,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
       <div className="run-row2-body">
         <div className="run-row2-l1">
           <span className="run-row2-title" title={title}>{title}</span>
-          <span className="run-row2-type" data-type={type.toLowerCase()}>{type}</span>
+          <span className="run-row2-type" data-type={run.runKind}>{runKindLabel(run.runKind)}</span>
           {version && <span className="run-row2-ver">{version}</span>}
           {run.attemptCount > 1 && (
             <span className="run-row2-attempts" title={`${run.attemptCount} attempts — showing the latest`}>
