@@ -334,6 +334,41 @@ describe("introspectScope — recursive nested & typed-array outputs", () => {
     expect(under(p, "nodes.s.outputs.status")).toEqual(["nodes.s.outputs.status"]);
     expect(under(p, "nodes.s.outputs.ok")).toEqual(["nodes.s.outputs.ok"]);
   });
+
+  it("does NOT key-walk a union that is also array-typed — emits the whole value, not dead `.key` paths", () => {
+    const p = pathsOf({ type: "object", properties: {
+      rows: { type: ["object", "array"], properties: { name: { type: "string" } } },
+    } });
+    expect(p).toContain("nodes.s.outputs.rows");            // bind the whole value ($ref resolves whichever kind)
+    expect(p).not.toContain("nodes.s.outputs.rows.name");   // the resolver can't key-walk an array → never emit
+  });
+
+  it("skips non-identifier keys the resolver grammar can't match (hyphen, @, dot)", () => {
+    const p = pathsOf({ type: "object", properties: {
+      "content-type": { type: "string" },
+      "@id": { type: "string" },
+      contentType: { type: "string" },
+    } });
+    expect(p).toContain("nodes.s.outputs.contentType");        // identifier → offered
+    expect(p).not.toContain("nodes.s.outputs.content-type");   // hyphen → would insert a literal dead ref
+    expect(p.some((x) => x.includes("@id"))).toBe(false);
+  });
+
+  it("a root-level typed-item array drills nothing (no malformed leading-[0] path)", () => {
+    const p = pathsOf({ type: "array", items: { type: "object", properties: { x: { type: "string" } } } });
+    expect(p.some((x) => x.includes("[0]"))).toBe(false);
+    expect(p.some((x) => x.startsWith("nodes.s.outputs.["))).toBe(false);
+    expect(p).toContain("nodes.s.outputs");   // falls back to the generic "outputs not typed" placeholder
+  });
+
+  it("preserves union type hints on the whole-object / whole-array branch suggestions", () => {
+    const all = build({ type: "object", properties: {
+      result: { type: ["object", "null"], properties: { count: { type: "integer" } } },
+      rows: { type: ["array", "null"], items: { type: "object", properties: { x: { type: "string" } } } },
+    } });
+    expect(all.find((x) => x.path === "nodes.s.outputs.result")?.type).toBe("object|null");
+    expect(all.find((x) => x.path === "nodes.s.outputs.rows")?.type).toBe("array|null");
+  });
 });
 
 describe("introspectScope — human labels (display-only, ref preserved)", () => {
