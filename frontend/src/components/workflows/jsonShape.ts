@@ -35,13 +35,19 @@ export function inferSchemaFromSample(text: string | undefined): Record<string, 
   }
 }
 
+// The picker only offers identifier-shaped keys (collectSchemaPaths' RESOLVABLE_KEY guard), so the count must
+// skip the rest — otherwise "N fields now drillable" over-promises for a sample with hyphen/dot/space keys.
+const RESOLVABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /** How many leaf fields the inferred shape exposes — for the editor's "N fields now drillable" confirmation. */
 export function countLeafFields(schema: Record<string, unknown> | null): number {
   if (!schema) return 0;
   const props = schema.properties as Record<string, unknown> | undefined;
   const items = schema.items as Record<string, unknown> | undefined;
   if (props && typeof props === "object") {
-    return Object.values(props).reduce<number>((n, child) => n + Math.max(1, countLeafFields(child as Record<string, unknown>)), 0);
+    return Object.entries(props)
+      .filter(([k]) => RESOLVABLE_KEY.test(k))
+      .reduce<number>((n, [, child]) => n + Math.max(1, countLeafFields(child as Record<string, unknown>)), 0);
   }
   if (schema.type === "array" && items && typeof items === "object" && items.properties) {
     return countLeafFields(items);

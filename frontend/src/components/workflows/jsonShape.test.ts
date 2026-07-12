@@ -58,4 +58,9 @@ describe("countLeafFields", () => {
     expect(countLeafFields(inferSchema({ a: 1, b: { c: "x", d: "y" } }))).toBe(3); // a, b.c, b.d
     expect(countLeafFields(null)).toBe(0);
   });
+
+  it("counts only identifier keys the picker can actually drill (skips hyphen/space/@ keys)", () => {
+    // Mirrors the picker's RESOLVABLE_KEY guard so "N fields now drillable" doesn't over-promise.
+    expect(countLeafFields(inferSchema({ "content-type": "x", "user id": 1, ok: true }))).toBe(1); // only `ok`
+  });
 });

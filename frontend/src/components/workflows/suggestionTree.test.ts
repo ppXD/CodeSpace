@@ -76,6 +76,18 @@ describe("buildSuggestionTree", () => {
     expect(tree[0].roots[0].suggestion?.path).toBe("wf.maxRetries");
     expect(tree[0].roots[0].children).toHaveLength(0);
   });
+
+  it("renders an empty-scope hint (path 'wf.') as a NON-selectable label, never a dead {{wf.}} ref", () => {
+    const tree = buildSuggestionTree([{ path: "wf.", label: "wf.<name>", category: "wf" }]);
+    const root = tree[0].roots[0];
+    expect(root.label).toBe("wf.<name>");
+    expect(root.suggestion).toBeUndefined();   // not selectable → activateRow can't insert {{wf.}}
+  });
+
+  it("recovers the full node name when the node's own label contains an arrow", () => {
+    const tree = buildSuggestionTree([node("nodes.n.outputs.status", "A → B → status", "string")]);
+    expect(tree[0].roots[0].label).toBe("A → B");   // last arrow, not the first
+  });
 });
 
 describe("flattenVisible", () => {

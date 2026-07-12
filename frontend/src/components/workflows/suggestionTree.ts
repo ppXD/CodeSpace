@@ -72,9 +72,10 @@ function splitFieldPath(fieldPath: string): string[] {
   return out;
 }
 
-/** The source display name for a node suggestion — the label's "Name → …" head, else the bare label. */
+/** The source display name for a node suggestion — the label's "Name → …" head, else the bare label. Splits on
+ *  the LAST arrow (output keys never contain " → "), so a node whose own label contains " → " isn't truncated. */
 function sourceName(label: string): string {
-  const arrow = label.indexOf(" → ");
+  const arrow = label.lastIndexOf(" → ");
   return arrow >= 0 ? label.slice(0, arrow) : label;
 }
 
@@ -140,9 +141,10 @@ function buildRoots(category: SuggestionCategory, items: ScopeSuggestion[]): Sug
     const chain = category === "iteration" ? segs : segs.slice(1);
 
     if (chain.length === 0) {
-      // A head-only hint (e.g. the "wf." / "trigger." placeholder when no real variable exists yet) —
-      // surface it as a single leaf carrying its own guidance label, not a stripped-to-nothing node.
-      roots.push({ id: `${category}:${s.path}`, label: s.label, category, suggestion: s, children: [] });
+      // A head-only hint (e.g. the "wf." / "trigger." placeholder when no real variable exists yet) — show it
+      // as a NON-selectable label (no suggestion), never a leaf: its path is a trailing-dot `wf.` that the
+      // resolver can't match, so inserting it would write a dead `{{wf.}}` ref.
+      roots.push({ id: `${category}:${s.path}`, label: s.label, category, children: [] });
       continue;
     }
     insertChain(roots, chain, s, category === "iteration" ? "" : category);

@@ -441,6 +441,34 @@ describe("introspectScope — typed {{item.*}} inside a map body", () => {
   it("falls back to bare item/index when items is a literal list, not a ref", () => {
     expect(iterPaths(build([{ instruction: "x" }]))).toEqual(["item", "index"]);
   });
+
+  it("drills item.<field> when the map's items binds a DYNAMIC-output source with a pasted sample", () => {
+    const dyn: NodeManifestDto = {
+      typeKey: "http.request", displayName: "HTTP request", category: "Test", kind: "Regular",
+      description: null, iconKey: null, configSchema: {}, inputSchema: {},
+      outputSchema: { type: "object", "x-dynamic-output": "body", properties: { body: {} } },
+    };
+    const mbt = new Map<string, NodeManifestDto>([
+      ["trigger.x", manifest("trigger.x", "Trigger")],
+      ["http.request", dyn],
+      ["flow.map", manifest("flow.map", "Map")],
+      ["flow.map_start", manifest("flow.map_start", "Regular")],
+      ["regular.a", manifest("regular.a", "Regular", { value: { type: "string" } })],
+    ]);
+    const def: WorkflowDefinition = {
+      schemaVersion: 1,
+      nodes: [
+        { id: "trigger", typeKey: "trigger.x", config: {}, inputs: {} },
+        { id: "fetch", typeKey: "http.request", config: { responseSample: '[{"instruction":"do x"}]' }, inputs: {} },
+        { id: "map", typeKey: "flow.map", config: {}, inputs: { items: "{{nodes.fetch.outputs.body}}" } },
+        { id: "mapStart", typeKey: "flow.map_start", parentId: "map", config: {}, inputs: {} },
+        { id: "body", typeKey: "regular.a", parentId: "map", config: {}, inputs: {} },
+      ],
+      edges: [{ from: "trigger", to: "fetch" }, { from: "fetch", to: "map" }, { from: "mapStart", to: "body" }],
+    };
+    const p = introspectScope({ definition: def, currentNodeId: "body", manifestByType: mbt }).filter((s) => s.category === "iteration").map((s) => s.path);
+    expect(p).toContain("item.instruction");
+  });
 });
 
 /**
