@@ -48,6 +48,7 @@ import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { MapEditor } from "@/components/workflows/MapEditor";
 import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
+import { TerminalEditor } from "@/components/workflows/TerminalEditor";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
@@ -1453,6 +1454,16 @@ function NodeInspector({
           config={config}
           inputs={inputs}
           onConfigChange={onConfigChange}
+          onInputsChange={onInputsChange}
+          suggestions={suggestions}
+        />
+      ) : manifest.typeKey === "builtin.terminal" ? (
+        // The End node carries no config/inputs schema — its Inputs bag IS the workflow's output
+        // VALUE map (engine → WorkflowOutputs). This editor binds each DECLARED output to a value
+        // instead of showing the generic "No configuration" form.
+        <TerminalEditor
+          outputs={liveDefinition.outputs ?? []}
+          inputs={inputs}
           onInputsChange={onInputsChange}
           suggestions={suggestions}
         />
