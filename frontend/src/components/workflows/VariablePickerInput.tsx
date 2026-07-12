@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 
 import type { ScopeSuggestion } from "./scope-introspection";
-import { allBranchIds, buildSuggestionTree, flattenVisible, type VisibleRow } from "./suggestionTree";
+import { allBranchIds, buildSuggestionTree, flattenVisible, typeFits, type VisibleRow } from "./suggestionTree";
 
 /**
  * Dify-style templated input field with chip rendering. Every {{ref}} token in the value
@@ -30,9 +30,12 @@ interface VariablePickerInputProps {
   defaultMultiline?: boolean;
   /** Back-compat alias for defaultMultiline. */
   multiline?: boolean;
+  /** The JSON type the FIELD expects (from its schema). A selective type (array/number/boolean) accents the
+   *  values that fit it in the picker — guidance only, never a filter. */
+  expectType?: string;
 }
 
-export function VariablePickerInput({ value, onChange, suggestions, placeholder, defaultMultiline, multiline }: VariablePickerInputProps) {
+export function VariablePickerInput({ value, onChange, suggestions, placeholder, defaultMultiline, multiline, expectType }: VariablePickerInputProps) {
   const initialMultiline = defaultMultiline ?? multiline ?? false;
   const [expanded, setExpanded] = useState(initialMultiline);
 
@@ -460,6 +463,7 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
             const newGroup = i === 0 || visibleRows[i - 1].groupCategory !== row.groupCategory;
             const selectable = row.node.suggestion != null;
             const highlighted = i === highlightIndex;
+            const fits = selectable && typeFits(row.node.suggestion!.type, expectType);
             return (
               <div key={row.node.id}>
                 {newGroup && <div className="wf-picker-group-h">{row.groupLabel}</div>}
@@ -468,6 +472,7 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
                   className="wf-picker-item"
                   data-highlighted={highlighted}
                   data-selectable={selectable}
+                  data-fit={fits || undefined}
                   aria-expanded={row.expandable ? row.expanded : undefined}
                   style={{ paddingLeft: `${8 + row.depth * 15}px` }}
                   onMouseEnter={() => setHighlightIndex(i)}

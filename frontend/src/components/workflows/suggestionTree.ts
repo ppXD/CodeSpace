@@ -176,6 +176,20 @@ export function flattenVisible(groups: SuggestionTreeGroup[], expanded: Set<stri
   return rows;
 }
 
+/**
+ * Does a suggestion's type FIT the field being edited? Only for SELECTIVE expectations — an array field wants a
+ * List, a number field a Number, a Yes/No a boolean. A string field (or none) accepts anything, so nothing is
+ * singled out. Drives the picker's "fits this field" accent — guidance, never a filter (nothing is hidden).
+ */
+export function typeFits(suggestionType: string | undefined, expect: string | undefined): boolean {
+  if (!expect || expect === "string") return false;
+  const s = (suggestionType ?? "").split("|")[0].trim();
+  if (expect === "array") return s === "array";
+  if (expect === "number" || expect === "integer") return s === "number" || s === "integer";
+  if (expect === "boolean") return s === "boolean";
+  return false;
+}
+
 /** Every branch id in the tree — used to fully open the tree while a search filter is active. */
 export function allBranchIds(groups: SuggestionTreeGroup[]): Set<string> {
   const set = new Set<string>();
