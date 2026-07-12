@@ -260,7 +260,7 @@ public class NodeManifestContractTests
     {
         var prop = GetConfigProp(new LogicMergeNode(), "strategy");
         prop.TryGetProperty("x-enumLabels", out var labels).ShouldBeTrue("strategy must declare x-enumLabels for friendly display");
-        labels.GetProperty("first-non-empty").GetString().ShouldBe("First branch that ran");
+        labels.GetProperty("first-non-empty").GetString().ShouldBe("The branch that ran");
         labels.GetProperty("all").GetString().ShouldBe("Wait for all (barrier)");
     }
 

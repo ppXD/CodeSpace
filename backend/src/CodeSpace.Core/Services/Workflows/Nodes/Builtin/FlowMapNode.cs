@@ -52,7 +52,7 @@ public sealed class FlowMapNode : INodeRuntime
               "type": "object",
               "properties": {
                 "maxParallelism": { "type": "integer", "minimum": 1, "maximum": 64, "description": "How many element-branches run at once. Empty inherits the engine default." },
-                "errorHandling": { "type": "string", "enum": ["terminate", "continue"], "default": "terminate", "title": "If a branch fails", "x-control": "radioCards", "x-enumLabels": { "terminate": "Stop on first failure", "continue": "Keep going on failure" }, "x-optionConsequence": { "terminate": "If any element-branch fails, the whole map fails.", "continue": "A failed branch records a failure marker; the rest keep running." } },
+                "errorHandling": { "type": "string", "enum": ["terminate", "continue"], "default": "terminate", "title": "If a branch fails", "x-control": "radioCards", "x-enumLabels": { "terminate": "Fail the map if a branch fails", "continue": "Keep going, mark failures" }, "x-optionConsequence": { "terminate": "If any element-branch fails, the whole map fails and emits no results.", "continue": "A failed branch records a failure marker; the rest keep running and the map still succeeds." } },
                 "resultKey": { "type": "string", "default": "results", "description": "Output key the collected array lands under, read as {{nodes.<map>.outputs.<resultKey>}}." }
               }
             }

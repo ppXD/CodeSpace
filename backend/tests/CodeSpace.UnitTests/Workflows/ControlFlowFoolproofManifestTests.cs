@@ -21,7 +21,6 @@ public class ControlFlowFoolproofManifestTests
     public static IEnumerable<object[]> BehaviourForks()
     {
         yield return new object[] { "flow.decision", DecisionConfig, "decisionType" };
-        yield return new object[] { "flow.decision", DecisionConfig, "policy" };
         yield return new object[] { "flow.map", MapConfig, "errorHandling" };
         yield return new object[] { "logic.merge", MergeConfig, "strategy" };
     }
@@ -63,5 +62,19 @@ public class ControlFlowFoolproofManifestTests
     {
         DecisionConfig.GetProperty("x-intent").GetString().ShouldContain("{question}");
         DecisionConfig.GetProperty("x-intentPlaceholders").GetProperty("question").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
+    // policy is deliberately NOT radioCards: a standalone decision node's auto/supervisor options don't fire
+    // (node-grain decisions are human/timeout-only), so surfacing per-option consequence cards would overstate
+    // automation. It stays a labeled select whose field description tells that truth — pin that honesty here.
+    [Fact]
+    public void FlowDecision_policy_is_a_labeled_select_not_overstated_cards()
+    {
+        var policy = DecisionConfig.GetProperty("properties").GetProperty("policy");
+
+        policy.TryGetProperty("x-control", out _).ShouldBeFalse("policy must NOT be radioCards — its auto/supervisor options don't fire for a standalone decision node");
+        policy.TryGetProperty("x-optionConsequence", out _).ShouldBeFalse("policy must not promise per-option automation it doesn't perform");
+        policy.GetProperty("x-enumLabels").GetProperty("human_required").GetString().ShouldBe("Human required");
+        policy.GetProperty("description").GetString().ShouldContain("waits for a person");
     }
 }
