@@ -80,7 +80,35 @@ public sealed class PlanAuthorNode : INodeRuntime
                 "planId": { "type": "string", "description": "The persisted work_plan row id of THIS plan version." },
                 "version": { "type": "integer", "description": "This plan's version within the run (1-based; re-entries bump it)." },
                 "goal": { "type": "string", "description": "The planner's restated goal." },
-                "items": { "type": "array", "description": "The persisted plan items — {id, title, instruction, rationale?, dependsOn?, acceptance?, harness?, model?} — bindable as flow.map items." },
+                "items": {
+                  "type": "array",
+                  "description": "The persisted plan items — bindable whole as flow.map items, or drill a field of the first item.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string", "description": "Stable plan-local item id." },
+                      "title": { "type": "string", "description": "Short checklist line title." },
+                      "instruction": { "type": "string", "description": "Concrete instruction for the executing agent." },
+                      "rationale": { "type": ["string","null"], "description": "One-line why (absent when the planner gave none)." },
+                      "kind": { "type": ["string","null"], "description": "Open item-kind hint (e.g. research / code / analysis / write)." },
+                      "dependsOn": { "type": ["array","null"], "items": { "type": "string" }, "description": "Ids of items this depends on (DAG edges); absent on flat / parallel plans." },
+                      "acceptance": {
+                        "type": ["object","null"],
+                        "description": "Objective per-item acceptance — a command the supervisor runs to grade the item.",
+                        "properties": {
+                          "command": { "type": "array", "items": { "type": "string" }, "description": "The acceptance command argv." },
+                          "kind": { "type": ["string","null"], "enum": ["TestsPass","ArtifactPresent","LlmJudge","ArtifactSchema"], "description": "How the command's result is graded." },
+                          "description": { "type": ["string","null"] },
+                          "timeoutSeconds": { "type": ["integer","null"] },
+                          "setupCommand": { "type": ["array","null"], "items": { "type": "string" } }
+                        }
+                      },
+                      "acceptanceCriteria": { "type": ["array","null"], "items": { "type": "string" }, "description": "Free-text per-item criteria." },
+                      "harness": { "type": ["string","null"], "description": "Producer-picked harness (e.g. claude-code)." },
+                      "model": { "type": ["string","null"], "description": "Producer-picked model id." }
+                    }
+                  }
+                },
                 "executionNeeded": { "type": "boolean", "description": "false when the planner declared the goal needs no execution (hasEnoughContext) — a downstream logic.if can route straight to synthesis." },
                 "json": { "type": "object", "description": "The raw structured plan (goal/subtasks/successCriteria/risks/recommendedWorkflowKind) — binding-compatible with a structured llm.complete's 'json' output." }
               }

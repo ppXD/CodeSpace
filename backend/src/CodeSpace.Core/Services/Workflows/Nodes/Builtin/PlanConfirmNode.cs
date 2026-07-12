@@ -96,7 +96,36 @@ public sealed class PlanConfirmNode : INodeRuntime
                 "version":  { "type": "integer", "description": "The approved version — v1 when approved as authored, higher after revisions." },
                 "approved": { "type": "boolean", "description": "Always true on completion — a rejected plan never releases this node." },
                 "goal":     { "type": "string" },
-                "items":    { "type": "array", "description": "The approved plan's items (the durable contract)." },
+                "items": {
+                  "type": "array",
+                  "description": "The approved plan's items (the durable contract) — bindable whole as flow.map items, or drill a field of the first item.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string", "description": "Stable plan-local item id." },
+                      "title": { "type": "string", "description": "Short checklist line title." },
+                      "instruction": { "type": "string", "description": "Concrete instruction for the executing agent." },
+                      "rationale": { "type": ["string","null"], "description": "One-line why (absent when none)." },
+                      "kind": { "type": ["string","null"], "description": "Open item-kind hint (e.g. research / code / analysis / write)." },
+                      "dependsOn": { "type": ["array","null"], "items": { "type": "string" }, "description": "Ids of items this depends on (DAG edges); absent on flat / parallel plans." },
+                      "acceptance": {
+                        "type": ["object","null"],
+                        "description": "Objective per-item acceptance — a command the supervisor runs to grade the item.",
+                        "properties": {
+                          "command": { "type": "array", "items": { "type": "string" }, "description": "The acceptance command argv." },
+                          "kind": { "type": ["string","null"], "enum": ["TestsPass","ArtifactPresent","LlmJudge","ArtifactSchema"], "description": "How the command's result is graded." },
+                          "description": { "type": ["string","null"] },
+                          "timeoutSeconds": { "type": ["integer","null"] },
+                          "setupCommand": { "type": ["array","null"], "items": { "type": "string" } }
+                        }
+                      },
+                      "acceptanceCriteria": { "type": ["array","null"], "items": { "type": "string" }, "description": "Free-text per-item criteria." },
+                      "harness": { "type": ["string","null"], "description": "Producer-picked harness (e.g. claude-code)." },
+                      "model": { "type": ["string","null"], "description": "Producer-picked model id." },
+                      "expectsChanges": { "type": ["boolean","null"], "description": "Whether the item expects a code diff / branch." }
+                    }
+                  }
+                },
                 "json":     { "type": "object", "description": "{ subtasks: items } — binding-compatible with plan.author's json output, so a flow.map binds this node identically." }
               }
             }
