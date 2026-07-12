@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
+  const r = { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), rootRunId: id, attemptCount: 1, hasSession: true, ...o };
   return { ...r, rootSourceType: o.rootSourceType ?? r.sourceType };   // a non-rerun run's root source == its own
 }
 
@@ -54,7 +54,7 @@ describe("CockpitBoard", () => {
     expect(screen.getByText("History")).toBeTruthy();
     expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run, from the History page
     const recent = container.querySelector(".run-row2")!;
-    expect(recent.querySelector(".run-row2-type")?.textContent).toBe("Workflow");   // type label beside the name
+    expect(recent.querySelector(".run-row2-type")?.textContent).toBe("Automation");   // run-kind label beside the name (workflow → Automation)
     expect(recent.querySelector(".run-row2-ver")?.textContent).toBe("v1");          // version label
     expect(recent.querySelector(".run-row2-sw")?.textContent).toBe("Done");         // friendly status word (shared lexicon), in its tone
   });
@@ -187,15 +187,15 @@ describe("CockpitBoard", () => {
     expect(screen.getByText(/Nothing needs you/)).toBeTruthy();
   });
 
-  it("labels the Workflow/Task type + version beside the name, and shows the status word + run duration", () => {
+  it("labels the run kind + version beside the name, and shows the status word + run duration", () => {
     const { container } = board({ history: hist([
       run("wf", "Success", { workflowVersion: 3, createdDate: new Date(NOW - 7 * 60_000 - 59_000).toISOString(), completedAt: new Date(NOW).toISOString() }),
-      run("task", "Success", { workflowId: null, workflowVersion: null }),
+      run("task", "Success", { workflowId: null, workflowVersion: null, runKind: "task" }),
     ]) });
 
     const rows = [...container.querySelectorAll(".run-row2")];
-    const wf = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Workflow")!;
-    expect(wf.querySelector(".run-row2-type")?.getAttribute("data-type")).toBe("workflow");   // coral type chip
+    const wf = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Automation")!;   // workflow kind → "Automation"
+    expect(wf.querySelector(".run-row2-type")?.getAttribute("data-type")).toBe("workflow");   // data-type carries the raw kind token
     expect(wf.querySelector(".run-row2-ver")?.textContent).toBe("v3");                         // version is its own label
     expect(wf.querySelector(".run-row2-dur")?.textContent).toContain("7m 59s");                // duration shown on success
 

@@ -35,11 +35,6 @@ export function formatDuration(startISO: string | null, endISO: string | null): 
   return `${h}h ${m % 60}m`;
 }
 
-/** Workflow vs Task — an authored run has a parent workflow; a snapshot / task run does not. */
-export function runType(run: WorkflowRunSummary): "Workflow" | "Task" {
-  return run.workflowId ? "Workflow" : "Task";
-}
-
 /** The status tone shared by the row's tinted status tile + its status word. */
 export type RunStatusTone = "ok" | "err" | "running" | "suspended" | "cancelled" | "queued";
 

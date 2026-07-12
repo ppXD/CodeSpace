@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, formatDuration, humanizeRunError, runDuration, runStatusTone, runType, summarizeDecisions, summarizeToday } from "./cockpit";
+import { compactAge, formatDuration, humanizeRunError, runDuration, runStatusTone, summarizeDecisions, summarizeToday } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -12,7 +12,7 @@ function decision(o: Partial<PendingDecision>): PendingDecision {
 }
 
 function run(id: string, status: WorkflowRunStatus, createdDate = "2026-06-22T00:00:00Z"): WorkflowRunSummary {
-  return { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1, rootSourceType: "manual", hasSession: true };
+  return { id, runNumber: 1, workflowId: "w", workflowVersion: 1, workflowName: null, sessionTitle: null, repositoryIds: [], runKind: "workflow", sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate, rootRunId: id, attemptCount: 1, rootSourceType: "manual", hasSession: true };
 }
 
 describe("formatDuration", () => {
@@ -23,13 +23,6 @@ describe("formatDuration", () => {
     expect(formatDuration(t0, "2026-06-22T01:05:00Z")).toBe("1h 5m");
     expect(formatDuration(null, t0)).toBe("");
     expect(formatDuration(t0, null)).toBe("");
-  });
-});
-
-describe("runType", () => {
-  it("is Workflow with a parent workflow, Task without one", () => {
-    expect(runType(run("a", "Success"))).toBe("Workflow");                        // run() sets workflowId: "w"
-    expect(runType({ ...run("b", "Success"), workflowId: null })).toBe("Task");
   });
 });
 
