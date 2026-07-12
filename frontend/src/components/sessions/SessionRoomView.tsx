@@ -172,7 +172,7 @@ export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamS
 
       <div className="room-composer">
         <div className="room-composer-inner">
-          <LaunchTaskModal inline surface="chat" sessionId={room.sessionId} placeholder="Reply to continue this session…" onClose={() => {}} onLaunched={openRun} />
+          <LaunchTaskModal inline surface="chat" sessionId={room.sessionId} placeholder="Ask a follow-up — starts a new turn…" onClose={() => {}} onLaunched={openRun} />
         </div>
       </div>
 
@@ -1707,7 +1707,7 @@ function TurnActions({ actions, turn, onOpenRoom, onOpenRun }: { actions: RoomAc
     <div className="room-foot">
       {doing.map((a) => {
         if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
-        if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending}><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
+        if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending} title="Try again from scratch — a fresh attempt; the current result is kept in the turn's history."><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
         if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
         if (a.kind === "OpenPullRequest") {
           if (a.url) return <a key={a.kind} className="room-btn" href={a.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> {a.label}</a>;
