@@ -4131,6 +4131,7 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-linkish:hover { text-decoration: underline; }
 .acs-root .wf-if-preview { margin: 0; }
+.acs-root .wf-shape-ok { color: var(--good); }
 .acs-root .wf-if-preview code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--ink);

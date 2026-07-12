@@ -76,6 +76,7 @@ public sealed class LlmCompleteNode : INodeRuntime
         OutputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
+              "x-dynamic-output": "json",
               "properties": {
                 "text": { "type": "string" },
                 "json": { "type": ["object","null"] },
