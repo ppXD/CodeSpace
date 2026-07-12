@@ -72,7 +72,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 "commitTitle": { "type": "string", "description": "Optional merge-commit title (squash/merge). Provider default when empty." },
                 "commitMessage": { "type": "string", "x-long": true, "description": "Optional merge-commit message body." },
                 "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge." },
-                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]
             }

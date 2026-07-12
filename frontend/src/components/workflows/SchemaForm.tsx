@@ -12,6 +12,7 @@ import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { RelatedRepositoriesEditor } from "./selectors/RelatedRepositoriesEditor";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
+import { ActAsUserSelector } from "./selectors/ActAsUserSelector";
 import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
 
@@ -141,6 +142,7 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
       onChange={(next) => update(key, next)}
       templateHint={templateHint}
       variableSuggestions={variableSuggestions}
+      siblings={obj}
     />
   );
 
@@ -204,7 +206,7 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
   );
 }
 
-function Field({ name, required, schema, value, onChange, templateHint, variableSuggestions }: {
+function Field({ name, required, schema, value, onChange, templateHint, variableSuggestions, siblings }: {
   name: string;
   required: boolean;
   schema: Schema;
@@ -212,6 +214,9 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
   onChange: (next: unknown) => void;
   templateHint: boolean;
   variableSuggestions?: ScopeSuggestion[];
+  /** The other field values at this object level — lets a control read a sibling (e.g. the repositoryId a
+   *  user picker filters by). Generic + optional; a control that doesn't need siblings ignores it. */
+  siblings?: Record<string, unknown>;
 }) {
   const label = schema.title ?? humanize(name);
   const description = schema.description;
@@ -253,7 +258,7 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
         {label}
         {required && <span className="wf-form-required">*</span>}
       </span>
-      {renderControl(schema, value, onChange, templateHint, variableSuggestions)}
+      {renderControl(schema, value, onChange, templateHint, variableSuggestions, siblings)}
       {description && <span className="wf-form-help">{description}</span>}
     </div>
   );
@@ -455,7 +460,7 @@ function ChipsControl({ schema, value, onChange }: { schema: Schema; value: unkn
   );
 }
 
-function renderControl(schema: Schema, value: unknown, onChange: (next: unknown) => void, templateHint: boolean, variableSuggestions?: ScopeSuggestion[]) {
+function renderControl(schema: Schema, value: unknown, onChange: (next: unknown) => void, templateHint: boolean, variableSuggestions?: ScopeSuggestion[], siblings?: Record<string, unknown>) {
   // x-control — an explicit widget discriminator, read FIRST. When a property declares a recognised
   // "x-control" for its shape we render that widget for the SAME stored value (e.g. an enum as a
   // segmented button-group). Absent OR unrecognised falls through to the x-selector / enum / type
@@ -479,7 +484,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   // stays the schema-declared shape (string for repository, etc.).
   const selectorKey = schema["x-selector"];
   if (selectorKey) {
-    const custom = renderCustomSelector(selectorKey, schema, value, onChange);
+    const custom = renderCustomSelector(selectorKey, schema, value, onChange, siblings);
     if (custom != null) {
       // A scalar-string selector (e.g. repository, conversation) can ALSO be bound to a dynamic
       // {{ }} reference — essential when the target isn't known at design time. When the editor
@@ -656,7 +661,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
  * selector's expected shape. Returning <c>null</c> means "no selector registered" — the
  * caller then falls back to the default control so the field still works.
  */
-function renderCustomSelector(key: string, schema: Schema, value: unknown, onChange: (next: unknown) => void) {
+function renderCustomSelector(key: string, schema: Schema, value: unknown, onChange: (next: unknown) => void, siblings?: Record<string, unknown>) {
   switch (key) {
     case "user":
       // Array field → a multi-member toggle list (e.g. allowedResponderUserIds); scalar → a single-user
@@ -664,6 +669,17 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
       return schema.type === "array"
         ? <UserMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
         : <UserSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
+    case "actorUser":
+      // "Act as" author picker: only teammates with a live linked identity on the SIBLING repositoryId's
+      // provider (so a picked author's write can't fail). Filtered via the sibling repository; stores the
+      // same user-id string, and is still wrapped in the Pick ⇄ Expression toggle by renderControl.
+      return (
+        <ActAsUserSelector
+          repositoryId={typeof siblings?.repositoryId === "string" ? siblings.repositoryId : undefined}
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
     case "repository":
       return (
         <ProjectRepositorySelector

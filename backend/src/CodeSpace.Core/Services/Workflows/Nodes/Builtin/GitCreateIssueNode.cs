@@ -58,7 +58,7 @@ public sealed class GitCreateIssueNode : INodeRuntime
                 "title": { "type": "string", "description": "The issue title." },
                 "body": { "type": "string", "x-long": true, "description": "Optional markdown body. Supports {{ }} references." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Optional label names to attach (comma-separated)." },
-                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Create the issue AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Create the issue AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","title"]
             }

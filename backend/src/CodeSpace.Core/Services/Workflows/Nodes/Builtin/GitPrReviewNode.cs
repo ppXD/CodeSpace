@@ -72,7 +72,7 @@ public sealed class GitPrReviewNode : INodeRuntime
                 "number": { "type": "integer", "description": "The pull/merge request number." },
                 "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "x-control": "segmented", "x-enumLabels": { "approve": "Approve", "request_changes": "Request changes", "comment": "Comment" }, "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
                 "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." },
-                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Submit the review AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by the person who approved. Bind {{nodes.<wait>.outputs.by}} from an approval step. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Submit the review AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by the person who approved. Bind {{nodes.<wait>.outputs.by}} from an approval step. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number","verdict"]
             }

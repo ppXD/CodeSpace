@@ -54,7 +54,7 @@ public sealed class GitCloseIssueNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The issue number to close." },
-                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Close AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Close AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]
             }

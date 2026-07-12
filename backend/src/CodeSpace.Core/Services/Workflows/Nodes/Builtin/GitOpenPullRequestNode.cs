@@ -81,7 +81,7 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
                 "targetBranch": { "type": "string", "description": "The branch to merge into (base / target). Must already exist on the remote." },
                 "body": { "type": "string", "x-long": true, "description": "Optional markdown description. Supports {{ }} references." },
                 "draft": { "type": "boolean", "description": "Open as a draft / work-in-progress when the provider supports it." },
-                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "user", "description": "Open the PR AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by that person. Omit to use the repository's connection credential." }
+                "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Open the PR AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by that person. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","title","sourceBranch","targetBranch"]
             }
