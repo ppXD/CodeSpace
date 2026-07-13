@@ -2,6 +2,7 @@ import type { Node } from "@xyflow/react";
 
 import type { NodeManifestDto, WorkflowDefinition } from "@/api/workflows";
 
+import { resolveSpotlight } from "./nodeSpotlight";
 import { isBodyStartTypeKey, isContainerKind } from "./workflowContainers";
 import type { WorkflowNodeData } from "./WorkflowNode";
 
@@ -133,6 +134,9 @@ export function definitionToRfNodes(
       isSideEffecting: manifest?.isSideEffecting,
       canSuspend: manifest?.canSuspend,
       alwaysRequiresApproval: manifest?.alwaysRequiresApproval,
+      // The manifest's highest-ranked config/input params (x-spotlight) as ≤3 compact chips — precomputed
+      // here so every canvas that loads via definitionToRfNodes shows them with no caller change.
+      spotlight: manifest ? resolveSpotlight(manifest, n.config, n.inputs) : [],
       outputs: manifest?.outputs,
       // Manual start node shows the workflow's input fields on its card (Dify-style).
       ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),

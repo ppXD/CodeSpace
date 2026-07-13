@@ -17,6 +17,7 @@ import { MapFanout } from "./MapFanout";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
 import { NodeBadges } from "./NodeBadges";
 import { nodeIconFor, nodeToneFor } from "./nodeIcon";
+import type { SpotlightChip } from "./nodeSpotlight";
 import { CATCH_HANDLE, isContainerKind } from "./workflowContainers";
 
 /**
@@ -61,6 +62,13 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   isSideEffecting?: boolean;
   canSuspend?: boolean;
   alwaysRequiresApproval?: boolean;
+  /**
+   * Up to 3 spotlight chips — the manifest's highest-ranked config/input params (x-spotlight) resolved
+   * against this node's config/inputs, precomputed in definitionToRfNodes. Rendered between the id ref line
+   * and the badges so a viewer reads "what this step acts on" without opening the inspector. Absent/empty ⇒
+   * no extra row (card height unchanged from a node with none).
+   */
+  spotlight?: SpotlightChip[];
   /** Named output handles (routing branches, e.g. logic.if's true/false) → one labelled source handle each. */
   outputs?: NodeOutputHandle[];
   label: string | null;
@@ -252,6 +260,15 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
             muted sub-line so it's visible to copy but no longer dominates the card. */}
         <div className="wf-rf-node-title">{d.label ?? d.displayName}</div>
         <div className="wf-rf-node-ref">{d.nodeId}</div>
+        {d.spotlight && d.spotlight.length > 0 && (
+          <div className="wf-rf-spot">
+            {d.spotlight.map((c) => (
+              <span key={c.key} className="wf-rf-spot-chip" data-tone={c.tone} data-unset={c.unset || undefined} title={c.value}>
+                {c.label && <b>{c.label}</b>}{c.value}
+              </span>
+            ))}
+          </div>
+        )}
         <NodeBadges source={d} />
         <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-node-rerun" />
         {fields.length > 0 && (

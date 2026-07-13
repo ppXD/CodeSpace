@@ -3345,6 +3345,13 @@ textarea:-webkit-autofill {
 .acs-root .wf-badge[data-badge="write"]    { color: var(--warn);    background: #F7ECD6; border-color: #EAD6B4; }
 .acs-root .wf-badge[data-badge="wait"]     { color: var(--wf-flow);  background: var(--wf-flow-soft); border-color: color-mix(in srgb, var(--wf-flow) 28%, transparent); }
 .acs-root .wf-badge[data-badge="approval"] { color: var(--danger);  background: #F6E0DB; border-color: #E6C3B8; }
+/* Spotlight chips — the manifest's highest-ranked config/input params (x-spotlight), ≤3 per card, between
+   the id ref line and the badges. Absent when a node has none, so the card height is unchanged there. */
+.acs-root .wf-rf-spot { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.acs-root .wf-rf-spot-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; font-size: 10.5px; line-height: 1.6; padding: 1px 7px; border-radius: 5px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acs-root .wf-rf-spot-chip b { font-weight: 600; color: var(--ink); }
+.acs-root .wf-rf-spot-chip[data-tone="mono"] { font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.acs-root .wf-rf-spot-chip[data-unset] { color: var(--muted-2); font-style: italic; }
 /* Handles — slightly larger so they're easy to grab. The visible dot is 10px but a
  * pseudo-element extends the hit area to 22px without affecting layout, so the user
  * can grab anywhere near the dot. Accent ring on hover signals "connect from here".
