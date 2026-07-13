@@ -89,7 +89,7 @@ public sealed partial class SupervisorTurnService
                 // counts toward the run's cost cap. A no-op for every OTHER grader kind (TestsPass etc. make no model call).
                 using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
                 {
-                    decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, teamId, cancellationToken).ConfigureAwait(false);
+                    decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                     decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -395,7 +395,7 @@ public sealed partial class SupervisorTurnService
     /// grade, or any unexpected error folds <c>passed:false</c> (Unverified) — never a silent accept, never a throw that
     /// would strand the terminal row. Only a genuine cancellation propagates.
     /// </summary>
-    private async Task<SupervisorPriorDecision> FoldAcceptanceGradeAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string>? command, Guid teamId, CancellationToken cancellationToken)
+    private async Task<SupervisorPriorDecision> FoldAcceptanceGradeAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string>? command, Guid supervisorRunId, string nodeId, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.DecisionKind != SupervisorDecisionKinds.Resolve) return decision;
 
@@ -409,7 +409,25 @@ public sealed partial class SupervisorTurnService
         // SupervisorOutcome.ResolvedBranch self-excludes a multi-repo resolver via the same RepositoryResults signal.
         if (SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.RepositoryResults.Count > 0) return decision;
 
-        var grade = await GradeResolveAcceptanceAsync(decision, goalConfig, command, teamId, cancellationToken).ConfigureAwait(false);
+        // The same ledger heartbeat the stop-target and per-unit grades run under (P1.3): this fold's single
+        // clone+run can outlast LedgerLivenessWindow just like theirs, and it emits no other ledger activity —
+        // without a pulse the reconciler reads a genuinely-alive resolve grade as abandoned and re-dispatches
+        // the run mid-grade. Starts only when a real grade fires (every early return above skips it).
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, "Supervisor resolve acceptance grading is still in progress.");
+
+        BenchmarkGrade grade;
+        try
+        {
+            grade = await GradeResolveAcceptanceAsync(decision, goalConfig, command, teamId, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+
+            try { await heartbeat.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
 
         return decision with { OutcomeJson = SupervisorOutcome.FoldAcceptanceGrade(decision.OutcomeJson, grade.Passed, grade.Detail) };
     }
