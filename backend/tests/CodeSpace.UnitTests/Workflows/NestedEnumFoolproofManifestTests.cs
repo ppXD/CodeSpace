@@ -32,6 +32,17 @@ public class NestedEnumFoolproofManifestTests
         }
     }
 
+    // A chat button's Default/Primary/Danger emphasis (deep inside the actions array-of-object) renders as a
+    // glanceable segmented control — the array rows go through a recursive SchemaForm, so x-control reaches it.
+    [Fact]
+    public void ChatPostMessage_button_style_is_a_segmented_control()
+    {
+        var style = new ChatPostMessageNode(null!, null!, null!).Manifest.InputSchema
+            .GetProperty("properties").GetProperty("actions").GetProperty("items").GetProperty("properties").GetProperty("style");
+
+        style.GetProperty("x-control").GetString().ShouldBe("segmented");
+    }
+
     [Fact]
     public void FlowLoop_termination_logic_is_a_segmented_and_or()
     {
