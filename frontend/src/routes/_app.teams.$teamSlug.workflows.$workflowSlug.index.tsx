@@ -996,6 +996,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
             aria-label="Search node types"
           />
           <div className="wf-palette-hint">Click to add · Drag for precise placement</div>
+          {manifests.length > 0 && <PaletteEffectLegend />}
           {manifests.length === 0 && <div className="wf-palette-empty">No node types loaded.</div>}
           {manifests.length > 0 && paletteGroups.length === 0 && (
             <div className="wf-palette-empty">No nodes match “{paletteQuery.trim()}”.</div>
@@ -1198,6 +1199,19 @@ const PALETTE_GROUPS: ReadonlyArray<{ tone: string; label: string }> = [
   { tone: "tool", label: "Tools" },
   { tone: "end", label: "Endpoints" },
 ];
+
+/** Legend for the corner dots each tile carries: one line above the sections mapping colour → effect,
+ * with dots identical to the tiles' so the mapping reads at a glance. Same order as the tiles (approval
+ * → write → wait) and the same words as their hover tooltips + the canvas card pills. */
+function PaletteEffectLegend() {
+  return (
+    <div className="wf-palette-legend" aria-label="What the coloured dots on a node mean">
+      <span className="wf-palette-legend-item"><span className="wf-palette-legend-dot" data-badge="approval" aria-hidden />Approval</span>
+      <span className="wf-palette-legend-item"><span className="wf-palette-legend-dot" data-badge="write" aria-hidden />Writes</span>
+      <span className="wf-palette-legend-item"><span className="wf-palette-legend-dot" data-badge="wait" aria-hidden />Waits</span>
+    </div>
+  );
+}
 
 function PaletteSection({ title, manifests, onAdd, disabledOf }: {
   title: string;
