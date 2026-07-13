@@ -34,12 +34,17 @@ public class SupervisorGradingHeartbeatTests
 
         var loop = Service(logger).RunGradingHeartbeatLoopAsync(RunId, NodeId, TimeSpan.FromMilliseconds(15), cts.Token);
 
-        // Let several ticks land, then stop — proves it's a REPEATING loop, not a one-shot.
-        await Task.Delay(TimeSpan.FromMilliseconds(80));
+        // Wait FOR the ticks, not for wall-clock — a loaded CI runner can starve a fixed 80ms window below three
+        // 15ms ticks (a thrice-observed flake), while three OBSERVED ticks prove the same thing deterministically:
+        // it's a REPEATING loop, not a one-shot.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        while (logger.Calls.Count < 3 && DateTimeOffset.UtcNow < deadline)
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
+
         cts.Cancel();
         await loop;
 
-        logger.Calls.Count.ShouldBeGreaterThanOrEqualTo(3, "an 80ms window at a 15ms interval must land several heartbeats");
+        logger.Calls.Count.ShouldBeGreaterThanOrEqualTo(3, "three heartbeats must land within 10s at a 15ms interval — check RunGradingHeartbeatLoopAsync's delay/loop wiring if this ever fires");
         logger.Calls.ShouldAllBe(c => c.RunId == RunId && c.NodeId == NodeId && c.Level == LogLevel.Info);
     }
 
