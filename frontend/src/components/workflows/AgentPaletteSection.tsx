@@ -29,28 +29,27 @@ export function AgentPaletteSection({ enabled, onAdd }: AgentPaletteSectionProps
   return (
     <div className="wf-palette-section">
       <div className="wf-palette-section-h">Agents</div>
-      {rows.map((a) => (
-        <button
-          key={a.id}
-          type="button"
-          className="wf-palette-item"
-          draggable
-          onClick={() => onAdd(a.id)}
-          onDragStart={(e) => { e.dataTransfer.setData(AGENT_DRAG_MIME, a.id); e.dataTransfer.effectAllowed = "move"; }}
-          title={`Add a Run agent step bound to @${a.slug}\nClick to add · Drag to position`}
-        >
-          <span className="wf-palette-item-icon"><Ic.Bot size={16} /></span>
-          <span className="wf-palette-item-body">
+      <div className="wf-palette-grid">
+        {rows.map((a) => (
+          <button
+            key={a.id}
+            type="button"
+            className="wf-palette-item"
+            data-tone="ai"
+            draggable
+            onClick={() => onAdd(a.id)}
+            onDragStart={(e) => { e.dataTransfer.setData(AGENT_DRAG_MIME, a.id); e.dataTransfer.effectAllowed = "move"; }}
+            title={`Add a Run agent step bound to @${a.slug}\nClick to add · Drag to position`}
+          >
+            {/* Same centred-tile shape as the node tiles; agents carry no effect tags, but the reserved
+                tag row keeps them one height with the rest of the grid. */}
+            <span className="wf-palette-item-icon"><Ic.Bot size={16} /></span>
             <span className="wf-palette-item-name">{a.name || `@${a.slug}`}</span>
-            {/* line-2 wrapper (agents carry no badges) so persona rows keep the same row height + rhythm
-                as the node rows above. */}
-            <span className="wf-palette-line2">
-              <span className="wf-palette-item-key">@{a.slug}</span>
-            </span>
-          </span>
-          <span className="wf-palette-item-add" aria-hidden>+</span>
-        </button>
-      ))}
+            <span className="wf-palette-item-key">@{a.slug}</span>
+            <span className="wf-palette-tile-tags" />
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
