@@ -67,7 +67,10 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
     return null;
   }, [trimmedName, takenNames]);
 
-  const canSave = nameError === null;
+  // A Select needs at least one option — without one it saves as a bare {type:string} (no enum) and reopens
+  // as a plain Text field, silently dropping the operator's type choice. Require an option so the type survives.
+  const optionsError = type === "select" && usableOptions.length === 0 ? "Add at least one option" : null;
+  const canSave = nameError === null && optionsError === null;
 
   const save = () => {
     if (!canSave) return;
@@ -151,6 +154,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                     <Ic.Plus size={12} /> Add option
                   </button>
                 </div>
+                {optionsError && <span className="wf-form-help wf-form-help-err">{optionsError}</span>}
               </div>
             )}
 
