@@ -313,6 +313,96 @@ public class CompletionReducerTests
         ContractKinds.Routed.ShouldBe(new[] { ContractKinds.Acceptance, ContractKinds.Delivery, ContractKinds.Output });
     }
 
+    [Fact]
+    public void A_run_owing_a_required_delivery_with_no_receipt_cannot_clean_terminal_as_Solved()
+    {
+        // The C1 hole, closed: no acceptance requirement + Success would take the status-fallback arm to Solved
+        // while a required delivery (and output) sits unanswered — the run must park, not terminalize.
+        var requirements = new[] { Requirement("d", ContractKinds.Delivery), Requirement("o", ContractKinds.Output) };
+
+        var a = CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success));
+
+        a.Delivery.ShouldBe(DeliveryDisposition.Unknown);
+        a.Artifact.ShouldBe(ArtifactDisposition.Unknown);
+        a.Outcome.ShouldBe(OutcomeDisposition.Unknown);
+        CompletionReducer.IsTerminalizable(a).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_settled_required_delivery_restores_the_fallback_solve()
+    {
+        var requirements = new[] { Requirement("d", ContractKinds.Delivery) };
+        var receipts = new[] { Receipt("d", VerificationDisposition.Passed, ContractKinds.Delivery) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success));
+
+        a.Delivery.ShouldBe(DeliveryDisposition.Delivered);
+        a.Outcome.ShouldBe(OutcomeDisposition.Solved);
+        CompletionReducer.IsTerminalizable(a).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void A_policy_blocked_delivery_is_settled_and_does_not_block_the_outcome()
+    {
+        // PolicyBlocked is a DECIDED state — the delivery dimension carries its story; the outcome is not held
+        // hostage by an obligation policy already adjudicated.
+        var requirements = new[] { Requirement("d", ContractKinds.Delivery) };
+        var receipts = new[] { Receipt("d", VerificationDisposition.Failed, ContractKinds.Delivery) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success));
+
+        a.Delivery.ShouldBe(DeliveryDisposition.PolicyBlocked);
+        a.Outcome.ShouldBe(OutcomeDisposition.Solved);
+    }
+
+    [Fact]
+    public void A_waiver_cannot_discharge_an_unsettled_required_delivery()
+    {
+        // Waiving the ORACLE does not waive the delivery obligation — an Abstained outcome with a required
+        // delivery unanswered degrades to Unknown and parks.
+        var requirements = new[] { Requirement("a1"), Requirement("d", ContractKinds.Delivery) };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Waived) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success));
+
+        a.Outcome.ShouldBe(OutcomeDisposition.Unknown);
+        CompletionReducer.IsTerminalizable(a).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_decided_failure_survives_an_unsettled_obligation()
+    {
+        var requirements = new[] { Requirement("a1"), Requirement("d", ContractKinds.Delivery) };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Failed) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Failure));
+
+        a.Outcome.ShouldBe(OutcomeDisposition.Unsolved, "a decided failure is stronger evidence than a truth hole");
+        CompletionReducer.IsTerminalizable(a).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void An_optional_delivery_never_holds_the_outcome_hostage()
+    {
+        var requirements = new[] { Requirement("d", ContractKinds.Delivery, Requiredness.Optional) };
+
+        CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success)).Outcome.ShouldBe(OutcomeDisposition.Solved);
+    }
+
+    [Fact]
+    public void A_corrupt_authority_receipt_fails_closed_like_a_self_report()
+    {
+        // The authority gate is an ALLOWLIST: a corrupt enum value can never mint success — the requirement reads
+        // Unknown exactly as unanswered.
+        var requirements = new[] { Requirement("a1") };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Passed, authority: (ContractAuthority)99) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success));
+
+        a.Verification.ShouldBe(VerificationDisposition.Unknown);
+        a.Outcome.ShouldBe(OutcomeDisposition.Unknown);
+    }
+
     // ── The ModelProposal kernel exclusion ──────────────────────────────────────────────────────────────────
 
     [Fact]
