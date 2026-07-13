@@ -41,6 +41,12 @@
   --sidebar-w: 256px;
   --shadow-1: 0 1px 0 rgba(0,0,0,.02), 0 1px 2px rgba(20,15,8,.04);
   --shadow-2: 0 1px 0 rgba(0,0,0,.02), 0 10px 28px rgba(20,15,8,.10);
+  /* One easing + duration + focus/selection ring shared by every interactive control, so state changes
+     read as one coherent motion system instead of a grab-bag of ad-hoc timings. */
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --dur: 130ms;
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  --ring-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .acs-root,
@@ -3521,7 +3527,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-consequence[data-badge="wait"]     svg { color: var(--wf-flow); }
 .acs-root .wf-consequence[data-badge="approval"] svg { color: var(--danger); }
 
-.acs-root .wf-inspector-section { padding: 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel); box-shadow: 0 1px 2px rgba(31,30,29,.05); }
+.acs-root .wf-inspector-section { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-1); }
 /* Plain sections stack their fields with a clear gap so each label binds to ITS input: tight 4px
    label→input inside .wf-form-row, looser 16px between fields. The collapsible variant keeps its own
    toggle/body layout (it sets its own padding + overflow), so it's excluded from the flex gap. */
@@ -3574,17 +3580,19 @@ textarea:-webkit-autofill {
 
 .acs-root .wf-form-input {
   width: 100%; box-sizing: border-box;
-  font-family: inherit; font-size: 12px; padding: 6px 8px;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 5px; color: var(--ink); outline: none;
+  font-family: inherit; font-size: 12px; padding: 7px 9px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); outline: none;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.acs-root .wf-form-input:focus { border-color: var(--accent); background: var(--panel); }
+.acs-root .wf-form-input:focus { border-color: var(--accent); background: var(--panel); box-shadow: var(--ring); }
 .acs-root .wf-form-textarea {
   width: 100%; box-sizing: border-box;
-  font-family: inherit; font-size: 12px; padding: 8px;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 5px; color: var(--ink); outline: none;
+  font-family: inherit; font-size: 12px; padding: 8px 9px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); outline: none;
   resize: vertical; min-height: 60px;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.acs-root .wf-form-textarea:focus { border-color: var(--accent); background: var(--panel); }
+.acs-root .wf-form-textarea:focus { border-color: var(--accent); background: var(--panel); box-shadow: var(--ring); }
 .acs-root .wf-form-textarea-mono { font-family: inherit; font-size: 11.5px; color: var(--ink-2); }
 /* ── Boolean fields render as a themed switch: the native <input type="checkbox"> restyled in place, so
    the value, the "checkbox" role and full keyboard behaviour are unchanged — only the look is upgraded
@@ -3642,7 +3650,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-segmented-opt {
   appearance: none; border: 1px solid transparent; background: none; font: inherit; font-size: 12px;
   font-weight: 500; color: var(--muted); padding: 5px 11px; border-radius: 6px; cursor: pointer;
-  transition: background .1s, color .1s, box-shadow .1s;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .acs-root .wf-segmented-opt:hover { color: var(--ink); }
 .acs-root .wf-segmented-opt[data-active] { background: var(--panel); color: var(--ink); font-weight: 600; border-color: var(--line-2); box-shadow: var(--shadow-1); }
@@ -3650,7 +3658,8 @@ textarea:-webkit-autofill {
 
 /* ── Stepper (x-control:"stepper") — a −/+ control for bounded integers. The value stays a bare number;
    an empty field shows the effective default as placeholder so it never reads as a required blank. ── */
-.acs-root .wf-stepper { display: inline-flex; align-self: flex-start; align-items: center; gap: 1px; padding: 2px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); }
+.acs-root .wf-stepper { display: inline-flex; align-self: flex-start; align-items: center; gap: 1px; padding: 2px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+.acs-root .wf-stepper:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
 .acs-root .wf-stepper-btn {
   appearance: none; border: 0; background: transparent; color: var(--muted);
   width: 26px; height: 26px; border-radius: 6px; font-size: 16px; line-height: 1; cursor: pointer;
@@ -3672,13 +3681,13 @@ textarea:-webkit-autofill {
   display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
   padding: 5px 6px; min-height: 32px;
   border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel);
-  transition: border-color .1s;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.acs-root .wf-chips:focus-within { border-color: var(--accent); }
+.acs-root .wf-chips:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
 .acs-root .wf-chip {
-  display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--ink);
-  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
-  padding: 2px 4px 2px 9px; border-radius: 999px; max-width: 100%;
+  display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--ink-2);
+  background: var(--panel-2); border: 1px solid var(--line-2);
+  padding: 3px 4px 3px 10px; border-radius: 999px; max-width: 100%;
 }
 .acs-root .wf-chip-x {
   appearance: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
@@ -3694,35 +3703,36 @@ textarea:-webkit-autofill {
 
 /* ── RadioCards (x-control:"radioCards") — a closed enum as stacked cards, each with a label + a one-line
    consequence. The stored value stays the raw enum; this replaces the <select> for behaviour forks. ── */
-.acs-root .wf-radiocards { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-radiocards { display: flex; flex-direction: column; gap: 7px; }
 .acs-root .wf-radiocard {
   appearance: none; text-align: left; font: inherit; cursor: pointer;
-  display: flex; align-items: flex-start; gap: 10px; width: 100%;
-  padding: 9px 11px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--panel);
-  transition: border-color .1s, background .1s;
+  display: flex; align-items: flex-start; gap: 11px; width: 100%;
+  padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.acs-root .wf-radiocard:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
-.acs-root .wf-radiocard[data-active] { border-color: var(--accent); background: var(--accent-soft); }
-.acs-root .wf-radiocard:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .wf-radiocard:hover { border-color: color-mix(in srgb, var(--accent) 32%, var(--line-2)); background: color-mix(in srgb, var(--accent-soft) 26%, var(--panel)); }
+.acs-root .wf-radiocard[data-active] { border-color: var(--accent); background: var(--panel); box-shadow: var(--ring), var(--shadow-1); }
+.acs-root .wf-radiocard:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring-focus), var(--shadow-1); }
 .acs-root .wf-radiocard-dot {
-  flex-shrink: 0; width: 15px; height: 15px; margin-top: 1px; border-radius: 50%;
-  border: 1.5px solid var(--line-2); background: var(--bg); transition: border-color .1s, box-shadow .1s;
+  flex-shrink: 0; width: 16px; height: 16px; margin-top: 1px; border-radius: 50%;
+  border: 1.5px solid var(--line-2); background: var(--panel); transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.acs-root .wf-radiocard[data-active] .wf-radiocard-dot { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--accent); background: var(--panel); }
-.acs-root .wf-radiocard-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.acs-root .wf-radiocard-label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.acs-root .wf-radiocard-desc { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.acs-root .wf-radiocard[data-active] .wf-radiocard-dot { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 44%, var(--panel) 46%); }
+.acs-root .wf-radiocard-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.acs-root .wf-radiocard-label { font-size: 12.5px; font-weight: 600; color: var(--ink); letter-spacing: -.005em; }
+.acs-root .wf-radiocard-desc { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 
 /* ── IntentLine — the always-first plain-language summary at the top of a node's settings. Entity ids show
    as friendly names, bound {{refs}} as subtle chips, unset fields as muted prompts. Display-only. ── */
 .acs-root .wf-intent {
-  display: flex; gap: 8px; align-items: flex-start; margin: 0 0 14px;
-  padding: 10px 12px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2);
-  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); border-radius: 9px;
+  display: flex; gap: 9px; align-items: flex-start; margin: 0 0 16px;
+  padding: 11px 13px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2);
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 13%, var(--line)); border-radius: 10px;
 }
-.acs-root .wf-intent-icon { flex-shrink: 0; color: var(--accent); font-size: 12px; margin-top: 1px; }
+.acs-root .wf-intent-icon { flex-shrink: 0; color: var(--accent); font-size: 9px; margin-top: 3px; }
 .acs-root .wf-intent-text { min-width: 0; }
-.acs-root .wf-intent-entity { font-weight: 600; color: var(--ink); background: color-mix(in srgb, var(--accent) 13%, var(--panel)); padding: 0 5px; border-radius: 5px; }
+.acs-root .wf-intent-entity { font-weight: 600; color: var(--ink); background: color-mix(in srgb, var(--accent) 11%, var(--panel)); padding: 0 5px; border-radius: 5px; }
 .acs-root .wf-intent-ref { font-family: var(--mono, ui-monospace, monospace); font-size: .88em; color: var(--accent); background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); padding: 0 5px; border-radius: 5px; }
 .acs-root .wf-intent-ref::before { content: "@"; opacity: .7; margin-right: 1px; }
 .acs-root .wf-intent-prompt { color: var(--muted); font-style: italic; }
@@ -3846,9 +3856,9 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
 /* user multi-picker: searchable combobox — selected tags + filtered dropdown (x-selector:"user" on an array field). */
 .acs-root .wf-userpick { display: flex; flex-direction: column; gap: 6px; position: relative; }
-.acs-root .wf-userpick-control { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-.acs-root .wf-userpick-control:focus-within { border-color: var(--accent); }
-.acs-root .wf-userpick-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 3px; font-size: 11.5px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--ink); }
+.acs-root .wf-userpick-control { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+.acs-root .wf-userpick-control:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.acs-root .wf-userpick-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 3px; font-size: 11.5px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-2)); border-radius: 999px; background: color-mix(in srgb, var(--accent-soft) 52%, var(--panel)); color: var(--ink); }
 .acs-root .wf-userpick-tag-av { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 999px; font-size: 9px; font-weight: 600; }
 .acs-root .wf-userpick-tag-x { display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: none; background: none; color: var(--ink-2); cursor: pointer; border-radius: 999px; }
 .acs-root .wf-userpick-tag-x:hover { color: var(--ink); background: rgba(0,0,0,.06); }
@@ -3937,9 +3947,9 @@ textarea:-webkit-autofill {
 .mdl .wf-form-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mdl .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
 .mdl .wf-userpick { display: flex; flex-direction: column; gap: 6px; position: relative; }
-.mdl .wf-userpick-control { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-.mdl .wf-userpick-control:focus-within { border-color: var(--accent); }
-.mdl .wf-userpick-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 3px; font-size: 11.5px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--ink); }
+.mdl .wf-userpick-control { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+.mdl .wf-userpick-control:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.mdl .wf-userpick-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 3px; font-size: 11.5px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-2)); border-radius: 999px; background: color-mix(in srgb, var(--accent-soft) 52%, var(--panel)); color: var(--ink); }
 .mdl .wf-userpick-tag-av { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 999px; font-size: 9px; font-weight: 600; }
 .mdl .wf-userpick-tag-x { display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: none; background: none; color: var(--ink-2); cursor: pointer; border-radius: 999px; }
 .mdl .wf-userpick-tag-x:hover { color: var(--ink); background: rgba(0,0,0,.06); }
