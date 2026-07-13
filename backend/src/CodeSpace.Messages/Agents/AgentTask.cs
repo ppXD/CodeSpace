@@ -85,18 +85,14 @@ public sealed record AgentTask
     public string? SubtaskId { get; init; }
 
     /// <summary>
-    /// P1 identity: WHICH durable plan row this attempt was dispatched under (<c>WorkPlan.Id</c>), stamped at the
-    /// supervisor's staging chokepoint. With <see cref="PlanVersion"/> + <see cref="SubtaskId"/> it is the
-    /// tape-archaeology-free source of a receipt's <c>WorkUnitRef</c> — a superseded plan's attempt never has to be
-    /// re-derived by ordering plan decisions against origin keys. Null for a plan-less dispatch (a direct
-    /// agent.run, a spawn before any plan persisted); null-omitted so every other lane's task_json is byte-identical.
+    /// P1a identity: the ATOMIC plan-lineage stamp — which durable plan row (id + version) and which unit this
+    /// attempt was dispatched under, bound from the plan DECISION's own recorded ref (an immutable tape fact,
+    /// never a later "current plan" query). One record instead of loose fields so the three coordinates can never
+    /// drift apart; <see cref="SubtaskId"/> stays for legacy/resume compatibility. Null for a plan-less dispatch;
+    /// null-omitted so every other lane's task_json is byte-identical.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public Guid? WorkPlanId { get; init; }
-
-    /// <summary>The plan VERSION this attempt was dispatched under — see <see cref="WorkPlanId"/>.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? PlanVersion { get; init; }
+    public Contracts.WorkUnitRef? WorkUnit { get; init; }
 
     /// <summary>
     /// Optional Agent persona (<c>AgentDefinition</c>) this run resolves from — null = a pure-inline run (no persona).

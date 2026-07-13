@@ -1105,6 +1105,29 @@ public static class SupervisorOutcome
     }
 
     /// <summary>Read the plan-local subtask ids off a <c>spawn</c> decision's PAYLOAD (the fan-out order) — empty when absent/malformed. The spawn outcome's <c>agentRunIds[i]</c> corresponds to this payload's <c>subtaskIds[i]</c> (same staging order), so a phase's grouped subtasks map to the agents that ran them (C2).</summary>
+    /// <summary>
+    /// The EXACT durable plan row a plan decision persisted (P1a identity) — recorded into the decision's outcome
+    /// at execution, so spawn/retry bind their attempts to an immutable tape fact instead of re-querying a mutable
+    /// "current plan" projection. Null for a rejected plan, a unit-tier plan, or a pre-P1a tape.
+    /// </summary>
+    public static (Guid WorkPlanId, int Version)? ReadPlanRef(string? planOutcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(planOutcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(planOutcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("workPlanId", out var id) || id.ValueKind != JsonValueKind.String || !Guid.TryParse(id.GetString(), out var planId)
+                || !root.TryGetProperty("workPlanVersion", out var version) || version.ValueKind != JsonValueKind.Number)
+                return null;
+
+            return (planId, version.GetInt32());
+        }
+        catch (JsonException) { return null; }
+    }
+
     public static IReadOnlyList<string> ReadSpawnSubtaskIds(string? spawnPayloadJson)
     {
         if (string.IsNullOrWhiteSpace(spawnPayloadJson)) return Array.Empty<string>();

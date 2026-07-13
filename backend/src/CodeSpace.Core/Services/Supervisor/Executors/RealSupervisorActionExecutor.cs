@@ -117,13 +117,22 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         if ((plan.Subtasks?.Count ?? 0) == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { plan = "rejected", reason = "the plan decision named no subtasks" }, AgentJson.Options));
 
-        await PersistWorkPlanAsync(plan, context, cancellationToken).ConfigureAwait(false);
+        var persisted = await PersistWorkPlanAsync(plan, context, cancellationToken).ConfigureAwait(false);
 
         // L4 arc C: a plan that authored semantic phases records them alongside the subtasks (the scorecard / tasks-phases
         // surface projects them); a flat plan records only planned/count → byte-identical to before.
-        var outcome = plan.Phases is { Count: > 0 }
-            ? JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases }, AgentJson.Options)
-            : JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options);
+        // P1a identity: the decision's outcome records the EXACT durable plan row it persisted (id + version) —
+        // spawn/retry read the plan ref from THIS immutable tape fact, never from a later mutable "current plan"
+        // query, so a crash replay / reconciler re-dispatch / zombie resume can never re-derive a different plan
+        // (the exactly-once origin key already lands a replayed persist on the same row; recording it makes the
+        // binding hold by construction). A unit-tier context (nothing persisted) records no ref.
+        var outcome = (plan.Phases is { Count: > 0 }, persisted) switch
+        {
+            (true, { } row) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases, workPlanId = row.Id, workPlanVersion = row.Version }, AgentJson.Options),
+            (true, null) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases }, AgentJson.Options),
+            (false, { } row) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, workPlanId = row.Id, workPlanVersion = row.Version }, AgentJson.Options),
+            (false, null) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options),
+        };
 
         _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s)", plan.Subtasks.Count, plan.Phases?.Count ?? 0);
 
@@ -136,11 +145,11 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     /// version); a LATER re-plan is a different turn → a new key → the run's next version. A pure-unit context
     /// (no run/team — nothing to own the row) skips, keeping unit-tier executors DB-free.
     /// </summary>
-    private async Task PersistWorkPlanAsync(SupervisorPlanPayload plan, SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<Persistence.Entities.WorkPlan?> PersistWorkPlanAsync(SupervisorPlanPayload plan, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        if (context.SupervisorRunId == Guid.Empty || context.TeamId == Guid.Empty) return;
+        if (context.SupervisorRunId == Guid.Empty || context.TeamId == Guid.Empty) return null;
 
-        await _workPlans.SaveVersionAsync(new WorkPlanDraft
+        return await _workPlans.SaveVersionAsync(new WorkPlanDraft
         {
             TeamId = context.TeamId,
             WorkflowRunId = context.SupervisorRunId,
