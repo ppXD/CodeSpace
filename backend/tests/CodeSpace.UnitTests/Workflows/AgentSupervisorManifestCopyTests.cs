@@ -51,6 +51,37 @@ public class AgentSupervisorManifestCopyTests
         props.GetProperty("approvalPolicy").GetProperty("x-enumLabels").GetProperty("none").GetString().ShouldBe("Autonomous");
     }
 
+    // The behaviour-fork enums (who approves, how decisions/plans are reviewed, what each spawned agent may do)
+    // render as radioCards where EVERY option carries a plain-language consequence — the reader must understand
+    // the fork before choosing. radioCards stores the SAME enum string/int the <select> did (string-tolerant
+    // reads), so the config VALUE shape is unchanged. Copy was mapped against the supervisor runtime — notably
+    // decisionReviewMode's Gate is a HARD gate (block → redo → human), NOT the "flag concerns" the old text said.
+    [Fact]
+    public void Behaviour_fork_enums_render_as_radiocards_with_a_consequence_for_every_option()
+    {
+        var props = Config().GetProperty("properties");
+        var forks = new[]
+        {
+            ("approvalPolicy", props.GetProperty("approvalPolicy")),
+            ("decisionReviewMode", props.GetProperty("decisionReviewMode")),
+            ("planReviewMode", props.GetProperty("planReviewMode")),
+            ("agentProfile.autonomyLevel", props.GetProperty("agentProfile").GetProperty("properties").GetProperty("autonomyLevel")),
+        };
+
+        foreach (var (name, prop) in forks)
+        {
+            prop.GetProperty("x-control").GetString().ShouldBe("radioCards", $"{name} is a behaviour fork — render it as stacked cards, not a bare dropdown");
+
+            prop.TryGetProperty("x-optionConsequence", out var cons).ShouldBeTrue($"{name} must declare x-optionConsequence so no option is a mystery");
+            foreach (var value in prop.GetProperty("enum").EnumerateArray())
+            {
+                var key = value.ToString();
+                cons.TryGetProperty(key, out var consequence).ShouldBeTrue($"{name} option '{key}' has no consequence line");
+                consequence.GetString().ShouldNotBeNullOrWhiteSpace();
+            }
+        }
+    }
+
     // The dense supervisor form is sectioned via x-group — every top-level field must belong to a section
     // declared in x-sections, so the grouped layout has no stray "More" bucket. Presentation-only.
     [Fact]
