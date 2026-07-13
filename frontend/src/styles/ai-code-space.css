@@ -3493,8 +3493,8 @@ textarea:-webkit-autofill {
    per-action rows, help text) groups into legible blocks instead of one long undivided column. */
 .acs-root .wf-inspector-body { display: flex; flex-direction: column; gap: 12px; padding: 12px; min-height: 0; background: var(--panel-2); }
 .acs-root .wf-inspector-h {
-  padding: 14px 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel);
-  box-shadow: 0 1px 2px rgba(31,30,29,.05);
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  box-shadow: var(--shadow-1);
   display: flex; flex-direction: column; gap: 2px;
 }
 .acs-root .wf-inspector-h-name { font-weight: 600; font-size: 13px; color: var(--ink); }
@@ -3518,8 +3518,8 @@ textarea:-webkit-autofill {
    the coloured icon carrying the same semantics as the card's badges. Shown only for nodes that actually act. */
 .acs-root .wf-inspector-consequences {
   display: flex; flex-direction: column; gap: 7px;
-  padding: 11px 12px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel);
-  box-shadow: 0 1px 2px rgba(31,30,29,.05);
+  padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  box-shadow: var(--shadow-1);
 }
 .acs-root .wf-consequence { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink); line-height: 1.35; }
 .acs-root .wf-consequence svg { flex-shrink: 0; }
@@ -3638,10 +3638,10 @@ textarea:-webkit-autofill {
 .acs-root .wf-interaction-opt {
   padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line);
   background: var(--bg); font-family: inherit; font-size: 12px; font-weight: 500;
-  color: var(--ink-2); cursor: pointer; transition: background .1s, border-color .1s, color .1s;
+  color: var(--ink-2); cursor: pointer; transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .acs-root .wf-interaction-opt:hover { background: var(--panel); border-color: var(--line-2); color: var(--ink); }
-.acs-root .wf-interaction-opt[data-active] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.acs-root .wf-interaction-opt[data-active] { background: color-mix(in srgb, var(--accent-soft) 45%, var(--panel)); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .acs-root .wf-interaction-body { padding-top: 4px; }
 
 /* ── Segmented control (x-control:"segmented") — a lifted-pill button group for short closed enums.
@@ -4343,7 +4343,7 @@ textarea:-webkit-autofill {
   display: flex; flex-direction: column;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
 }
 .acs-root .wf-trigger-repos-row {
@@ -4370,15 +4370,16 @@ textarea:-webkit-autofill {
 .acs-root .wf-trigger-repos-select {
   flex: 1 1 0; min-width: 0;
   appearance: none; -webkit-appearance: none;
-  font-family: inherit; font-size: 12px; padding: 5px 22px 5px 8px;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 5px; color: var(--ink);
+  font-family: inherit; font-size: 12px; padding: 6px 22px 6px 9px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; color: var(--ink);
   outline: none; cursor: pointer;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
   background-image: linear-gradient(45deg, transparent 50%, var(--muted-2) 50%), linear-gradient(135deg, var(--muted-2) 50%, transparent 50%);
   background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%;
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
 }
-.acs-root .wf-trigger-repos-select:focus { border-color: var(--accent); }
+.acs-root .wf-trigger-repos-select:focus { border-color: var(--accent); box-shadow: var(--ring); }
 .acs-root .wf-trigger-repos-remove {
   display: inline-grid; place-items: center;
   width: 22px; height: 22px; flex-shrink: 0;
@@ -4398,12 +4399,12 @@ textarea:-webkit-autofill {
   font-size: 11px; color: var(--muted); font-style: italic;
 }
 .acs-root .wf-trigger-repos-label {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 1px 4px 1px 6px;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 4px 2px 8px;
   font-size: 11px; line-height: 1.4;
-  background: var(--accent-soft); color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 3px;
+  background: var(--panel-2); color: var(--ink-2);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
   user-select: none;
 }
 .acs-root .wf-trigger-repos-label-remove {
