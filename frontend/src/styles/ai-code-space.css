@@ -2512,11 +2512,11 @@ textarea:-webkit-autofill {
   display: flex; align-items: center; gap: 10px;
   min-width: 200px; max-width: 280px;
   padding: 10px 12px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   position: relative;
   font-size: 12px; color: var(--ink);
   box-shadow: 0 1px 2px rgba(31,30,29,.05), 0 3px 8px rgba(31,30,29,.05);
-  transition: box-shadow .15s ease, border-color .15s ease;
+  transition: box-shadow var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 /* Hover lift — only a PLAIN editor node (not selected, not carrying a run status, both of which own the
    border + shadow). The border warms toward the node's own tone, so hovering reinforces its colour. */
@@ -2524,7 +2524,7 @@ textarea:-webkit-autofill {
   border-color: color-mix(in srgb, var(--tone) 45%, var(--line));
   box-shadow: 0 2px 5px rgba(31,30,29,.07), 0 10px 22px rgba(31,30,29,.10);
 }
-.acs-root .wf-rf-node[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), 0 4px 10px rgba(31,30,29,.07); }
+.acs-root .wf-rf-node[data-selected="true"] { border-color: var(--accent); box-shadow: var(--ring), 0 4px 12px rgba(31,30,29,.08); }
 
 /* ── Run overlay (RunCanvas): a node's status as a ring + corner badge, reusing the app status tones ── */
 .acs-root .wf-rf-node[data-run-status], .acs-root .wf-rf-loop[data-run-status] { transition: border-color .18s ease, box-shadow .18s ease, opacity .18s ease; }
@@ -3286,7 +3286,7 @@ textarea:-webkit-autofill {
   background: var(--panel-2); border: 1.5px solid var(--line); border-radius: 12px;
   position: relative; box-shadow: 0 1px 3px rgba(31,30,29,0.05);
 }
-.acs-root .wf-rf-loop[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.acs-root .wf-rf-loop[data-selected="true"] { border-color: var(--accent); box-shadow: var(--ring); }
 .acs-root .wf-rf-loop-head {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; font-size: 12.5px; color: var(--ink);
@@ -3326,7 +3326,7 @@ textarea:-webkit-autofill {
 .acs-root [data-tone="end"]   { --tone: var(--wf-end);   --tone-soft: var(--wf-end-soft); }
 .acs-root .wf-rf-node-bar {
   position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tone);
-  border-top-left-radius: 9px; border-bottom-left-radius: 9px;
+  border-top-left-radius: 10px; border-bottom-left-radius: 10px;
 }
 .acs-root .wf-rf-node-icon {
   width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center;
