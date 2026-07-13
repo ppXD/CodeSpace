@@ -189,8 +189,8 @@ public sealed class AgentCodeNode : INodeRuntime
             PushProducedBranch = acceptance != null ? true : ResolvePushBranch(context.Config, mode),
             EnableMcpEndpoint = ReadOptionalBool(context.Config, "enableMcp"),
             // The output-review mode + its reviewer model — the executor runs an independent critic over the produced
-            // change at completion. Absent ⇒ None ⇒ no review ⇒ byte-identical. Read as the enum int (the schema offers
-            // 0=None / 1=Gate; v1 supports Gate only).
+            // change at completion. Absent ⇒ None ⇒ no review ⇒ byte-identical. Read as the enum int
+            // (0=None / 1=Gate re-grades a disapproved change to NeedsReview / 2=Improve grants one bounded revise round).
             OutputReviewMode = ReadInt(context.Config, "outputReviewMode") is { } rm ? (ReviewMode)rm : ReviewMode.None,
             ReviewerModelId = ReadOptionalGuid(context.Config, "reviewerModelId"),
             // S6: the bounded revise budget — how many times the executor may feed an oracle failure / Improve-critic
