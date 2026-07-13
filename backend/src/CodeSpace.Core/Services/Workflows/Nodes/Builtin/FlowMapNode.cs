@@ -51,8 +51,8 @@ public sealed class FlowMapNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "maxParallelism": { "type": "integer", "minimum": 1, "maximum": 64, "description": "How many element-branches run at once. Empty inherits the engine default." },
-                "errorHandling": { "type": "string", "enum": ["terminate", "continue"], "default": "terminate", "title": "If a branch fails", "x-control": "radioCards", "x-enumLabels": { "terminate": "Fail the map if a branch fails", "continue": "Keep going, mark failures" }, "x-optionConsequence": { "terminate": "If any element-branch fails, the whole map fails and emits no results.", "continue": "A failed branch records a failure marker; the rest keep running and the map still succeeds." } },
+                "maxParallelism": { "type": "integer", "minimum": 1, "maximum": 64, "description": "How many element-branches run at once. Empty inherits the engine default.", "x-spotlight": 2 },
+                "errorHandling": { "type": "string", "enum": ["terminate", "continue"], "default": "terminate", "title": "If a branch fails", "x-control": "radioCards", "x-enumLabels": { "terminate": "Fail the map if a branch fails", "continue": "Keep going, mark failures" }, "x-optionConsequence": { "terminate": "If any element-branch fails, the whole map fails and emits no results.", "continue": "A failed branch records a failure marker; the rest keep running and the map still succeeds." }, "x-spotlight": 3 },
                 "resultKey": { "type": "string", "default": "results", "description": "Output key the collected array lands under, read as {{nodes.<map>.outputs.<resultKey>}}." }
               }
             }
@@ -61,7 +61,7 @@ public sealed class FlowMapNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "items": { "type": "array", "description": "The collection to fan out over — usually {{nodes.<planner>.outputs.json.subtasks}}. Required: bind a non-empty collection. A missing or empty binding is a validation error." }
+                "items": { "type": "array", "description": "The collection to fan out over — usually {{nodes.<planner>.outputs.json.subtasks}}. Required: bind a non-empty collection. A missing or empty binding is a validation error.", "x-spotlight": 1 }
               },
               "required": ["items"]
             }

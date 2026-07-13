@@ -69,12 +69,12 @@ public sealed class AgentRunCommandNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "repositoryId":   { "type": "string", "format": "uuid", "x-selector": "repository", "description": "Repository to clone and run inside. Leave empty to run with no checkout. Or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
-                "command":        { "type": "string", "minLength": 1, "description": "Executable to run (resolved on PATH, e.g. \"npm\", \"make\", \"pytest\"). Not shell-interpreted — put each argument in Args." },
+                "repositoryId":   { "type": "string", "format": "uuid", "x-selector": "repository", "description": "Repository to clone and run inside. Leave empty to run with no checkout. Or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}).", "x-spotlight": 2 },
+                "command":        { "type": "string", "minLength": 1, "description": "Executable to run (resolved on PATH, e.g. \"npm\", \"make\", \"pytest\"). Not shell-interpreted — put each argument in Args.", "x-spotlight": 1 },
                 "args":           { "type": "array", "items": { "type": "string" }, "description": "Arguments, one per entry (e.g. [\"test\", \"--silent\"]). No shell splitting or globbing." },
                 "branch":         { "type": "string", "description": "Branch / tag / sha to check out (repo runs only). Empty → the repository's default branch." },
                 "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate." },
-                "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600." },
+                "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600.", "x-spotlight": 3 },
                 "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default." },
                 "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap stdout/stderr to this many characters (a head+tail preview is kept, the rest dropped). Leave empty for the full output. Use it to keep a noisy build/test log from bloating the run — the exact byte size is always reported on stdoutBytes/stderrBytes." }
               },
