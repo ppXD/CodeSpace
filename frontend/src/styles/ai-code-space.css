@@ -24,6 +24,10 @@
   --good: #5BA17A;
   --warn: #C97C3F;
   --danger: #C0623D;
+  /* Effect-dot hues — the palette tile corner dots + their legend. Deliberately pulled apart (a redder
+     red vs a golder amber) so the three read as distinct colours at 6px, where --danger and --warn are
+     too close. Wait stays the flow blue. */
+  --fx-approval: #C13A2D;  --fx-write: #CC8A38;  --fx-wait: var(--wf-flow);
   /* Workflow node tones — one muted, warm-compatible hue per node category so every node on the canvas
      reads by colour + icon at a glance (left rail + icon chip). "start" reuses the brand accent; "tool" is
      the neutral fallback that any unmapped/plugin category lands on. */
@@ -2413,6 +2417,17 @@ textarea:-webkit-autofill {
   font-size: 10px; color: var(--muted-2); padding: 0 4px;
   line-height: 1.5;
 }
+/* Legend for the tiles' corner effect-dots — one quiet row above the sections. The dots match the
+ * tile dots exactly (size, colour, halo) so colour → meaning reads without hovering. */
+.acs-root .wf-palette-legend { display: flex; flex-wrap: wrap; gap: 3px 12px; padding: 1px 4px 2px; }
+.acs-root .wf-palette-legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
+.acs-root .wf-palette-legend-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--dot); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--dot) 18%, transparent);
+}
+.acs-root .wf-palette-legend-dot[data-badge="approval"] { --dot: var(--fx-approval); }
+.acs-root .wf-palette-legend-dot[data-badge="write"]    { --dot: var(--fx-write); }
+.acs-root .wf-palette-legend-dot[data-badge="wait"]     { --dot: var(--fx-wait); }
 .acs-root .wf-palette-search {
   width: 100%; box-sizing: border-box; margin: 0;
   padding: 6px 10px; border-radius: 7px;
@@ -3361,9 +3376,9 @@ textarea:-webkit-autofill {
   border-radius: 50%; font-size: 0; line-height: 0; color: transparent;
   background: var(--dot); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--dot) 18%, transparent);
 }
-.acs-root .wf-palette-item .wf-badge[data-badge="approval"] { --dot: var(--danger); }
-.acs-root .wf-palette-item .wf-badge[data-badge="write"]    { --dot: var(--warn); }
-.acs-root .wf-palette-item .wf-badge[data-badge="wait"]     { --dot: var(--wf-flow); }
+.acs-root .wf-palette-item .wf-badge[data-badge="approval"] { --dot: var(--fx-approval); }
+.acs-root .wf-palette-item .wf-badge[data-badge="write"]    { --dot: var(--fx-write); }
+.acs-root .wf-palette-item .wf-badge[data-badge="wait"]     { --dot: var(--fx-wait); }
 
 /* Handles — slightly larger so they're easy to grab. The visible dot is 10px but a
  * pseudo-element extends the hit area to 22px without affecting layout, so the user
