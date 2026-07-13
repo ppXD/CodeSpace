@@ -36,6 +36,7 @@ public sealed class ContractEnvelopeTests
         Enum.GetNames<OutcomeDisposition>().ShouldBe(new[] { "Solved", "Unsolved", "Abstained", "Unknown" });
         Enum.GetNames<ArtifactDisposition>().ShouldBe(new[] { "Captured", "CaptureFailed", "NothingExpected", "Unknown" });
         Enum.GetNames<DeliveryDisposition>().ShouldBe(new[] { "Delivered", "PolicyBlocked", "WaivedByPolicy", "NotRequired", "Unknown" });
+        Enum.GetNames<CompletionBasis>().ShouldBe(new[] { "ContractDerived", "LegacyUnknown" });
     }
 
     [Fact]
@@ -55,7 +56,7 @@ public sealed class ContractEnvelopeTests
         receiptJson.ShouldNotContain("evidenceRef");
         receiptJson.ShouldContain("\"disposition\":\"Passed\"", customMessage: "the enum NAME is the wire value");
 
-        var assessment = new CompletionAssessment { Execution = ExecutionDisposition.Completed, Outcome = OutcomeDisposition.Solved, Verification = VerificationDisposition.Passed, Artifact = ArtifactDisposition.Captured, Delivery = DeliveryDisposition.Delivered };
+        var assessment = new CompletionAssessment { Basis = CompletionBasis.ContractDerived, Execution = ExecutionDisposition.Completed, Outcome = OutcomeDisposition.Solved, Verification = VerificationDisposition.Passed, Artifact = ArtifactDisposition.Captured, Delivery = DeliveryDisposition.Delivered };
         JsonSerializer.Serialize(assessment, AgentJson.Options).ShouldNotContain("forcedStopReason");
     }
 

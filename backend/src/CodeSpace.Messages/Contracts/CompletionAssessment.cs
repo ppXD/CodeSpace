@@ -52,6 +52,9 @@ public enum DeliveryDisposition
 /// </summary>
 public sealed record CompletionAssessment
 {
+    /// <summary>What this assessment was derived from — see <see cref="CompletionBasis"/> for the CUTOVER semantics.</summary>
+    public required CompletionBasis Basis { get; init; }
+
     public required ExecutionDisposition Execution { get; init; }
 
     /// <summary>The forced stop's recorded reason (<c>SupervisorStopReasons</c> vocabulary) — present exactly when <see cref="Execution"/> is <see cref="ExecutionDisposition.ForcedStop"/>.</summary>

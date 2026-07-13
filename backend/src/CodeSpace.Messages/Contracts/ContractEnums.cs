@@ -55,3 +55,18 @@ public enum OutputExpectation
     NoOutputExpected,
     HumanReviewRequired,
 }
+
+/// <summary>
+/// WHAT a <see cref="CompletionAssessment"/> was derived from (the CUTOVER policy). A run created before the
+/// cutover is <see cref="LegacyUnknown"/> — its tape predates the contract regime, so only <see cref="CompletionAssessment.Execution"/>
+/// (a durable status fact) is derived and every contract dimension stays <c>Unknown</c>: old facts are NEVER
+/// re-derived into contract truth (recomputation would manufacture false precision). A run created at-or-after
+/// the cutover is <see cref="ContractDerived"/> — the reducer's five dimensions ARE its truth, and a missing
+/// assessment reads <c>Unknown</c>, never Success.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum CompletionBasis
+{
+    ContractDerived,
+    LegacyUnknown,
+}
