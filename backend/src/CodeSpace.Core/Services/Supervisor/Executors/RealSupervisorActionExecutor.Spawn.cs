@@ -53,11 +53,15 @@ public sealed partial class RealSupervisorActionExecutor
         var tasks = new List<(AgentTask, SupervisorAgentDispatch?)>();
         var blocked = new List<DependencyBlock>();
 
+        var contractHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+
         foreach (var id in spawn.SubtaskIds)
         {
             var spec = DispatchFor(spawn, id);
             var planned = subtasks.GetValueOrDefault(id);
             var repositoryId = ResolveTargetRepositoryId(spec, context);
+
+            if (planned is not null) contractHashes[id] = SupervisorUnitContract.Hash(planned, spec?.GoalOverride, spec?.RepositoryId);
 
             var staging = await ResolveDependencyStagingAsync(DependsOnFor(planned, spec), repositoryId, context, cancellationToken).ConfigureAwait(false);
 
@@ -73,7 +77,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (blocked.Count > 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(blocked), AgentJson.Options));
 
-        return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes).ConfigureAwait(false);
     }
 
     /// <summary>A subtask's staging dependency: the model-authored <see cref="SupervisorAgentDispatch.BaseSubtaskId"/> override when present (narrows to ONE producer for this specific spawn), else the plan's own <c>DependsOn</c>. Empty when neither names a producer (byte-identical no-override path). Internal + static so the precedence is unit-pinned directly.</summary>
@@ -208,11 +212,15 @@ public sealed partial class RealSupervisorActionExecutor
 
         var builtTask = BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: effectiveStaging);
 
+        var retryContractHashes = subtasks.GetValueOrDefault(retry.SubtaskId) is { } plannedUnit
+            ? new Dictionary<string, string>(StringComparer.Ordinal) { [retry.SubtaskId] = SupervisorUnitContract.Hash(plannedUnit, retry.RevisedInstruction, repositoryOverride: null) }
+            : null;
+
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorAgentRunId, context, cancellationToken).ConfigureAwait(false);
 
         var task = prior is null ? escalatedTask : ApplyResumeRecord(escalatedTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
 
-        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, retryContractHashes).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -291,7 +299,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -317,7 +325,15 @@ public sealed partial class RealSupervisorActionExecutor
         if (planRef is { } plan)
             tasks = tasks.Select(t => (t.Task with
             {
-                WorkUnit = string.IsNullOrEmpty(t.Task.SubtaskId) ? null : new Messages.Contracts.WorkUnitRef { WorkPlanId = plan.WorkPlanId, PlanVersion = plan.Version, UnitId = t.Task.SubtaskId },
+                WorkUnit = string.IsNullOrEmpty(t.Task.SubtaskId) ? null : new Messages.Contracts.WorkUnitRef
+                {
+                    WorkPlanId = plan.WorkPlanId,
+                    PlanVersion = plan.Version,
+                    UnitId = t.Task.SubtaskId,
+                    // P1b: the EFFECTIVE contract's canonical hash (dispatch overrides included) — the content
+                    // identity receipts and ReceiptAdmission bind to. Null when the unit has no known contract.
+                    ContractHash = contractHashes?.GetValueOrDefault(t.Task.SubtaskId),
+                },
             }, t.Spec)).ToList();
 
         var agentRunIds = new List<Guid>(tasks.Count);

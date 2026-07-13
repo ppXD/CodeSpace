@@ -202,6 +202,9 @@ public class SupervisorSpawnFlowTests : IDisposable
                 Guid.Parse(workUnit.GetProperty("workPlanId").GetString()!).ShouldBe(plan.Id, "the attempt's atomic WorkUnitRef must name the exact durable plan row that dispatched it");
                 workUnit.GetProperty("planVersion").GetInt32().ShouldBe(1);
                 workUnit.GetProperty("unitId").GetString().ShouldNotBeNullOrEmpty();
+
+                // P1b: the effective contract's canonical hash rides the ref — self-describing + non-empty.
+                workUnit.GetProperty("contractHash").GetString()!.ShouldStartWith("sha256/canonical-json-v1:");
             }
         }
         finally
