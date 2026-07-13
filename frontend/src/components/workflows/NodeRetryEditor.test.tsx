@@ -17,7 +17,7 @@ describe("NodeRetryEditor", () => {
     render(<NodeRetryEditor value={null} onChange={vi.fn()} />);
 
     expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
-    expect(screen.queryByRole("spinbutton", { name: /max attempts/i })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: /max attempts/i })).toBeNull();
   });
 
   it("seeds a retrying policy when toggled on", () => {
@@ -44,10 +44,10 @@ describe("NodeRetryEditor", () => {
     const onChange = vi.fn();
     render(<NodeRetryEditor value={{ maxAttempts: 3, backoffSeconds: 0 }} onChange={onChange} />);
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: /max attempts/i }), { target: { value: "5" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /max attempts/i }), { target: { value: "5" } });
     expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 5, backoffSeconds: 0 });
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: /backoff/i }), { target: { value: "2.5" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /backoff/i }), { target: { value: "2.5" } });
     expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 3, backoffSeconds: 2.5 });
   });
 
@@ -55,13 +55,35 @@ describe("NodeRetryEditor", () => {
     const onChange = vi.fn();
     render(<NodeRetryEditor value={{ maxAttempts: 3, backoffSeconds: 0 }} onChange={onChange} />);
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: /max attempts/i }), { target: { value: "999" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /max attempts/i }), { target: { value: "999" } });
     expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: RETRY_MAX_ATTEMPTS_CAP, backoffSeconds: 0 });
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: /max attempts/i }), { target: { value: "0" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /max attempts/i }), { target: { value: "0" } });
     expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 1, backoffSeconds: 0 });
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: /backoff/i }), { target: { value: "999" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /backoff/i }), { target: { value: "999" } });
     expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 3, backoffSeconds: RETRY_MAX_BACKOFF_SECONDS });
+  });
+
+  it("lets you type a fractional backoff — the in-progress '0.' sits in the buffer, then commits", () => {
+    const onChange = vi.fn();
+    render(<NodeRetryEditor value={{ maxAttempts: 3, backoffSeconds: 0 }} onChange={onChange} />);
+    const backoff = screen.getByRole("textbox", { name: /backoff/i }) as HTMLInputElement;
+
+    fireEvent.change(backoff, { target: { value: "0." } });   // trailing dot held, not coerced to 0
+    expect(backoff.value).toBe("0.");
+    fireEvent.change(backoff, { target: { value: "0.5" } });
+    expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 3, backoffSeconds: 0.5 });
+  });
+
+  it("lets you blank a field to retype it, instead of instantly refilling", () => {
+    const onChange = vi.fn();
+    render(<NodeRetryEditor value={{ maxAttempts: 3, backoffSeconds: 2 }} onChange={onChange} />);
+    const max = screen.getByRole("textbox", { name: /max attempts/i }) as HTMLInputElement;
+
+    fireEvent.change(max, { target: { value: "" } });   // clearing does NOT snap back to a number
+    expect(max.value).toBe("");
+    fireEvent.change(max, { target: { value: "5" } });
+    expect(onChange).toHaveBeenLastCalledWith({ maxAttempts: 5, backoffSeconds: 2 });
   });
 });
