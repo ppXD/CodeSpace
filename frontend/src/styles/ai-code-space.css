@@ -3346,36 +3346,34 @@ textarea:-webkit-autofill {
 .acs-root .wf-badge[data-badge="wait"]     { color: var(--wf-flow);  background: var(--wf-flow-soft); border-color: color-mix(in srgb, var(--wf-flow) 28%, transparent); }
 .acs-root .wf-badge[data-badge="approval"] { color: var(--danger);  background: #F6E0DB; border-color: #E6C3B8; }
 
-/* ── Palette row: uniform height + calm right-aligned effect rail ──────────────
+/* ── Palette row: uniform, legible rows — name on top, effect on the key line ──
  * The effect badges (Approval/Writes/Waits) used to stack as a 3rd line under the
  * type-key, so a badge-bearing row was ~20px taller than a plain one — a ragged
  * column, and each badged row read as an L-shape (icon + text top-left, a lone
- * pill bottom-left, the whole right half empty). Here the badges LEAVE the body
- * into a fixed-width right slot (`.wf-palette-item-meta`) present on EVERY row, so
- * the 2-line name+key body is the sole height driver: every row is identical
- * height and every name ellipsizes at the same x. Each badge collapses to a calm
- * 7px semantic dot — the word stays in the DOM as a title tooltip, and the canvas
- * node card keeps the full word pill. Scoped to `.wf-palette-item`; static (no
- * hover reflow of the name). Fixed DOM order approval→write→wait makes position a
- * second channel beyond hue. */
+ * pill bottom-left, the right half empty). Now the name owns line 1 (so it never
+ * truncates), and the muted type-key shares line 2 with the effect tags — key on
+ * the left (ellipsizes if a 2-tag row is tight), tags flush right so line 2 spans
+ * the full width and the row reads balanced, not left-leaning. The tag is a small,
+ * calm, per-kind-tinted word (clear at a glance, unlike a cryptic dot); its box is
+ * sized to the type-key line and line 2 has a fixed min-height, so a tag never
+ * makes a row taller than a plain one — every row is the same height. Scoped to
+ * `.wf-palette-item`; the canvas node card keeps its own fuller word pills. */
 .acs-root .wf-palette-item { min-height: 42px; }
 
-.acs-root .wf-palette-item-meta {
-  flex-shrink: 0; align-self: center;
-  display: flex; align-items: center; justify-content: flex-end;
-  min-width: 31px;   /* 3 × 7px dots + 2 × 5px gaps — reserved on every row so names align */
+.acs-root .wf-palette-line2 {
+  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 16px;
 }
-.acs-root .wf-palette-item-meta .wf-badges { margin: 0; gap: 5px; flex-wrap: nowrap; }
+.acs-root .wf-palette-line2 .wf-palette-item-key { flex: 0 1 auto; min-width: 0; }
+.acs-root .wf-palette-line2 .wf-badges { margin: 0 0 0 auto; gap: 4px; flex-wrap: nowrap; flex-shrink: 0; }
 
 .acs-root .wf-palette-item .wf-badge {
-  width: 7px; min-width: 7px; height: 7px; padding: 0; border: 0;
-  border-radius: 50%; font-size: 0; line-height: 0; color: transparent;
-  background: var(--dot);
-  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--dot) 18%, transparent);
+  width: auto; min-width: 0; height: auto; padding: 0 6px; border-radius: 5px;
+  font-size: 9px; font-weight: 600; line-height: 1.55; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--muted); background: var(--panel-2); border: 1px solid var(--line-2); box-shadow: none;
 }
-.acs-root .wf-palette-item .wf-badge[data-badge="approval"] { --dot: var(--danger); }
-.acs-root .wf-palette-item .wf-badge[data-badge="write"]    { --dot: var(--warn); }
-.acs-root .wf-palette-item .wf-badge[data-badge="wait"]     { --dot: var(--wf-flow); }
+.acs-root .wf-palette-item .wf-badge[data-badge="approval"] { color: var(--danger); }
+.acs-root .wf-palette-item .wf-badge[data-badge="write"]    { color: var(--warn); }
+.acs-root .wf-palette-item .wf-badge[data-badge="wait"]     { color: var(--wf-flow); }
 
 /* Handles — slightly larger so they're easy to grab. The visible dot is 10px but a
  * pseudo-element extends the hit area to 22px without affecting layout, so the user
