@@ -77,10 +77,10 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "title": { "type": "string", "description": "The pull/merge request title." },
-                "sourceBranch": { "type": "string", "description": "The branch with the changes (head / source). Must already exist on the remote." },
-                "targetBranch": { "type": "string", "description": "The branch to merge into (base / target). Must already exist on the remote." },
+                "sourceBranch": { "type": "string", "description": "The branch with the changes (head / source). Must already exist on the remote.", "x-spotlight": 1 },
+                "targetBranch": { "type": "string", "description": "The branch to merge into (base / target). Must already exist on the remote.", "x-spotlight": 2 },
                 "body": { "type": "string", "x-long": true, "description": "Optional markdown description. Supports {{ }} references." },
-                "draft": { "type": "boolean", "description": "Open as a draft / work-in-progress when the provider supports it." },
+                "draft": { "type": "boolean", "description": "Open as a draft / work-in-progress when the provider supports it.", "x-spotlight": 3 },
                 "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Open the PR AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by that person. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","title","sourceBranch","targetBranch"]

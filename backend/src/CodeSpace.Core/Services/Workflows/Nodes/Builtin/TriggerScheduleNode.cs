@@ -28,7 +28,8 @@ public sealed class TriggerScheduleNode : INodeRuntime
               "properties": {
                 "cron": {
                   "type": "string",
-                  "description": "Standard 5-field cron in UTC (minute hour day-of-month month day-of-week). Examples: '*/15 * * * *' every 15 min; '0 9 * * 1-5' weekdays at 09:00."
+                  "description": "Standard 5-field cron in UTC (minute hour day-of-month month day-of-week). Examples: '*/15 * * * *' every 15 min; '0 9 * * 1-5' weekdays at 09:00.",
+                  "x-spotlight": 1
                 }
               },
               "required": ["cron"],

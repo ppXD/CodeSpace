@@ -28,7 +28,7 @@ public sealed class FlowWaitApprovalNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "prompt": { "type": "string", "description": "The question shown to the approver (e.g. 'Deploy to production?')." }
+                "prompt": { "type": "string", "description": "The question shown to the approver (e.g. 'Deploy to production?').", "x-spotlight": 1 }
               }
             }
             """),

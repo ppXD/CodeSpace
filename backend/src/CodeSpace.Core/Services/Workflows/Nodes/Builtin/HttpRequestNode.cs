@@ -62,8 +62,8 @@ public sealed class HttpRequestNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "url":     { "type": "string", "minLength": 1 },
-                "method":  { "type": "string", "enum": ["GET","POST","PUT","DELETE","PATCH"], "default": "GET" },
+                "url":     { "type": "string", "minLength": 1, "x-spotlight": 2 },
+                "method":  { "type": "string", "enum": ["GET","POST","PUT","DELETE","PATCH"], "default": "GET", "x-spotlight": 1 },
                 "headers": { "type": "object" },
                 "body":    { "type": ["string","object","null"] }
               },
