@@ -8,9 +8,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// Fan-in convergence. When two branches reconverge (e.g. after a logic.if both paths
 /// eventually need to continue), this node sits at the join. Two semantics:
 ///
-///   strategy = "first-non-empty"  → emits the first upstream's outputs that aren't empty.
-///                                   The classic "either branch fired, pick whichever
-///                                   actually ran" pattern.
+///   strategy = "first-non-empty"  → emits the branch that ran (the most recently completed,
+///                                   when several did — see RunAsync's Reverse). The classic
+///                                   "either branch fired, pick whichever actually ran" pattern.
 ///   strategy = "all"              → waits for ALL upstreams (fan-in barrier). Emits a
 ///                                   merged outputs object keyed by upstream node id.
 ///
@@ -37,8 +37,10 @@ public sealed class LogicMergeNode : INodeRuntime
                   "type": "string",
                   "enum": ["first-non-empty", "all"],
                   "default": "first-non-empty",
-                  "x-enumLabels": { "first-non-empty": "First branch that ran", "all": "Wait for all (barrier)" },
-                  "description": "first-non-empty: emit the first upstream that actually ran. all: wait for everyone and emit a merged object."
+                  "x-control": "radioCards",
+                  "x-enumLabels": { "first-non-empty": "The branch that ran", "all": "Wait for all (barrier)" },
+                  "x-optionConsequence": { "first-non-empty": "Forwards the one upstream branch that ran — if several did, the most recently completed; the rest are ignored.", "all": "Waits for every upstream branch, then emits one object keyed by branch." },
+                  "description": "first-non-empty: forward the branch that ran (the most recently completed, when several did). all: wait for everyone and emit a merged object keyed by upstream id."
                 }
               }
             }

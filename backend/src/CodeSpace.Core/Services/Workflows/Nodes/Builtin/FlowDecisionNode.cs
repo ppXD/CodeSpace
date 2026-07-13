@@ -41,16 +41,18 @@ public sealed class FlowDecisionNode : INodeRuntime
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
+              "x-intent": "Ask: \"{question}\".",
+              "x-intentPlaceholders": { "question": "a question" },
               "properties": {
                 "question":          { "type": "string", "description": "The question shown to the answerer." },
-                "decisionType":      { "type": "string", "enum": ["confirm","choose_one","choose_many","free_text","approve_action"], "default": "confirm" },
+                "decisionType":      { "type": "string", "enum": ["confirm","choose_one","choose_many","free_text","approve_action"], "default": "confirm", "title": "Decision type", "x-control": "radioCards", "x-enumLabels": { "confirm": "Confirm (yes / no)", "choose_one": "Choose one option", "choose_many": "Choose several options", "free_text": "Type a free-text answer", "approve_action": "Approve or reject an action" }, "x-optionConsequence": { "confirm": "The answerer clicks yes or no — the simplest gate.", "choose_one": "The answerer picks exactly one of the options below.", "choose_many": "The answerer picks any number of the options below.", "free_text": "The answerer types an answer in their own words.", "approve_action": "The answerer approves or rejects a side-effecting action before it runs." } },
                 "options":           { "type": "array", "items": { "type": "object", "properties": { "id": {"type":"string"}, "label": {"type":"string"}, "isSideEffecting": {"type":"boolean"} }, "required": ["id","label"] }, "description": "Selectable options (for confirm/choose_one/choose_many/approve_action)." },
                 "recommendedOption": { "type": "string", "description": "The recommended option id — REQUIRED for any auto-answerable policy." },
                 "blockingReason":    { "type": "string", "description": "Why the run is blocked — REQUIRED for any auto-answerable policy." },
                 "contextSummary":    { "type": "string", "description": "A short self-contained summary so the answerer needn't read the whole run." },
-                "answerSchema":      { "type": "object", "description": "Optional JSON Schema the free-text answer must conform to." },
-                "riskLevel":         { "type": "string", "enum": ["low","medium","high"], "default": "medium" },
-                "policy":            { "type": "string", "enum": ["auto_allowed","supervisor_first","human_required"], "default": "human_required" },
+                "answerSchema":      { "type": "object", "description": "Optional JSON Schema describing the expected answer shape (recorded for downstream use; not enforced on the answer)." },
+                "riskLevel":         { "type": "string", "enum": ["low","medium","high"], "default": "medium", "title": "Risk level", "x-control": "segmented", "x-enumLabels": { "low": "Low", "medium": "Medium", "high": "High" } },
+                "policy":            { "type": "string", "enum": ["auto_allowed","supervisor_first","human_required"], "default": "human_required", "title": "Who answers", "x-enumLabels": { "auto_allowed": "Auto-answer allowed", "supervisor_first": "Supervisor may answer", "human_required": "Human required" }, "description": "The autonomy this decision permits. A standalone decision node still waits for a person (or the timeout default below) — the automated options take effect only when an agent or supervisor drives the decision." },
                 "confidenceRequired":{ "type": "number", "minimum": 0, "maximum": 1, "description": "Minimum confidence an arbiter must clear to auto-answer." },
                 "defaultAction":     { "type": "string", "description": "The option id applied on timeout (the never-hang default). Omit to surface a _timedOut answer the downstream handles." },
                 "timeoutSeconds":    { "type": "integer", "minimum": 1, "default": 3600, "description": "The mandatory deadline — a decision never hangs forever." }
