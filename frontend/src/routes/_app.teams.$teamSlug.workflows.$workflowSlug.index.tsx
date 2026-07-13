@@ -1247,8 +1247,10 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
       <span className="wf-palette-item-body">
         <span className="wf-palette-item-name">{manifest.displayName}</span>
         <span className="wf-palette-item-key">{manifest.typeKey}</span>
-        <NodeBadges source={manifest} />
       </span>
+      {/* Effect badges live in a fixed right slot (present on every row) so they no longer stack a
+          3rd line — every palette row stays the same height and its name ellipsizes at the same x. */}
+      <span className="wf-palette-item-meta"><NodeBadges source={manifest} /></span>
       <span className="wf-palette-item-add" aria-hidden>{disabled ? "—" : "+"}</span>
     </button>
   );

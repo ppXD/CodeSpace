@@ -3345,6 +3345,38 @@ textarea:-webkit-autofill {
 .acs-root .wf-badge[data-badge="write"]    { color: var(--warn);    background: #F7ECD6; border-color: #EAD6B4; }
 .acs-root .wf-badge[data-badge="wait"]     { color: var(--wf-flow);  background: var(--wf-flow-soft); border-color: color-mix(in srgb, var(--wf-flow) 28%, transparent); }
 .acs-root .wf-badge[data-badge="approval"] { color: var(--danger);  background: #F6E0DB; border-color: #E6C3B8; }
+
+/* ── Palette row: uniform height + calm right-aligned effect rail ──────────────
+ * The effect badges (Approval/Writes/Waits) used to stack as a 3rd line under the
+ * type-key, so a badge-bearing row was ~20px taller than a plain one — a ragged
+ * column, and each badged row read as an L-shape (icon + text top-left, a lone
+ * pill bottom-left, the whole right half empty). Here the badges LEAVE the body
+ * into a fixed-width right slot (`.wf-palette-item-meta`) present on EVERY row, so
+ * the 2-line name+key body is the sole height driver: every row is identical
+ * height and every name ellipsizes at the same x. Each badge collapses to a calm
+ * 7px semantic dot — the word stays in the DOM as a title tooltip, and the canvas
+ * node card keeps the full word pill. Scoped to `.wf-palette-item`; static (no
+ * hover reflow of the name). Fixed DOM order approval→write→wait makes position a
+ * second channel beyond hue. */
+.acs-root .wf-palette-item { min-height: 42px; }
+
+.acs-root .wf-palette-item-meta {
+  flex-shrink: 0; align-self: center;
+  display: flex; align-items: center; justify-content: flex-end;
+  min-width: 31px;   /* 3 × 7px dots + 2 × 5px gaps — reserved on every row so names align */
+}
+.acs-root .wf-palette-item-meta .wf-badges { margin: 0; gap: 5px; flex-wrap: nowrap; }
+
+.acs-root .wf-palette-item .wf-badge {
+  width: 7px; min-width: 7px; height: 7px; padding: 0; border: 0;
+  border-radius: 50%; font-size: 0; line-height: 0; color: transparent;
+  background: var(--dot);
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--dot) 18%, transparent);
+}
+.acs-root .wf-palette-item .wf-badge[data-badge="approval"] { --dot: var(--danger); }
+.acs-root .wf-palette-item .wf-badge[data-badge="write"]    { --dot: var(--warn); }
+.acs-root .wf-palette-item .wf-badge[data-badge="wait"]     { --dot: var(--wf-flow); }
+
 /* Handles — slightly larger so they're easy to grab. The visible dot is 10px but a
  * pseudo-element extends the hit area to 22px without affecting layout, so the user
  * can grab anywhere near the dot. Accent ring on hover signals "connect from here".
