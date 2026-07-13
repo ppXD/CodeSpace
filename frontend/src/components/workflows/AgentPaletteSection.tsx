@@ -44,6 +44,9 @@ export function AgentPaletteSection({ enabled, onAdd }: AgentPaletteSectionProps
             <span className="wf-palette-item-name">{a.name || `@${a.slug}`}</span>
             <span className="wf-palette-item-key">@{a.slug}</span>
           </span>
+          {/* Empty meta spacer (agents carry no badges) so persona rows share the exact name-ellipsis
+              column and right edge as the node rows above. */}
+          <span className="wf-palette-item-meta" />
           <span className="wf-palette-item-add" aria-hidden>+</span>
         </button>
       ))}
