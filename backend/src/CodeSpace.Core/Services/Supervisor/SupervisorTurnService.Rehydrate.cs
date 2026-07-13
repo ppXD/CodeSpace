@@ -90,7 +90,7 @@ public sealed partial class SupervisorTurnService
                 using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
                 {
                     decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, teamId, cancellationToken).ConfigureAwait(false);
-                    decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, teamId, cancellationToken).ConfigureAwait(false);
+                    decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                 }
 
                 priorDecisions.Add(decision);
@@ -469,7 +469,7 @@ public sealed partial class SupervisorTurnService
     /// or a grader error folds <c>passed:false</c> — never a silent accept, never a throw that would strand the
     /// terminal row.
     /// </summary>
-    private async Task<SupervisorPriorDecision> FoldUnitAcceptanceGradeAsync(SupervisorPriorDecision decision, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorGoalConfig? goalConfig, Guid teamId, CancellationToken cancellationToken)
+    private async Task<SupervisorPriorDecision> FoldUnitAcceptanceGradeAsync(SupervisorPriorDecision decision, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorGoalConfig? goalConfig, Guid supervisorRunId, string nodeId, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) return decision;
 
@@ -492,6 +492,16 @@ public sealed partial class SupervisorTurnService
         // S3: one baseline capture per (repo, base, command) within this fold — parallel units off the SAME S1 base
         // share one measurement instead of re-cloning per unit.
         var baselines = new Dictionary<string, BenchmarkGrade>(StringComparer.Ordinal);
+
+        // The same ledger heartbeat the stop-target grade runs under (P1.3): K contract units × (candidate +
+        // baseline) grades are serial clone+run cycles that can dwarf LedgerLivenessWindow — without a pulse the
+        // reconciler reads this genuinely-alive fold as abandoned and re-dispatches the run mid-grade (the S3
+        // adversarial scan's M4: the baseline roughly doubled the silent window).
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, "Supervisor per-unit acceptance grading is still in progress.");
+
+        try
+        {
 
         for (var i = 0; i < results.Count; i++)
         {
@@ -553,6 +563,15 @@ public sealed partial class SupervisorTurnService
         if (!anyGraded) return decision;   // no unit in THIS decision carries a contract (the plan's acceptance-bearing subtasks belong to a different decision) → byte-identical; a replay re-attempt is a pure no-op (no grade I/O ran)
 
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, graded) };
+
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+
+            try { await heartbeat.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
     }
 
     /// <summary>
@@ -876,7 +895,7 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>The heartbeat loop itself: sleeps, logs, repeats — until <paramref name="cancellationToken"/> fires (grading finished). A cancellation mid-sleep is the expected exit, never propagated as a fault. Internal + interval-parameterized so a unit test can pin the cancellation contract with a millisecond-scale interval instead of waiting out the real 90s production value.</summary>
-    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken)
+    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken, string message = "Supervisor stop acceptance grading is still in progress.")
     {
         try
         {
@@ -885,7 +904,7 @@ public sealed partial class SupervisorTurnService
                 await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
 
                 await _recordLogger.LogAsync(supervisorRunId, nodeId, Workflows.Lifecycle.LogLevel.Info,
-                    "Supervisor stop acceptance grading is still in progress.", cancellationToken).ConfigureAwait(false);
+                    message, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
