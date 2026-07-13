@@ -14,10 +14,17 @@ function toOption(m: CredentialedModelOption): SearchOption {
   return { id: m.rowId, label: m.modelId, meta: m.available === false ? `${cred} — offline` : cred };
 }
 
-/** Single credentialed-model picker. Value = the chosen model's `rowId`. */
-export function CredentialedModelSelector({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+/**
+ * Single credentialed-model picker. Value = the chosen model's `rowId`. An optional `providers` allowlist
+ * scopes the options to models whose credential provider is in the list — e.g. agent.run passes the chosen
+ * harness's supportedProviders so only runnable models are offered. Omitted ⇒ every team model (unchanged).
+ */
+export function CredentialedModelSelector({ value, onChange, providers }: { value: string; onChange: (next: string) => void; providers?: string[] }) {
   const models = useCredentialedModels();
-  const options = (models.data ?? []).map(toOption);
+  const scoped = providers && providers.length > 0
+    ? (models.data ?? []).filter((m) => providers.some((p) => p.toLowerCase() === m.provider.toLowerCase()))
+    : (models.data ?? []);
+  const options = scoped.map(toOption);
 
   return (
     <SearchSelect

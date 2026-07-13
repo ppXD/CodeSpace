@@ -12,6 +12,12 @@ vi.mock("@/hooks/use-agents", () => ({
 }));
 vi.mock("@/hooks/use-model-credentials", () => ({
   useModelCredentials: () => ({ isLoading: false, data: [{ id: "c1", provider: "OpenAI", displayName: "Team key", status: "Active" }] }),
+  // The primary Model picker (CredentialedModelSelector) flattens the team's credentialed models; one OpenAI
+  // model (codex-cli-compatible) and one Anthropic model (NOT — codex supports OpenAI/Custom only).
+  useCredentialedModels: () => ({ isLoading: false, data: [
+    { rowId: "m1", modelId: "gpt-5-codex", credentialId: "c1", credentialName: "Team key", provider: "OpenAI", available: true },
+    { rowId: "m2", modelId: "claude-sonnet-4", credentialId: "c2", credentialName: "Anthropic key", provider: "Anthropic", available: true },
+  ] }),
 }));
 vi.mock("@/hooks/use-chat", () => ({
   useConversations: () => ({ isLoading: false, data: [{ id: "conv1", kind: "Channel", slug: "review", name: "Review" }] }),
@@ -59,10 +65,51 @@ describe("AgentCodeInspector", () => {
     expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli" });
   });
 
-  it("offers the chosen harness's models as datalist suggestions for the model field", () => {
+  it("offers the chosen harness's models as datalist suggestions for the manual model field", () => {
     const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} />);
     const option = container.querySelector("#agentcode-model-hints option");
     expect(option?.getAttribute("value")).toBe("gpt-5-codex");
+  });
+
+  it("lists only harness-compatible credentialed models, and picking one sets model+credential in one choice", () => {
+    const onConfigChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli" }} />);
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick a model…" }));
+    expect(screen.queryByRole("option", { name: /claude-sonnet-4/ })).toBeNull();   // Anthropic model excluded (codex = OpenAI/OpenRouter/Ollama/Custom)
+    fireEvent.mouseDown(screen.getByRole("option", { name: /gpt-5-codex/ }));
+
+    // one pick stores the credentialed-model row id; the loose model/credential stay absent
+    expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", modelCredentialModelId: "m1" });
+  });
+
+  it("clears pre-existing manual model + credential when a credentialed model is picked (they'd be discarded)", () => {
+    const onConfigChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli", model: "gpt-4o", modelCredentialId: "c1" }} />);
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "Pick a model…" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: /gpt-5-codex/ }));
+
+    expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", modelCredentialModelId: "m1" });
+  });
+
+  it("clears the picked credentialed model when a manual model id is typed (so the manual value takes effect)", () => {
+    const onConfigChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli", modelCredentialModelId: "m1" }} />);
+
+    fireEvent.change(screen.getByPlaceholderText("Leave blank for the harness default"), { target: { value: "o1-preview" } });
+
+    expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", model: "o1-preview" });
+  });
+
+  it("opens the manual drawer for a pre-existing loose-model config so it stays visible at a glance", () => {
+    const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", model: "gpt-4o" }} />);
+    expect((container.querySelector("details.wf-form-advanced") as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("keeps the manual drawer collapsed when a credentialed model is picked", () => {
+    const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", modelCredentialModelId: "m1" }} />);
+    expect((container.querySelector("details.wf-form-advanced") as HTMLDetailsElement).open).toBe(false);
   });
 
   it("shows the approval-conversation picker, reflecting the saved value", () => {
