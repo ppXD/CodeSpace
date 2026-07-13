@@ -67,7 +67,7 @@ public sealed class ContractEnvelopeTests
         {
             RequirementRef = "delivery:run", Kind = ContractKinds.Delivery,
             WorkUnit = new WorkUnitRef { WorkPlanId = Guid.NewGuid(), PlanVersion = 2, UnitId = "s1", ContractHash = "abc" },
-            AttemptId = Guid.NewGuid(), FenceEpoch = 3, ContentHashes = new[] { "sha1" },
+            AttemptId = Guid.NewGuid(), Generation = 3, ContentHashes = new[] { "sha1" },
             Disposition = VerificationDisposition.Waived, Authority = ContractAuthority.Operator,
             EvidenceRef = Guid.NewGuid(), EvaluatorVersion = "grader-v1", ObservedAt = DateTimeOffset.UnixEpoch,
         };

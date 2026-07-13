@@ -19,9 +19,9 @@ public sealed record ReceiptEnvelope
     /// <summary>@1 ≡ the first AUTHORIZED attempt (the M1a definition) — never best-of-N, never a human-corrected re-run.</summary>
     public required Guid AttemptId { get; init; }
 
-    /// <summary>The P+ fence epoch this receipt was produced under — a fenced-out generation's receipt is never-counted (the fence guarantees never-authorized/never-counted, not never-happened).</summary>
+    /// <summary>The P+ EXECUTION GENERATION this receipt was produced under — a fenced-out generation's receipt is never-counted (the fence guarantees never-authorized/never-counted, not never-happened). Named <c>Generation</c> deliberately: <c>AgentRun.FenceEpoch</c> is the WORKER-CLAIM fence (a lease CAS, bumped per re-claim) — a different fence for a different race; the two must never be conflated.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? FenceEpoch { get; init; }
+    public int? Generation { get; init; }
 
     /// <summary>Same registry domain as the requirement (<see cref="ContractKinds"/>).</summary>
     public required string Kind { get; init; }

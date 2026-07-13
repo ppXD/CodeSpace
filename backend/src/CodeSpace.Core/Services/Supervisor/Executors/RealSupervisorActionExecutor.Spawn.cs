@@ -303,6 +303,18 @@ public sealed partial class RealSupervisorActionExecutor
 
         var orphans = await ReclaimableOrphanAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
 
+        // P1 identity: every staged attempt carries WHICH durable plan version dispatched it (the current
+        // supervisor-authored plan row — the decider always decides against the latest plan, and the single-writer
+        // turn loop means no later plan can interleave before these tasks stage). A plan-less dispatch stamps
+        // nothing (null-omitted, byte-identical task_json). Origin-scoped so a co-resident plan.author node's
+        // versions can never be named here.
+        var currentPlan = context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty
+            ? await _workPlans.GetCurrentAsync(context.SupervisorRunId, context.TeamId, cancellationToken, Messages.Plans.WorkPlanOrigins.Supervisor).ConfigureAwait(false)
+            : null;
+
+        if (currentPlan is not null)
+            tasks = tasks.Select(t => (t.Task with { WorkPlanId = currentPlan.Id, PlanVersion = currentPlan.Version }, t.Spec)).ToList();
+
         var agentRunIds = new List<Guid>(tasks.Count);
         var reclaimedAny = false;
 

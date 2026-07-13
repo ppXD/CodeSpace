@@ -160,6 +160,48 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_staged_attempt_carries_the_plan_row_it_was_dispatched_under()
+    {
+        // P1 identity: the staging chokepoint stamps WHICH durable plan version dispatched each attempt, so a
+        // receipt's WorkUnitRef never needs tape archaeology (ordering plan decisions against origin keys).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var plan = await db.WorkPlan.AsNoTracking().SingleAsync(w => w.WorkflowRunId == runId);
+            plan.Version.ShouldBe(1);
+
+            var taskJsons = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.TaskJson).ToListAsync();
+            taskJsons.Count.ShouldBe(2);
+
+            foreach (var json in taskJsons)
+            {
+                var root = System.Text.Json.JsonDocument.Parse(json!).RootElement;
+
+                Guid.Parse(root.GetProperty("workPlanId").GetString()!).ShouldBe(plan.Id, "the attempt must name the exact durable plan row that dispatched it");
+                root.GetProperty("planVersion").GetInt32().ShouldBe(1);
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_spawn_with_per_agent_dispatch_stages_two_agents_with_distinct_roles_and_overrides()
     {
         // L4 arc B headline: ONE spawn fans out TWO agents the MODEL shaped differently — the per-agent role folds into
