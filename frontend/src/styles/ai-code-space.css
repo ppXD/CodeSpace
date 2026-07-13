@@ -2426,11 +2426,12 @@ textarea:-webkit-autofill {
 /* Palette node = a centred tile in a 2-column grid. Icon, name, type-key and effect tags
  * all centre, so nothing starts at the left edge and short + long names read as one
  * symmetric grid (the fix for the "icon+title start left, short nodes look ragged" feel).
- * The name reserves two lines and the tag row is always present, so every tile is exactly
- * one height whatever its name length or badge count. */
+ * The tile sizes to its content with tight gaps (the type-key hugs the name), and the tag
+ * row is always present, so all the common one-line-name tiles share one compact height;
+ * only a name that genuinely wraps takes the extra line. */
 .acs-root .wf-palette-item {
-  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 5px;
-  padding: 11px 8px 9px; border-radius: 10px; cursor: pointer; box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px;
+  padding: 11px 8px 10px; border-radius: 10px; cursor: pointer; box-sizing: border-box;
   background: var(--bg); border: 1px solid var(--line);
   font-family: inherit; font-size: 12px; color: var(--ink);
   user-select: none; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
@@ -2444,8 +2445,9 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-palette-item-name {
   font-weight: 600; font-size: 11.5px; line-height: 1.25; color: var(--ink); text-align: center;
-  display: flex; align-items: center; justify-content: center; overflow: hidden;
-  min-height: calc(2 * 1.25 * 11.5px);   /* reserve two lines so a wrapping name never makes a tile taller */
+  /* natural height (1–2 lines, clamped) so the type-key hugs the name — no reserved blank line below a
+     one-line name. Tiles size to content: a name that genuinely wraps takes the extra line, nothing else does. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .acs-root .wf-palette-item-key {
   font-size: 9px; color: var(--muted); max-width: 100%;
