@@ -32,7 +32,7 @@ public static class CompletionReducer
             Basis = CompletionBasis.ContractDerived,
             Execution = execution,
             ForcedStopReason = execution == ExecutionDisposition.ForcedStop ? facts.ForcedStopReason : null,
-            Outcome = ClassifyOutcome(verification, execution, facts),
+            Outcome = GuardUnroutedKinds(requirements, ClassifyOutcome(verification, execution, facts)),
             Verification = verification,
             Artifact = ClassifyArtifact(requirements, authorized),
             Delivery = ClassifyDelivery(requirements, authorized),
@@ -65,6 +65,19 @@ public static class CompletionReducer
     /// </summary>
     public static bool IsTerminalizable(CompletionAssessment assessment) =>
         assessment.Execution != ExecutionDisposition.Completed || assessment.Outcome != OutcomeDisposition.Unknown;
+
+    /// <summary>
+    /// The fail-loud boundary of the fixed five-dimension projection: a REQUIRED requirement whose
+    /// <see cref="RequirementEnvelope.Kind"/> the kernel cannot route onto a dimension (not in
+    /// <see cref="ContractKinds.Routed"/>) degrades the Outcome to <see cref="OutcomeDisposition.Unknown"/> —
+    /// an obligation the kernel cannot project must never be silently dropped, and Completed+Unknown parks via
+    /// <see cref="IsTerminalizable"/> instead of terminalizing as decided. An OPTIONAL unrouted requirement is
+    /// ignored (Requiredness.Optional never blocks). Registering the kind's dimension route lifts the guard.
+    /// </summary>
+    private static OutcomeDisposition GuardUnroutedKinds(IReadOnlyList<RequirementEnvelope> requirements, OutcomeDisposition outcome) =>
+        requirements.Any(r => r.Requiredness == Requiredness.Required && !ContractKinds.Routed.Contains(r.Kind))
+            ? OutcomeDisposition.Unknown
+            : outcome;
 
     /// <summary>
     /// HOW the run ended, independent of whether it succeeded (a Failure that ran its course is still
