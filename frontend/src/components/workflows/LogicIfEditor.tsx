@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ScopeSuggestion } from "./scope-introspection";
 import { VariablePickerInput } from "./VariablePickerInput";
@@ -19,23 +19,38 @@ export interface LogicIfEditorProps {
  */
 export function LogicIfEditor({ config, onConfigChange, suggestions }: LogicIfEditorProps) {
   const condition = typeof config.condition === "string" ? config.condition : "";
-  const parsed = useMemo(() => parseCondition(condition), [condition]);
+
+  // The structured condition is LOCAL state, not re-derived from the string on every render. An in-progress
+  // edit — a binary operator chosen BEFORE its compare-to value is typed — serializes to a bare `left`, which
+  // would parse back to "is true" and snap the operator (and hide the Compare-to field, so the value could
+  // never be entered). Seed from the string; re-sync only when it changes from OUTSIDE this editor (a raw
+  // edit, an undo, a different node) — tracked via lastWritten so our own writes don't trigger a re-parse.
+  const [cond, setCond] = useState<IfCondition>(() => parseCondition(condition));
+  const lastWritten = useRef(condition);
+  useEffect(() => {
+    if (condition !== lastWritten.current) { setCond(parseCondition(condition)); lastWritten.current = condition; }
+  }, [condition]);
   const [raw, setRaw] = useState(false);
 
-  const write = (next: IfCondition) => onConfigChange({ ...config, condition: serializeCondition(next) });
+  const write = (next: IfCondition) => {
+    const serialized = serializeCondition(next);
+    lastWritten.current = serialized;
+    setCond(next);
+    onConfigChange({ ...config, condition: serialized });
+  };
 
   // When the left value is a {{ref}} we recognise, narrow the operators to its type — but always keep the
   // currently-saved op selectable so switching the left never silently drops it.
-  const leftType = useMemo(() => suggestions.find((s) => `{{${s.path}}}` === parsed.left.trim())?.type, [suggestions, parsed.left]);
+  const leftType = useMemo(() => suggestions.find((s) => `{{${s.path}}}` === cond.left.trim())?.type, [suggestions, cond.left]);
   const options = useMemo(() => {
     const allowed = allowedOperators(leftType);
-    if (allowed.some((o) => o.value === parsed.op)) return allowed;
-    const current = IF_OPERATORS.find((o) => o.value === parsed.op);
+    if (allowed.some((o) => o.value === cond.op)) return allowed;
+    const current = IF_OPERATORS.find((o) => o.value === cond.op);
     return current ? [current, ...allowed] : allowed;
-  }, [leftType, parsed.op]);
+  }, [leftType, cond.op]);
 
-  const arity = IF_OPERATORS.find((o) => o.value === parsed.op)?.arity ?? "truthy";
-  const preview = serializeCondition(parsed);
+  const arity = IF_OPERATORS.find((o) => o.value === cond.op)?.arity ?? "truthy";
+  const preview = serializeCondition(cond);
 
   if (raw) {
     return (
@@ -61,8 +76,8 @@ export function LogicIfEditor({ config, onConfigChange, suggestions }: LogicIfEd
       <div className="wf-form-row">
         <span className="wf-form-label">Value</span>
         <VariablePickerInput
-          value={parsed.left}
-          onChange={(left) => write({ ...parsed, left })}
+          value={cond.left}
+          onChange={(left) => write({ ...cond, left })}
           suggestions={suggestions}
           placeholder="pick a value — type @"
         />
@@ -70,7 +85,7 @@ export function LogicIfEditor({ config, onConfigChange, suggestions }: LogicIfEd
 
       <div className="wf-form-row">
         <span className="wf-form-label">Condition</span>
-        <select className="wf-form-input wf-if-op" value={parsed.op} onChange={(e) => write({ ...parsed, op: e.target.value })}>
+        <select className="wf-form-input wf-if-op" value={cond.op} onChange={(e) => write({ ...cond, op: e.target.value })}>
           {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </div>
@@ -79,8 +94,8 @@ export function LogicIfEditor({ config, onConfigChange, suggestions }: LogicIfEd
         <div className="wf-form-row">
           <span className="wf-form-label">Compare to</span>
           <VariablePickerInput
-            value={parsed.right}
-            onChange={(right) => write({ ...parsed, right })}
+            value={cond.right}
+            onChange={(right) => write({ ...cond, right })}
             suggestions={suggestions}
             placeholder="a value or some text"
           />
