@@ -6,6 +6,7 @@ import type { ScopeSuggestion } from "./scope-introspection";
 import { VariablePickerInput } from "./VariablePickerInput";
 import { AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
+import { CredentialedModelSelector } from "./selectors/CredentialedModelSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { RepositoryWorkspacePicker } from "./selectors/RepositoryWorkspacePicker";
@@ -37,6 +38,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
   const goal = str(config.goal);
   const model = str(config.model);
   const credentialId = str(config.modelCredentialId);
+  const credentialedModelId = str(config.modelCredentialModelId);
   const repositoryId = str(inputs.repositoryId);
   const approvalConversationId = str(config.approvalConversationId);
   const timeoutSeconds = typeof config.timeoutSeconds === "number" ? config.timeoutSeconds : undefined;
@@ -114,26 +116,48 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
           </label>
         )}
 
+        {/* Primary model chooser: one pick sets BOTH the model id and its backing credential (stored as
+            modelCredentialModelId, which the resolver expands and which wins over the loose fields below).
+            Choosing here clears the manual fields so the picked pair is what actually runs. */}
         <label className="wf-form-row">
           <span className="wf-form-label">{mode === "agent" ? "Model override" : "Model"}</span>
-          <input
-            className="wf-form-input"
-            list="agentcode-model-hints"
-            value={model}
-            onChange={(e) => patch({ model: e.target.value })}
-            placeholder={mode === "agent" ? "Leave blank to use the persona's model" : "Leave blank for the harness default"}
-            spellCheck={false}
+          <CredentialedModelSelector
+            value={credentialedModelId}
+            providers={credProviders}
+            onChange={(v) => patch({ modelCredentialModelId: v, model: "", modelCredentialId: "" })}
           />
-          {modelHints.length > 0 && <datalist id="agentcode-model-hints">{modelHints.map((m) => <option key={m} value={m} />)}</datalist>}
+          {harness
+            ? <span className="wf-form-help">Pick one of your team's <code>{harness}</code>-compatible models — its credential comes with it.{mode === "agent" ? " Leave empty to use the persona's model." : ""}</span>
+            : <span className="wf-form-help">Pick a harness first to list compatible models.</span>}
         </label>
 
-        <label className="wf-form-row">
-          <span className="wf-form-label">{mode === "agent" ? "Model credential override" : "Model credential"}</span>
-          <ModelCredentialSelector value={credentialId} onChange={(v) => patch({ modelCredentialId: v })} providers={credProviders} />
-          {harness
-            ? credProviders.length > 0 && <span className="wf-form-help">Only keys the <code>{harness}</code> harness can use ({credProviders.join(" / ")}) are shown. Empty = the team / operator default.</span>
-            : <span className="wf-form-help">Pick a harness first to filter compatible keys.</span>}
-        </label>
+        {/* Escape hatch: a model id the harness knows but no credential lists, or a manual credential. Setting
+            either clears the picked pair above so these take effect (the resolver would otherwise discard them). */}
+        <details className="wf-form-advanced">
+          <summary className="wf-form-advanced-summary">Set model &amp; credential manually</summary>
+          <div className="wf-form-advanced-body">
+            <label className="wf-form-row">
+              <span className="wf-form-label">Model id</span>
+              <input
+                className="wf-form-input"
+                list="agentcode-model-hints"
+                value={model}
+                onChange={(e) => patch({ model: e.target.value, modelCredentialModelId: "" })}
+                placeholder={mode === "agent" ? "Leave blank to use the persona's model" : "Leave blank for the harness default"}
+                spellCheck={false}
+              />
+              {modelHints.length > 0 && <datalist id="agentcode-model-hints">{modelHints.map((m) => <option key={m} value={m} />)}</datalist>}
+            </label>
+
+            <label className="wf-form-row">
+              <span className="wf-form-label">Model credential</span>
+              <ModelCredentialSelector value={credentialId} onChange={(v) => patch({ modelCredentialId: v, modelCredentialModelId: "" })} providers={credProviders} />
+              {harness
+                ? credProviders.length > 0 && <span className="wf-form-help">Only keys the <code>{harness}</code> harness can use ({credProviders.join(" / ")}) are shown. Empty = the team / operator default.</span>
+                : <span className="wf-form-help">Pick a harness first to filter compatible keys.</span>}
+            </label>
+          </div>
+        </details>
       </section>
 
       <section className="wf-inspector-section">
