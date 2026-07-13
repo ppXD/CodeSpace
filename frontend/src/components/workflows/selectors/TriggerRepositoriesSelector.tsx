@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
@@ -73,19 +73,29 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   // and the project is purely a UI narrowing aid.
   const [draftProjectByIndex, setDraftProjectByIndex] = useState<Map<number, string>>(new Map());
 
+  // The index-keyed drafts are ephemeral UI state that would go stale when `value` changes from OUTSIDE this
+  // selector (a node switch, undo, raw edit) — a leftover draft could then filter a restored row's real repo
+  // out of its dropdown. Clear them whenever the incoming value isn't the one we last emitted; route every
+  // write through `emit` so our own changes never trigger the reset (logic.if's external-sync pattern).
+  const lastWritten = useRef<unknown>(value);
+  useEffect(() => {
+    if (value !== lastWritten.current) { setDraftProjectByIndex(new Map()); lastWritten.current = value; }
+  }, [value]);
+  const emit = (next: TriggerRepoEntry[] | undefined) => { lastWritten.current = next; onChange(next); };
+
   const projectForRow = (idx: number, entry: TriggerRepoEntry): string => {
-    const draft = draftProjectByIndex.get(idx);
-    if (draft !== undefined) return draft;
-    if (!entry.repositoryId) return "";
-    return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
+    // A real repository always shows ITS project — a stale draft must never filter a real repo out of the
+    // dropdown. The draft applies only mid-pick, when picking a project has cleared the row's repositoryId.
+    if (entry.repositoryId) return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
+    return draftProjectByIndex.get(idx) ?? "";
   };
 
   const toggleMatchAll = (next: boolean) => {
-    if (next) onChange(undefined);   // opt-in: drop the key → matcher match-all
-    else onChange([]);               // opt-out: explicit empty list → matcher match-nothing (safe)
+    if (next) emit(undefined);   // opt-in: drop the key → matcher match-all
+    else emit([]);               // opt-out: explicit empty list → matcher match-nothing (safe)
   };
 
-  const addRow = () => onChange([...entries, { repositoryId: "" }]);
+  const addRow = () => emit([...entries, { repositoryId: "" }]);
 
   const removeRow = (idx: number) => {
     // Shift draft project indices: drop the removed entry, then re-key
@@ -102,11 +112,11 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
     // checkbox is the ONLY way to get to undefined; otherwise removing the
     // last row would silently flip the trigger to fire on every repo —
     // exactly the footgun this PR was designed to remove.
-    onChange(entries.filter((_, i) => i !== idx));
+    emit(entries.filter((_, i) => i !== idx));
   };
 
   const updateRow = (idx: number, patch: Partial<TriggerRepoEntry>) => {
-    onChange(entries.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
+    emit(entries.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
   };
 
   const pickProjectForRow = (idx: number, projectId: string) => {

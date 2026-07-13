@@ -165,6 +165,22 @@ describe("TriggerRepositoriesSelector — safe default + match-all checkbox", ()
     expect(projectSelect.value).toBe("proj-alpha");
   });
 
+  it("a stale project draft never hides a real repo after the value changes externally", () => {
+    const { rerender } = render(<TriggerRepositoriesSelector value={[{ repositoryId: "" }]} onChange={vi.fn()} />);
+
+    // Draft-narrow the empty row to project Beta (its repositoryId is still empty — a pure UI draft).
+    fireEvent.change(within(screen.getByTestId("trigger-repositories-row")).getByLabelText("Project") as HTMLSelectElement, { target: { value: "proj-beta" } });
+
+    // The config is replaced from OUTSIDE (node switch / undo) with a repo that belongs to project Alpha.
+    rerender(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={vi.fn()} />);
+
+    // Regression: the repo dropdown follows the restored repo's own Alpha, so repo-1 stays selectable —
+    // previously the stale Beta draft filtered it out and the <select> showed no matching option.
+    const repoSelect = within(screen.getByTestId("trigger-repositories-row")).getByLabelText("Repository") as HTMLSelectElement;
+    expect(repoSelect.value).toBe("repo-1");
+    expect(Array.from(repoSelect.options).map((o) => o.value)).toContain("repo-1");
+  });
+
   it("picking a project clears the row's repo when it doesn't belong to that project", () => {
     const onChange = vi.fn();
     render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-3" }]} onChange={onChange} />);

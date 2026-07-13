@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
@@ -58,15 +58,27 @@ export function RelatedRepositoriesEditor({ value, onChange }: RelatedRepositori
   // Per-row "draft" project pick — UI narrowing only, never persisted (the saved row is { repositoryId, alias, access }).
   const [draftProjectByIndex, setDraftProjectByIndex] = useState<Map<number, string>>(new Map());
 
+  // The index-keyed drafts are ephemeral UI state that would go stale when `value` changes from OUTSIDE this
+  // editor (a node switch, undo, raw edit) — a leftover draft could then filter a restored row's real repo out
+  // of its dropdown. Clear them whenever the incoming value isn't the one we last emitted (logic.if's pattern).
+  const lastWritten = useRef<unknown>(value);
+  useEffect(() => {
+    if (value !== lastWritten.current) { setDraftProjectByIndex(new Map()); lastWritten.current = value; }
+  }, [value]);
+
   const projectForRow = (idx: number, entry: RelatedRepoEntry): string => {
-    const draft = draftProjectByIndex.get(idx);
-    if (draft !== undefined) return draft;
-    if (!entry.repositoryId) return "";
-    return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
+    // A real repository always shows ITS project — a stale draft must never filter a real repo out of the
+    // dropdown. The draft applies only mid-pick, when picking a project has cleared the row's repositoryId.
+    if (entry.repositoryId) return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
+    return draftProjectByIndex.get(idx) ?? "";
   };
 
   // Empty ⇒ undefined ⇒ the key drops on save ⇒ single-repo byte-identical.
-  const emit = (next: RelatedRepoEntry[]) => onChange(next.length === 0 ? undefined : next);
+  const emit = (next: RelatedRepoEntry[]) => {
+    const out = next.length === 0 ? undefined : next;
+    lastWritten.current = out;
+    onChange(out);
+  };
 
   const addRow = () => emit([...entries, { repositoryId: "", access: "read" }]);
 

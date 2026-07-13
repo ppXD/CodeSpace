@@ -90,6 +90,24 @@ describe("RelatedRepositoriesEditor", () => {
     expect(within(row).queryByRole("option", { name: "acme/api" })).toBeNull();
   });
 
+  it("a stale project draft never hides a real repo after the value changes externally", () => {
+    const { rerender } = render(<RelatedRepositoriesEditor value={[{ repositoryId: "", access: "read" }]} onChange={vi.fn()} />);
+
+    // Draft-narrow the empty row to project Beta (its repositoryId is still empty — a pure UI draft).
+    const row0 = screen.getByTestId("related-repositories-row");
+    fireEvent.focus(within(row0).getByRole("textbox", { name: "All projects" }));
+    fireEvent.mouseDown(within(row0).getByRole("option", { name: "Beta" }));
+
+    // The config is replaced from OUTSIDE (node switch / undo) with a repo that belongs to project Alpha.
+    rerender(<RelatedRepositoriesEditor value={[{ repositoryId: "repo-1", access: "read" }]} onChange={vi.fn()} />);
+
+    // Regression: the restored repo resolves to its own label — the stale Beta draft must not filter it out
+    // (previously projectForRow returned the draft, so repo-1 fell out of the dropdown and rendered "Unavailable").
+    const row = screen.getByTestId("related-repositories-row");
+    expect(within(row).getByText("acme/api")).toBeInTheDocument();
+    expect(within(row).queryByText("Unavailable")).toBeNull();
+  });
+
   it("typing an alias emits it on the entry", () => {
     const onChange = vi.fn();
     render(<RelatedRepositoriesEditor value={[{ repositoryId: "repo-1", access: "read" }]} onChange={onChange} />);
