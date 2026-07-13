@@ -602,8 +602,16 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         if (run.Status == WorkflowRunStatus.Success && everProducedWork)
         {
-            var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions);
-            integratedBranch.ShouldNotBeNullOrEmpty("the run completed Success with accepted work, but carries no final integrated branch — I3 must never let this combination reach Completed silently");
+            // The reviewable head has TWO designed sources: the tape's merge/resolve-derived branch, and the DC-3
+            // ledger-direct surface (a single accepted contributor's own pushed manifest — no merge decision ever
+            // runs, so the tape is silent BY DESIGN and the branch lives on the terminal outputs instead, the exact
+            // field Check 3 below already reads its sibling from). Reading only the tape false-reds every
+            // ledger-direct run — the first complete supervisor-arcs window (run 29215356358) hit exactly that.
+            var integratedBranch = SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions) ?? ReadTerminalIntegratedBranch(run.OutputsJson);
+
+            var stopTrail = string.Join(" → ", stops.Select(d => SupervisorOutcome.ReadStopReason(d.PayloadJson) is { } reason ? $"forced({reason})" : "model-stop"));
+            var kindTrail = string.Join("→", priorDecisions.Select(d => d.DecisionKind));
+            integratedBranch.ShouldNotBeNullOrEmpty($"the run completed Success with accepted work, but carries no final integrated branch on EITHER source (tape merge/resolve AND the DC-3 terminal-output surface) — I3 must never let this combination reach Completed silently. stops=[{stopTrail}], decisions=[{kindTrail}], terminalOutputs={run.OutputsJson}");
 
             var branchesOnRemote = await remote.ListBranchesAsync();
             branchesOnRemote.ShouldContain(integratedBranch!, "the run's own final branch must genuinely exist on the real remote, not just be a name recorded in the ledger");
@@ -928,6 +936,23 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         status == WorkflowRunStatus.Failure ? RealModelOutcome.CodeFault
         : drove ? RealModelOutcome.Drove
         : RealModelOutcome.CapabilityMiss;
+
+    /// <summary>The run-level terminal output's <c>integratedBranch</c> — the DC-3 ledger-direct surface (a run whose accepted work published via per-unit pushed manifests has NO merge decision on the tape; the branch reaches the terminal binding through <c>SupervisorTurnService.BuildFinalResultAsync</c>). Null on absence/parse failure.</summary>
+    private static string? ReadTerminalIntegratedBranch(string outputsJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(outputsJson);
+
+            return doc.RootElement.TryGetProperty("integratedBranch", out var prop) && prop.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(prop.GetString())
+                ? prop.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>PR-6: the run-level terminal output's <c>repositoryId</c> (echoed from <c>AgentSupervisorNode.Finish</c>'s config, via <c>SupervisorDefinitionBuilder.TerminalInputs</c> → <c>workflow_run.outputs_jsonb</c>). Null on any parse failure or absence — a real regression here reads as a mismatch against the seeded repo id, not a silent pass.</summary>
     private static Guid? ReadTerminalRepositoryId(string outputsJson)
