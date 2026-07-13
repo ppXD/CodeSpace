@@ -40,12 +40,14 @@ public sealed class SupervisorPlanFoldFlowTests
         var execution = await scope.Resolve<ISupervisorActionExecutor>()
             .ExecuteAsync(PlanDecision(withPhases: false), context, CancellationToken.None);
 
-        execution.OutcomeJson.ShouldBe("""{"planned":[{"id":"s1","title":"T","instruction":"do"}],"count":1}""",
-            "a flat plan records the EXACT pre-field outcome bytes — the floor C2's projection + replay depend on; the S1 work-plan write must not touch them");
-
         // Triad S1: the plan verb also persisted the run's durable work_plan version.
         var db = scope.Resolve<CodeSpaceDbContext>();
         var plan = await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == context.SupervisorRunId);
+
+        // P1a identity: the outcome records the EXACT persisted row (id + version) beside the pre-P1a keys —
+        // spawn/retry bind attempts to THIS immutable tape fact; the projection/replay keys stay verbatim.
+        execution.OutcomeJson.ShouldBe($$"""{"planned":[{"id":"s1","title":"T","instruction":"do"}],"count":1,"workPlanId":"{{plan.Id}}","workPlanVersion":1}""",
+            "a flat plan records the pre-P1a outcome bytes + the decision-bound plan ref, nothing else");
         plan.OriginKind.ShouldBe(WorkPlanOrigins.Supervisor);
         plan.OriginKey.ShouldBe("boss#turn0", "the per-turn exactly-once key, derived from the REAL NodeId (not the empty-NodeId fallback)");
         plan.Version.ShouldBe(1);

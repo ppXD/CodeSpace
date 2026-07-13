@@ -187,12 +187,21 @@ public class SupervisorSpawnFlowTests : IDisposable
             var taskJsons = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.TaskJson).ToListAsync();
             taskJsons.Count.ShouldBe(2);
 
+            var planDecision = await db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Plan)
+                .SingleAsync();
+            var recordedRef = Core.Services.Supervisor.SupervisorOutcome.ReadPlanRef(planDecision.OutcomeJson);
+            recordedRef.ShouldNotBeNull("the plan DECISION's outcome records the exact durable row it persisted — the immutable fact spawns bind to");
+            recordedRef!.Value.WorkPlanId.ShouldBe(plan.Id);
+            recordedRef.Value.Version.ShouldBe(1);
+
             foreach (var json in taskJsons)
             {
-                var root = System.Text.Json.JsonDocument.Parse(json!).RootElement;
+                var workUnit = System.Text.Json.JsonDocument.Parse(json!).RootElement.GetProperty("workUnit");
 
-                Guid.Parse(root.GetProperty("workPlanId").GetString()!).ShouldBe(plan.Id, "the attempt must name the exact durable plan row that dispatched it");
-                root.GetProperty("planVersion").GetInt32().ShouldBe(1);
+                Guid.Parse(workUnit.GetProperty("workPlanId").GetString()!).ShouldBe(plan.Id, "the attempt's atomic WorkUnitRef must name the exact durable plan row that dispatched it");
+                workUnit.GetProperty("planVersion").GetInt32().ShouldBe(1);
+                workUnit.GetProperty("unitId").GetString().ShouldNotBeNullOrEmpty();
             }
         }
         finally

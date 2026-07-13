@@ -303,17 +303,22 @@ public sealed partial class RealSupervisorActionExecutor
 
         var orphans = await ReclaimableOrphanAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
 
-        // P1 identity: every staged attempt carries WHICH durable plan version dispatched it (the current
-        // supervisor-authored plan row — the decider always decides against the latest plan, and the single-writer
-        // turn loop means no later plan can interleave before these tasks stage). A plan-less dispatch stamps
-        // nothing (null-omitted, byte-identical task_json). Origin-scoped so a co-resident plan.author node's
-        // versions can never be named here.
-        var currentPlan = context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty
-            ? await _workPlans.GetCurrentAsync(context.SupervisorRunId, context.TeamId, cancellationToken, Messages.Plans.WorkPlanOrigins.Supervisor).ConfigureAwait(false)
-            : null;
+        // P1a identity: every staged attempt carries the ATOMIC WorkUnitRef of the plan that dispatched it, read
+        // from the latest plan DECISION's own recorded ref on the tape — an immutable fact bound at plan
+        // execution, never a mutable "current plan" query, so a crash replay / reconciler re-dispatch / zombie
+        // resume can never re-derive a different plan for an already-persisted decision. A plan-less dispatch
+        // (or a pre-P1a tape whose plan decisions carry no ref) stamps nothing — null-omitted, byte-identical.
+        var planRef = context.PriorDecisions
+            .Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan)
+            .OrderBy(d => d.Sequence)
+            .Select(d => SupervisorOutcome.ReadPlanRef(d.OutcomeJson))
+            .LastOrDefault(r => r is not null);
 
-        if (currentPlan is not null)
-            tasks = tasks.Select(t => (t.Task with { WorkPlanId = currentPlan.Id, PlanVersion = currentPlan.Version }, t.Spec)).ToList();
+        if (planRef is { } plan)
+            tasks = tasks.Select(t => (t.Task with
+            {
+                WorkUnit = string.IsNullOrEmpty(t.Task.SubtaskId) ? null : new Messages.Contracts.WorkUnitRef { WorkPlanId = plan.WorkPlanId, PlanVersion = plan.Version, UnitId = t.Task.SubtaskId },
+            }, t.Spec)).ToList();
 
         var agentRunIds = new List<Guid>(tasks.Count);
         var reclaimedAny = false;
