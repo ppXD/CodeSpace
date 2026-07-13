@@ -768,7 +768,13 @@ function DualModeSelector({ pick, value, onChange, variableSuggestions }: {
   variableSuggestions: ScopeSuggestion[];
 }) {
   const stringValue = typeof value === "string" ? value : "";
-  const [mode, setMode] = useState<"pick" | "expr">(stringValue.includes("{{") ? "expr" : "pick");
+  const isExpr = stringValue.includes("{{");
+  const [mode, setMode] = useState<"pick" | "expr">(isExpr ? "expr" : "pick");
+  // Re-sync the toggle when the value changes from OUTSIDE (undo/redo, a programmatic edit that turns a literal
+  // into a {{ref}} or back). Keyed on the value, not mounted once — but only when the value itself changed, so a
+  // manual toggle (value unchanged) is never overridden. (Adjust-during-render "reset state on prop change".)
+  const [seenValue, setSeenValue] = useState(stringValue);
+  if (stringValue !== seenValue) { setSeenValue(stringValue); setMode(isExpr ? "expr" : "pick"); }
 
   return (
     <div className="wf-dualmode">
