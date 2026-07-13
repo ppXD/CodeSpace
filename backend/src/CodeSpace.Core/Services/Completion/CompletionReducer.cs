@@ -19,23 +19,31 @@ public static class CompletionReducer
     {
         var execution = ClassifyExecution(facts);
 
-        // "A model may propose, never authorize" — ENFORCED IN THE KERNEL: a receipt whose Authority is
-        // ModelProposal (a self-report) never participates in any objective dimension. It rides the tape for
-        // renderers and contradiction detection, but it cannot satisfy a requirement, mint an exemption, or move
-        // a metric; a required requirement answered ONLY by a self-report reads Unknown, exactly as unanswered.
-        var authorized = receipts.Where(r => r.Authority != ContractAuthority.ModelProposal).ToList();
+        // "A model may propose, never authorize" — ENFORCED IN THE KERNEL, as an ALLOWLIST: only a receipt whose
+        // Authority is Operator or ServerPolicy participates in any objective dimension. A ModelProposal
+        // (self-report) rides the tape for renderers and contradiction detection but cannot satisfy a requirement,
+        // mint an exemption, or move a metric — and a CORRUPT authority value (a receipt written under a newer
+        // enum version) fails closed exactly like a self-report; a required requirement answered only by such
+        // receipts reads Unknown, exactly as unanswered. Requirement-side authority is a mint-time validation
+        // concern (an obligation can only ever add Unknown/park — it can never mint success).
+        var authorized = receipts.Where(r => r.Authority is ContractAuthority.Operator or ContractAuthority.ServerPolicy).ToList();
 
         var verification = AggregateVerification(requirements, authorized);
+        var artifact = ClassifyArtifact(requirements, authorized);
+        var delivery = ClassifyDelivery(requirements, authorized);
+
+        var outcome = GuardUnroutedKinds(requirements,
+            GuardUnsettledObligations(requirements, artifact, delivery, ClassifyOutcome(verification, execution, facts)));
 
         return new CompletionAssessment
         {
             Basis = CompletionBasis.ContractDerived,
             Execution = execution,
             ForcedStopReason = execution == ExecutionDisposition.ForcedStop ? facts.ForcedStopReason : null,
-            Outcome = GuardUnroutedKinds(requirements, ClassifyOutcome(verification, execution, facts)),
+            Outcome = outcome,
             Verification = verification,
-            Artifact = ClassifyArtifact(requirements, authorized),
-            Delivery = ClassifyDelivery(requirements, authorized),
+            Artifact = artifact,
+            Delivery = delivery,
         };
     }
 
@@ -65,6 +73,29 @@ public static class CompletionReducer
     /// </summary>
     public static bool IsTerminalizable(CompletionAssessment assessment) =>
         assessment.Execution != ExecutionDisposition.Completed || assessment.Outcome != OutcomeDisposition.Unknown;
+
+    /// <summary>
+    /// A run cannot read Solved (or Abstained) while any REQUIRED obligation's truth is unstatable: a required
+    /// delivery or output requirement whose dimension folded <c>Unknown</c> (no receipt, an infra-broken receipt,
+    /// an under-delivered cardinality) degrades the outcome to <see cref="OutcomeDisposition.Unknown"/>, so
+    /// Completed+Unknown PARKS via <see cref="IsTerminalizable"/> instead of clean-terminaling with the obligation
+    /// unmet — the no-oracle status-fallback arm can never outrank an unsettled required delivery. A definite
+    /// <c>Unsolved</c> survives (a decided failure is stronger evidence than a truth hole), and SETTLED negative
+    /// states (<c>PolicyBlocked</c>, <c>WaivedByPolicy</c>, <c>CaptureFailed</c>) are decided — they do not block
+    /// the outcome; the delivery dimension carries their story.
+    /// </summary>
+    private static OutcomeDisposition GuardUnsettledObligations(IReadOnlyList<RequirementEnvelope> requirements, ArtifactDisposition artifact, DeliveryDisposition delivery, OutcomeDisposition outcome)
+    {
+        if (outcome is not (OutcomeDisposition.Solved or OutcomeDisposition.Abstained)) return outcome;
+
+        var deliveryUnsettled = delivery == DeliveryDisposition.Unknown && HasRequired(requirements, ContractKinds.Delivery);
+        var artifactUnsettled = artifact == ArtifactDisposition.Unknown && HasRequired(requirements, ContractKinds.Output);
+
+        return deliveryUnsettled || artifactUnsettled ? OutcomeDisposition.Unknown : outcome;
+    }
+
+    private static bool HasRequired(IReadOnlyList<RequirementEnvelope> requirements, string kind) =>
+        requirements.Any(r => r.Kind == kind && r.Requiredness == Requiredness.Required);
 
     /// <summary>
     /// The fail-loud boundary of the fixed five-dimension projection: a REQUIRED requirement whose
