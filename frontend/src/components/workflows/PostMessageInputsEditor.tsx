@@ -69,7 +69,15 @@ export function PostMessageInputsEditor({ inputs, onChange, variableSuggestions,
     onChange(out);
   };
 
-  const updateInteraction = (partial: Record<string, unknown>) => onChange({ ...inputs, ...partial });
+  // Apply an edit from the active interaction's sub-editor. Emptying an array-of-object field (e.g. removing
+  // the last button) makes ObjectArrayEditor collapse it to `undefined`; that would re-derive activeKind to
+  // "none" (see above) and unmount THIS sub-editor mid-edit. Re-seed a concrete empty value so the interaction
+  // stays selected through an empty-and-refill instead of silently deselecting.
+  const updateInteraction = (key: string, partial: Record<string, unknown>) => {
+    const next = { ...inputs, ...partial };
+    if (next[key] == null) next[key] = INTERACTION_SEED[key] ?? {};
+    onChange(next);
+  };
 
   return (
     <div className="wf-form">
@@ -120,7 +128,7 @@ export function PostMessageInputsEditor({ inputs, onChange, variableSuggestions,
             <SchemaForm
               schema={field.wrappedSchema}
               value={{ [field.key]: inputs[field.key] }}
-              onChange={(partial) => updateInteraction(partial)}
+              onChange={(partial) => updateInteraction(field.key, partial)}
               templateHint
               variableSuggestions={variableSuggestions}
             />
