@@ -128,6 +128,16 @@ describe("SchemaForm scalar selector dual-mode", () => {
     expect(screen.queryByRole("combobox")).toBeNull();
   });
 
+  it("re-syncs the toggle when the value changes from outside (literal ⇄ reference)", () => {
+    const { rerender } = render(<SchemaForm schema={convSchema} value={{ conversationId: "conv-1" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
+    expect(screen.getByRole("button", { name: "Pick" }).getAttribute("data-active")).toBe("true");   // a literal opens in Pick
+
+    // An external change (undo / programmatic edit) to a {{ref}} must flip the toggle to Expression — previously
+    // mode seeded once at mount and stayed on Pick while the stored value was an expression.
+    rerender(<SchemaForm schema={convSchema} value={{ conversationId: "{{trigger.channelId}}" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
+    expect(screen.getByRole("button", { name: "Expression" }).getAttribute("data-active")).toBe("true");
+  });
+
   it("stays a plain picker with no toggle when there are no variable suggestions (run form)", () => {
     renderConv({ conversationId: "" }, false);
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
