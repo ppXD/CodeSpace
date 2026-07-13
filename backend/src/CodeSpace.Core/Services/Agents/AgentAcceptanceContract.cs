@@ -73,13 +73,37 @@ public static class AgentAcceptanceContract
     /// no-progress evidence fold, and the workflow node's respawn verdict all share — so "retry the agent" is never
     /// spent on a failure class a retry cannot fix, at any tier.
     /// </summary>
-    public static bool IsInfraFailure(string? detail, bool workPresent) =>
-        detail is not null
-        && (detail.StartsWith("grade-error:", StringComparison.Ordinal)
-            || detail.StartsWith("clone-failed:", StringComparison.Ordinal)
-            || detail.StartsWith("setup-failed:", StringComparison.Ordinal)
-            || detail is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
-            || (detail == "no-branch-or-repo" && workPresent));
+    public static bool IsInfraFailure(string? detail, bool workPresent)
+    {
+        var effective = StripRepoTag(detail);
+
+        return effective is not null
+               && (effective.StartsWith("grade-error:", StringComparison.Ordinal)
+                   || effective.StartsWith("clone-failed:", StringComparison.Ordinal)
+                   || effective.StartsWith("setup-failed:", StringComparison.Ordinal)
+                   || effective is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
+                   || (effective == "no-branch-or-repo" && workPresent));
+    }
+
+    /// <summary>
+    /// The multi-repo grade paths wrap a classifiable detail in a uniform machine-authored display tag
+    /// (<c>repo 'alias': </c>) — classification must see through it, or a grader crash on one repo of a
+    /// multi-repo unit reads as a genuine test failure and buys retries no retry can fix. Strips ONLY that
+    /// exact tag shape (at most the leading occurrences); every other prefix stays significant.
+    /// </summary>
+    private static string? StripRepoTag(string? detail)
+    {
+        while (detail is not null && detail.StartsWith("repo '", StringComparison.Ordinal))
+        {
+            var end = detail.IndexOf("': ", StringComparison.Ordinal);
+
+            if (end < 0) return detail;
+
+            detail = detail[(end + 3)..];
+        }
+
+        return detail;
+    }
 
     /// <summary>
     /// Validate an AUTHORED spec's kind-specific completeness (triad S7) — the single rule the plan-map node applies
