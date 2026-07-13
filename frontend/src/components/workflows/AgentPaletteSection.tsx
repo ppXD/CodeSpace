@@ -42,11 +42,12 @@ export function AgentPaletteSection({ enabled, onAdd }: AgentPaletteSectionProps
           <span className="wf-palette-item-icon"><Ic.Bot size={16} /></span>
           <span className="wf-palette-item-body">
             <span className="wf-palette-item-name">{a.name || `@${a.slug}`}</span>
-            <span className="wf-palette-item-key">@{a.slug}</span>
+            {/* line-2 wrapper (agents carry no badges) so persona rows keep the same row height + rhythm
+                as the node rows above. */}
+            <span className="wf-palette-line2">
+              <span className="wf-palette-item-key">@{a.slug}</span>
+            </span>
           </span>
-          {/* Empty meta spacer (agents carry no badges) so persona rows share the exact name-ellipsis
-              column and right edge as the node rows above. */}
-          <span className="wf-palette-item-meta" />
           <span className="wf-palette-item-add" aria-hidden>+</span>
         </button>
       ))}
