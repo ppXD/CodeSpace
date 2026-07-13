@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { RetryPolicy } from "@/api/workflows";
 
 /**
@@ -29,6 +31,33 @@ export function NodeRetryEditor({ value, onChange }: NodeRetryEditorProps) {
     if (value) onChange({ ...value, ...next });
   };
 
+  // Local raw-string buffers so an in-progress edit can hold text the committed number can't represent —
+  // a `type=number` input reports "" for a mid-typed "2." (decimals were impossible) and refills the instant
+  // you blank it to retype. The buffers use type=text and only commit when the string parses to a valid
+  // number; they re-seed from the value when it changes from OUTSIDE this edit (toggle, node switch, undo)
+  // via the adjust-during-render "reset state on prop change" pattern, and normalise on blur.
+  const [maxRaw, setMaxRaw] = useState<string>(value ? String(value.maxAttempts) : "");
+  const [maxSeen, setMaxSeen] = useState<number | undefined>(value?.maxAttempts);
+  if (value?.maxAttempts !== maxSeen) { setMaxSeen(value?.maxAttempts); setMaxRaw(value ? String(value.maxAttempts) : ""); }
+
+  const [backoffRaw, setBackoffRaw] = useState<string>(value ? String(value.backoffSeconds) : "");
+  const [backoffSeen, setBackoffSeen] = useState<number | undefined>(value?.backoffSeconds);
+  if (value?.backoffSeconds !== backoffSeen) { setBackoffSeen(value?.backoffSeconds); setBackoffRaw(value ? String(value.backoffSeconds) : ""); }
+
+  const onMaxChange = (raw: string) => {
+    setMaxRaw(raw);
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isNaN(n)) patch({ maxAttempts: clamp(n, 1, RETRY_MAX_ATTEMPTS_CAP) });
+  };
+
+  const onBackoffChange = (raw: string) => {
+    setBackoffRaw(raw);
+    // Let "" and a trailing-dot "2." sit in the buffer uncommitted so the decimal can be finished.
+    if (raw === "" || raw.endsWith(".")) return;
+    const n = Number(raw);
+    if (!Number.isNaN(n)) patch({ backoffSeconds: clamp(n, 0, RETRY_MAX_BACKOFF_SECONDS) });
+  };
+
   return (
     <section className="wf-inspector-section">
       <label className="wf-form-check">
@@ -42,11 +71,11 @@ export function NodeRetryEditor({ value, onChange }: NodeRetryEditorProps) {
             <span className="wf-form-label">Max attempts</span>
             <input
               className="wf-form-input"
-              type="number"
-              min={1}
-              max={RETRY_MAX_ATTEMPTS_CAP}
-              value={value.maxAttempts}
-              onChange={(e) => patch({ maxAttempts: clampInt(e.target.value, 1, RETRY_MAX_ATTEMPTS_CAP, DEFAULT_MAX_ATTEMPTS) })}
+              type="text"
+              inputMode="numeric"
+              value={maxRaw}
+              onChange={(e) => onMaxChange(e.target.value)}
+              onBlur={() => setMaxRaw(String(value.maxAttempts))}
             />
           </label>
 
@@ -54,12 +83,11 @@ export function NodeRetryEditor({ value, onChange }: NodeRetryEditorProps) {
             <span className="wf-form-label">Backoff (seconds)</span>
             <input
               className="wf-form-input"
-              type="number"
-              min={0}
-              max={RETRY_MAX_BACKOFF_SECONDS}
-              step={0.5}
-              value={value.backoffSeconds}
-              onChange={(e) => patch({ backoffSeconds: clampNum(e.target.value, 0, RETRY_MAX_BACKOFF_SECONDS, 0) })}
+              type="text"
+              inputMode="decimal"
+              value={backoffRaw}
+              onChange={(e) => onBackoffChange(e.target.value)}
+              onBlur={() => setBackoffRaw(String(value.backoffSeconds))}
             />
           </label>
 
@@ -73,12 +101,4 @@ export function NodeRetryEditor({ value, onChange }: NodeRetryEditorProps) {
   );
 }
 
-function clampInt(raw: string, min: number, max: number, fallback: number): number {
-  const n = Number.parseInt(raw, 10);
-  return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
-}
-
-function clampNum(raw: string, min: number, max: number, fallback: number): number {
-  const n = Number(raw);
-  return Number.isNaN(n) ? fallback : Math.min(Math.max(n, min), max);
-}
+const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max);
