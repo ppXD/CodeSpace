@@ -140,6 +140,21 @@ describe("PostMessageInputsEditor — session drafts (switching never destroys d
     expect(get().actions).toEqual([{ key: "ship", label: "Ship it" }]);  // restored from draft
   });
 
+  it("removing the last button keeps Buttons selected (empty-and-refill), not snapping back to None", () => {
+    const get = renderStateful({ conversationId: "c", actions: [{ key: "approve", label: "Approve" }] });
+    expect(screen.getByRole("button", { name: "Buttons" })).toHaveAttribute("data-active");
+
+    // Remove the only row → ObjectArrayEditor collapses the array to `undefined`.
+    fireEvent.click(screen.getByRole("button", { name: "Remove item" }));
+
+    // Regression: the interaction must STAY on Buttons (re-seeded to []) with its sub-editor mounted, instead
+    // of the empty list re-deriving activeKind to None and unmounting the editor mid-edit.
+    expect(screen.getByRole("button", { name: "Buttons" })).toHaveAttribute("data-active");
+    expect(screen.getByRole("button", { name: /add item/i })).toBeInTheDocument();
+    expect(get().actions).toEqual([]);
+    expect(get().conversationId).toBe("c");
+  });
+
   it("drafts do not leak between nodes — switching the inspector to a new node resets them", () => {
     const onChange = vi.fn();
     const { rerender } = render(
