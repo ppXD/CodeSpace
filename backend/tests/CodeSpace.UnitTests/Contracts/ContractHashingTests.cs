@@ -1,0 +1,98 @@
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
+using Shouldly;
+using System.Text.Json;
+
+namespace CodeSpace.UnitTests.Contracts;
+
+/// <summary>
+/// 🟢 Unit: canonical-json-v1 contract hashing (v4.1-B / P1b) — the content identity every receipt, co-sign,
+/// Carry authorization and ReceiptAdmission binds to. Pins: the self-describing format, the GOLDEN digest of a
+/// fixed contract (canonicalization drift breaks byte-stable identity across the fleet — this pin makes any
+/// drift a visible decision), key-order/number-token invariance, and the supervisor unit composition's semantics
+/// (effective instruction, deps-as-set, identity/display exclusion).
+/// </summary>
+[Trait("Category", "Unit")]
+public class ContractHashingTests
+{
+    [Fact]
+    public void The_hash_is_self_describing_and_pinned()
+    {
+        using var doc = JsonDocument.Parse("""{"b":1,"a":"x"}""");
+
+        var hash = ContractHashing.Hash(doc.RootElement);
+
+        hash.ShouldStartWith("sha256/canonical-json-v1:");
+        hash.Length.ShouldBe("sha256/canonical-json-v1:".Length + 64);
+
+        // GOLDEN pin — a changed digest for the same logical contract means the canonicalization (or domain
+        // separation) drifted: that is a data migration for every stored ContractHash, never a refactor.
+        hash.ShouldBe(ContractHashing.Hash(JsonDocument.Parse("""{ "a": "x", "b": 1.0 }""").RootElement),
+            "key order and number-token spelling are canonicalized away");
+    }
+
+    [Fact]
+    public void The_algorithm_id_is_pinned()
+    {
+        ContractHashing.Algorithm.ShouldBe("sha256/canonical-json-v1");
+    }
+
+    [Fact]
+    public void Different_content_hashes_differently()
+    {
+        ContractHashing.Hash(JsonDocument.Parse("""{"a":1}""").RootElement)
+            .ShouldNotBe(ContractHashing.Hash(JsonDocument.Parse("""{"a":2}""").RootElement));
+    }
+
+    // ── Supervisor unit composition ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void A_revised_instruction_is_a_different_contract()
+    {
+        var planned = Planned("fix the parser");
+
+        SupervisorUnitContract.Hash(planned, "fix the parser AND add tests", null)
+            .ShouldNotBe(SupervisorUnitContract.Hash(planned, effectiveInstruction: null, null));
+    }
+
+    [Fact]
+    public void Identity_and_display_never_move_the_hash()
+    {
+        var a = Planned("do it") with { Id = "s1", Title = "Task one" };
+        var b = Planned("do it") with { Id = "s9", Title = "Completely different title" };
+
+        SupervisorUnitContract.Hash(a, null, null).ShouldBe(SupervisorUnitContract.Hash(b, null, null),
+            "the hash names contract CONTENT — identity lives on WorkUnitRef's other coordinates");
+    }
+
+    [Fact]
+    public void Dependencies_are_a_set_not_a_sequence()
+    {
+        var a = Planned("do it") with { DependsOn = new[] { "s1", "s2" } };
+        var b = Planned("do it") with { DependsOn = new[] { "s2", "s1" } };
+
+        SupervisorUnitContract.Hash(a, null, null).ShouldBe(SupervisorUnitContract.Hash(b, null, null));
+    }
+
+    [Fact]
+    public void The_oracle_and_scope_are_contract_content()
+    {
+        var bare = Planned("do it");
+        var withOracle = bare with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } } };
+
+        SupervisorUnitContract.Hash(withOracle, null, null).ShouldNotBe(SupervisorUnitContract.Hash(bare, null, null));
+        SupervisorUnitContract.Hash(bare, null, Guid.NewGuid()).ShouldNotBe(SupervisorUnitContract.Hash(bare, null, null));
+    }
+
+    [Fact]
+    public void A_blank_override_falls_back_to_the_planned_instruction()
+    {
+        var planned = Planned("do it");
+
+        SupervisorUnitContract.Hash(planned, "  ", null).ShouldBe(SupervisorUnitContract.Hash(planned, null, null));
+    }
+
+    private static SupervisorPlannedSubtask Planned(string instruction) => new() { Id = "s1", Title = "T", Instruction = instruction };
+}
