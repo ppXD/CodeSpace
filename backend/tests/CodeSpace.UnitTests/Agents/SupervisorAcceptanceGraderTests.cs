@@ -376,6 +376,35 @@ public class SupervisorAcceptanceGraderTests
         AgentAcceptanceContract.IsInfraFailure("setup-timed-out", workPresent: false).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("repo 'web': grade-error: judge binary missing", true)]      // executor multi-repo crash wrap (AgentRunExecutor :1310)
+    [InlineData("repo 'web': clone-failed: connection refused", true)]       // wrapped grader detail (:1316 / Rehydrate :730)
+    [InlineData("repo 'api': setup-failed: npm ERR!", true)]
+    [InlineData("repo 'api': tests-timed-out", true)]
+    [InlineData("repo 'web': tests-failed-exit-1", false)]                   // genuine failure stays genuine under the tag
+    public void A_repo_tag_never_defeats_the_infra_classification(string detail, bool expected)
+    {
+        // The multi-repo grade paths wrap the classifiable detail in a uniform "repo 'alias': " tag for display —
+        // classification must see through it, or a grader crash on one repo reads as a genuine test failure and
+        // buys retries no retry can fix.
+        AgentAcceptanceContract.IsInfraFailure(detail, workPresent: false).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_tagged_no_branch_or_repo_keeps_its_work_present_semantics()
+    {
+        AgentAcceptanceContract.IsInfraFailure("repo 'web': no-branch-or-repo", workPresent: true).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("repo 'web': no-branch-or-repo", workPresent: false).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_repo_tagged_infra_detail_classifies_InfraUnknown_in_the_typed_layer()
+    {
+        // The F0 mapping rides the same classifier — a wrapped infra fault must never reach the typed layer as Failed.
+        CodeSpace.Core.Services.Supervisor.VerificationDispositions.Classify(false, "repo 'web': grade-error: boom", workPresent: false)
+            .ShouldBe(CodeSpace.Messages.Contracts.VerificationDisposition.InfraUnknown);
+    }
+
     // ── The corpus-stub factory the adapter reuses ───────────────────────────────────
 
     [Theory]
