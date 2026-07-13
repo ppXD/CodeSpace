@@ -2403,7 +2403,8 @@ textarea:-webkit-autofill {
   text-transform: uppercase; letter-spacing: 0.05em; padding: 0 4px;
 }
 .acs-root .wf-palette-empty { font-size: 11.5px; color: var(--muted); padding: 0 4px; }
-.acs-root .wf-palette-section { display: flex; flex-direction: column; gap: 4px; }
+.acs-root .wf-palette-section { display: flex; flex-direction: column; gap: 5px; }
+.acs-root .wf-palette-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 6px; }
 .acs-root .wf-palette-section-h {
   font-size: 10px; font-weight: 600; color: var(--muted-2);
   text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px 2px;
@@ -2422,46 +2423,41 @@ textarea:-webkit-autofill {
 .acs-root .wf-palette-search::placeholder { color: var(--muted-2); }
 .acs-root .wf-palette-search:focus { outline: none; border-color: var(--accent); background: var(--panel); }
 
+/* Palette node = a centred tile in a 2-column grid. Icon, name, type-key and effect tags
+ * all centre, so nothing starts at the left edge and short + long names read as one
+ * symmetric grid (the fix for the "icon+title start left, short nodes look ragged" feel).
+ * The name reserves two lines and the tag row is always present, so every tile is exactly
+ * one height whatever its name length or badge count. */
 .acs-root .wf-palette-item {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 8px; border-radius: 6px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 5px;
+  padding: 11px 8px 9px; border-radius: 10px; cursor: pointer; box-sizing: border-box;
   background: var(--bg); border: 1px solid var(--line);
-  font-family: inherit; font-size: 12px; color: var(--ink); text-align: left;
-  user-select: none; transition: border-color .12s ease, background .12s ease, transform .08s ease;
+  font-family: inherit; font-size: 12px; color: var(--ink);
+  user-select: none; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
   position: relative;
 }
-.acs-root .wf-palette-item:hover {
-  border-color: var(--accent); background: var(--panel);
-  /* resting cards are warm cream; hover brightens to white — transient, so no resting glare */
-  transform: translateX(1px);
-}
-.acs-root .wf-palette-item:active { transform: translateX(0); background: var(--accent-soft); }
-.acs-root .wf-palette-item:hover .wf-palette-item-add { opacity: 1; color: var(--accent); }
+.acs-root .wf-palette-item:hover { border-color: var(--accent); background: var(--panel); }
+.acs-root .wf-palette-item:active { background: var(--accent-soft); }
 .acs-root .wf-palette-item-icon {
-  width: 22px; height: 22px; border-radius: 5px; display: grid; place-items: center;
+  width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
   background: var(--tone-soft); border: 1px solid color-mix(in srgb, var(--tone) 22%, transparent); color: var(--tone); flex-shrink: 0;
 }
-.acs-root .wf-palette-item-body { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
-.acs-root .wf-palette-item-name { font-weight: 500; font-size: 12px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.acs-root .wf-palette-item-key  { font-size: 10px; color: var(--muted); font-family: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.acs-root .wf-palette-item-add {
-  font-size: 14px; font-weight: 600; color: var(--muted-2);
-  opacity: 0; transition: opacity .12s ease, color .12s ease;
-  width: 16px; text-align: center; flex-shrink: 0;
+.acs-root .wf-palette-item-name {
+  font-weight: 600; font-size: 11.5px; line-height: 1.25; color: var(--ink); text-align: center;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  min-height: calc(2 * 1.25 * 11.5px);   /* reserve two lines so a wrapping name never makes a tile taller */
 }
+.acs-root .wf-palette-item-key {
+  font-size: 9px; color: var(--muted); max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.acs-root .wf-palette-tile-tags { display: flex; align-items: center; justify-content: center; min-height: 15px; }
 
 /* Disabled state — when a constraint blocks adding this node (e.g. only-one-trigger).
- * Still hoverable for the tooltip ("why disabled?"), but cursor + opacity + grey accent
- * make it visually clear it won't work. The "—" dash replaces the "+" affordance.
- */
-.acs-root .wf-palette-item[data-disabled="true"] {
-  cursor: not-allowed; opacity: 0.5;
-}
-.acs-root .wf-palette-item[data-disabled="true"]:hover {
-  border-color: var(--line); background: var(--bg); transform: none;
-}
-.acs-root .wf-palette-item[data-disabled="true"]:hover .wf-palette-item-icon { border-color: var(--line); color: var(--muted); }
-.acs-root .wf-palette-item[data-disabled="true"] .wf-palette-item-add { opacity: 1; color: var(--muted-2); }
+ * Still hoverable for the tooltip ("why disabled?"), but cursor + opacity make it clear
+ * the tile won't add. */
+.acs-root .wf-palette-item[data-disabled="true"] { cursor: not-allowed; opacity: 0.5; }
+.acs-root .wf-palette-item[data-disabled="true"]:hover { border-color: var(--line); background: var(--bg); }
 
 /* Empty-canvas hint — centred overlay that disappears as soon as a node lands.
  * pointer-events: none on the wrapper, auto on the card so clicks pass through to
@@ -3346,29 +3342,15 @@ textarea:-webkit-autofill {
 .acs-root .wf-badge[data-badge="wait"]     { color: var(--wf-flow);  background: var(--wf-flow-soft); border-color: color-mix(in srgb, var(--wf-flow) 28%, transparent); }
 .acs-root .wf-badge[data-badge="approval"] { color: var(--danger);  background: #F6E0DB; border-color: #E6C3B8; }
 
-/* ── Palette row: uniform, legible rows — name on top, effect on the key line ──
- * The effect badges (Approval/Writes/Waits) used to stack as a 3rd line under the
- * type-key, so a badge-bearing row was ~20px taller than a plain one — a ragged
- * column, and each badged row read as an L-shape (icon + text top-left, a lone
- * pill bottom-left, the right half empty). Now the name owns line 1 (so it never
- * truncates), and the muted type-key shares line 2 with the effect tags — key on
- * the left (ellipsizes if a 2-tag row is tight), tags flush right so line 2 spans
- * the full width and the row reads balanced, not left-leaning. The tag is a small,
- * calm, per-kind-tinted word (clear at a glance, unlike a cryptic dot); its box is
- * sized to the type-key line and line 2 has a fixed min-height, so a tag never
- * makes a row taller than a plain one — every row is the same height. Scoped to
- * `.wf-palette-item`; the canvas node card keeps its own fuller word pills. */
-.acs-root .wf-palette-item { min-height: 42px; }
-
-.acs-root .wf-palette-line2 {
-  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 16px;
-}
-.acs-root .wf-palette-line2 .wf-palette-item-key { flex: 0 1 auto; min-width: 0; }
-.acs-root .wf-palette-line2 .wf-badges { margin: 0 0 0 auto; gap: 4px; flex-wrap: nowrap; flex-shrink: 0; }
-
+/* ── Palette effect tags — the centred word tags at the foot of each tile ───────
+ * Each node's Approval/Writes/Waits render as small, calm, per-kind-tinted word tags,
+ * centred in the tile's reserved tag row (so the effect reads at a glance and every
+ * tile stays one height). Scoped to `.wf-palette-item`; the canvas node card keeps
+ * its own fuller word pills. */
+.acs-root .wf-palette-tile-tags .wf-badges { margin: 0; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .acs-root .wf-palette-item .wf-badge {
-  width: auto; min-width: 0; height: auto; padding: 0 6px; border-radius: 5px;
-  font-size: 9px; font-weight: 600; line-height: 1.55; letter-spacing: 0.03em; text-transform: uppercase;
+  width: auto; min-width: 0; height: auto; padding: 0 5px; border-radius: 5px;
+  font-size: 8.5px; font-weight: 600; line-height: 1.5; letter-spacing: 0.02em; text-transform: uppercase;
   color: var(--muted); background: var(--panel-2); border: 1px solid var(--line-2); box-shadow: none;
 }
 .acs-root .wf-palette-item .wf-badge[data-badge="approval"] { color: var(--danger); }

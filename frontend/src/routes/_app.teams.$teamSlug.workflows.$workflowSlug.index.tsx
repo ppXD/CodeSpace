@@ -1209,10 +1209,12 @@ function PaletteSection({ title, manifests, onAdd, disabledOf }: {
   return (
     <div className="wf-palette-section">
       <div className="wf-palette-section-h">{title}</div>
-      {manifests.map((m) => {
-        const { disabled, reason } = disabledOf(m);
-        return <PaletteItem key={m.typeKey} manifest={m} onAdd={onAdd} disabled={disabled} disabledReason={reason} />;
-      })}
+      <div className="wf-palette-grid">
+        {manifests.map((m) => {
+          const { disabled, reason } = disabledOf(m);
+          return <PaletteItem key={m.typeKey} manifest={m} onAdd={onAdd} disabled={disabled} disabledReason={reason} />;
+        })}
+      </div>
     </div>
   );
 }
@@ -1243,17 +1245,12 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
       }}
       title={title}
     >
+      {/* Centred tile: icon, name, type-key and effect tags all centre so nothing starts at the left.
+          Name reserves two lines and the tag row is always present, so every tile is one height. */}
       <span className="wf-palette-item-icon">{nodeIconFor(manifest)}</span>
-      <span className="wf-palette-item-body">
-        <span className="wf-palette-item-name">{manifest.displayName}</span>
-        {/* The name owns line 1 (never truncates); the muted type-key + effect tags share line 2, tags
-            flush right — so line 2 spans the full width and a tag never stacks a 3rd line (uniform height). */}
-        <span className="wf-palette-line2">
-          <span className="wf-palette-item-key">{manifest.typeKey}</span>
-          <NodeBadges source={manifest} />
-        </span>
-      </span>
-      <span className="wf-palette-item-add" aria-hidden>{disabled ? "—" : "+"}</span>
+      <span className="wf-palette-item-name">{manifest.displayName}</span>
+      <span className="wf-palette-item-key">{manifest.typeKey}</span>
+      <span className="wf-palette-tile-tags"><NodeBadges source={manifest} /></span>
     </button>
   );
 }

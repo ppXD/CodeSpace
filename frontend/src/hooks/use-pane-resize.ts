@@ -4,7 +4,10 @@ export type ResizablePane = "palette" | "inspector";
 
 /** Per-rail bounds. A rail can't be dragged below its min (so it never collapses to nothing) or past its max. */
 const BOUNDS: Record<ResizablePane, { min: number; max: number; default: number }> = {
-  palette: { min: 180, max: 460, default: 220 },
+  // The palette is a 2-column tile grid; below ~280px the tiles get cramped (type-keys clip, a
+  // two-tag row wraps and breaks the uniform height), so the minimum keeps it grid-viable. A width
+  // stored from the older narrower default clamps up to the new minimum on load.
+  palette: { min: 280, max: 480, default: 292 },
   inspector: { min: 320, max: 680, default: 440 },
 };
 
