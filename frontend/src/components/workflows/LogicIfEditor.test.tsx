@@ -45,6 +45,37 @@ describe("LogicIfEditor", () => {
     expect(onConfigChange).toHaveBeenLastCalledWith({ condition: "{{s}} == {{other}}" });
   });
 
+  it("keeps a binary operator selected before its value is typed, opening the compare-to field", () => {
+    render_("{{trigger.state}}");   // a bare value → starts as "is true"
+    expect(opSelect().value).toBe("truthy");
+    expect(compareInput()).toBeNull();
+
+    fireEvent.change(opSelect(), { target: { value: "==" } });
+
+    // Regression: the operator must NOT snap back to "is true", and the Compare-to field must appear so the
+    // value can be entered (previously the empty comparison serialized to bare `left` → re-parsed as truthy).
+    expect(opSelect().value).toBe("==");
+    expect(compareInput()).not.toBeNull();
+  });
+
+  it("serializes the full comparison once the compare-to value is typed after picking the operator", () => {
+    const onConfigChange = render_("{{trigger.state}}");
+    fireEvent.change(opSelect(), { target: { value: "==" } });
+    fireEvent.change(compareInput()!, { target: { value: "open" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({ condition: '{{trigger.state}} == "open"' });
+  });
+
+  it("re-syncs when the condition changes from outside the editor", () => {
+    const onConfigChange = vi.fn();
+    const { rerender } = render(<LogicIfEditor config={{ condition: "{{a}}" }} onConfigChange={onConfigChange} suggestions={[]} />);
+    expect(opSelect().value).toBe("truthy");
+
+    rerender(<LogicIfEditor config={{ condition: '{{b}} contains "x"' }} onConfigChange={onConfigChange} suggestions={[]} />);
+    expect(valueInput().value).toBe("{{b}}");
+    expect(opSelect().value).toBe("contains");
+    expect(compareInput()!.value).toBe("x");
+  });
+
   it("hides the compare-to field for a unary operator", () => {
     render_("{{nodes.fetch.outputs.files}} is_not_empty");
     expect(opSelect().value).toBe("is_not_empty");
