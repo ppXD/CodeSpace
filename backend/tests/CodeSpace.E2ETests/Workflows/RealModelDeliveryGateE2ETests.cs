@@ -145,8 +145,14 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (afterDrive.PendingQuestion?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) != true)
                 return (RealModelOutcome.CapabilityMiss, $"the run parked on a NON-gate card ('{Truncate(afterDrive.PendingQuestion)}') before the delivery conflict ever surfaced — reported, not gating");
 
+            // The gate's ladder has an HONEST empty-result card ("no published branch to open one from") for a run
+            // whose agents captured nothing at all — under the 2026-07 gateway model drift, agents routinely
+            // "succeed" with an empty diff, so zero manifests ⇒ that card is the truth and the miss is the MODEL's
+            // (first seen run 29235518700). Only a mis-named card OVER captured work is a code fault.
             if (!afterDrive.PendingQuestion.Contains("patch-only", StringComparison.OrdinalIgnoreCase))
-                return (RealModelOutcome.CodeFault, $"the gate parked but its card does not name the patch-only policy conflict: '{Truncate(afterDrive.PendingQuestion)}'");
+                return afterDrive.AgentManifestCount > 0
+                    ? (RealModelOutcome.CodeFault, $"the gate parked but its card does not name the patch-only policy conflict despite {afterDrive.AgentManifestCount} captured manifest(s): '{Truncate(afterDrive.PendingQuestion)}'")
+                    : (RealModelOutcome.CapabilityMiss, $"the agents captured NO work at all (zero publish manifests) — the gate's empty-publish card is honest; the live model never produced a diff to publish: '{Truncate(afterDrive.PendingQuestion)}' — reported, not gating");
 
             afterDrive.PublishCount.ShouldBeGreaterThanOrEqualTo(1, "the gate must have forced the first server publish before parking");
 
@@ -188,7 +194,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
     // ─── Tape/state snapshot ─────────────────────────────────────────────────────────
 
     private sealed record Snapshot(WorkflowRunStatus RunStatus, string? RunError, string? PendingActionToken, string? PendingQuestion,
-        int PublishCount, int GateCardCount, bool AnyPublishSatisfied, bool IntegrationManifestWithPr,
+        int PublishCount, int GateCardCount, bool AnyPublishSatisfied, bool IntegrationManifestWithPr, int AgentManifestCount,
         string? LastDecisionKind, string? LastStopForcedReason, string KindTrail);
 
     private async Task<Snapshot> SnapshotAsync(Guid runId, Guid teamId)
@@ -226,7 +232,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             pendingQuestion,
             publishes.Count,
             decisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman && ReadQuestion(d.PayloadJson)?.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal) == true),
-            anySatisfied, prOnManifest,
+            anySatisfied, prOnManifest, manifests.Count,
             last?.DecisionKind, lastStopReason,
             string.Join("→", decisions.Select(d => d.DecisionKind)));
     }
