@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { Background, BackgroundVariant, Controls, Panel, ReactFlow, ReactFlowProvider, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -7,6 +7,7 @@ import { isRunActive } from "@/hooks/use-workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
 import { definitionToRfNodes } from "./definitionToRfNodes";
+import { patchNodes } from "./runNodePatch";
 import { runEdgeFlow } from "./runCanvasFlow";
 import { collapsedMapNode, runFanoutCollapse } from "./runFanoutCollapse";
 import { RunActionsContext } from "./runActionsContext";
@@ -64,24 +65,40 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
   // cancel/finish stopped it. The edges + progress chip read this so a cancelled run doesn't keep "flowing".
   const runActive = isRunActive(runStatus);
 
+  // Reference-stabilization cache: every 2s poll rebuilds the whole node array (fresh status/rows Maps), so
+  // without this React Flow re-renders EVERY card. patchNodes hands back the previous object for any node
+  // whose run overlay didn't move, so only the nodes that actually changed re-render. The cache is reset
+  // when the definition / manifests identity changes — which never happens during a run (pinned snapshot).
+  const prevNodesRef = useRef<Node<WorkflowNodeData>[] | null>(null);
+  const buildKeyRef = useRef<{ def: WorkflowDefinition; manifests: Map<string, NodeManifestDto> } | null>(null);
+
   const nodes = useMemo<Node<WorkflowNodeData>[]>(
-    () => definitionToRfNodes(definition, manifestByType).map((n) => {
-      const fanout = collapse.fanoutRowsByMapId.get(n.id);
-      const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), rerunnableFromHere: rerunnable.has(n.id), runRows: rowsByNodeId.get(n.id), fanout };
+    () => {
+      const built = definitionToRfNodes(definition, manifestByType).map((n) => {
+        const fanout = collapse.fanoutRowsByMapId.get(n.id);
+        const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), rerunnableFromHere: rerunnable.has(n.id), runRows: rowsByNodeId.get(n.id), fanout };
 
-      // A collapsed map → an auto-sized fan-out card: keep its structure (incl. parentId for a nested map), drop
-      // only the container sizing. See collapsedMapNode.
-      if (fanout) return collapsedMapNode(n, data);
+        // A collapsed map → an auto-sized fan-out card: keep its structure (incl. parentId for a nested map), drop
+        // only the container sizing. See collapsedMapNode.
+        if (fanout) return collapsedMapNode(n, data);
 
-      return {
-        ...n,
-        data,
-        draggable: false,
-        selectable: false,
-        connectable: false,
-        ...(collapse.hiddenNodeIds.has(n.id) ? { hidden: true } : {}),
-      };
-    }),
+        return {
+          ...n,
+          data,
+          draggable: false,
+          selectable: false,
+          connectable: false,
+          ...(collapse.hiddenNodeIds.has(n.id) ? { hidden: true } : {}),
+        };
+      });
+
+      const key = buildKeyRef.current;
+      const prev = key && key.def === definition && key.manifests === manifestByType ? prevNodesRef.current : null;
+      const patched = patchNodes(prev, built);
+      prevNodesRef.current = patched;
+      buildKeyRef.current = { def: definition, manifests: manifestByType };
+      return patched;
+    },
     [definition, manifestByType, statuses, rerunnable, rowsByNodeId, collapse],
   );
 
@@ -104,6 +121,7 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        onlyRenderVisibleElements
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#E6E1D5" />
