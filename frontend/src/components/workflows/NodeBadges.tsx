@@ -4,8 +4,8 @@ import { nodeBadges, type NodeBadgeSource } from "./nodeIcon";
  * Renders a node's "what this step does" badges (Approval / Writes / Waits), driven purely by manifest flags
  * via {@link nodeBadges}. Returns null when the node has none, so the canvas and palette stay quiet except
  * where a step actually acts. The markup is one label span per badge; CSS decides the shape — the canvas card
- * shows full word pills, and the palette tile renders a smaller calm per-kind-tinted word tag centred at the
- * tile's foot (with a `title` tooltip), so the effect reads at a glance and every tile stays one height.
+ * shows full word pills, and the palette tile shows small per-kind-tinted dots pinned to its top-right corner
+ * (out of the content flow, with the word on a `title` tooltip) so every tile stays one uniform height.
  *
  * (Its own file — a component can't live in nodeIcon.tsx alongside the icon/tone helper functions without
  * tripping react-refresh/only-export-components.)
