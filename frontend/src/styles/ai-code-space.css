@@ -47,6 +47,13 @@
   --dur: 130ms;
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
   --ring-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  /* Run-canvas motion durations — one named set so every live node reads as one coherent
+     motion system. Consumed by the compositor-only running glow, the suspended breathe, and
+     the one-shot status beats (ignite / settle / verdict). Looping glows animate ONLY opacity
+     on a pseudo-element so the animation frames never repaint. */
+  --wf-pulse-dur: 1.5s;
+  --wf-breathe-dur: 2.6s;
+  --wf-beat-dur: .9s;
 }
 
 .acs-root,
@@ -2534,10 +2541,48 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-node[data-run-status="failure"]  { border-color: #E7A6A6; box-shadow: 0 0 0 2px #FCEDED; }
 .acs-root .wf-rf-node[data-run-status="suspended"] { border-color: #D9CFEC; box-shadow: 0 0 0 2px #EEEAF6; }
 .acs-root .wf-rf-loop[data-run-status="failure"]  { box-shadow: 0 0 0 2px #FCEDED; }
-.acs-root .wf-rf-node[data-run-status="running"], .acs-root .wf-rf-loop[data-run-status="running"] { border-color: var(--accent); animation: wfRunPulse 1.5s ease-in-out infinite; }
-@keyframes wfRunPulse {
-  0%, 100% { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 0 rgba(217,119,87,0); }
-  50%      { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 14px 1px rgba(217,119,87,.30); }
+/* Running / suspended glow — COMPOSITOR-ONLY. The static inner ring lives on the card's own
+   box-shadow (no animation); the pulsing/breathing glow is a pseudo-element whose box-shadow is
+   painted ONCE and the loop animates only `opacity`, so animation frames composite without repaint. */
+.acs-root .wf-rf-node[data-run-status="running"], .acs-root .wf-rf-loop[data-run-status="running"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.acs-root .wf-rf-node[data-run-status="running"]::after,
+.acs-root .wf-rf-loop[data-run-status="running"]::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0;
+  box-shadow: 0 0 14px 1px rgba(217,119,87,.30);
+  opacity: 0; will-change: opacity; animation: wfGlow var(--wf-pulse-dur) ease-in-out infinite;
+}
+.acs-root .wf-rf-node[data-run-status="suspended"]::after,
+.acs-root .wf-rf-loop[data-run-status="suspended"]::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0;
+  box-shadow: 0 0 0 5px color-mix(in srgb, #5B4B8A 14%, transparent);
+  opacity: 0; will-change: opacity; animation: wfGlow var(--wf-breathe-dur) ease-in-out infinite;
+}
+@keyframes wfGlow { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+/* One-shot status beats — a single play (iteration-count 1) fired by a `data-beat` attribute the
+   run view sets at a state transition (trigger fires → ignite; terminal reached → settle; branch
+   chosen → verdict). One-shot, so box-shadow paint cost is a non-issue. */
+.acs-root .wf-rf-node[data-beat="ignite"], .acs-root .wf-rf-loop[data-beat="ignite"] { animation: wfBeatIgnite var(--wf-beat-dur) var(--ease) 1; }
+.acs-root .wf-rf-node[data-beat="settle"] { animation: wfBeatSettle var(--wf-beat-dur) var(--ease) 1; }
+.acs-root .wf-rf-node[data-beat="verdict"] { animation: wfBeatVerdict var(--wf-beat-dur) var(--ease) 1; }
+@keyframes wfBeatIgnite  { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 14px rgba(217,119,87,0); } }
+@keyframes wfBeatSettle  { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); } 100% { box-shadow: 0 0 0 12px rgba(91,161,122,0); } }
+@keyframes wfBeatVerdict { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 50%, transparent); } 60%, 100% { box-shadow: 0 0 0 8px rgba(91,161,122,0); } }
+/* Countdown-ring primitive (sleep / decision / approval deadlines). The fill percentage is driven
+   from JS per second off the persisted wake_at / DeadlineAt — NOT a CSS loop — so the depletion is
+   honest to the real clock. @property lets Chrome smooth the discrete steps; without it (Firefox)
+   the ring still renders the set percentage, just stepping once a second. */
+@property --wf-ring-p { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+.acs-root .wf-ring {
+  width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; position: relative;
+  background: conic-gradient(var(--wf-ring-tone, var(--accent)) var(--wf-ring-p, 0%), color-mix(in srgb, var(--wf-ring-tone, var(--accent)) 18%, transparent) 0);
+}
+.acs-root .wf-ring::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--panel); }
+/* Reduced motion: the looping glows settle to their lit frame (status still legible by colour, no
+   information lost); the one-shot beats are suppressed. */
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .wf-rf-node[data-run-status="running"]::after, .acs-root .wf-rf-loop[data-run-status="running"]::after,
+  .acs-root .wf-rf-node[data-run-status="suspended"]::after, .acs-root .wf-rf-loop[data-run-status="suspended"]::after { animation: none; opacity: 1; }
+  .acs-root .wf-rf-node[data-beat], .acs-root .wf-rf-loop[data-beat] { animation: none; }
 }
 .acs-root .wf-rf-status-badge { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; z-index: 5; border: 1.5px solid var(--panel); }
 .acs-root .wf-rf-status-badge > svg { display: block; }
