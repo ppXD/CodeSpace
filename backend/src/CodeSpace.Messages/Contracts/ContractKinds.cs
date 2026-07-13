@@ -5,10 +5,15 @@ namespace CodeSpace.Messages.Contracts;
 /// kernel (the reducer) never switches on a kind's SEMANTICS: it reads only the envelopes
 /// (<see cref="RequirementEnvelope"/> / <see cref="ReceiptEnvelope"/>), and each kind's payload lives in its own
 /// type outside the kernel. Registering a new kind = a new const here + its payload type + a pinning test + an
-/// entry in the v4.1 appendix (the Rule-8 ritual) — never an edit to the reducer.
+/// entry in the v4.1 appendix (the Rule-8 ritual) + a dimension route in the reducer — the kernel's five
+/// dimensions are a FIXED projection, so a kind the reducer cannot route degrades the run's Outcome to
+/// <c>Unknown</c> (fail-loud parking) rather than being silently invisible.
 /// </summary>
 public static class ContractKinds
 {
+    /// <summary>The kinds the completion kernel routes onto assessment dimensions. A REQUIRED requirement of any other kind cannot be projected — the reducer degrades the Outcome to Unknown so the obligation can never be silently dropped.</summary>
+    public static readonly IReadOnlyList<string> Routed = new[] { Acceptance, Delivery, Output };
+
     /// <summary>A unit/run's OBJECTIVE acceptance oracle (tests-pass argv, rubric, schema…) — the "is the work correct" contract.</summary>
     public const string Acceptance = "acceptance";
 

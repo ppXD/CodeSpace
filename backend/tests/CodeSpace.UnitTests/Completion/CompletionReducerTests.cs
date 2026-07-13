@@ -280,6 +280,39 @@ public class CompletionReducerTests
             .ShouldBe(VerificationDisposition.Unknown, "a case-differing ref is a different ref — mismatch degrades conservatively");
     }
 
+    [Fact]
+    public void A_required_requirement_of_an_unrouted_kind_degrades_the_outcome_and_parks()
+    {
+        // The fixed five-dimension projection fails LOUD at its boundary: an obligation the kernel cannot route
+        // (a fourth kind) must never be silently invisible — the run reads Unknown and parks instead of
+        // terminalizing as decided.
+        var requirements = new[] { Requirement("a1"), Requirement("h", kind: "review.human") };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Passed) };
+
+        var a = CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success));
+
+        a.Verification.ShouldBe(VerificationDisposition.Passed, "the routed dimensions still project honestly");
+        a.Outcome.ShouldBe(OutcomeDisposition.Unknown);
+        CompletionReducer.IsTerminalizable(a).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_optional_unrouted_kind_never_blocks()
+    {
+        var requirements = new[] { Requirement("a1"), Requirement("h", kind: "review.human", requiredness: Requiredness.Optional) };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Passed) };
+
+        CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success)).Outcome.ShouldBe(OutcomeDisposition.Solved);
+    }
+
+    [Fact]
+    public void The_routed_kind_set_is_pinned()
+    {
+        // The guard's boundary IS this list — widening it without a reducer dimension route would resurrect the
+        // silent-drop hole.
+        ContractKinds.Routed.ShouldBe(new[] { ContractKinds.Acceptance, ContractKinds.Delivery, ContractKinds.Output });
+    }
+
     // ── The ModelProposal kernel exclusion ──────────────────────────────────────────────────────────────────
 
     [Fact]
