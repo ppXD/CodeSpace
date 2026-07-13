@@ -76,7 +76,7 @@ describe("AgentCodeInspector", () => {
     render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli" }} />);
 
     fireEvent.focus(screen.getByRole("textbox", { name: "Pick a model…" }));
-    expect(screen.queryByRole("option", { name: /claude-sonnet-4/ })).toBeNull();   // Anthropic model excluded (codex = OpenAI/Custom)
+    expect(screen.queryByRole("option", { name: /claude-sonnet-4/ })).toBeNull();   // Anthropic model excluded (codex = OpenAI/OpenRouter/Ollama/Custom)
     fireEvent.mouseDown(screen.getByRole("option", { name: /gpt-5-codex/ }));
 
     // one pick stores the credentialed-model row id; the loose model/credential stay absent
@@ -100,6 +100,16 @@ describe("AgentCodeInspector", () => {
     fireEvent.change(screen.getByPlaceholderText("Leave blank for the harness default"), { target: { value: "o1-preview" } });
 
     expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", model: "o1-preview" });
+  });
+
+  it("opens the manual drawer for a pre-existing loose-model config so it stays visible at a glance", () => {
+    const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", model: "gpt-4o" }} />);
+    expect((container.querySelector("details.wf-form-advanced") as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("keeps the manual drawer collapsed when a credentialed model is picked", () => {
+    const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", modelCredentialModelId: "m1" }} />);
+    expect((container.querySelector("details.wf-form-advanced") as HTMLDetailsElement).open).toBe(false);
   });
 
   it("shows the approval-conversation picker, reflecting the saved value", () => {

@@ -49,6 +49,10 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
   // to inline (clearing the persona) or back to a persona freely.
   const [mode, setMode] = useState<"agent" | "inline">(agentId ? "agent" : "inline");
 
+  // Open the manual drawer initially when a saved config already uses the loose model / credential (no picked
+  // pair), so its configured model stays visible at a glance instead of hiding behind a collapsed <details>.
+  const [manualOpen, setManualOpen] = useState<boolean>(() => !credentialedModelId && (!!model || !!credentialId));
+
   const harnesses = useHarnesses();
   const selectedHarness = harnesses.data?.find((h) => h.kind === harness);
   const modelHints = selectedHarness?.models ?? [];
@@ -133,7 +137,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
 
         {/* Escape hatch: a model id the harness knows but no credential lists, or a manual credential. Setting
             either clears the picked pair above so these take effect (the resolver would otherwise discard them). */}
-        <details className="wf-form-advanced">
+        <details className="wf-form-advanced" open={manualOpen} onToggle={(e) => setManualOpen((e.currentTarget as HTMLDetailsElement).open)}>
           <summary className="wf-form-advanced-summary">Set model &amp; credential manually</summary>
           <div className="wf-form-advanced-body">
             <label className="wf-form-row">
