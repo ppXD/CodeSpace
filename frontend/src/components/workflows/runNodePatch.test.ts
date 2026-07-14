@@ -30,6 +30,12 @@ describe("nodeRunFingerprint", () => {
     expect(nodeRunFingerprint(base)).not.toBe(nodeRunFingerprint(node("n1", { runStatus: "Running" }, { hidden: true })));
     expect(nodeRunFingerprint(base)).not.toBe(nodeRunFingerprint(node("n1", { runStatus: "Running", fanout: [row()] })));
   });
+
+  it("changes on a hot↔cold flip so a node dropping out of the animation budget re-renders (C3)", () => {
+    const cold = node("n1", { runStatus: "Running" });
+    const hot = node("n1", { runStatus: "Running", hot: true });
+    expect(nodeRunFingerprint(cold)).not.toBe(nodeRunFingerprint(hot));
+  });
 });
 
 describe("patchNodes", () => {

@@ -11,7 +11,7 @@ import type { WorkflowNodeData } from "./WorkflowNode";
  * (typically 1-2), not all 40.
  *
  * Pure + deterministic → unit-tested. Only the RUN OVERLAY is fingerprinted (status, per-row
- * status/timing/error, rerun eligibility, fan-out shape, hidden). The static base data (name, icon,
+ * status/timing/error, rerun eligibility, fan-out shape, hidden, hot). The static base data (name, icon,
  * kind, badges, position, size) can't change within a run — the definition is a version-pinned snapshot —
  * so the caller resets the cache when the definition / manifests identity changes, and the fingerprint
  * needn't cover them.
@@ -21,7 +21,7 @@ export function nodeRunFingerprint(node: Node<WorkflowNodeData>): string {
   const rows = d.runRows ?? [];
   const rowsFp = rows.map((r) => `${r.status}:${r.startedAt ?? ""}:${r.completedAt ?? ""}:${r.error ?? ""}`).join("|");
   const fanFp = d.fanout ? d.fanout.map((r) => `${r.status}:${r.startedAt ?? ""}:${r.completedAt ?? ""}`).join("|") : "";
-  return `${d.runStatus ?? ""}#${d.rerunnableFromHere ? 1 : 0}#${node.hidden ? 1 : 0}#${rowsFp}#${fanFp}`;
+  return `${d.runStatus ?? ""}#${d.rerunnableFromHere ? 1 : 0}#${node.hidden ? 1 : 0}#${d.hot ? 1 : 0}#${rowsFp}#${fanFp}`;
 }
 
 /**

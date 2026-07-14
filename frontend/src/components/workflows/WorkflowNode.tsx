@@ -12,12 +12,13 @@ import { RunRowDetail } from "./footers/ReceiptFooter";
 import { NodeRerunBadge } from "./NodeRerunBadge";
 import { RerunMenu } from "./RerunMenu";
 import { loopMinSize } from "./loopResize";
-import { fanBranches } from "./mapBranches";
+import { fanBranches, fanBreakdown, parseIterationKey } from "./mapBranches";
 import { MapFanout } from "./MapFanout";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
 import { NodeBadges } from "./NodeBadges";
 import { nodeIconFor, nodeToneFor } from "./nodeIcon";
 import type { SpotlightChip } from "./nodeSpotlight";
+import { useStatusBeat, type StatusBeat } from "./useStatusBeat";
 import { CATCH_HANDLE, isContainerKind } from "./workflowContainers";
 
 /**
@@ -105,6 +106,12 @@ export interface WorkflowNodeData extends Record<string, unknown> {
    * card embedding the activity-terminal fan-out) instead of a sized container framing a separate worker node.
    */
   fanout?: WorkflowRunNodeSummary[];
+  /**
+   * Run view only: this node is one of the ≤2 most-recently-started running nodes — the "hot set" (C3 animation
+   * budget). Only a hot node's card keeps the full breathing pulse; every other running node reads as a calm
+   * static accent ring, so a 12-branch running map doesn't light up as a christmas tree. Stamped in RunCanvas.
+   */
+  hot?: boolean;
 }
 
 /**
@@ -153,6 +160,83 @@ function useContainerMinSize(containerId: string) {
 }
 
 /**
+ * The loop's configured max passes when the card carries it. Config is NOT on WorkflowNodeData today
+ * (definitionToRfNodes doesn't copy `config` onto the card), so this is usually undefined and the loop
+ * meta omits the "/ max" — degrading to a bare pass count. Reads defensively so it lights up unchanged
+ * the day a card carries `config.maxIterations`.
+ */
+function containerMaxIterations(d: WorkflowNodeData): number | undefined {
+  const max = (d as { config?: { maxIterations?: unknown } }).config?.maxIterations;
+  return typeof max === "number" && max > 0 ? max : undefined;
+}
+
+/**
+ * The loop's current pass number, derived from its body rows: the highest iteration index seen (parsing
+ * `<loopId>#<i>`) PLUS 1 — i.e. the 1-based count of passes the loop has entered, so rows at `#0`,`#1`,`#2`
+ * read "第 3 輪". A non-iterated row (empty key, e.g. the loop's own top-level row) contributes nothing;
+ * `parseIterationKey` skips a non-integer segment (a supervisor `#turn2`), so a stray key never miscounts.
+ * Returns 0 when no iterated row exists yet — the caller then renders no meta.
+ */
+function loopPassCount(rows: readonly WorkflowRunNodeSummary[]): number {
+  let max = -1;
+  for (const r of rows) {
+    const segs = parseIterationKey(r.iterationKey);
+    if (segs.length === 0) continue;
+    max = Math.max(max, segs[segs.length - 1].index);
+  }
+  return max + 1;
+}
+
+/**
+ * A container frame's LIVE header counter (run view only), rendered at the right of the head:
+ *  - map  → "{done}/{total} branches" with the same per-state breakdown as the B4 fan-out summary
+ *    (running / 等待 waiting / failed), read from the fanned body branch rows via fanBranches/fanBreakdown.
+ *  - loop → "第 {i} 輪" — i = the 1-based pass count ({@link loopPassCount}) — with "/ {max}" appended only
+ *    when the card carries a maxIterations config (usually absent → bare count).
+ *  - try  → DEFERRED: the taken-handle stamp (catch vs default) needs the try's own routing decision, and
+ *    WorkflowRunNodeSummary carries no `routingHints` today, so there's nothing sound to read.
+ *
+ * Returns null (no meta) whenever the container has no run status / rows, or its rows carry no branch /
+ * iteration to count — so the editor and a not-yet-iterated container render exactly as before.
+ */
+function ContainerHeaderMeta({ d }: { d: WorkflowNodeData }) {
+  const rows = d.runRows;
+  if (!d.runStatus || !rows || rows.length === 0) return null;
+
+  if (d.kind === "Map") {
+    const branches = fanBranches(rows);
+    if (branches.length === 0) return null;
+
+    const bd = fanBreakdown(branches);
+    return (
+      <span className="wf-rf-loop-meta" title={`${bd.done} of ${bd.total} branches settled`}>
+        <b>{bd.done}/{bd.total}</b> branches
+        {bd.running > 0 && <span data-state="running"> · {bd.running} running</span>}
+        {bd.waiting > 0 && <span data-state="waiting"> · {bd.waiting} 等待</span>}
+        {bd.failed > 0 && <span data-state="failed"> · {bd.failed} failed</span>}
+      </span>
+    );
+  }
+
+  if (d.kind === "Loop") {
+    const pass = loopPassCount(rows);
+    if (pass === 0) return null;
+
+    const max = containerMaxIterations(d);
+    return (
+      <span className="wf-rf-loop-meta">第 <b>{pass}</b>{max ? ` / ${max}` : ""} 輪</span>
+    );
+  }
+
+  // Try: which handle the run took (catch vs default) is the meaningful stamp, but it needs the try's own
+  // routing decision. WorkflowRunNodeSummary has no `routingHints` field today, so reading it would fake a
+  // signal — DEFER rather than invent one.
+  // TODO(C2 follow-up): once a try's run row exposes routingHints (['catch'] vs default), stamp the taken
+  // handle here when the try is terminal.
+  return null;
+}
+
+/**
  * A container node (flow.loop / flow.try): the React Flow node's style sets its size and its body
  * subgraph (child nodes with parentId === this node) renders INSIDE via React Flow's parent/child
  * positioning. We draw only the frame + header so the body shows through. Corner-drag resizes the box;
@@ -166,12 +250,12 @@ function useContainerMinSize(containerId: string) {
  * Split into its own component so the store subscription (useContainerMinSize) mounts only for
  * container nodes, not for every node on the canvas.
  */
-function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; selected: boolean | undefined }) {
+function ContainerNode({ id, d, selected, beat }: { id: string; d: WorkflowNodeData; selected: boolean | undefined; beat: StatusBeat | undefined }) {
   const { minWidth, minHeight } = useContainerMinSize(id);
   const onAddFrom = useContext(NodeAddContext);
   const isTry = d.kind === "Try";
   return (
-    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={d.runStatus}>
+    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={d.runStatus} data-hot={d.hot || undefined} data-beat={beat}>
       {d.runStatus && <RunStatusDot status={d.runStatus} />}
       {/* Drag a corner/edge to resize. Min size = the body's bounding box, so the box never shrinks
           past its items; the new size is persisted to the definition via the editor's onNodesChange. */}
@@ -182,6 +266,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
         <span className="wf-rf-loop-title">{d.label ?? d.displayName}</span>
         <span className="wf-rf-loop-ref">{d.nodeId}</span>
         <NodeRerunBadge nodeId={d.nodeId} className="wf-rf-loop-rerun" />
+        <ContainerHeaderMeta d={d} />
       </div>
       <Handle type="source" position={Position.Right} className="wf-rf-handle" />
       {isTry ? (
@@ -204,7 +289,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
  */
 function FanoutNode({ d, selected }: { d: WorkflowNodeData; selected: boolean | undefined }) {
   return (
-    <div className="wf-rf-node wf-rf-fanout-node" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={d.runStatus}>
+    <div className="wf-rf-node wf-rf-fanout-node" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={d.runStatus} data-hot={d.hot || undefined}>
       {d.runStatus && <RunStatusDot status={d.runStatus} />}
       <Handle type="target" position={Position.Left} className="wf-rf-handle" />
       <div className="wf-rf-fanout-node-head">
@@ -234,13 +319,18 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const runStatus = effectiveRunStatus(d.runStatus, d.runRows, agentRun.data?.status);
   const parkedTitle = runStatus !== d.runStatus ? "Parked (Suspended) while its agent runs" : undefined;
 
+  // One-shot beat fired when this node transitions into a beat-worthy Success while mounted (trigger → ignite,
+  // terminal → settle, routing node → verdict). Computed once here — before the fanout/container early returns —
+  // so the hook order stays stable, and threaded down to ContainerNode (flow.try beats verdict on its frame).
+  const beat = useStatusBeat(runStatus, d.kind, d.typeKey);
+
   // A flow.map collapsed to a fan-out card (run view) renders as a self-contained card — checked BEFORE the
-  // container branch so its Map kind doesn't route it to ContainerNode.
+  // container branch so its Map kind doesn't route it to ContainerNode. A map is never a beat-worthy kind.
   if (d.fanout) return <FanoutNode d={d} selected={selected} />;
 
   // A container (loop / try / map) draws only its frame + header; its body renders inside. It's its own
   // component so the store subscription it needs (for the resize-min) doesn't run for every node.
-  if (isContainerKind(d.kind)) return <ContainerNode id={id} d={d} selected={selected} />;
+  if (isContainerKind(d.kind)) return <ContainerNode id={id} d={d} selected={selected} beat={beat} />;
 
   // A loop/map body's entry marker (flow.loop_start / flow.map_start) is source-only: the engine seeds
   // it at the start of every iteration / branch, so it can't have an incoming edge, and a passthrough
@@ -249,7 +339,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const isLoopStart = d.typeKey === "flow.loop_start" || d.typeKey === "flow.map_start";
 
   return (
-    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={runStatus}>
+    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-tone={nodeToneFor(d)} data-selected={selected} data-run-status={runStatus} data-hot={d.hot || undefined} data-beat={beat}>
       {runStatus && <RunStatusDot status={runStatus} />}
       {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Left} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />

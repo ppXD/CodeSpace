@@ -2554,11 +2554,23 @@ textarea:-webkit-autofill {
    box-shadow (no animation); the pulsing/breathing glow is a pseudo-element whose box-shadow is
    painted ONCE and the loop animates only `opacity`, so animation frames composite without repaint. */
 .acs-root .wf-rf-node[data-run-status="running"], .acs-root .wf-rf-loop[data-run-status="running"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-.acs-root .wf-rf-node[data-run-status="running"]::after,
-.acs-root .wf-rf-loop[data-run-status="running"]::after {
+/* C3 animation budget: only the ≤2 most-recently-started running nodes (data-hot, stamped in RunCanvas)
+   keep the full breathing pulse — a wide running map would otherwise light up as a christmas tree of
+   simultaneous glows. The pulsing ::after is scoped to [data-hot]; the accent border + static ring above
+   still mark EVERY running node. */
+.acs-root .wf-rf-node[data-run-status="running"][data-hot]::after,
+.acs-root .wf-rf-loop[data-run-status="running"][data-hot]::after {
   content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0;
   box-shadow: 0 0 14px 1px rgba(217,119,87,.30);
   opacity: 0; will-change: opacity; animation: wfGlow var(--wf-pulse-dur) ease-in-out infinite;
+}
+/* C3 animation budget: a running-but-NOT-hot node reads as running via the accent border + a calm STATIC
+   inner glow (fixed opacity, no loop → no repaint), never a pulse. */
+.acs-root .wf-rf-node[data-run-status="running"]:not([data-hot])::after,
+.acs-root .wf-rf-loop[data-run-status="running"]:not([data-hot])::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0;
+  box-shadow: 0 0 10px 0 rgba(217,119,87,.14);
+  opacity: 1;
 }
 .acs-root .wf-rf-node[data-run-status="suspended"]::after,
 .acs-root .wf-rf-loop[data-run-status="suspended"]::after {
@@ -2589,7 +2601,8 @@ textarea:-webkit-autofill {
 /* Reduced motion: the looping glows settle to their lit frame (status still legible by colour, no
    information lost); the one-shot beats are suppressed. */
 @media (prefers-reduced-motion: reduce) {
-  .acs-root .wf-rf-node[data-run-status="running"]::after, .acs-root .wf-rf-loop[data-run-status="running"]::after,
+  /* Match the [data-hot] specificity of the C3 pulse rule so this override still wins for hot nodes. */
+  .acs-root .wf-rf-node[data-run-status="running"][data-hot]::after, .acs-root .wf-rf-loop[data-run-status="running"][data-hot]::after,
   .acs-root .wf-rf-node[data-run-status="suspended"]::after, .acs-root .wf-rf-loop[data-run-status="suspended"]::after { animation: none; opacity: 1; }
   .acs-root .wf-rf-node[data-beat], .acs-root .wf-rf-loop[data-beat] { animation: none; }
 }
@@ -3447,6 +3460,60 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-agent-stamp[data-tone="failure"] .wf-rf-agent-lead { color: #9E3535; }
 .acs-root .wf-rf-agent-stamp[data-tone="success"] .wf-rf-agent-lead { color: #1F6B3F; }
 
+/* B6 pipeline footer (PipelineFooter) — the multi-stage git.integrate / run_command family. It CONSUMES the shared
+   `.wf-rf-result*` bar + expand, the `.wf-rf-digest*` label, and the `.wf-ring` primitive (defined in the run-canvas
+   block — NOT redefined here); this block adds only the pipeline-specific affordances: the running stage rail with its
+   indeterminate shimmer sweep, the run_command terminal-cursor blink, and the branchable-outcome tones. Both families'
+   non-happy outcomes read AMBER (a Conflicted integration, a non-zero command exit) — branchable data, never a red
+   error. Animations are compositor-friendly (opacity / transform / background-position only) and FROZEN under reduced
+   motion. */
+/* git.integrate running: a STATIC rail of the 5 known stages (clone → anchor → apply → commit → push) — the integrator
+   emits no per-step records, so we never light a stage; one shimmer sweeps the whole strip as a "working" texture. */
+.acs-root .wf-pf-rail {
+  position: relative; overflow: hidden; margin-top: 6px;
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 4px;
+  padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2);
+}
+.acs-root .wf-pf-stage { font-size: 10px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.acs-root .wf-pf-stage + .wf-pf-stage::before { content: "→"; margin-right: 4px; color: var(--muted-2); font-weight: 400; }
+.acs-root .wf-pf-sweep {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--accent) 20%, transparent) 50%, transparent 100%);
+  transform: translateX(-100%); animation: wf-pf-sweep 1.6s linear infinite;
+}
+@keyframes wf-pf-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* git.integrate terminal: the OUTCOME tints the bar, not the node status (git.integrate SUCCEEDS on a Conflicted
+   result, so a node-status green would lie). Clean = green, Conflicted = amber, Empty = muted. */
+.acs-root .wf-pf-int[data-outcome="clean"] .wf-rf-result-bar { border-color: #BFE0CD; background: #F2F9F5; }
+.acs-root .wf-pf-int[data-outcome="clean"] .wf-rf-result-glyph { color: #1F6B3F; }
+.acs-root .wf-pf-int[data-outcome="conflicted"] .wf-rf-result-bar { border-color: #E4B980; background: #FBF1E1; }
+.acs-root .wf-pf-int[data-outcome="conflicted"] .wf-rf-result-glyph { color: #8A5A1B; }
+.acs-root .wf-pf-int[data-outcome="empty"] .wf-rf-result-bar { opacity: .8; }
+.acs-root .wf-pf-int[data-outcome="empty"] .wf-rf-result-glyph { color: var(--muted-2); }
+.acs-root .wf-pf-branch { display: inline-flex; align-items: center; gap: 3px; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 10px; color: #1F6B3F; background: #F2F9F5; border: 1px solid #BFE0CD; border-radius: 5px; padding: 0 5px; }
+.acs-root .wf-pf-branch > svg { flex-shrink: 0; }
+.acs-root .wf-pf-conflict-label { font-weight: 600; }
+.acs-root .wf-pf-conflict-reason { color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .wf-pf-muted { color: var(--muted); font-weight: 400; }
+/* Conflicted reassurance — hangs below the bar so "nothing was pushed, the agent branches are safe" is explicit. */
+.acs-root .wf-pf-reassure { margin-top: 5px; padding: 4px 8px; border-radius: 7px; background: #FBF1E1; border: 1px solid #F0DEC0; color: #8A5A1B; font-size: 10.5px; }
+
+/* run_command running: a blinking terminal cursor + (when config carries a timeout) the shared `.wf-ring` gauge. */
+.acs-root .wf-pf-cursor { width: 6px; height: 12px; margin-left: 1px; border-radius: 1px; background: var(--ink-2); animation: wf-pf-blink 1.06s step-end infinite; }
+.acs-root .wf-pf-cmd .wf-ring { --wf-ring-tone: var(--accent); }
+@keyframes wf-pf-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* run_command terminal: the exit stamp — byte counts + a 📎 when the full output was preserved as an artifact. */
+.acs-root .wf-pf-bytes { color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .wf-pf-timeout { display: inline-flex; align-items: center; gap: 3px; }
+.acs-root .wf-pf-clip { margin-left: 4px; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .wf-pf-sweep { animation: none; opacity: .5; transform: none; }
+  .acs-root .wf-pf-cursor { animation: none; opacity: 1; }
+}
+
 /* Unified Rerun control (RerunMenu) — a filled-accent split button (primary + caret) + a dropdown of every rerun the
    surface offers: the current action checkmarked, the bulk "Rerun all failed items" badged "suggested", and "Rerun
    entire run" always available. `wf-rerun-onrow` right-aligns it on a fan-out card's #i status row; `wf-rerun-node`
@@ -3529,6 +3596,17 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-rf-loop-title { font-weight: 600; }
 .acs-root .wf-rf-loop-ref { color: var(--muted); }
+/* C2 container live header — a run view's live counter at the right of a loop/map frame's head:
+   "{done}/{total} branches" (map) or "第 {i} 輪" (loop). Right-aligned (margin-left:auto pushes it past
+   the title/ref), muted, tabular-nums so the digits don't jitter as they tick. Purely additive — does NOT
+   touch the data-run-status / beat / .wf-ring blocks that drive the frame's status treatment. */
+.acs-root .wf-rf-loop-meta {
+  margin-left: auto; color: var(--muted); font-size: 11.5px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.acs-root .wf-rf-loop-meta b { font-weight: 600; color: var(--ink); }
+.acs-root .wf-rf-loop-meta [data-state="running"] { color: var(--accent); }
+.acs-root .wf-rf-loop-meta [data-state="failed"] { color: var(--danger); }
 /* Loop box resize handles (React Flow NodeResizer) — warm accent, not the library's default blue.
    Corner/edge handles are small accent squares; the edge guide line is a faint accent. */
 .acs-root .wf-rf-resize-handle {
@@ -3640,6 +3718,15 @@ textarea:-webkit-autofill {
 .acs-root .wf-canvas .react-flow__edge.wf-rf-edge-error .react-flow__edge-path { stroke: var(--danger); stroke-dasharray: 5 3; }
 /* A flow.try catch edge — the handled-failure path, warn (amber) + dashed to read like the error edge. */
 .acs-root .wf-canvas .react-flow__edge.wf-rf-edge-catch .react-flow__edge-path { stroke: var(--warn); stroke-dasharray: 5 3; }
+
+/* C1 run-edge states — the run overlay's edge grammar (see runEdgeFlow / definitionToRunEdges):
+   `dead` = a branch the run declined, dimmed to read as not-taken; `taken` = the hop it walked, held sage;
+   plus a hover-thicken so any edge can be traced under the cursor. `verdict` (a just-settled routing choice)
+   is lit by B7. The inline stroke wins on colour, so `taken` only needs to hold the sage the flow already set. */
+.acs-root .wf-run-canvas .react-flow__edge.wf-rf-edge-dead .react-flow__edge-path { opacity: .35; }
+.acs-root .wf-run-canvas .react-flow__edge.wf-rf-edge-taken .react-flow__edge-path { stroke: #5FA882; }
+.acs-root .wf-run-canvas .react-flow__edge .react-flow__edge-path { transition: stroke-width .15s ease; }
+.acs-root .wf-run-canvas .react-flow__edge:hover .react-flow__edge-path { stroke-width: 3px !important; }
 /* Subtle pulse on the source handle of a selected node so users know where to drag from. */
 .acs-root .wf-rf-node[data-selected="true"] .react-flow__handle.source {
   background: var(--accent) !important; border-color: var(--accent) !important;
