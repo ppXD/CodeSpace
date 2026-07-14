@@ -15,15 +15,18 @@ public sealed record HiddenSuite(IReadOnlyList<BenchmarkTask> Tasks, string Suit
 /// <see cref="BenchmarkTask"/> array) plus <c>&lt;dir&gt;/fixtures/&lt;fixtureRef&gt;/**</c>. The suite hash covers
 /// BYTES — tasks.json and every fixture file's content, path-sorted — so an edited fixture under an unchanged ref
 /// can never impersonate the frozen suite (the M1a fixture-content hole, closed for this lane). Fail-loud: a
-/// configured-but-broken suite throws; only an UNSET directory reads null (the lane self-skips).
+/// PRESENT-but-broken suite throws; only an ABSENT directory reads null (the lane self-skips). DEFAULT-ON by
+/// owner ruling: no env toggle — the suite lives at ONE conventional path outside the repo, and pointing
+/// elsewhere is a code change, never a deployment knob.
 /// </summary>
 public static class HiddenSuiteLoader
 {
-    /// <summary>Rule 8: the operator seam. Renaming breaks every sealed-lane deployment — pinned by test.</summary>
-    public const string SuiteDirEnvVar = "CODESPACE_HIDDEN_SUITE_DIR";
+    /// <summary>THE conventional sealed-suite location — outside every repository checkout, owner-held. Pinned by test: moving it is an explicit, reviewed decision.</summary>
+    public static string DefaultSuiteDirectory { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codespace", "hidden-suite");
 
-    public static HiddenSuite? LoadFromEnvironment() =>
-        Environment.GetEnvironmentVariable(SuiteDirEnvVar) is { Length: > 0 } dir ? Load(dir) : null;
+    public static HiddenSuite? LoadFromDefaultLocation() =>
+        Directory.Exists(DefaultSuiteDirectory) ? Load(DefaultSuiteDirectory) : null;
 
     public static HiddenSuite Load(string suiteDirectory)
     {

@@ -21,10 +21,11 @@ public class HiddenSuiteLoaderTests : IDisposable
     public void Dispose() { try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ } }
 
     [Fact]
-    public void The_env_var_name_is_pinned()
+    public void The_default_suite_location_is_pinned()
     {
-        // Rule 8: renaming strands every sealed-lane deployment that exported the old name.
-        HiddenSuiteLoader.SuiteDirEnvVar.ShouldBe("CODESPACE_HIDDEN_SUITE_DIR");
+        // Default-on, no env toggle (owner ruling): ONE conventional path — moving it is an explicit decision.
+        HiddenSuiteLoader.DefaultSuiteDirectory.ShouldBe(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codespace", "hidden-suite"));
     }
 
     [Fact]

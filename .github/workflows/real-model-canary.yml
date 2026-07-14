@@ -11,8 +11,11 @@ name: Backend · Real model canary
 #   - provider outage classifies InfraUnknown in the harness — not a capability failure, and never release-green.
 #   - a floating model that meets the bar is PROMOTION INPUT for the next pinned bundle (an explicit re-pin).
 #
-# Enabled by setting the repo VARIABLE CODESPACE_LLM_FLOATING_MODEL_ID (the model id is not a secret); unset, the
-# whole workflow self-skips at zero cost. Nightly + on-demand — drift is a slow signal, not a per-push one.
+# DEFAULT-ON (owner ruling: no env/variable toggles — defaults enabled, changes are explicit file edits): probes
+# the SAME model id as the pinned lane nightly — provider-side drift of an UNCHANGED id is exactly the observed
+# failure mode (the 2026-07 Anthropic-wire drift shipped under the same id). To probe a DIFFERENT candidate model,
+# edit the model env below in a PR — visible, reviewed, reverted the same way. Nightly + on-demand; drift is a
+# slow signal, not a per-push one.
 
 on:
   schedule:
@@ -27,13 +30,13 @@ jobs:
   canary:
     name: floating canary (decision evals, report-only)
     runs-on: ubuntu-latest
-    if: ${{ vars.CODESPACE_LLM_FLOATING_MODEL_ID != '' }}
     continue-on-error: true
     timeout-minutes: 120
     env:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_FLOATING_MODEL_ID }}
+      # The probe target — same id as the pinned lane by default (same-id drift detection). Edit HERE to probe a candidate model.
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
     steps:
       - uses: actions/checkout@v4
 
