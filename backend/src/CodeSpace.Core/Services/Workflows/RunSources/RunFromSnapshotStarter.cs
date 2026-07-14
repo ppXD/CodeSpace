@@ -182,6 +182,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             ReleaseHashAtRun = definitionHash,
             TeamId = teamId,
             RunRequestId = requestId,
+            // P2a: a replay/rerun is a NEW execution — it explicitly receives the policy current at ITS creation,
+            // never an inherited or inferred one.
+            CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
+            CompletionEnforcementMode = Completion.CompletionPolicy.CurrentMode.ToString(),
             ActorId = actorUserId,   // snapshot / task runs are always user-launched (mirrors the request's ActorId)
             ProjectionKind = projectionKind,
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),

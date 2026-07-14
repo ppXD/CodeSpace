@@ -631,14 +631,28 @@ public class CompletionReducerTests
     }
 
     [Fact]
-    public void The_cutover_value_is_pinned()
+    public void The_completion_policy_is_pinned_and_era_is_per_run()
     {
-        // Moving the cutover silently REWRITES which runs have contract truth — the value change must be an
-        // explicit, reviewed decision, never a refactor side-effect.
-        CompletionCutover.Value.ShouldBe(new DateTimeOffset(2026, 7, 13, 0, 0, 0, TimeSpan.Zero));
+        // Bumping the policy version is an explicit protocol revision, never a refactor side-effect — and era is
+        // decided by the run's OWN stamped column, never a global clock.
+        CompletionPolicy.CurrentVersion.ShouldBe(1);
+        CompletionPolicy.CurrentMode.ShouldBe(CompletionEnforcementMode.Shadow, "generic creation NEVER stamps Enforced — that is P2b's qualified-cohort rollout (Lock Clause 1)");
 
-        CompletionCutover.IsContractEra(CompletionCutover.Value).ShouldBeTrue("the boundary instant itself is contract-era");
-        CompletionCutover.IsContractEra(CompletionCutover.Value.AddTicks(-1)).ShouldBeFalse();
+        CompletionPolicy.BasisFor(1).ShouldBe(CompletionBasis.ContractDerived);
+        CompletionPolicy.BasisFor(null).ShouldBe(CompletionBasis.LegacyUnknown, "an unstamped run is pre-protocol — old tape is never re-derived");
+    }
+
+    [Theory]
+    [InlineData(null, CompletionEnforcementMode.Legacy)]
+    [InlineData("", CompletionEnforcementMode.Legacy)]
+    [InlineData("Shadow", CompletionEnforcementMode.Shadow)]
+    [InlineData("Enforced", CompletionEnforcementMode.Enforced)]
+    [InlineData("Legacy", CompletionEnforcementMode.Legacy)]
+    [InlineData("shadow", CompletionEnforcementMode.Legacy)]      // case-exact — a mangled value must not half-match
+    [InlineData("Turbo", CompletionEnforcementMode.Legacy)]       // unknown → fail-close
+    public void The_stored_mode_reads_fail_closed(string? stored, CompletionEnforcementMode expected)
+    {
+        CompletionPolicy.ModeFor(stored).ShouldBe(expected, "the protocol never enforces on a policy it cannot read");
     }
 
     [Fact]

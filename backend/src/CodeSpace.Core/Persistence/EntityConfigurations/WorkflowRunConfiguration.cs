@@ -11,6 +11,7 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         builder.HasKey(r => r.Id);
 
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
+        builder.Property(r => r.CompletionEnforcementMode).HasMaxLength(16);
         builder.Property(r => r.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");
 
         // run_kind is a Postgres GENERATED column (migration 0067) — the DB computes it from source_type, so EF must
