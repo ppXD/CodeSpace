@@ -235,6 +235,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // gateway runs on ITS family instead of the CLI's built-in default (e.g. codex gpt-5.5) it can't serve.
             var effectiveModel = string.IsNullOrWhiteSpace(task.Model) ? defaultModel : task.Model;
 
+            // Surface the RESOLVED model on the run NOW — so the agent's identity strip shows what it's running the moment
+            // it starts, from the DISPATCH data, not only after the rollout backfills it at completion. Only when the
+            // operator left it blank (a pin is already displayed); the resolved model is not a secret, so re-persisting the
+            // stored task (the ORIGINAL, no injected env) with just its model filled is safe.
+            if (string.IsNullOrWhiteSpace(task.Model) && !string.IsNullOrWhiteSpace(effectiveModel))
+                await PersistResolvedModelAsync(agentRunId, task with { Model = effectiveModel }, cancellationToken).ConfigureAwait(false);
+
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
 
             // P3 (3.2c): resolve a REFERENCED (offloaded) restored transcript to bytes NOW — the producer kept only the
@@ -1703,6 +1710,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // credential's own models instead of the CLI default. All null when no credential resolved.
         return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel);
     }
+
+    /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>
+    private async Task PersistResolvedModelAsync(Guid agentRunId, AgentTask taskWithModel, CancellationToken cancellationToken) =>
+        await _db.AgentRun.Where(r => r.Id == agentRunId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.TaskJson, JsonSerializer.Serialize(taskWithModel, AgentJson.Options)), cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// When the run opted into <see cref="AgentEgressPolicy.Allowlist"/> egress (B3.3b), set the sandbox's egress
