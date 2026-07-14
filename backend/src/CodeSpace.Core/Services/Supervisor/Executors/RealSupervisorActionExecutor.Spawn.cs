@@ -336,6 +336,39 @@ public sealed partial class RealSupervisorActionExecutor
                 },
             }, t.Spec)).ToList();
 
+        // P2a-2 (R): the staged units' acceptance obligations become durable requirement rows AT AUTHORIZATION —
+        // the composer reads these, never re-derives them from the tape. Upsert-idempotent: a crash-replayed
+        // staging lands on the same (run, kind, ref) rows. Model-authored oracles carry ModelProposal authority
+        // honestly (an obligation can only add Unknown/park — authority gates RECEIPTS, not requirements).
+        // Best-effort: a ledger fault must never strand the staging itself.
+        if (planRef is not null && contractHashes is { Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
+        {
+            var requirements = tasks
+                .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
+                .Select(t => new Messages.Contracts.RequirementEnvelope
+                {
+                    RequirementRef = $"acceptance:{t.Task.SubtaskId}",
+                    Kind = Messages.Contracts.ContractKinds.Acceptance,
+                    Requiredness = Messages.Contracts.Requiredness.Required,
+                    Authority = Messages.Contracts.ContractAuthority.ModelProposal,
+                    SpecHash = contractHashes[t.Task.SubtaskId!],
+                    ContractSchemaVersion = "1",
+                })
+                .ToList();
+
+            if (requirements.Count > 0)
+            {
+                try
+                {
+                    await _contracts.UpsertRequirementsAsync(context.SupervisorRunId, context.TeamId, requirements, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Persisting completion requirements failed for run {RunId}; staging proceeds — the composer will read an incomplete obligation set as Unknown", context.SupervisorRunId);
+                }
+            }
+        }
+
         var agentRunIds = new List<Guid>(tasks.Count);
         var reclaimedAny = false;
 
