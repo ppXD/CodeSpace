@@ -21,4 +21,13 @@ public sealed record CompletionRunFacts
 
     /// <summary>Whether the run reached an ORDERLY terminal (a recorded terminal decision / a completed engine fold) — false means the engine died out from under it (<see cref="ExecutionDisposition.Crashed"/>).</summary>
     public required bool HadOrderlyTerminal { get; init; }
+
+    /// <summary>
+    /// The model SELF-REPORTED giving up (a stop whose outcome label is a non-success — the tape's GaveUp
+    /// classification) — recorded because the engine still lands such a run as <c>Success</c>, and with no
+    /// contract the status-fallback arm would read it Solved. A give-up is an honest Unsolved, never a fallback
+    /// solve; it is a MODEL claim of failure, which — unlike a model claim of success — the kernel may honor
+    /// (believing "I failed" can never inflate a metric).
+    /// </summary>
+    public bool SelfReportedGiveUp { get; init; }
 }
