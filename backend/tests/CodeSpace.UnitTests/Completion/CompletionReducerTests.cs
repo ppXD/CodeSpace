@@ -476,6 +476,32 @@ public class CompletionReducerTests
         CompletionReducer.Reduce(None, NoReceipts, Facts(status, forced, orderly)).Outcome.ShouldBe(expected);
     }
 
+    [Fact]
+    public void A_self_reported_give_up_with_no_contract_never_reads_Solved()
+    {
+        // The engine lands a model give-up as Success; with no contract the fallback arm would read it Solved —
+        // the give-up signal makes it an honest Unsolved (a model claim of FAILURE may be honored; only claims
+        // of success are barred from moving metrics).
+        var facts = Facts(WorkflowRunStatus.Success) with { SelfReportedGiveUp = true };
+
+        var a = CompletionReducer.Reduce(None, NoReceipts, facts);
+
+        a.Outcome.ShouldBe(OutcomeDisposition.Unsolved);
+        a.Execution.ShouldBe(ExecutionDisposition.Completed);
+        CompletionReducer.IsTerminalizable(a).ShouldBeTrue("an honest failure always terminalizes");
+    }
+
+    [Fact]
+    public void A_give_up_never_outranks_a_real_oracle_verdict()
+    {
+        var requirements = new[] { Requirement("a1") };
+        var receipts = new[] { Receipt("a1", VerificationDisposition.Passed) };
+        var facts = Facts(WorkflowRunStatus.Success) with { SelfReportedGiveUp = true };
+
+        CompletionReducer.Reduce(requirements, receipts, facts).Outcome
+            .ShouldBe(OutcomeDisposition.Solved, "an oracle that RAN outranks the model's self-assessment in BOTH directions");
+    }
+
     // ── Artifact fold ───────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]

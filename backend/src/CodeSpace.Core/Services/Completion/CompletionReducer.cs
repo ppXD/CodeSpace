@@ -225,7 +225,9 @@ public static class CompletionReducer
     /// waiver cannot move a solve-rate, and never Unsolved, so it cannot punish either), and every non-verdict
     /// (<c>InfraUnknown</c>/<c>HumanReviewRequired</c>/<c>Unknown</c>) → Unknown (truth cannot be stated).
     /// <see cref="VerificationDisposition.NotApplicable"/> (no oracle ever owed) falls back to the run's own honest
-    /// end — Completed+Success → Solved, everything else → Unsolved — mirroring the scorecard's and
+    /// end — Completed+Success → Solved UNLESS the model self-reported giving up (a give-up is an honest Unsolved:
+    /// believing a model's claim of FAILURE can never inflate a metric, unlike its claim of success), everything
+    /// else → Unsolved — mirroring the scorecard's and
     /// <c>SupervisorEvalScorecard.ClassifyByRunStatus</c>'s shared precedent so the 2b consumer switch is
     /// metric-neutral for the no-contract population.
     /// </summary>
@@ -234,7 +236,7 @@ public static class CompletionReducer
         VerificationDisposition.Passed => OutcomeDisposition.Solved,
         VerificationDisposition.Failed => OutcomeDisposition.Unsolved,
         VerificationDisposition.Waived => OutcomeDisposition.Abstained,
-        VerificationDisposition.NotApplicable => execution == ExecutionDisposition.Completed && facts.TerminalStatus == WorkflowRunStatus.Success
+        VerificationDisposition.NotApplicable => execution == ExecutionDisposition.Completed && facts.TerminalStatus == WorkflowRunStatus.Success && !facts.SelfReportedGiveUp
             ? OutcomeDisposition.Solved
             : OutcomeDisposition.Unsolved,
         _ => OutcomeDisposition.Unknown,
