@@ -78,6 +78,13 @@ public sealed record AgentRunResult
     /// </summary>
     public string? SessionId { get; init; }
 
+    /// <summary>
+    /// The model the CLI ACTUALLY ran — read off the run's event stream (Claude's init line, Codex's thread/turn start),
+    /// harness-agnostic. Preferred over the spawn-PINNED model so an UNPINNED run (left on the CLI's own default, as a
+    /// Codex agent commonly is) still reports what it used, instead of showing nothing. Null when the stream carried none.
+    /// </summary>
+    public string? Model { get; init; }
+
     /// <summary>Failure detail when <see cref="Status"/> is <see cref="AgentRunStatus.Failed"/>.</summary>
     public string? Error { get; init; }
 

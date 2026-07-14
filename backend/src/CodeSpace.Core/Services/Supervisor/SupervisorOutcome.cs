@@ -401,11 +401,12 @@ public static class SupervisorOutcome
             // single-repo run → the top-level ProducedBranch/ChangedFiles remain the one outcome (behaviour-identical).
             RepositoryResults = StripPerRepoPatches(result?.RepositoryResults),
             // SOTA #4: the priced inputs ride inline so the cost bound sums realized spend straight off the durable
-            // outcome (no new query, replay-deterministic). Tokens come from the result; the model is the agent's
-            // task model (passed in by the rehydrate fold, which has TaskJson) — null when the caller has no model.
+            // outcome (no new query, replay-deterministic). Tokens come from the result; the model is what the run
+            // ACTUALLY reported off its stream, preferred over the spawn-PINNED task model the rehydrate fold passes
+            // in — so an UNPINNED run (common for Codex) still prices + labels with what it used — null when neither has one.
             InputTokens = result?.TokenUsage?.InputTokens ?? 0,
             OutputTokens = result?.TokenUsage?.OutputTokens ?? 0,
-            Model = model,
+            Model = !string.IsNullOrWhiteSpace(result?.Model) ? result!.Model : model,
         };
     }
 

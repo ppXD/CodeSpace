@@ -510,8 +510,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // capture that too: this is what turns a forced-terminal's later RETRY warm (continuing the conversation)
         // instead of always cold — AgentSessionIdReader.TryRead + the AgentRun.SessionId write + the supervisor's
         // FindResumableSubtaskAttemptAsync are already generic over every terminal status; this was the missing input.
-        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
-        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events) },
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events), Model = AgentModelReader.TryRead(events) },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over.", TokenUsage = AgentTokenUsageReader.TryRead(events), SessionId = AgentSessionIdReader.TryRead(events), Model = AgentModelReader.TryRead(events) },
         _ => harness.BuildResult(events, sandbox.ExitCode),
     };
 
