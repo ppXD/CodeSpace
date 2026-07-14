@@ -3590,6 +3590,20 @@ textarea:-webkit-autofill {
   border-style: dashed; border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+
+/* D3 jumps — the focused node's transient ring (forward: journal → canvas). A pane jump sets ?node=, which rides the
+   `wf-rf-focus` class onto that node's RF wrapper. The ring is a ::after overlay whose ENTRY is a scale+fade pulse
+   (transform + opacity only → compositor-friendly, no layout/paint thrash); the accent border + soft halo persist as a
+   steady highlight so the eye keeps the node after the pan lands. pointer-events:none so it never blocks the card. */
+.acs-root .react-flow__node.wf-rf-focus { position: relative; }
+.acs-root .react-flow__node.wf-rf-focus::after {
+  content: ""; position: absolute; inset: -4px; border-radius: 16px;
+  border: 2px solid var(--accent); box-shadow: 0 0 0 4px var(--accent-soft);
+  pointer-events: none; z-index: 1; animation: d3-focus-ring .85s ease-out;
+}
+@keyframes d3-focus-ring { 0% { opacity: 0; transform: scale(1.08); } 45% { opacity: 1; } 100% { transform: scale(1); } }
+/* Reduced motion — keep the static ring (the focus cue), drop the entry pulse. */
+@media (prefers-reduced-motion: reduce) { .acs-root .react-flow__node.wf-rf-focus::after { animation: none; } }
 .acs-root .wf-rf-loop-icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; border-radius: 6px; background: var(--tone-soft); color: var(--tone);
@@ -6378,6 +6392,65 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-composer { flex: none; background: var(--bg); padding: 10px 28px 16px; }
 .room-composer-inner { max-width: 820px; margin: 0 auto; }
 
+/* ─── D1 room companion pane — the run canvas docked beside the chat (Claude-artifacts style), summoned per turn from
+ *     each turn's execution card. Reuses the Room warm tokens; the pane's width is a persisted fraction of the split. ─── */
+.room-split { flex: 1; min-height: 0; display: flex; flex-direction: row; position: relative; }
+.room-col { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* The exec card's summon affordance sits opposite the "Execution" label. */
+.room-exec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 13px; }
+.room-exec-head .room-exec-label { margin-bottom: 0; }
+.room-exec-canvas { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); font-size: 11px; font-weight: 600; cursor: pointer; }
+.room-exec-canvas:hover { background: var(--accent-soft); border-color: var(--rm-accent-line); color: var(--accent); }
+
+/* The drag divider between the chat column and the pane (a wider invisible hit area via ::before). */
+.room-divider { flex: 0 0 7px; align-self: stretch; cursor: col-resize; background: var(--line); position: relative; }
+.room-divider::before { content: ""; position: absolute; inset: 0 -3px; }
+.room-divider:hover, .room-divider:active { background: var(--rm-accent-line); }
+
+/* The right-docked pane. Width = --pane-frac of the split; border-left + shadow mirror the RoomDrawer. */
+.room-pane { flex: 0 0 calc(var(--pane-frac, .44) * 100%); min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--line); box-shadow: -10px 0 28px rgba(38,28,22,.07); }
+.room-pane-head { display: flex; align-items: center; gap: 9px; padding: 11px 13px; border-bottom: 1px solid var(--line); flex: none; }
+.room-pane-grip { flex: none; cursor: col-resize; color: var(--muted-2); font-size: 12px; letter-spacing: -2px; line-height: 1; user-select: none; }
+.room-pane-back { display: none; flex: none; width: 26px; height: 26px; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.room-pane-back:hover { background: var(--panel-2); color: var(--ink-2); }
+.room-pane-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.room-pane-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+.room-pane-close:hover { background: var(--panel-2); color: var(--ink-2); }
+/* D5 pane mini-tabs — 畫布 / 變更 / 紀錄. The D1 strip's one static 畫布 label is now three real tab buttons. */
+.room-pane-tabs { display: flex; gap: 4px; padding: 7px 13px 0; border-bottom: 1px solid var(--line); flex: none; }
+.room-pane-tab { appearance: none; border: 0; background: transparent; cursor: pointer; padding: 5px 11px 8px; font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; }
+.room-pane-tab:hover { color: var(--ink-2); }
+.room-pane-tab[data-active] { color: var(--ink); border-bottom-color: var(--accent); }
+.room-pane-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+/* D2 pane follow/pin — the title's 跟隨中 hint, the follow↔pin toggle, and the jump-to-latest chip. */
+.room-pane-follow-hint { flex: none; font-size: 10.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; letter-spacing: .02em; }
+.room-pane-bind { flex: none; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); color: var(--muted); font: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+.room-pane-bind:hover { color: var(--ink-2); border-color: var(--rm-accent-line); }
+.room-pane-bind[data-mode="follow"] { color: var(--accent); border-color: var(--rm-accent-line); background: var(--accent-soft); }
+.room-pane-jump { flex: none; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--rm-accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: inherit; font-size: 11px; font-weight: 600; padding: 3px 9px; cursor: pointer; white-space: nowrap; animation: rm-pulse-soft 2s ease-in-out infinite; }
+.room-pane-jump:hover { filter: brightness(.96); }
+@keyframes rm-pulse-soft { 0%,100% { opacity: 1; } 50% { opacity: .7; } }
+.room-pane-body { flex: 1; min-height: 0; overflow: hidden; }
+/* The 變更 / 紀錄 tabs are scrolling documents, not the ReactFlow canvas — the body scrolls them instead of clipping. */
+.room-pane-scroll { overflow-y: auto; padding: 12px 13px; }
+.room-pane-empty { height: 100%; display: grid; place-items: center; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
+/* The canvas fills the pane body — drop the standalone view's fixed height + framing. */
+.acs-root .room-pane-canvas .wf-run-canvas { height: 100%; min-height: 0; border: 0; border-radius: 0; }
+/* D5 變更 tab — the honest coming-soon placeholder until the change-set projector ships. */
+.room-pane-coming { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center; }
+.room-pane-coming-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 9px; }
+.room-pane-coming-h { font-size: 14px; font-weight: 600; color: var(--ink); }
+.room-pane-coming-p { max-width: 320px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+
+/* Narrow screens: the pane becomes a full-width overlay over the chat with a back button, not a side-by-side split. */
+@media (max-width: 1100px) {
+  .room-room[data-pane] .room-pane { position: absolute; inset: 0; flex-basis: auto; width: 100%; max-width: none; z-index: 42; }
+  .room-room[data-pane] .room-divider { display: none; }
+  .room-pane .room-pane-back { display: inline-flex; }
+  .room-pane .room-pane-grip { display: none; }
+}
+
 /* animations */
 @keyframes rm-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
 @keyframes rm-ants { to { background-position-x: 12px; } }
@@ -6720,6 +6793,12 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .room-jkind-revise { background: var(--rm-warn-bg); color: var(--rm-warn); }
 .room-jtitle { font-size: 13px; color: var(--ink-2); } .room-jtitle b { color: var(--ink); }
 .room-jstep.room-jtone-err .room-jtitle { color: var(--rm-danger); }
+
+/* D3 jumps — a journal beat's "在畫布查看" chip (forward: journal → canvas). Sits at the end of the beat's header row,
+   quiet until hovered so it never competes with the beat title; matches the exec card's 畫布 summon vocabulary. */
+.room-jjump { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted-2); font: inherit; font-size: 11px; font-weight: 600; padding: 2px 8px; cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, background .12s, border-color .12s; }
+.room-jstep:hover .room-jjump, .room-jjump:focus-visible { opacity: 1; }
+.room-jjump:hover { background: var(--accent-soft); border-color: var(--rm-accent-line); color: var(--accent); }
 
 .room-jwhy { margin: 3px 0 0 64px; color: var(--muted); font-size: 12px; font-style: italic; max-width: 68ch; }
 .room-jwhy-l { font-style: normal; color: var(--muted-2); font-size: 10.5px; }
