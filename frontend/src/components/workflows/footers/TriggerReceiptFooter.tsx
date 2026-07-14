@@ -97,11 +97,11 @@ function scheduleDigest(out: Record<string, unknown>): TriggerDigest | null {
   return { tone: "success", label: scheduledFor };
 }
 
-/** trigger.manual → `由 {actor}` when the actor is known, else the neutral `手動`. */
+/** trigger.manual → `by {actor}` when the actor is known, else the neutral `Manual`. */
 function manualDigest(out: Record<string, unknown>): TriggerDigest {
   const actor = readString(out, "actor") ?? readString(out, "triggeredBy") ?? readString(out, "user");
 
-  return { tone: "success", label: actor ? `由 ${actor}` : "手動" };
+  return { tone: "success", label: actor ? `by ${actor}` : "Manual" };
 }
 
 /** Trim a PR/issue title for the one-line receipt so a long title never widens the card. */

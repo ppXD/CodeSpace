@@ -76,7 +76,7 @@ describe("resolveBinding (follow / pin effective turn)", () => {
 
 /**
  * The D3 forward-jump gate — a journal step exposes a canvas node only when the backend attached one, so the
- * "在畫布查看" affordance is never offered without a real target (a fabricated node would setCenter on nothing).
+ * "在Canvas查看" affordance is never offered without a real target (a fabricated node would setCenter on nothing).
  */
 describe("journalStepNodeId (the no-id → no-affordance gate)", () => {
   const step = (over: Partial<JournalStep>): JournalStep => ({

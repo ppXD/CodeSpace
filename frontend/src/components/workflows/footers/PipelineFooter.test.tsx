@@ -50,9 +50,9 @@ describe("pipelineDigest — git.integrate outcomes", () => {
     expect(text).toContain("base SHA mismatch");
   });
 
-  it("Empty → muted '無可整合'", () => {
+  it("Empty → muted 'Nothing to integrate'", () => {
     const digest = pipelineDigest("git.integrate", rowWith({ status: "Empty", appliedCount: 0, conflicts: [] }));
-    expect(labelText(digest)).toContain("無可整合");
+    expect(labelText(digest)).toContain("Nothing to integrate");
   });
 
   it("returns null for an unknown integration status", () => {
@@ -77,10 +77,10 @@ describe("pipelineDigest — agent.run_command exit codes", () => {
     expect(labelText(digest)).toContain("exit 1");
   });
 
-  it("TimedOut → a clock glyph + 逾時 (warn)", () => {
+  it("TimedOut → a clock glyph + Timed out (warn)", () => {
     const digest = pipelineDigest("agent.run_command", rowWith({ exitCode: -1, status: "TimedOut", stdoutBytes: 0, stderrBytes: 0 }));
     expect(digest?.tone).toBe("warn");
-    expect(labelText(digest)).toContain("逾時");
+    expect(labelText(digest)).toContain("Timed out");
   });
 
   it("shows a 📎 when the full output was preserved as an artifact", () => {
@@ -149,7 +149,7 @@ describe("PipelineFooter — git.integrate", () => {
 
     expect(container.querySelector(".wf-pf-int")?.getAttribute("data-outcome")).toBe("conflicted");
     expect(container.querySelector(".wf-rf-digest")?.getAttribute("data-tone")).toBe("warn");
-    expect(container.querySelector(".wf-pf-reassure")?.textContent).toContain("什麼都沒推");
+    expect(container.querySelector(".wf-pf-reassure")?.textContent).toContain("Nothing pushed");
     expect(container.textContent).toContain("fix-auth");
     expect(container.textContent).toContain("base SHA mismatch");
   });

@@ -7,6 +7,7 @@ import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
 import { compactAge, humanizeRunError, runDuration, runStatusTone, type CockpitFilter } from "./cockpit";
 import { runKindLabel, sourceLabel } from "./runsIndex";
+import { shortRunTitle } from "@/lib/runTitle";
 import { summarizeRunState } from "./runPhases";
 
 /** How many suspended runs the default-board Needs-attention zone previews before it collapses to "View all N". */
@@ -141,7 +142,7 @@ function SuspendedRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: 
     <div className="cockpit-attn-row" onClick={() => onOpen(run)}>
       <span className="run-row2-tile" data-tone="suspended" aria-hidden="true"><Ic.Pause size={13} /></span>
       <div className="cockpit-attn-body">
-        <div className="cockpit-attn-title">{title} <span className="cockpit-attn-sub">suspended</span></div>
+        <div className="cockpit-attn-title" title={title}>{shortRunTitle(title)} <span className="cockpit-attn-sub">suspended</span></div>
         <div className="cockpit-attn-meta">{sourceLabel(run.rootSourceType)} · waiting {compactAge(run.startedAt ?? run.createdDate, nowMs)}</div>
       </div>
       <button type="button" className="btn cockpit-attn-act" onClick={(e) => { e.stopPropagation(); onOpen(run); }}>Review →</button>
@@ -167,7 +168,7 @@ function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phas
       <span className="run-row2-tile" data-tone="running" aria-hidden="true"><span className="runs-row-spin" /></span>
       <div className="cockpit-live-body">
         <div className="cockpit-live-title">
-          <span className="cockpit-live-name">{title}</span>
+          <span className="cockpit-live-name" title={title}>{shortRunTitle(title)}</span>
           {rerunning && <span className="cockpit-live-rerun"><Ic.Branch size={10} aria-hidden="true" /> rerunning · attempt {run.attemptCount}</span>}
         </div>
         <div className="cockpit-live-meta">{parts.length > 0 ? parts.join(" · ") : run.status}</div>
@@ -211,7 +212,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
       <span className="run-row2-tile" data-tone={tone} aria-hidden="true"><RunGlyph status={run.status} /></span>
       <div className="run-row2-body">
         <div className="run-row2-l1">
-          <span className="run-row2-title" title={title}>{title}</span>
+          <span className="run-row2-title" title={title}>{shortRunTitle(title)}</span>
           <span className="run-row2-type" data-type={run.runKind}>{runKindLabel(run.runKind)}</span>
           {version && <span className="run-row2-ver">{version}</span>}
           {run.attemptCount > 1 && (

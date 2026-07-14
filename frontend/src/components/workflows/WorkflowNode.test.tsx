@@ -160,7 +160,7 @@ describe("WorkflowNode coze-style result footer", () => {
 
   it("shows no duration while a node is still running", () => {
     // A receipt-family node pins the generic coze bar's mid-run behavior (no duration until the row completes).
-    // llm.complete now owns the bespoke tokenStream footer, whose Running treatment (生成中 + a live estimate /
+    // llm.complete now owns the bespoke tokenStream footer, whose Running treatment (Generating + a live estimate /
     // elapsed) is covered in TokenStreamFooter.test.tsx.
     const run = renderNode({
       typeKey: "trigger.manual", category: "Triggers",
@@ -250,7 +250,7 @@ describe("WorkflowNode result footer — agent.run + sub-workflow embeds (S3)", 
     expect(run.container.querySelector(".wf-rf-node")?.getAttribute("data-run-status")).toBe("Running");
     // Footer: agent.run routes to the agent feed, whose live "working" head is the not-idle signal
     // (the feed's own moods — working vs awaiting-approval vs receipt — are covered in AgentFeedFooter.test.tsx).
-    expect(run.container.querySelector(".wf-rf-feed-title")?.textContent).toBe("代理工作中");
+    expect(run.container.querySelector(".wf-rf-feed-title")?.textContent).toBe("Agent working");
   });
 
   it("keeps a node Suspended once its agent is no longer active", () => {
@@ -335,7 +335,7 @@ describe("ContainerNode live header counter (C2)", () => {
     expect(meta?.textContent).toContain("3/5");        // done / total
     expect(meta?.textContent).toContain("branches");
     expect(meta?.textContent).toContain("1 running");
-    expect(meta?.textContent).toContain("等待");        // the Suspended branch reads as waiting, per B4
+    expect(meta?.textContent).toContain("waiting");        // the Suspended branch reads as waiting, per B4
   });
 
   it("loop header reads the current pass = highest iteration index + 1", () => {
@@ -345,8 +345,7 @@ describe("ContainerNode live header counter (C2)", () => {
       runRows: [loopRow(0), loopRow(1), loopRow(2, "Running")],
     });
     const meta = run.container.querySelector(".wf-rf-loop-meta");
-    expect(meta?.textContent).toContain("第 3");   // indices #0..#2 → 3rd pass
-    expect(meta?.textContent).toContain("輪");
+    expect(meta?.textContent).toContain("Round 3");   // indices #0..#2 → 3rd pass
     expect(meta?.textContent).not.toContain("/");  // no maxIterations on the card → no "/ N" suffix
   });
 
@@ -357,7 +356,7 @@ describe("ContainerNode live header counter (C2)", () => {
       config: { maxIterations: 5 },
       runRows: [loopRow(0), loopRow(1), loopRow(2)],
     });
-    expect(run.container.querySelector(".wf-rf-loop-meta")?.textContent).toContain("第 3 / 5 輪");
+    expect(run.container.querySelector(".wf-rf-loop-meta")?.textContent).toContain("Round 3 / 5");
   });
 
   it("try header is deferred — renders the frame but no meta (routingHints not on the run row)", () => {

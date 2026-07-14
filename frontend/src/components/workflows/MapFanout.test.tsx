@@ -75,12 +75,12 @@ describe("MapFanout", () => {
     expect(container.querySelector(".wf-rf-fanout")).toBeNull();
   });
 
-  it("counts a Suspended branch as waiting — a '· N 等待' summary entry + a waiting dot (distinct from running)", () => {
+  it("counts a Suspended branch as waiting — a '· N waiting' summary entry + a waiting dot (distinct from running)", () => {
     const rows = [branch(0, "Success"), branch(1, "Suspended"), branch(2, "Running")];
 
     const { container } = render(<MapFanout rows={rows} renderBranch={() => null} />);
 
-    expect(screen.getByText("· 1 等待")).toBeInTheDocument();
+    expect(screen.getByText("· 1 waiting")).toBeInTheDocument();
     expect(screen.getByText("1 running")).toBeInTheDocument();                                     // Suspended no longer folds into running
     expect(container.querySelector('.wf-rf-fanout-dot[data-state="waiting"]')).not.toBeNull();
   });

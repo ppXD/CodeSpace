@@ -67,15 +67,15 @@ function classifyWaitKind(typeKey: string, liveKind?: string): WaitKind {
 /** The fixed label + glyph for a kind — the headline is overridden per-kind by payload where richer (a decision's question, a plan version). */
 function kindPresentation(kind: WaitKind): { label: string; glyph: ReactNode } {
   switch (kind) {
-    case "approval": return { label: "等待核准", glyph: <Ic.Bell size={12} /> };
-    case "planConfirm": return { label: "計畫待確認", glyph: <Ic.Check size={12} /> };
-    case "action": return { label: "等待動作", glyph: <Ic.Zap size={12} /> };
-    case "callback": return { label: "等外部回呼", glyph: <Ic.Link size={12} /> };
-    case "timer": return { label: "睡眠中", glyph: <Ic.Clock size={12} /> };
-    case "decision": return { label: "等待決定", glyph: <Ic.Help size={12} /> };
-    case "subworkflow": return { label: "等待子工作流", glyph: <Ic.ArrowOut size={12} /> };
-    case "message": return { label: "等待中", glyph: <Ic.Bell size={12} /> };
-    default: return { label: "等待中", glyph: <Ic.Pause size={12} /> };
+    case "approval": return { label: "Awaiting approval", glyph: <Ic.Bell size={12} /> };
+    case "planConfirm": return { label: "Plan pending confirmation", glyph: <Ic.Check size={12} /> };
+    case "action": return { label: "Awaiting action", glyph: <Ic.Zap size={12} /> };
+    case "callback": return { label: "Awaiting callback", glyph: <Ic.Link size={12} /> };
+    case "timer": return { label: "Sleeping", glyph: <Ic.Clock size={12} /> };
+    case "decision": return { label: "Awaiting decision", glyph: <Ic.Help size={12} /> };
+    case "subworkflow": return { label: "Awaiting subworkflow", glyph: <Ic.ArrowOut size={12} /> };
+    case "message": return { label: "Waiting", glyph: <Ic.Bell size={12} /> };
+    default: return { label: "Waiting", glyph: <Ic.Pause size={12} /> };
   }
 }
 
@@ -85,7 +85,7 @@ function waitBarLabel(kind: WaitKind, base: string, payload: Record<string, unkn
 
   if (kind === "planConfirm") {
     const v = payload ? readVersion(payload) : undefined;
-    return v != null ? `計畫待確認 v${v}` : base;
+    return v != null ? `Plan pending confirmation v${v}` : base;
   }
 
   return base;
@@ -128,7 +128,7 @@ function WaitTiming({ wait, now, payload }: { wait: WaitSignal | null; now: numb
     const onTimeout = payload ? readStr(payload, "defaultAction", "onTimeout", "timeoutAction", "onTimeoutAction", "default") : undefined;
 
     return (
-      <span className="wf-wait-time" title="倒數至逾時">
+      <span className="wf-wait-time" title="Countdown to timeout">
         <span className="wf-ring" style={{ "--wf-ring-p": `${pct}%` } as CSSProperties} aria-hidden="true" />
         <span className="wf-wait-count">{formatCountdown(wait.deadlineAtMs, now)}</span>
         {onTimeout && <span className="wf-wait-default">→ {onTimeout}</span>}
@@ -138,7 +138,7 @@ function WaitTiming({ wait, now, payload }: { wait: WaitSignal | null; now: numb
 
   return (
     <span className="wf-wait-time">
-      <span className="wf-wait-parked">已暫停{wait ? ` ${formatElapsed(now - wait.sinceMs)}` : ""}</span>
+      <span className="wf-wait-parked">Parked{wait ? ` ${formatElapsed(now - wait.sinceMs)}` : ""}</span>
     </span>
   );
 }
@@ -152,7 +152,7 @@ function WaitDetail({ kind, payload, wait, rows }: { kind: WaitKind; payload: Re
 
   if (kind === "action") {
     const action = payload ? readStr(payload, "action", "actionKey", "actionKind") : undefined;
-    return action ? <div className="wf-wait-detail">動作鍵 <code>{action}</code></div> : null;
+    return action ? <div className="wf-wait-detail">Action key <code>{action}</code></div> : null;
   }
 
   if (kind === "callback") {
@@ -161,13 +161,13 @@ function WaitDetail({ kind, payload, wait, rows }: { kind: WaitKind; payload: Re
   }
 
   if (kind === "timer") {
-    if (wait?.deadlineAtMs) return <div className="wf-wait-detail">醒來 {new Date(wait.deadlineAtMs).toLocaleTimeString()}</div>;
+    if (wait?.deadlineAtMs) return <div className="wf-wait-detail">Wakes {new Date(wait.deadlineAtMs).toLocaleTimeString()}</div>;
     return null;
   }
 
   if (kind === "subworkflow") {
     const childRunId = rows[0]?.childRunId;
-    return childRunId ? <div className="wf-wait-detail">子工作流 <code>{childRunId}</code></div> : null;
+    return childRunId ? <div className="wf-wait-detail">Subworkflow <code>{childRunId}</code></div> : null;
   }
 
   return null;
@@ -181,7 +181,7 @@ function CallbackRow({ url }: { url: string }) {
   return (
     <div className="wf-wait-cb">
       <input className="wf-wait-cb-url" readOnly value={url} onFocus={(e) => e.currentTarget.select()} />
-      <button type="button" className="wf-wait-cb-copy" onClick={copy}><Ic.Copy size={11} /> {copied ? "已複製" : "複製"}</button>
+      <button type="button" className="wf-wait-cb-copy" onClick={copy}><Ic.Copy size={11} /> {copied ? "Copied" : "Copy"}</button>
     </div>
   );
 }
@@ -197,14 +197,14 @@ function WaitActions({ kind, typeKey }: { kind: WaitKind; typeKey: string }) {
   if (typeKey === "flow.wait_approval" && actions?.runId) return <ApprovalActions runId={actions.runId} />;
 
   if (kind === "decision" || kind === "action" || kind === "planConfirm" || kind === "approval") {
-    return <div className="wf-wait-hint">在執行詳情回覆</div>;
+    return <div className="wf-wait-hint">Respond in the run detail</div>;
   }
 
   return null;
 }
 
 /**
- * Inline approve / reject buttons reusing the run's resume mutation. Optimistic: a click flips to "已送出…"
+ * Inline approve / reject buttons reusing the run's resume mutation. Optimistic: a click flips to "Submitted…"
  * immediately; on error it rolls back to the buttons and surfaces the failure inline (no global toast system
  * exists — SuspendedPanel likewise shows an inline error). On success the run leaves Suspended and the poll
  * re-renders this node out of the wait state.
@@ -218,13 +218,13 @@ function ApprovalActions({ runId }: { runId: string }) {
     resume.mutate({ approved, comment: undefined }, { onError: () => setSubmitted(false) });
   };
 
-  if (submitted) return <div className="wf-wait-sent">已送出…</div>;
+  if (submitted) return <div className="wf-wait-sent">Submitted…</div>;
 
   return (
     <div className="wf-wait-approve">
-      <button type="button" className="wf-wait-btn wf-wait-btn-ok" onClick={() => decide(true)} disabled={resume.isPending}>批准</button>
-      <button type="button" className="wf-wait-btn wf-wait-btn-no" onClick={() => decide(false)} disabled={resume.isPending}>駁回</button>
-      {resume.isError && <span className="wf-wait-err" role="alert">送出失敗，請重試</span>}
+      <button type="button" className="wf-wait-btn wf-wait-btn-ok" onClick={() => decide(true)} disabled={resume.isPending}>Approve</button>
+      <button type="button" className="wf-wait-btn wf-wait-btn-no" onClick={() => decide(false)} disabled={resume.isPending}>Reject</button>
+      {resume.isError && <span className="wf-wait-err" role="alert">Submit failed — please retry</span>}
     </div>
   );
 }
@@ -295,7 +295,7 @@ export function waitResolution(typeKey: string, rows: WorkflowRunNodeSummary[]):
 
     const who = readStr(o, "approvedBy", "answeredBy", "decidedBy", "by");
     const suffix = who ? ` · ${who}` : "";
-    return approved ? { label: `✓ 已核准${suffix}`, tone: "ok" } : { label: `✗ 已駁回${suffix}`, tone: "reject" };
+    return approved ? { label: `✓ Approved${suffix}`, tone: "ok" } : { label: `✗ Rejected${suffix}`, tone: "reject" };
   }
 
   if (kind === "decision") {
@@ -303,7 +303,7 @@ export function waitResolution(typeKey: string, rows: WorkflowRunNodeSummary[]):
     if (!choice) return null;
 
     const who = readStr(o, "answeredBy", "decidedBy", "by");
-    return { label: `已選 ${choice}${who ? ` · ${who}` : ""}`, tone: "ok" };
+    return { label: `Chose ${choice}${who ? ` · ${who}` : ""}`, tone: "ok" };
   }
 
   if (kind === "action") {
@@ -311,7 +311,7 @@ export function waitResolution(typeKey: string, rows: WorkflowRunNodeSummary[]):
     if (!action) return null;
 
     const who = readStr(o, "responder", "respondedBy", "by");
-    return { label: `動作 ${action}${who ? ` · ${who}` : ""}`, tone: "ok" };
+    return { label: `Action ${action}${who ? ` · ${who}` : ""}`, tone: "ok" };
   }
 
   return null;

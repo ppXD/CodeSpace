@@ -67,12 +67,12 @@ function renderFooter(props: Partial<NodeFooterProps> & { status: NodeStatus }, 
 describe("waitResolution", () => {
   it("stamps an approved approval with who approved it", () => {
     expect(waitResolution("flow.wait_approval", [row({ outputs: { approved: true, approvedBy: "alice" } })]))
-      .toEqual({ label: "✓ 已核准 · alice", tone: "ok" });
+      .toEqual({ label: "✓ Approved · alice", tone: "ok" });
   });
 
   it("stamps a rejected approval", () => {
     expect(waitResolution("flow.wait_approval", [row({ outputs: { approved: false } })]))
-      .toEqual({ label: "✗ 已駁回", tone: "reject" });
+      .toEqual({ label: "✗ Rejected", tone: "reject" });
   });
 
   it("stamps a decision's chosen option", () => {
@@ -111,7 +111,7 @@ describe("WaitFooter — Suspended", () => {
     const { container } = renderFooter({ status: "Suspended", data: nodeData({ typeKey: "flow.sleep" }) });
 
     expect(container.querySelector(".wf-ring")).toBeNull();
-    expect(screen.getByText(/已暫停/).textContent).toContain("0:30");
+    expect(screen.getByText(/Parked/).textContent).toContain("0:30");
     expect(container.querySelector(".wf-rf-status-spin")).toBeNull();
   });
 
@@ -121,7 +121,7 @@ describe("WaitFooter — Suspended", () => {
     const { container } = renderFooter({ status: "Suspended", data: nodeData({ typeKey: "flow.decision" }) });
 
     expect(container.querySelector(".wf-rf-status-spin")).toBeNull();
-    expect(screen.getByText("等待決定")).toBeTruthy();                    // decision kind label from typeKey
+    expect(screen.getByText("Awaiting decision")).toBeTruthy();                    // decision kind label from typeKey
   });
 });
 
@@ -134,7 +134,7 @@ describe("WaitFooter — resolved", () => {
 
     const stamp = container.querySelector(".wf-wait-stamp");
     expect(stamp?.getAttribute("data-tone")).toBe("ok");
-    expect(stamp?.textContent).toContain("已核准");
+    expect(stamp?.textContent).toContain("Approved");
     expect(stamp?.textContent).toContain("bob");
   });
 });
@@ -145,7 +145,7 @@ describe("WaitFooter — inline approval", () => {
 
     renderFooter({ status: "Suspended" }, "run-1");
 
-    fireEvent.click(screen.getByText("批准"));
+    fireEvent.click(screen.getByText("Approve"));
 
     expect(resumeMutate).toHaveBeenCalledWith({ approved: true, comment: undefined }, expect.anything());
   });
@@ -155,7 +155,7 @@ describe("WaitFooter — inline approval", () => {
 
     renderFooter({ status: "Suspended" }, "run-1");
 
-    fireEvent.click(screen.getByText("駁回"));
+    fireEvent.click(screen.getByText("Reject"));
 
     expect(resumeMutate).toHaveBeenCalledWith({ approved: false, comment: undefined }, expect.anything());
   });

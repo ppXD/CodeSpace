@@ -9,7 +9,7 @@ import { useNodeManifests, useWorkflowRun } from "@/hooks/use-workflows";
 export type PaneView = "canvas" | "changes" | "trace";
 
 /** The three mini-tabs, in strip order. Kept as one source of truth so the strip + the body switch never drift. */
-const PANE_TABS: readonly [PaneView, string][] = [["canvas", "畫布"], ["changes", "變更"], ["trace", "紀錄"]];
+const PANE_TABS: readonly [PaneView, string][] = [["canvas", "Canvas"], ["changes", "Changes"], ["trace", "Trace"]];
 
 /**
  * The run companion pane — a right-docked panel inside the Session Room that mounts the run's live
@@ -17,25 +17,25 @@ const PANE_TABS: readonly [PaneView, string][] = [["canvas", "畫布"], ["change
  * card. The Claude-artifacts / ChatGPT-canvas pattern: the canvas travels WITH the conversation instead
  * of taking over in a modal, so the chat column stays live beside it.
  *
- * D5 makes the D1 tab strip functional: three mini-tabs — 畫布 (the canvas, unchanged) / 變更 (the change
- * set, an honest coming-soon placeholder until its projector ships) / 紀錄 (the run's raw append-only
+ * D5 makes the D1 tab strip functional: three mini-tabs — Canvas (the canvas, unchanged) / Changes (the change
+ * set, an honest coming-soon placeholder until its projector ships) / Trace (the run's raw append-only
  * {@link RunTrace} ledger). The `view` is controlled (SessionRoomView drives it from `?pane=` for deep-links);
- * when the caller omits `view`/`onViewChange` the pane manages it internally, defaulting to 畫布. RunCanvas's
+ * when the caller omits `view`/`onViewChange` the pane manages it internally, defaulting to Canvas. RunCanvas's
  * props are assembled exactly as RunDetailView does (useWorkflowRun for the pinned definition + nodes + status,
  * the node manifests for the icons) so the pane and the full-page run canvas never drift; `onOpenRun` is threaded
  * through unchanged, so a sub-workflow drill still uses the existing full-page/modal path.
  */
 export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLatest, onJumpToLatest, onViewChange, onClose, onOpenRun, onGripPointerDown, focusNodeId }: {
   runId: string;
-  /** The turn number this pane is bound to (the EFFECTIVE turn — latest in follow mode, the pinned one in pinned mode). The title reads "畫布 · 回合 {N}". */
+  /** The turn number this pane is bound to (the EFFECTIVE turn — latest in follow mode, the pinned one in pinned mode). The title reads "Canvas · Turn {N}". */
   turn: number;
-  /** The active mini-tab, controlled by the URL via SessionRoomView. Omit to manage it internally (defaults to 畫布). */
+  /** The active mini-tab, controlled by the URL via SessionRoomView. Omit to manage it internally (defaults to Canvas). */
   view?: PaneView;
-  /** The D2 follow/pin binding mode — drives the header toggle label + the "跟隨中" title hint. Omit to hide the toggle (standalone / test). */
+  /** The D2 follow/pin binding mode — drives the header toggle label + the "Following" title hint. Omit to hide the toggle (standalone / test). */
   mode?: "follow" | "pinned";
   /** Fires when the follow/pin toggle is clicked — SessionRoomView flips the binding (pinned↔follow). Omit to hide the toggle. */
   onToggleBind?: () => void;
-  /** When the pane is pinned behind a live newer turn, the latest turn number M → renders the "最新:回合 M 執行中 →" jump chip. Null/undefined hides it. */
+  /** When the pane is pinned behind a live newer turn, the latest turn number M → renders the "Latest: Turn M Running →" jump chip. Null/undefined hides it. */
   jumpToLatest?: number | null;
   /** Fires when the jump-to-latest chip is clicked — SessionRoomView switches the binding to follow. */
   onJumpToLatest?: () => void;
@@ -46,7 +46,7 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
   onOpenRun?: (runId: string) => void;
   /** Wired to the header's ⋮⋮ grip so dragging it resizes the split (same handler as the column divider). */
   onGripPointerDown?: (e: ReactPointerEvent) => void;
-  /** D3 forward jump: the canvas node to center + ring (the `?node=` deep-link a journal jump set). Only the 畫布 tab
+  /** D3 forward jump: the canvas node to center + ring (the `?node=` deep-link a journal jump set). Only the Canvas tab
    *  consumes it; the other tabs ignore it. Undefined leaves the canvas at fitView. */
   focusNodeId?: string;
 }) {
@@ -67,37 +67,37 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
   const r = run.data;
 
   return (
-    <aside className="room-pane" aria-label={`回合 ${turn} 的執行畫布`}>
-      {/* D2 pane follow/pin — the title carries a 跟隨中 hint in follow mode; the toggle flips follow↔pin; the jump chip
+    <aside className="room-pane" aria-label={`Execution canvas for turn ${turn}`}>
+      {/* D2 pane follow/pin — the title carries a Following hint in follow mode; the toggle flips follow↔pin; the jump chip
           (pinned behind a live newer turn) rebinds to follow. All are hidden when `mode` isn't supplied (standalone). */}
       <div className="room-pane-head">
         {onGripPointerDown && (
-          <span className="room-pane-grip" onPointerDown={onGripPointerDown} title="拖曳調整寬度" aria-hidden="true">⋮⋮</span>
+          <span className="room-pane-grip" onPointerDown={onGripPointerDown} title="Drag to resize" aria-hidden="true">⋮⋮</span>
         )}
-        <button className="room-pane-back" onClick={onClose} title="返回對話" aria-label="返回對話">‹</button>
-        <span className="room-pane-title">畫布 · 回合 {turn}</span>
-        {mode === "follow" && <span className="room-pane-follow-hint">跟隨中</span>}
+        <button className="room-pane-back" onClick={onClose} title="Back to conversation" aria-label="Back to conversation">‹</button>
+        <span className="room-pane-title">Canvas · Turn {turn}</span>
+        {mode === "follow" && <span className="room-pane-follow-hint">Following</span>}
         {mode && onToggleBind && (
           <button
             className="room-pane-bind"
             data-mode={mode}
             onClick={onToggleBind}
-            title={mode === "follow" ? "跟隨最新回合 — 點擊改為釘選這一回合" : "已釘選這一回合 — 點擊改為跟隨最新"}
+            title={mode === "follow" ? "Following the latest turn — click to pin this one" : "Pinned to this turn — click to follow the latest"}
           >
-            {mode === "follow" ? "📍 跟隨最新回合" : "📌 已釘選"}
+            {mode === "follow" ? "📍 Follow latest" : "📌 Pinned"}
           </button>
         )}
         {jumpToLatest != null && (
-          <button className="room-pane-jump" onClick={onJumpToLatest} title="切換到最新回合的執行畫布">
-            最新:回合 {jumpToLatest} 執行中 →
+          <button className="room-pane-jump" onClick={onJumpToLatest} title="Switch to the latest turn's canvas">
+            Latest: Turn {jumpToLatest} Running →
           </button>
         )}
         {r && <RunStatusBadge status={r.status} />}
-        <button className="room-pane-close" onClick={onClose} title="關閉畫布" aria-label="關閉畫布">✕</button>
+        <button className="room-pane-close" onClick={onClose} title="Close canvas" aria-label="Close canvas">✕</button>
       </div>
 
-      {/* D5 pane mini-tabs — 畫布 / 變更 / 紀錄, the D1 strip made real. Each is a tab button; the active one tracks `view`. */}
-      <div className="room-pane-tabs" role="tablist" aria-label="畫布檢視">
+      {/* D5 pane mini-tabs — Canvas / Changes / Trace, the D1 strip made real. Each is a tab button; the active one tracks `view`. */}
+      <div className="room-pane-tabs" role="tablist" aria-label="Canvas views">
         {PANE_TABS.map(([key, label]) => (
           <button
             key={key}
@@ -116,13 +116,13 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
       {activeView === "canvas" ? (
         <div className="room-pane-body room-pane-canvas">
           {run.isLoading ? (
-            <div className="room-pane-empty">載入執行圖…</div>
+            <div className="room-pane-empty">Loading execution graph…</div>
           ) : !r ? (
-            <div className="room-pane-empty">找不到這個執行紀錄。</div>
+            <div className="room-pane-empty">Execution record not found.</div>
           ) : r.definition ? (
             <RunCanvas definition={r.definition} runNodes={r.nodes} runStatus={r.status} manifestByType={manifestByType} runId={runId} onOpenRun={onOpenRun} focusNodeId={focusNodeId} />
           ) : (
-            <div className="room-pane-empty">這次執行沒有可顯示的流程快照。</div>
+            <div className="room-pane-empty">This run has no flow snapshot to show.</div>
           )}
         </div>
       ) : activeView === "trace" ? (
@@ -131,7 +131,7 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
         </div>
       ) : (
         <div className="room-pane-body room-pane-scroll">
-          <PaneComingSoon title="Changes" note="這次執行新增或修改的檔案 — 逐倉庫的變更集、diff，以及它開出的 PR。等變更投影上線後會顯示在這裡。" />
+          <PaneComingSoon title="Changes" note="The files this run added or changed — the per-repository change set, diffs, and any PR it opened. This appears here once the changes projection ships." />
         </div>
       )}
     </aside>
@@ -139,7 +139,7 @@ export function RoomRunPane({ runId, turn, view, mode, onToggleBind, jumpToLates
 }
 
 /**
- * An honest placeholder for the 變更 tab, whose change-set projector hasn't shipped yet. Keeps the tab visible so the
+ * An honest placeholder for the Changes tab, whose change-set projector hasn't shipped yet. Keeps the tab visible so the
  * pane reads as the intended whole, while being explicit the data is coming — never a fake-empty panel. Mirrors
  * RunDetailView's `RunTabComingSoon` copy, scoped to the pane so the pane doesn't pull in the whole run-detail module.
  */

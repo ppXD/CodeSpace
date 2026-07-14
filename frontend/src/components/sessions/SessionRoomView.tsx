@@ -46,6 +46,7 @@ import { useAlert, useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 import { statusWord } from "@/lib/runStatus";
+import { shortRunTitle } from "@/lib/runTitle";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
 import { useNowTick } from "@/hooks/use-now-tick";
 import { liveRunSummary } from "./live-run-summary";
@@ -72,7 +73,7 @@ const JournalContext = createContext<JournalView | null>(null);
 const useJournal = () => useContext(JournalContext);
 
 /**
- * D3 forward jump — a journal beat's "在畫布查看" opens the companion pane on THIS turn's canvas, focused on a node.
+ * D3 forward jump — a journal beat's "在Canvas查看" opens the companion pane on THIS turn's canvas, focused on a node.
  * The turn is captured once at the {@link AssistantTurn} level (which knows its turnIndex + runId), so a deep consumer
  * (a {@link JournalStepRow}) passes only the nodeId. Null when the turn has no runId (no canvas to open) — the
  * affordance then doesn't render, so a jump is never offered without a real target.
@@ -81,7 +82,7 @@ const PaneNodeFocusContext = createContext<((nodeId: string) => void) | null>(nu
 const usePaneNodeFocus = () => useContext(PaneNodeFocusContext);
 
 /**
- * The canvas node a journal step maps to — the gate for its "在畫布查看" jump. A step that carries no `nodeId` (a
+ * The canvas node a journal step maps to — the gate for its "在Canvas查看" jump. A step that carries no `nodeId` (a
  * supervisor decision with no workflow cell, a model call, plain lifecycle housekeeping) resolves to null, so no jump
  * affordance is rendered: we never fabricate a node target. Exported for the unit test that pins the no-id → no-affordance gate.
  */
@@ -206,7 +207,7 @@ function useRoomPaneFrac() {
  * owns no copy / order / status; an unknown block degrades to a faint line. The design palette IS the project warm
  * theme, but the design's deeper semantic colors (good/blue/err + bg/line variants) are scoped to `.room-room`.
  */
-export function SessionRoomView({ teamSlug, room, parentRunId, journal, initialPaneTurn, initialPaneView, initialPaneNode, onPaneChange }: { teamSlug: string; room: RoomView; parentRunId?: string; journal?: JournalView | null; initialPaneTurn?: number | null; initialPaneView?: PaneView; initialPaneNode?: string | null; onPaneChange?: (view: PaneView | null, turn: number | null, node: string | null) => void }) {
+export function SessionRoomView({ teamSlug, room, journal, initialPaneTurn, initialPaneView, initialPaneNode, onPaneChange }: { teamSlug: string; room: RoomView; journal?: JournalView | null; initialPaneTurn?: number | null; initialPaneView?: PaneView; initialPaneNode?: string | null; onPaneChange?: (view: PaneView | null, turn: number | null, node: string | null) => void }) {
   const navigate = useNavigate();
 
   const nowMs = useNowTick();
@@ -248,7 +249,7 @@ export function SessionRoomView({ teamSlug, room, parentRunId, journal, initialP
     else onPaneChange?.(next.view, next.mode === "pinned" ? next.turn : null, next.node ?? null);
   };
 
-  // Summon from a turn's ⧉ 畫布 card / footer action → PIN the pane to that turn (a deliberate "show me THIS turn"), on
+  // Summon from a turn's ⧉ Canvas card / footer action → PIN the pane to that turn (a deliberate "show me THIS turn"), on
   // the given mini-tab (canvas by default, trace when summoned from a failure diagnostic). No node → the whole-map view
   // (and clears any prior ?node focus, since a different turn is now in view).
   const summonPane = (turn: number, view: PaneView = "canvas") => commitBinding({ open: true, mode: "pinned", turn, view });
@@ -269,7 +270,7 @@ export function SessionRoomView({ teamSlug, room, parentRunId, journal, initialP
   // The jump-to-latest chip (shown only while pinned behind a live newer turn) → switch to follow (rebind to latest).
   const jumpToLatest = () => { if (binding.open) commitBinding({ open: true, mode: "follow", view: binding.view }); };
 
-  // Switching mini-tab keeps the same turn, so the node focus is preserved (it re-applies when the 畫布 tab is back).
+  // Switching mini-tab keeps the same turn, so the node focus is preserved (it re-applies when the Canvas tab is back).
   const changePaneView = (view: PaneView) => {
     if (!binding.open) return;
     commitBinding(binding.mode === "pinned" ? { open: true, mode: "pinned", turn: binding.turn, view, node: binding.node } : { open: true, mode: "follow", view, node: binding.node });
@@ -308,14 +309,8 @@ export function SessionRoomView({ teamSlug, room, parentRunId, journal, initialP
         <div className="room-head-top">
           <nav className="room-crumbs">
             <a onClick={() => navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug } })}>Runs</a>
-            {parentRunId && (
-              <>
-                <span className="room-crumb-sep">/</span>
-                <a title="回到上層 run" onClick={() => navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: parentRunId } })}>← 上層 run</a>
-              </>
-            )}
             <span className="room-crumb-sep">/</span>
-            <span className="room-crumb-cur" title={room.title}>{room.title}</span>
+            <span className="room-crumb-cur" title={room.title}>{shortRunTitle(room.title)}</span>
           </nav>
           <div className="room-head-icons">
             <button className="room-icon-btn" title="Copy link to this session" onClick={() => navigator.clipboard?.writeText(window.location.href)}><Sym n="link" s={16} /></button>
@@ -374,8 +369,8 @@ export function SessionRoomView({ teamSlug, room, parentRunId, journal, initialP
 
         {effPane && binding.open && (
           <>
-            <div className="room-divider" onPointerDown={onGripPointerDown} role="separator" aria-orientation="vertical" title="拖曳調整寬度" />
-            {/* TODO(D3-reverse): the canvas→journal direction (a node's "在對話查看此步" scrolls the chat to its journal
+            <div className="room-divider" onPointerDown={onGripPointerDown} role="separator" aria-orientation="vertical" title="Drag to resize" />
+            {/* TODO(D3-reverse): the canvas→journal direction (a node's "view this step in the conversation" scrolls the chat to its journal
                 block) is DEFERRED — it would inject a room-scoped affordance into the shared generic WorkflowNode (also
                 used by the editor) and thread a nodeId→block-scroll callback down through RunCanvas into the node footer.
                 That couples the generic node to the session concern, so it's out of scope here; the forward direction ships. */}
@@ -603,17 +598,24 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
   const live = isRunActive(turn.status);
 
   // D3 forward jump: a per-turn node-focus callback the journal beats consume via PaneNodeFocusContext. Bound to THIS
-  // turn's index; null when the turn has no runId (no canvas to open), so a beat then renders no "在畫布查看" affordance.
+  // turn's index; null when the turn has no runId (no canvas to open), so a beat then renders no "在Canvas查看" affordance.
   const focusPaneNode = onSummonPaneNode && turn.runId ? (nodeId: string) => onSummonPaneNode(turn.turnIndex, nodeId) : null;
 
   // The companion-pane summons for THIS turn — the run detail used to open in a modal (removed in D4); now the footer
-  // "開啟畫布" pins the canvas mini-tab and a failure diagnostic's "查看紀錄" pins the trace mini-tab. Undefined when the
+  // "開啟Canvas" pins the canvas mini-tab and a failure diagnostic's "View trace" pins the trace mini-tab. Undefined when the
   // turn has no run to bind a pane to (or no summon callback is wired — a standalone render).
   const openCanvas = onSummonPane && turn.runId ? () => onSummonPane(turn.turnIndex, "canvas") : undefined;
   const openTrace = onSummonPane && turn.runId ? () => onSummonPane(turn.turnIndex, "trace") : undefined;
   // TODO(D2-followup): auto-collapse non-bound turns to EXECUTION + a one-line summary when the pane is bound to another
   // turn — deferred from D2 (it's a larger AssistantTurn rendering change; D2 ships the binding + toggle + jump chip).
   const [open, setOpen] = useState(anchored || live);
+
+  // Opening a specific run (from the runs list or a deep link) resolves to its turn as the room's anchor. Scroll that
+  // turn into view once on mount so the click lands ON that turn, not at the top of a long multi-turn conversation.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (anchored) rootRef.current?.scrollIntoView?.({ block: "start", behavior: "auto" });
+  }, [anchored]);
 
   const tone = statusTone(turn.status, live);
 
@@ -644,7 +646,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
     <RunActionsContext.Provider value={{ runId: turn.runId, isTerminal: !live }}>
       <RunOpenContext.Provider value={onOpenRun}>
         <PaneNodeFocusContext.Provider value={focusPaneNode}>
-        <div className="room-turn">
+        <div className="room-turn" ref={rootRef}>
           <div className="room-turn-head">
             <span className="room-av"><Sym n="terminal" s={13} /></span>
             <span className="room-av-name">CodeSpace</span>
@@ -795,7 +797,7 @@ function RoomExecution({ steps, turnStatus, onSummon }: { steps: ExecutionMapSte
       <div className="room-exec-head">
         <div className="room-exec-label">Execution</div>
         {/* Summon the run companion pane — opens this turn's RunCanvas docked on the right (Claude-artifacts style). */}
-        {onSummon && <button type="button" className="room-exec-canvas" onClick={onSummon} title="在畫布開啟這回合的執行圖">⧉ 畫布</button>}
+        {onSummon && <button type="button" className="room-exec-canvas" onClick={onSummon} title="Open this turn's execution graph in the canvas"><span className="room-exec-canvas-ic" aria-hidden="true">⧉</span> Open canvas</button>}
       </div>
       <div className="room-exec-flow">
         {steps.map((s, i) => {
@@ -1092,7 +1094,7 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
   // line (like the "└ why" rationale line). Scoped to ASK beats with an answer; a still-pending ask shows just the question.
   const isAsk = step.beat && jVerbKey(step.verb) === "ask";
   const ask = isAsk && step.answer ? askParts(step.detail, step.answer) : null;
-  // D3 forward jump — render the "在畫布查看" chip only when a pane-focus callback is in context (an interactive room with
+  // D3 forward jump — render the "在Canvas查看" chip only when a pane-focus callback is in context (an interactive room with
   // a bound turn) AND this step maps to a real canvas node. A folded/muted background row keeps the timeline clean (no chip).
   const focusNode = usePaneNodeFocus();
   const jumpNodeId = journalStepNodeId(step);
@@ -1107,7 +1109,7 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
         {step.reviewEscalation && <span className="room-jpill room-jpill-blocked">review-blocked</span>}
         <span className="room-jtitle">{step.beat ? jTitle(step.title) : step.title}</span>
         {focusNode && jumpNodeId && !muted && (
-          <button type="button" className="room-jjump" title="在畫布開啟並聚焦這個節點" onClick={() => focusNode(jumpNodeId)}>⧉ 在畫布查看</button>
+          <button type="button" className="room-jjump" title="Open and focus this node in the canvas" onClick={() => focusNode(jumpNodeId)}>⧉ View in canvas</button>
         )}
       </div>
       {step.rationale && <div className="room-jwhy"><span className="room-jwhy-l">└ why · </span>{step.rationale}</div>}
@@ -1851,13 +1853,13 @@ function ErrorCard({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?:
                 className={i === 0 ? "room-btn-primary" : act.kind === "OpenTrace" ? "room-btn-ghost" : "room-btn"}
                 disabled={!act.enabled || (act.kind === "OpenTrace" && !onOpenTrace)}
                 title={act.disabledReason ?? undefined}
-                // The raw run detail used to open in a modal; now "查看紀錄" summons the companion pane on its trace mini-tab.
+                // The raw run detail used to open in a modal; now "View trace" summons the companion pane on its trace mini-tab.
                 onClick={act.kind === "OpenTrace" ? onOpenTrace : undefined}
               >
                 {act.kind === "FixCredentials" && <Sym n="lock" s={13} />}
                 {act.kind === "RerunTurn" && <Sym n="rerun" s={13} />}
                 {act.kind === "OpenTrace" && <Sym n="terminal" s={13} />}
-                {act.kind === "OpenTrace" ? "查看紀錄" : act.label}
+                {act.kind === "OpenTrace" ? "View trace" : act.label}
               </button>
             ))}
           </div>
@@ -1904,7 +1906,7 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
   );
 }
 
-/** The turn footer actions — the doing-actions first (Continue / Re-run / Open PR), then "開啟畫布" LAST. Re-run
+/** The turn footer actions — the doing-actions first (Continue / Re-run / Open PR), then "Open canvas" LAST. Re-run
  *  confirms before firing. Stop is NOT here: while running it lives in the pinned LiveRunBar with the progress it stops.
  *  Capability-gated by the backend (never 422s). */
 function TurnActions({ actions, turn, onOpenCanvas, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenCanvas?: () => void; onOpenRun: (runId: string) => void }) {
@@ -1943,7 +1945,7 @@ function TurnActions({ actions, turn, onOpenCanvas, onOpenRun }: { actions: Room
     if (failure) await alert({ title: "Couldn't open the pull request", message: failure.error, variant: "error" });
   };
 
-  // The doing-actions render first; the pane summon ("開啟畫布") is always last (a quiet ghost). Stop is excluded — the
+  // The doing-actions render first; the pane summon ("開啟Canvas") is always last (a quiet ghost). Stop is excluded — the
   // LiveRunBar owns it while running. Rerun shows ONLY when its capability is enabled (a finished turn shows Rerun). The
   // OpenTrace action is the backend's gate for offering the run's detail; it now summons the companion pane (canvas),
   // not the removed modal.
@@ -1962,7 +1964,7 @@ function TurnActions({ actions, turn, onOpenCanvas, onOpenRun }: { actions: Room
         }
         return null;
       })}
-      {trace && onOpenCanvas && <button className="room-btn-ghost" onClick={onOpenCanvas} title="在畫布開啟這回合的執行圖">⧉ 開啟畫布</button>}
+      {trace && onOpenCanvas && <button className="room-btn-ghost" onClick={onOpenCanvas} title="Open this turn's execution graph in the canvas">⧉ Open canvas</button>}
     </div>
   );
 }

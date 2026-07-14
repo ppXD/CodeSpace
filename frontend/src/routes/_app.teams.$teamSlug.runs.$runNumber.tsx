@@ -107,13 +107,13 @@ function RunDetailPage() {
     );
   }
 
-  return <RunDetail key={run.data.id} teamSlug={teamSlug} runNumber={String(run.data.runNumber)} runId={run.data.id} parentRunId={run.data.parentRunId ?? undefined} />;
+  return <RunDetail key={run.data.id} teamSlug={teamSlug} runNumber={String(run.data.runNumber)} runId={run.data.id} />;
 }
 
 // The Session — the Room frame with the Journal's chronological steps ③ as its middle. The strangler rebuild is complete:
 // the Journal is now the only view (the old room/journal toggle is gone). The room fetch drives the page frame + its
 // retained rich/live blocks; the journal supplies the ③ transcript (undefined until it loads — the frame still renders).
-function RunDetail({ teamSlug, runNumber, runId, parentRunId }: { teamSlug: string; runNumber: string; runId: string; parentRunId?: string }) {
+function RunDetail({ teamSlug, runNumber, runId }: { teamSlug: string; runNumber: string; runId: string }) {
   const navigate = useNavigate();
   const search = Route.useSearch();
   const room = useRunRoom(runId);
@@ -141,7 +141,7 @@ function RunDetail({ teamSlug, runNumber, runId, parentRunId }: { teamSlug: stri
 
   if (room.data) {
     return (
-      <SessionRoomView teamSlug={teamSlug} room={room.data} parentRunId={parentRunId} journal={journal.data ?? undefined} initialPaneTurn={search.turn ?? null} initialPaneView={search.pane} initialPaneNode={search.node ?? null} onPaneChange={onPaneChange} />
+      <SessionRoomView teamSlug={teamSlug} room={room.data} journal={journal.data ?? undefined} initialPaneTurn={search.turn ?? null} initialPaneView={search.pane} initialPaneNode={search.node ?? null} onPaneChange={onPaneChange} />
     );
   }
 

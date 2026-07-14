@@ -6400,8 +6400,10 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* The exec card's summon affordance sits opposite the "Execution" label. */
 .room-exec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 13px; }
 .room-exec-head .room-exec-label { margin-bottom: 0; }
-.room-exec-canvas { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); font-size: 11px; font-weight: 600; cursor: pointer; }
-.room-exec-canvas:hover { background: var(--accent-soft); border-color: var(--rm-accent-line); color: var(--accent); }
+.room-exec-canvas { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--rm-accent-line); background: var(--accent-soft); color: var(--accent); font-size: 11.5px; font-weight: 600; letter-spacing: -.01em; cursor: pointer; transition: background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .1s ease; }
+.room-exec-canvas:hover { background: color-mix(in srgb, var(--accent) 13%, transparent); border-color: color-mix(in srgb, var(--accent) 42%, transparent); box-shadow: 0 1px 5px color-mix(in srgb, var(--accent) 20%, transparent); transform: translateY(-.5px); }
+.room-exec-canvas:active { transform: translateY(0); box-shadow: none; }
+.room-exec-canvas-ic { font-size: 12.5px; line-height: 1; }
 
 /* The drag divider between the chat column and the pane (a wider invisible hit area via ::before). */
 .room-divider { flex: 0 0 7px; align-self: stretch; cursor: col-resize; background: var(--line); position: relative; }

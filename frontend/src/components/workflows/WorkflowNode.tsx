@@ -190,7 +190,7 @@ function loopPassCount(rows: readonly WorkflowRunNodeSummary[]): number {
 /**
  * A container frame's LIVE header counter (run view only), rendered at the right of the head:
  *  - map  → "{done}/{total} branches" with the same per-state breakdown as the B4 fan-out summary
- *    (running / 等待 waiting / failed), read from the fanned body branch rows via fanBranches/fanBreakdown.
+ *    (running / waiting waiting / failed), read from the fanned body branch rows via fanBranches/fanBreakdown.
  *  - loop → "第 {i} 輪" — i = the 1-based pass count ({@link loopPassCount}) — with "/ {max}" appended only
  *    when the card carries a maxIterations config (usually absent → bare count).
  *  - try  → DEFERRED: the taken-handle stamp (catch vs default) needs the try's own routing decision, and
@@ -212,7 +212,7 @@ function ContainerHeaderMeta({ d }: { d: WorkflowNodeData }) {
       <span className="wf-rf-loop-meta" title={`${bd.done} of ${bd.total} branches settled`}>
         <b>{bd.done}/{bd.total}</b> branches
         {bd.running > 0 && <span data-state="running"> · {bd.running} running</span>}
-        {bd.waiting > 0 && <span data-state="waiting"> · {bd.waiting} 等待</span>}
+        {bd.waiting > 0 && <span data-state="waiting"> · {bd.waiting} waiting</span>}
         {bd.failed > 0 && <span data-state="failed"> · {bd.failed} failed</span>}
       </span>
     );
@@ -224,7 +224,7 @@ function ContainerHeaderMeta({ d }: { d: WorkflowNodeData }) {
 
     const max = containerMaxIterations(d);
     return (
-      <span className="wf-rf-loop-meta">第 <b>{pass}</b>{max ? ` / ${max}` : ""} 輪</span>
+      <span className="wf-rf-loop-meta">Round <b>{pass}</b>{max ? ` / ${max}` : ""}</span>
     );
   }
 

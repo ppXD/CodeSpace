@@ -27,17 +27,17 @@ function labelText(digest: ExternalCallDigest | null): string {
 }
 
 describe("digestExternalCall — per-type receipt formatters", () => {
-  it("git.open_pr → #number 已開啟 with a link to the created url (success)", () => {
+  it("git.open_pr → #number opened with a link to the created url (success)", () => {
     const digest = digestExternalCall("git.open_pr", rowWith({ number: 42, url: "https://github.com/x/y/pull/42", state: "Open" }));
     expect(digest?.tone).toBe("success");
 
     const { container } = render(<>{digest?.label}</>);
     expect(container.textContent).toContain("#42");
-    expect(container.textContent).toContain("已開啟");
+    expect(container.textContent).toContain("opened");
     expect(container.querySelector("a")?.getAttribute("href")).toBe("https://github.com/x/y/pull/42");
   });
 
-  it("git.create_issue → #number 已開啟 (shares the opened formatter)", () => {
+  it("git.create_issue → #number opened (shares the opened formatter)", () => {
     const digest = digestExternalCall("git.create_issue", rowWith({ number: 7, url: "https://gl/x/-/issues/7" }));
     expect(digest?.tone).toBe("success");
     expect(labelText(digest)).toContain("#7");
@@ -71,10 +71,10 @@ describe("digestExternalCall — per-type receipt formatters", () => {
     expect(digest?.tone).toBe("warn");
   });
 
-  it("git.fetch_pr_diff → files 檔 · +add −del", () => {
+  it("git.fetch_pr_diff → files files · +add −del", () => {
     const digest = digestExternalCall("git.fetch_pr_diff", rowWith({ files: [{}, {}, {}], additions: 10, deletions: 4 }));
     expect(digest?.tone).toBe("success");
-    expect(labelText(digest)).toBe("3 檔 · +10 −4");
+    expect(labelText(digest)).toBe("3 files · +10 −4");
   });
 
   it("git.list_prs → count PRs", () => {
@@ -87,17 +87,17 @@ describe("digestExternalCall — per-type receipt formatters", () => {
     expect(digestExternalCall("git.pr_review", rowWith({ verdict: "request_changes" }))?.tone).toBe("warn");
   });
 
-  it("git.post_pr_comment with webUrl → 已發布 + link", () => {
+  it("git.post_pr_comment with webUrl → Published + link", () => {
     const digest = digestExternalCall("git.post_pr_comment", rowWith({ commentId: "c1", webUrl: "https://github.com/x/y/pull/1#note-1" }));
     const { container } = render(<>{digest?.label}</>);
-    expect(container.textContent).toContain("已發布");
+    expect(container.textContent).toContain("Published");
     expect(container.querySelector("a")?.getAttribute("href")).toBe("https://github.com/x/y/pull/1#note-1");
   });
 
-  it("git.comment_issue on GitLab (no webUrl) → 已發布 with NO link", () => {
+  it("git.comment_issue on GitLab (no webUrl) → Published with NO link", () => {
     const digest = digestExternalCall("git.comment_issue", rowWith({ commentId: "c2", webUrl: null }));
     const { container } = render(<>{digest?.label}</>);
-    expect(container.textContent).toContain("已發布");
+    expect(container.textContent).toContain("Published");
     expect(container.querySelector("a")).toBeNull();
   });
 
@@ -174,7 +174,7 @@ describe("ExternalCallFooter — component", () => {
 
     expect(container.querySelector(".wf-rf-result")?.getAttribute("data-status")).toBe("success");
     expect(container.querySelector(".wf-rf-digest")?.textContent).toContain("#42");
-    expect(container.textContent).toContain("已開啟");
+    expect(container.textContent).toContain("opened");
   });
 
   it("a live-less Running (no store / no provider) renders degraded without throwing", () => {

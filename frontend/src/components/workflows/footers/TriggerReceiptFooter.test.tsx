@@ -62,13 +62,13 @@ describe("triggerDigest — per-trigger receipt formatters", () => {
     expect(triggerDigest("trigger.schedule", rowWith({}))).toBeNull();
   });
 
-  it("trigger.manual → 由 {actor} when the actor is known", () => {
+  it("trigger.manual → by {actor} when the actor is known", () => {
     const digest = triggerDigest("trigger.manual", rowWith({ actor: "carol" }));
-    expect(labelText(digest)).toBe("由 carol");
+    expect(labelText(digest)).toBe("by carol");
   });
 
-  it("trigger.manual → 手動 when no actor but an outputs object is present", () => {
-    expect(labelText(triggerDigest("trigger.manual", rowWith({})))).toBe("手動");
+  it("trigger.manual → Manual when no actor but an outputs object is present", () => {
+    expect(labelText(triggerDigest("trigger.manual", rowWith({})))).toBe("Manual");
   });
 
   it("returns null for a non-trigger typeKey", () => {

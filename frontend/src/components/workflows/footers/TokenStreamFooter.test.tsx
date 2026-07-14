@@ -33,10 +33,10 @@ describe("digestTokens — generic terminal token digest", () => {
     expect(labelText(digest)).toBe("1,200→350 tok · $0.02");
   });
 
-  it("finishReason 'length' → warn tone + 已截斷", () => {
+  it("finishReason 'length' → warn tone + truncated", () => {
     const digest = digestTokens(rowWith({ inputTokens: 500, outputTokens: 2048, finishReason: "length" }));
     expect(digest?.tone).toBe("warn");
-    expect(labelText(digest)).toBe("500→2,048 tok · 已截斷");
+    expect(labelText(digest)).toBe("500→2,048 tok · truncated");
   });
 
   it("a json object output → json ✓ marker", () => {
@@ -83,7 +83,7 @@ describe("TokenStreamFooter — component", () => {
     const store = fakeLiveStore("n1", { stream: { chars: 2000, deltas: 8, streaming: true }, lastEventSeq: 1 });
     const { container } = renderFooter("Running", [], store);
 
-    expect(container.querySelector(".wf-rf-result-label")?.textContent).toBe("生成中");
+    expect(container.querySelector(".wf-rf-result-label")?.textContent).toBe("Generating");
     expect(container.querySelector(".wf-rf-tok-count")?.textContent).toBe("≈500 tok");   // 2000 chars ÷ 4
     expect(container.querySelector(".wf-rf-tok-caret")).not.toBeNull();
     expect(container.querySelectorAll(".wf-rf-tok-line")).toHaveLength(3);
@@ -113,7 +113,7 @@ describe("TokenStreamFooter — component", () => {
     const { container } = renderFooter("Running", []);
 
     expect(container.querySelector(".wf-rf-status-spin")).not.toBeNull();
-    expect(container.querySelector(".wf-rf-result-label")?.textContent).toBe("生成中");
+    expect(container.querySelector(".wf-rf-result-label")?.textContent).toBe("Generating");
     expect(container.querySelector(".wf-rf-tok-line")).toBeNull();
     expect(container.querySelector(".wf-rf-result-dur")).toBeNull();
   });
