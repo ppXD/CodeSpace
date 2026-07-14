@@ -44,7 +44,12 @@ jobs:
       # one gateway). Absent on a fork → the tests self-skip → green at zero cost.
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # DUAL-LANE (v4.2 gateway ruling): this workflow is the PINNED QUALIFICATION lane — the blocking,
+      # reproducible baseline. Set the repo VARIABLE CODESPACE_LLM_PINNED_MODEL_ID to freeze the model bundle;
+      # unset, it falls back to the gateway secret (today's behavior, byte-identical). Re-pinning is an explicit
+      # decision. Provider drift is watched by real-model-canary.yml (floating, report-only) — a genuine
+      # capability red HERE stays red; pinning exists to keep the baseline reproducible, never to hide a miss.
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -151,7 +156,7 @@ jobs:
       # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # best-of-N capability-floor for the strict whole-loop gate (Rule 8 escape hatch): 3 independent attempts absorb a
       # real model's run-to-run variance so a single off-run can't flaky-red main, while a persistent park-short still REDs.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
@@ -288,7 +293,7 @@ jobs:
       # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # best-of-N capability-floor for the strict whole-loop gate (Rule 8 escape hatch): 3 independent attempts absorb a
       # real model's run-to-run variance so a single off-run can't flaky-red main, while a persistent park-short still REDs.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
@@ -426,7 +431,7 @@ jobs:
       # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
       # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
       # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
@@ -534,7 +539,7 @@ jobs:
     env:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # M0 (2026-07-11): the gate's default 600s per-attempt deadline is calibrated for ONE brain arc with fast fake
       # agents; a corpus attempt runs the WHOLE seed corpus (9 tasks × 2 modes = 18 live coding-agent runs), which
       # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
@@ -634,7 +639,7 @@ jobs:
       # The custom-endpoint config the RealModel tests read; absent on a fork → the tests self-skip → green at zero cost.
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # best-of-3 capability-floor for the blessed Claude PERSONA gate (near-deterministic — the system prompt is always
       # in context; the spare attempts just absorb a rare gateway hiccup). The SKILL gate is REPORT-ONLY — a loaded
       # skill is applied only via the model's auto-invocation (progressive disclosure, a model decision), which we
@@ -758,7 +763,7 @@ jobs:
     env:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # best-of-N capability-floor (Rule 8 escape hatch): file-creation-then-push is near-deterministic, so the spare
       # attempts just absorb a rare gateway hiccup, not model judgement variance.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
@@ -847,7 +852,7 @@ jobs:
     env:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       # best-of-N capability-floor (Rule 8 escape hatch): a length-forced completion + a file-create-then-ls goal are
       # near-deterministic, so the spare attempts just absorb a rare gateway hiccup, not model judgement variance.
       CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
@@ -943,7 +948,7 @@ jobs:
     env:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
-      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_PINNED_MODEL_ID || secrets.CODESPACE_LLM_MODEL_ID }}
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-stop-hook-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
