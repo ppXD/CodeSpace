@@ -70,6 +70,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<PublishManifest> PublishManifest => Set<PublishManifest>();
     public DbSet<CompletionRequirement> CompletionRequirement => Set<CompletionRequirement>();
     public DbSet<CompletionReceipt> CompletionReceipt => Set<CompletionReceipt>();
+    public DbSet<CompletionAssessmentRecord> CompletionAssessmentRecord => Set<CompletionAssessmentRecord>();
 
     /// <summary>The shared ASP.NET Data Protection key-ring (<see cref="IDataProtectionKeyContext"/>) — persisted in Postgres so every API/worker pod decrypts the same credentials. Mapped to <c>data_protection_keys</c> below; the table is created by DbUp 0074.</summary>
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();

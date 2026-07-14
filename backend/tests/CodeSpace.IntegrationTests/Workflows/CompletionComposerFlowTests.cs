@@ -103,6 +103,47 @@ public sealed class CompletionComposerFlowTests
             .ShouldBeNull("an assessment is a terminal-time artifact");
     }
 
+    [Fact]
+    public async Task The_shadow_sweep_records_the_delta_append_only()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+        var planId = Guid.NewGuid();
+        var attemptId = Guid.NewGuid();
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""",
+            $$"""{"planned":[],"count":1,"workPlanId":"{{planId}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", producedBranch = "codespace/agent/s1" } } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+
+        var shadow = scope.Resolve<ICompletionShadowService>();
+
+        (await shadow.SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
+
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var record = await db.CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+
+        record.Outcome.ShouldBe("Unsolved");
+        record.LegacyIsSolved.ShouldBeTrue("the legacy ladder read this engine-Success run Solved — THE degraded-inflation delta, now a standing row");
+        record.EnforcementMode.ShouldBe("Shadow");
+        record.Basis.ShouldBe("ContractDerived");
+
+        // Re-sweep: the run has a record → not a candidate; even a direct re-record with an unchanged assessment appends nothing.
+        (await shadow.SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBe(0);
+        (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId)).ShouldBe(1);
+
+        (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "Shadow NEVER mutates a terminal (Lock Clause 1)");
+    }
+
     // ── Seeds ──
 
     private async Task<Guid> SeedTerminalRunAsync(Guid teamId, Guid userId, bool stampPolicy, WorkflowRunStatus status)

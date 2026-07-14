@@ -103,7 +103,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// never penalized for having none, but a Failure/Cancelled run is never counted solved just because nothing
     /// graded it either way.
     /// </summary>
-    private static bool IsSolved(IReadOnlyList<PublishManifest> manifests, WorkflowRunStatus terminalStatus)
+    public static bool IsSolved(IReadOnlyList<PublishManifest> manifests, WorkflowRunStatus terminalStatus)
     {
         if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Failed)) return false;
 
