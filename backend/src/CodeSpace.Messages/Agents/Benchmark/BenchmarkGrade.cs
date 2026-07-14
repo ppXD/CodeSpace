@@ -36,4 +36,12 @@ public sealed record BenchmarkGrade
     /// <summary>The typed failure class, minted at the source arm. Null → the arm predates typing; consumers fall back to the detail conventions.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public GradeFailureClass? Class { get; init; }
+
+    /// <summary>TRANSIENT (P3a-1): the oracle run's bounded output (command + exit + stdout/stderr tails), stamped by the grader that ran it. The scoped caller stores it to CAS and swaps it for <see cref="EvidenceArtifactId"/> — this text itself is never persisted.</summary>
+    [JsonIgnore]
+    public string? EvidenceText { get; init; }
+
+    /// <summary>The CAS id of the oracle run's captured output — what a receipt's <c>EvidenceRef</c> binds to (a required contract's verdict without evidence is at most InfraUnknown once admission batch 2 lands).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? EvidenceArtifactId { get; init; }
 }

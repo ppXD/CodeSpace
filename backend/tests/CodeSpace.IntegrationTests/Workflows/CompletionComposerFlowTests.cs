@@ -43,7 +43,7 @@ public sealed class CompletionComposerFlowTests
             $$"""{"planned":[],"count":1,"workPlanId":"{{planId}}","workPlanVersion":1}""");
         await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
             """{"subtaskIds":["s1"]}""",
-            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", producedBranch = "codespace/agent/s1" } } }));
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", acceptanceEvidenceId = (Guid?)EvidenceId, producedBranch = "codespace/agent/s1" } } }));
         await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
 
         using var scope = _fixture.BeginScope();
@@ -73,7 +73,12 @@ public sealed class CompletionComposerFlowTests
             .ShouldBe(1, "the write-through bridge is exactly-once — a re-compose lands on the first row");
 
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "compute + record ONLY — the composer never touches the terminal (Lock Clause 1)");
+
+        // P3a-1: the fold's evidence id rode the bridge onto the receipt — EvidenceRef is a fact, not prose.
+        (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Single().EvidenceRef.ShouldBe(EvidenceId);
     }
+
+    private static readonly Guid EvidenceId = Guid.NewGuid();
 
     [Fact]
     public async Task A_pre_protocol_run_projects_LegacyUnknown_and_derives_nothing()

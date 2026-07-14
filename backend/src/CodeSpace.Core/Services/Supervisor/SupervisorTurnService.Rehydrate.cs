@@ -569,6 +569,7 @@ public sealed partial class SupervisorTurnService
             {
                 AcceptancePassed = grade.Passed,
                 AcceptanceDetail = grade.Detail,
+                AcceptanceEvidenceId = grade.EvidenceArtifactId,
                 BaselinePassed = baseline?.Passed,
                 BaselineDetail = baseline?.Detail,
                 // P4-1: unlike the single-agent lane (which only ever grades a would-be Succeeded result), THIS fold

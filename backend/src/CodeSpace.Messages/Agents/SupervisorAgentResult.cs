@@ -22,6 +22,10 @@ public sealed record SupervisorAgentResult
     /// <summary>The agent run's terminal ROW status name (e.g. "Succeeded" / "Failed" / "Cancelled" / "TimedOut") — authoritative, taken from the AgentRun row, so it is present even when the run never wrote a result (a cancelled/abandoned agent).</summary>
     public required string Status { get; init; }
 
+    /// <summary>P3a-1: the CAS id of the acceptance oracle's captured output for THIS unit (stamped by the fold beside the verdict; null pre-P3a or when capture failed). The composer maps it onto the receipt's <c>EvidenceRef</c>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? AcceptanceEvidenceId { get; init; }
+
     /// <summary>The agent's final summary message (null when it produced none).</summary>
     public string? Summary { get; init; }
 
