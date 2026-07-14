@@ -126,7 +126,7 @@ public class JournalProjectorTests
     }
 
     [Fact]
-    public async Task A_collapsed_turn_without_a_result_falls_back_to_a_status_word()
+    public async Task A_past_turn_without_a_result_has_no_summary()
     {
         var detail = Detail(anchor: 2,
             Turn(1, Guid.NewGuid(), result: null, status: WorkflowRunStatus.Failure),
@@ -134,7 +134,9 @@ public class JournalProjectorTests
 
         var view = await Projector(detail).ProjectByRunAsync(Guid.NewGuid(), Team, CancellationToken.None);
 
-        view!.Turns.Single(t => t.TurnIndex == 1).Summary.ShouldBe("Ended with an error.", "a collapsed turn with no result shows a status word");
+        // The status-word fallback is gone: every turn is walked, so a turn with no recorded result shows no turn-level
+        // summary — its walked steps carry the story, not a synthetic status word.
+        view!.Turns.Single(t => t.TurnIndex == 1).Summary.ShouldBeNull("a rich turn with no recorded result has no synthetic summary");
     }
 
     [Fact]
@@ -198,21 +200,22 @@ public class JournalProjectorTests
     }
 
     [Fact]
-    public async Task A_collapsed_turns_ladder_focuses_no_attempt()
+    public async Task A_non_anchored_turns_ladder_focuses_its_latest_attempt()
     {
-        // A collapsed turn's ladder is a preview (the pager still renders), but NONE is focused — only the focused turn
-        // walks an attempt.
+        // Every turn is walked now, so a non-anchored reran turn shows its OWN latest attempt as the shown (focused) one
+        // — parity with the room's attempt switcher, not a preview with nothing focused.
         var a1 = Guid.NewGuid();
         var a2 = Guid.NewGuid();
         var reran = RerunTurn(1, (a1, WorkflowRunStatus.Failure), (a2, WorkflowRunStatus.Success));
         var detail = Detail(anchor: null, reran, Turn(2, Guid.NewGuid()));
 
-        // Session entry focuses the LAST turn (2), so the reran turn 1 collapses — its ladder still renders, none focused.
+        // Session entry anchors the LAST turn (2); turn 1 is still fully walked and shows its own latest attempt.
         var view = await Projector(detail).ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
 
-        var collapsed = view!.Turns.Single(t => t.TurnIndex == 1 && !t.Focused);
-        collapsed.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2 }, "the collapsed turn still exposes its ladder");
-        collapsed.Attempts.ShouldAllBe(a => !a.Focused, "but none is focused on a collapsed turn");
+        var turn1 = view!.Turns.Single(t => t.TurnIndex == 1);
+        turn1.Focused.ShouldBeFalse("only the anchored turn is the scroll anchor");
+        turn1.Attempts.Select(a => a.AttemptNumber).ShouldBe(new[] { 1, 2 }, "the turn exposes its full ladder");
+        turn1.Attempts.Single(a => a.Focused).AttemptNumber.ShouldBe(2, "its latest attempt is the shown one");
     }
 
     [Fact]
@@ -229,7 +232,7 @@ public class JournalProjectorTests
     }
 
     [Fact]
-    public async Task Only_the_focused_turn_is_walked()
+    public async Task Every_turn_is_walked()
     {
         var run1 = Guid.NewGuid();
         var run2 = Guid.NewGuid();
@@ -241,7 +244,8 @@ public class JournalProjectorTests
 
         await projector.ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
 
-        walked.ShouldHaveSingleItem().ShouldBe(run3, "only the focused (last) turn's run is walked — the collapsed turns are never read (no N+1)");
+        // Every turn's run is walked — each turn's full journal is available on expand (one read per turn, in order).
+        walked.ShouldBe(new[] { run1, run2, run3 });
     }
 
     [Fact]
