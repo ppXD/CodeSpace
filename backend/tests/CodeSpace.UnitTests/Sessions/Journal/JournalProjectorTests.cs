@@ -56,7 +56,7 @@ public class JournalProjectorTests
     }
 
     private static JournalProjector Projector(SessionDetail? detail, Func<Guid, IReadOnlyList<JournalStep>?>? steps = null) =>
-        new(new FakeSessions(detail), new FakeWalk(steps ?? (_ => Array.Empty<JournalStep>())));
+        new(new FakeSessions(detail), new FakeWalk(steps ?? (_ => Array.Empty<JournalStep>())), new SessionTurnCache());
 
     [Fact]
     public async Task Walks_only_the_focused_turn_others_are_light_cards()
@@ -240,12 +240,27 @@ public class JournalProjectorTests
         var detail = Detail(anchor: null, Turn(1, run1), Turn(2, run2), Turn(3, run3));
 
         var walked = new List<Guid>();
-        var projector = new JournalProjector(new FakeSessions(detail), new FakeWalk(r => { walked.Add(r); return Array.Empty<JournalStep>(); }));
+        var projector = new JournalProjector(new FakeSessions(detail), new FakeWalk(r => { walked.Add(r); return Array.Empty<JournalStep>(); }), new SessionTurnCache());
 
         await projector.ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
 
         // Every turn's run is walked — each turn's full journal is available on expand (one read per turn, in order).
         walked.ShouldBe(new[] { run1, run2, run3 });
+    }
+
+    [Fact]
+    public async Task A_terminal_past_turns_walk_is_cached_across_polls()
+    {
+        var past = Guid.NewGuid();   // a terminal (Success) NON-focused turn
+        var detail = Detail(anchor: null, Turn(1, past), Turn(2, Guid.NewGuid()));   // turn 2 (last) is the focused one
+
+        var walked = new List<Guid>();
+        var projector = new JournalProjector(new FakeSessions(detail), new FakeWalk(r => { walked.Add(r); return Array.Empty<JournalStep>(); }), new SessionTurnCache());
+
+        await projector.ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+        await projector.ProjectAsync(detail.Id, focusRunId: null, Team, CancellationToken.None);
+
+        walked.Count(r => r == past).ShouldBe(1, "a terminal past turn is walked once, then served from the cache — no re-walk on the next poll");
     }
 
     [Fact]

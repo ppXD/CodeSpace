@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Dtos.Sessions;
 using CodeSpace.Messages.Dtos.Sessions.Journal;
 using CodeSpace.Messages.Enums;
@@ -18,11 +19,13 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
 {
     private readonly ISessionReadService _sessions;
     private readonly IJournalWalk _walk;
+    private readonly ISessionTurnCache _cache;
 
-    public JournalProjector(ISessionReadService sessions, IJournalWalk walk)
+    public JournalProjector(ISessionReadService sessions, IJournalWalk walk, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _walk = walk;
+        _cache = cache;
     }
 
     public async Task<JournalView?> ProjectByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -61,7 +64,11 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
             // The focused turn honours the requested attempt; every other turn walks its own latest run (anchor null).
             var isFocused = focusedTurn != null && turn.TurnIndex == focusedTurn.TurnIndex;
             var focus = ResolveFocus(turn, isFocused ? anchorRunId : null);
-            var steps = await _walk.WalkAsync(focus.RunId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<JournalStep>();
+            // A non-focused TERMINAL turn's steps are immutable ledger projection, so serve them from the cache — the past
+            // turns aren't re-walked on every 2s poll. The focused turn (live / chosen attempt) is always walked fresh.
+            var steps = !isFocused && WorkflowRunState.IsTerminal(turn.RunStatus)
+                ? await _cache.GetOrAddJournalAsync(focus.RunId, async () => await _walk.WalkAsync(focus.RunId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<JournalStep>()).ConfigureAwait(false)
+                : await _walk.WalkAsync(focus.RunId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<JournalStep>();
 
             if (isFocused && steps.Count > 0) cursor = steps[^1].Cursor;   // the delta head stays the focused turn's newest step
 

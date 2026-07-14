@@ -7,6 +7,7 @@ import type { AssistantTurnBlock, RoomBlock } from "@/api/sessions";
 import { useWorkflowRun } from "@/hooks/use-workflows";
 import { useRunJournal, useRunRoom } from "@/hooks/use-sessions";
 import { SessionRoomView } from "@/components/sessions/SessionRoomView";
+import { RoomSkeleton } from "@/components/sessions/RoomSkeleton";
 import type { PaneView } from "@/components/sessions/RoomRunPane";
 
 /**
@@ -96,7 +97,7 @@ function RunDetailPage() {
     }
   }, [run.data, runNumber, teamSlug, navigate]);
 
-  if (run.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
+  if (run.isLoading) return <RoomSkeleton />;
 
   if (run.error instanceof ApiError || !run.data) {
     return (
@@ -146,7 +147,7 @@ function RunDetail({ teamSlug, runNumber, runId }: { teamSlug: string; runNumber
   }
 
   // Still resolving whether this run has a session.
-  if (room.isLoading) return <div className="run-outline-empty" style={{ padding: 48 }}>Loading…</div>;
+  if (room.isLoading) return <RoomSkeleton />;
 
   // The room fetch failed. getRunRoom maps ONLY 404 → null (genuinely session-less); a non-404 error (transient 500,
   // expired-token 401, network) re-throws. Don't mistake that for "no session" and strand the operator — a session-backed

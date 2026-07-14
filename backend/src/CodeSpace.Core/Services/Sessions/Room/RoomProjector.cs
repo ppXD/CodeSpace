@@ -40,8 +40,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly CodeSpaceDbContext _db;
+    private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, CodeSpaceDbContext db)
+    public RoomProjector(ISessionReadService sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionLog decisionLog, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -52,6 +53,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         _manifests = manifests;
         _publishedBranches = publishedBranches;
         _db = db;
+        _cache = cache;
     }
 
     public async Task<RoomView?> ProjectByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -91,8 +93,13 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
 
             // Project EVERY turn richly so each one's full execution UI is available on expand. The focused turn honours
             // the requested attempt (anchorRunId); every other turn focuses its own latest run (anchor null → the latest).
+            // A non-focused TERMINAL turn's flow never changes (a rerun mints a new run id), so serve it from the cache —
+            // this is what keeps a multi-turn room from re-reading every past turn on each 2s poll. The focused turn (often
+            // the live one, or a chosen attempt) is always projected fresh.
             var isFocused = focused != null && turn.TurnIndex == focused.TurnIndex;
-            var assistant = await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
+            var assistant = !isFocused && WorkflowRunState.IsTerminal(turn.RunStatus)
+                ? await _cache.GetOrAddRoomAsync(turn.RunId, () => BuildTurnAsync(turn, null, teamId, cancellationToken)).ConfigureAwait(false)
+                : await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
 
             cursor = Math.Max(cursor, assistant.Seq);
             blocks.Add(assistant);
