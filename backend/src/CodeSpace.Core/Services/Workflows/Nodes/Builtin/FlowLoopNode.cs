@@ -47,6 +47,7 @@ public sealed class FlowLoopNode : INodeRuntime
                 "termination": {
                   "type": "object",
                   "description": "Stops the loop when met.",
+                  "x-spotlight": 1,
                   "properties": {
                     "logic":      { "type": "string", "enum": ["and", "or"], "default": "and", "x-control": "segmented", "x-enumLabels": { "and": "All conditions match", "or": "Any condition matches" } },
                     "conditions": {
@@ -63,7 +64,7 @@ public sealed class FlowLoopNode : INodeRuntime
                     }
                   }
                 },
-                "maxIterations": { "type": "integer", "minimum": 1, "default": 10, "description": "Hard cap — the runaway guard." }
+                "maxIterations": { "type": "integer", "minimum": 1, "default": 10, "description": "Hard cap — the runaway guard.", "x-spotlight": 2 }
               }
             }
             """),

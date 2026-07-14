@@ -1,0 +1,62 @@
+<div id="room-ui-state-scenes" class="state-board">
+  <div class="viz-grid state-grid" aria-label="Room 其他狀態示意">
+    <section class="card state-card" aria-label="並行工作場景">
+      <div class="state-head"><span>並行工作</span><span class="text-small">2 運行 · 1 完成</span></div>
+      <div class="state-title">後端、前端與測試同時進行</div>
+      <div class="text-small state-copy">全部完成後自動整合，不讓子工作搶走主焦點。</div>
+      <div class="state-lanes text-small">
+        <div><span>◌</span><b>後端</b><span>整合測試 84 / 126</span></div>
+        <div><span>◌</span><b>前端</b><span>更新 Room 摘要</span></div>
+        <div><span>✓</span><b>測試</b><span>38 項通過</span></div>
+      </div>
+    </section>
+
+    <section class="card state-card" aria-label="等待確認場景">
+      <div class="state-head"><span>需要你</span><span class="text-small">工作已保存</span></div>
+      <div class="state-title">是否套用資料庫索引遷移？</div>
+      <div class="text-small state-copy">只新增可回滾索引，不會刪除或改寫資料。</div>
+      <div class="state-actions"><button class="btn btn-primary" type="button">套用建議並繼續</button><button class="btn" type="button">查看差異</button></div>
+    </section>
+
+    <section class="card state-card" aria-label="失敗恢復場景">
+      <div class="state-head"><span>正在恢復</span><span class="text-small">第 2 / 3 次嘗試</span></div>
+      <div class="state-title">建置未通過，正在改用完整方案驗證</div>
+      <div class="text-small state-copy">修改均已保留；舊失敗收進嘗試歷史，不污染全局狀態。</div>
+      <div class="state-recovery text-small"><span>× 快速建置失敗</span><i></i><span>◌ 完整建置中</span></div>
+    </section>
+
+    <section class="card state-card" aria-label="完成場景">
+      <div class="state-head"><span>已完成</span><span class="text-small">7 分 48 秒</span></div>
+      <div class="state-title">已移除未使用的 using</div>
+      <div class="text-small state-copy">8 個檔案 · 移除 27 處 · 建置成功 · 126 項測試通過。</div>
+      <div class="state-result text-small"><span>✓ 沒有行為變更</span><span>✓ 沒有未解決事項</span></div>
+      <div class="state-actions"><button class="btn btn-primary" type="button">查看變更</button><button class="btn" type="button">執行記錄</button></div>
+    </section>
+  </div>
+</div>
+
+<style>
+  #room-ui-state-scenes { color: var(--foreground); }
+  #room-ui-state-scenes * { box-sizing: border-box; }
+  #room-ui-state-scenes .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #room-ui-state-scenes .state-card { padding: 18px; }
+  #room-ui-state-scenes .state-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 13px; }
+  #room-ui-state-scenes .state-head > span:first-child,
+  #room-ui-state-scenes .state-title,
+  #room-ui-state-scenes .state-lanes b { font-weight: 500; }
+  #room-ui-state-scenes .state-head .text-small,
+  #room-ui-state-scenes .state-copy,
+  #room-ui-state-scenes .state-lanes > div > span:last-child { color: var(--muted-foreground); }
+  #room-ui-state-scenes .state-head .text-small { text-align: right; }
+  #room-ui-state-scenes .state-copy { margin-top: 5px; }
+  #room-ui-state-scenes .state-lanes { margin-top: 14px; border-top: 1px solid var(--border); }
+  #room-ui-state-scenes .state-lanes > div { display: grid; grid-template-columns: 18px auto minmax(0, 1fr); gap: 7px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  #room-ui-state-scenes .state-lanes > div > span:last-child { text-align: right; }
+  #room-ui-state-scenes .state-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  #room-ui-state-scenes .state-recovery { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+  #room-ui-state-scenes .state-recovery i { flex: 1; height: 1px; background: var(--border); }
+  #room-ui-state-scenes .state-result { display: flex; flex-direction: column; gap: 5px; margin-top: 13px; }
+  @media (max-width: 560px) {
+    #room-ui-state-scenes .state-grid { grid-template-columns: 1fr; }
+  }
+</style>

@@ -67,11 +67,11 @@ public sealed class GitMergePullRequestNode : INodeRuntime
               "type": "object",
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
-                "number": { "type": "integer", "description": "The pull/merge request number to merge." },
-                "method": { "type": "string", "enum": ["merge","squash","rebase"], "x-control": "segmented", "x-enumLabels": { "merge": "Merge commit", "squash": "Squash", "rebase": "Rebase" }, "description": "How to integrate the commits. Default: merge commit." },
+                "number": { "type": "integer", "description": "The pull/merge request number to merge.", "x-spotlight": 1 },
+                "method": { "type": "string", "enum": ["merge","squash","rebase"], "x-control": "segmented", "x-enumLabels": { "merge": "Merge commit", "squash": "Squash", "rebase": "Rebase" }, "description": "How to integrate the commits. Default: merge commit.", "x-spotlight": 2 },
                 "commitTitle": { "type": "string", "description": "Optional merge-commit title (squash/merge). Provider default when empty." },
                 "commitMessage": { "type": "string", "x-long": true, "description": "Optional merge-commit message body." },
-                "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge." },
+                "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge.", "x-spotlight": 3 },
                 "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]

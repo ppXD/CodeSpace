@@ -1,0 +1,327 @@
+<div id="room-ui-vision" class="rvision">
+  <div class="viz-row rvision-controls" aria-label="設計場景">
+    <button class="btn" type="button" data-scene="running" aria-pressed="true">執行中</button>
+    <button class="btn" type="button" data-scene="parallel" aria-pressed="false">並行工作</button>
+    <button class="btn" type="button" data-scene="approval" aria-pressed="false">等待確認</button>
+    <button class="btn" type="button" data-scene="failure" aria-pressed="false">失敗恢復</button>
+    <button class="btn" type="button" data-scene="done" aria-pressed="false">已完成</button>
+    <span class="rvision-control-gap"></span>
+    <button class="btn" type="button" id="rvision-density" aria-pressed="false">專業資訊</button>
+  </div>
+
+  <section class="card rvision-room" aria-label="Room 任務運行設計">
+    <header class="rvision-header">
+      <div class="rvision-breadcrumb text-small">Runs&nbsp;&nbsp;/&nbsp;&nbsp;<span id="rv-breadcrumb">清理未使用的 using</span></div>
+      <div class="rvision-title-row">
+        <div>
+          <h3 id="rv-title">清理未使用的 using</h3>
+          <div class="rvision-meta text-small"><span id="rv-turn">第 1 回合</span><span>·</span><span id="rv-elapsed">2 分 43 秒</span><span class="rvision-pro">· attempt 1 · workspace/code-cleanup</span></div>
+        </div>
+        <div class="rvision-global-state" id="rv-global-state"><span class="rvision-state-mark" aria-hidden="true"></span><span id="rv-state-label">正在執行</span></div>
+      </div>
+    </header>
+
+    <div class="rvision-body">
+      <div class="rvision-stage" id="rv-stage" aria-label="任務階段"></div>
+
+      <section class="rvision-focus" id="rv-focus" aria-live="polite">
+        <div class="rvision-focus-mark" id="rv-focus-mark" aria-hidden="true"><span></span></div>
+        <div class="rvision-focus-copy">
+          <div class="rvision-kicker text-small" id="rv-kicker">目前</div>
+          <div class="rvision-focus-title" id="rv-focus-title">正在移除 12 個未使用的 using</div>
+          <div class="rvision-focus-text" id="rv-focus-text">已完成結構掃描；目前修改服務層，接著驗證建置。</div>
+          <div class="rvision-stream text-small" id="rv-stream"><span id="rv-stream-text">正在更新 SessionService.cs，保留條件編譯區塊</span><i aria-hidden="true"></i></div>
+        </div>
+        <div class="rvision-focus-metric text-small" id="rv-focus-metric">3 / 5 步驟<br>4 個檔案</div>
+      </section>
+
+      <div class="rvision-actions" id="rv-actions"></div>
+
+      <section class="rvision-story" aria-label="任務進展">
+        <div class="rvision-story-head">
+          <span>任務進展</span>
+          <span class="text-small" id="rv-story-count">2 項完成 · 1 項進行中</span>
+        </div>
+        <div id="rv-story"></div>
+      </section>
+
+      <details class="rvision-evidence" id="rv-evidence">
+        <summary><span id="rv-evidence-label">變更證據 · 4 個檔案 · +0 −12</span><span class="rvision-pro">模型 / 工具 / 完整記錄</span></summary>
+        <div id="rv-evidence-content"></div>
+      </details>
+
+      <div class="rvision-inspector rvision-pro" id="rv-inspector">
+        <span>審計資訊</span>
+        <span>codex-5.6-sol · high reasoning</span>
+        <span>27.3k tokens</span>
+        <span>8 tools</span>
+        <span>US$0.084</span>
+        <button class="btn" type="button">打開 Trace</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<style>
+  #room-ui-vision {
+    --rv-ok: var(--viz-series-2);
+    --rv-live: var(--viz-series-1);
+    --rv-warn: var(--viz-series-4);
+    --rv-error: var(--destructive);
+    color: var(--foreground);
+  }
+  #room-ui-vision * { box-sizing: border-box; }
+  #room-ui-vision .rvision-controls { margin-bottom: 14px; align-items: center; }
+  #room-ui-vision .rvision-control-gap { flex: 1; }
+  #room-ui-vision .rvision-room { overflow: hidden; padding: 0; }
+  #room-ui-vision .rvision-header { padding: 18px 20px 16px; border-bottom: 1px solid var(--border); }
+  #room-ui-vision .rvision-breadcrumb { color: var(--muted-foreground); margin-bottom: 12px; }
+  #room-ui-vision .rvision-title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  #room-ui-vision h3 { margin: 0 0 5px; font-weight: 500; }
+  #room-ui-vision .rvision-meta { display: flex; flex-wrap: wrap; gap: 7px; color: var(--muted-foreground); }
+  #room-ui-vision .rvision-global-state { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; font-weight: 500; }
+  #room-ui-vision .rvision-state-mark { width: 9px; height: 9px; border-radius: 50%; background: var(--rv-live); }
+  #room-ui-vision[data-scene="approval"] .rvision-state-mark { background: var(--rv-warn); }
+  #room-ui-vision[data-scene="failure"] .rvision-state-mark { background: var(--rv-error); }
+  #room-ui-vision[data-scene="done"] .rvision-state-mark { background: var(--rv-ok); }
+  #room-ui-vision .rvision-body { padding: 20px; }
+  #room-ui-vision .rvision-stage { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 22px; }
+  #room-ui-vision .rvision-stage::before { content: ""; position: absolute; top: 12px; left: 10%; right: 10%; height: 1px; background: var(--border); }
+  #room-ui-vision .rvision-stage-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; text-align: center; color: var(--muted-foreground); min-width: 0; }
+  #room-ui-vision .rvision-stage-dot { position: relative; z-index: 1; width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border); background: var(--card); color: var(--muted-foreground); }
+  #room-ui-vision .rvision-stage-node[data-status="done"] .rvision-stage-dot { color: var(--rv-ok); border-color: var(--rv-ok); }
+  #room-ui-vision .rvision-stage-node[data-status="active"] { color: var(--foreground); }
+  #room-ui-vision .rvision-stage-node[data-status="active"] .rvision-stage-dot { color: var(--rv-live); border-color: var(--rv-live); box-shadow: 0 0 0 4px color-mix(in srgb, var(--rv-live) 12%, transparent); }
+  #room-ui-vision .rvision-stage-node[data-status="waiting"] .rvision-stage-dot { color: var(--rv-warn); border-color: var(--rv-warn); }
+  #room-ui-vision .rvision-stage-node[data-status="error"] .rvision-stage-dot { color: var(--rv-error); border-color: var(--rv-error); }
+  #room-ui-vision .rvision-stage-node[data-status="pending"] { opacity: .56; }
+  #room-ui-vision .rvision-focus { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow: hidden; }
+  #room-ui-vision .rvision-focus::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: linear-gradient(90deg, transparent, var(--rv-live), transparent); transform: translateX(-100%); animation: rv-sweep 2.4s ease-in-out infinite; }
+  #room-ui-vision[data-scene="approval"] .rvision-focus::after,
+  #room-ui-vision[data-scene="failure"] .rvision-focus::after,
+  #room-ui-vision[data-scene="done"] .rvision-focus::after { animation: none; transform: none; background: var(--border); }
+  #room-ui-vision .rvision-focus-mark { width: 30px; height: 30px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--rv-live) 55%, var(--border)); display: grid; place-items: center; color: var(--rv-live); animation: rv-orbit 2.1s linear infinite; }
+  #room-ui-vision .rvision-focus-mark::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  #room-ui-vision .rvision-focus-mark span { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: currentColor; transform: translateY(-14px); }
+  #room-ui-vision[data-scene="approval"] .rvision-focus-mark,
+  #room-ui-vision[data-scene="failure"] .rvision-focus-mark,
+  #room-ui-vision[data-scene="done"] .rvision-focus-mark { animation: none; }
+  #room-ui-vision[data-scene="approval"] .rvision-focus-mark { color: var(--rv-warn); border-color: var(--rv-warn); }
+  #room-ui-vision[data-scene="failure"] .rvision-focus-mark { color: var(--rv-error); border-color: var(--rv-error); }
+  #room-ui-vision[data-scene="done"] .rvision-focus-mark { color: var(--rv-ok); border-color: var(--rv-ok); }
+  #room-ui-vision[data-scene="approval"] .rvision-focus-mark::before { content: "Ⅱ"; width: auto; height: auto; background: none; }
+  #room-ui-vision[data-scene="failure"] .rvision-focus-mark::before { content: "×"; width: auto; height: auto; background: none; }
+  #room-ui-vision[data-scene="done"] .rvision-focus-mark::before { content: "✓"; width: auto; height: auto; background: none; }
+  #room-ui-vision[data-scene="approval"] .rvision-focus-mark span,
+  #room-ui-vision[data-scene="failure"] .rvision-focus-mark span,
+  #room-ui-vision[data-scene="done"] .rvision-focus-mark span { display: none; }
+  #room-ui-vision .rvision-kicker { color: var(--rv-live); margin-bottom: 4px; }
+  #room-ui-vision[data-scene="approval"] .rvision-kicker { color: var(--rv-warn); }
+  #room-ui-vision[data-scene="failure"] .rvision-kicker { color: var(--rv-error); }
+  #room-ui-vision[data-scene="done"] .rvision-kicker { color: var(--rv-ok); }
+  #room-ui-vision .rvision-focus-title { font-weight: 500; margin-bottom: 5px; }
+  #room-ui-vision .rvision-focus-text { color: var(--muted-foreground); }
+  #room-ui-vision .rvision-stream { color: var(--muted-foreground); margin-top: 9px; min-height: 1.5em; animation: rv-fade-up 180ms ease-out; }
+  #room-ui-vision .rvision-stream i { display: inline-block; width: 5px; height: 1em; margin-left: 4px; vertical-align: text-bottom; background: var(--rv-live); animation: rv-caret 1s step-end infinite; }
+  #room-ui-vision[data-scene="approval"] .rvision-stream i,
+  #room-ui-vision[data-scene="failure"] .rvision-stream i,
+  #room-ui-vision[data-scene="done"] .rvision-stream i { display: none; }
+  #room-ui-vision .rvision-focus-metric { color: var(--muted-foreground); text-align: right; white-space: nowrap; }
+  #room-ui-vision .rvision-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 14px; }
+  #room-ui-vision .rvision-actions:empty { display: none; }
+  #room-ui-vision .rvision-story { margin-top: 20px; }
+  #room-ui-vision .rvision-story-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
+  #room-ui-vision .rvision-story-head .text-small { color: var(--muted-foreground); text-align: right; }
+  #room-ui-vision .rvision-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--border); animation: rv-fade-up 180ms ease-out; }
+  #room-ui-vision .rvision-row-mark { color: var(--muted-foreground); }
+  #room-ui-vision .rvision-row[data-status="done"] .rvision-row-mark { color: var(--rv-ok); }
+  #room-ui-vision .rvision-row[data-status="active"] .rvision-row-mark { color: var(--rv-live); }
+  #room-ui-vision .rvision-row[data-status="waiting"] .rvision-row-mark { color: var(--rv-warn); }
+  #room-ui-vision .rvision-row[data-status="error"] .rvision-row-mark { color: var(--rv-error); }
+  #room-ui-vision .rvision-row-title { font-weight: 500; }
+  #room-ui-vision .rvision-row-detail { color: var(--muted-foreground); margin-top: 3px; }
+  #room-ui-vision .rvision-row-side { color: var(--muted-foreground); text-align: right; white-space: nowrap; }
+  #room-ui-vision .rvision-subrows { grid-column: 2 / -1; margin-top: 5px; padding-left: 10px; border-left: 1px solid var(--border); }
+  #room-ui-vision .rvision-subrow { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; }
+  #room-ui-vision .rvision-subrow span:nth-child(2) { flex: 1; min-width: 0; }
+  #room-ui-vision .rvision-chip { color: var(--muted-foreground); white-space: nowrap; }
+  #room-ui-vision .rvision-evidence { margin-top: 10px; }
+  #room-ui-vision .rvision-evidence summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; padding: 11px 0; color: var(--muted-foreground); }
+  #room-ui-vision .rvision-evidence[open] summary { color: var(--foreground); }
+  #room-ui-vision .rvision-files { border-top: 1px solid var(--border); }
+  #room-ui-vision .rvision-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  #room-ui-vision .rvision-file code { overflow-wrap: anywhere; }
+  #room-ui-vision pre { margin: 12px 0 0; padding: 11px 0 11px 14px; border-left: 2px solid var(--border); color: var(--muted-foreground); white-space: pre-wrap; overflow-wrap: anywhere; }
+  #room-ui-vision .rvision-inspector { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
+  #room-ui-vision .rvision-inspector button { margin-left: auto; }
+  #room-ui-vision .rvision-pro { display: none; }
+  #room-ui-vision[data-density="pro"] .rvision-pro { display: inline-flex; }
+  #room-ui-vision[data-density="pro"] .rvision-inspector { display: flex; }
+  @keyframes rv-orbit { to { transform: rotate(360deg); } }
+  @keyframes rv-caret { 0%, 48% { opacity: 1; } 49%, 100% { opacity: 0; } }
+  @keyframes rv-sweep { 0% { transform: translateX(-100%); opacity: 0; } 22% { opacity: .75; } 78% { opacity: .75; } 100% { transform: translateX(100%); opacity: 0; } }
+  @keyframes rv-fade-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @media (max-width: 560px) {
+    #room-ui-vision .rvision-title-row { align-items: flex-start; }
+    #room-ui-vision .rvision-body, #room-ui-vision .rvision-header { padding-left: 14px; padding-right: 14px; }
+    #room-ui-vision .rvision-focus { grid-template-columns: auto minmax(0, 1fr); }
+    #room-ui-vision .rvision-focus-metric { grid-column: 2; text-align: left; }
+    #room-ui-vision .rvision-row { grid-template-columns: 18px minmax(0, 1fr); }
+    #room-ui-vision .rvision-row-side { grid-column: 2; text-align: left; }
+    #room-ui-vision .rvision-stage-node span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #room-ui-vision *, #room-ui-vision *::before, #room-ui-vision *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<script>
+  (() => {
+    const root = document.getElementById('room-ui-vision');
+    const stageLabels = ['理解', '規劃', '實作', '驗證', '交付'];
+    const scenes = {
+      running: {
+        title: '清理未使用的 using', state: '正在執行', elapsed: '2 分 43 秒', kicker: '目前',
+        focus: '正在移除 12 個未使用的 using',
+        text: '已完成結構掃描；目前修改服務層，接著驗證建置。', metric: '3 / 5 步驟<br>4 個檔案',
+        stages: ['done', 'done', 'active', 'pending', 'pending'], count: '2 項完成 · 1 項進行中',
+        streams: ['正在更新 SessionService.cs，保留條件編譯區塊', '已安全移除 7 處；正在檢查全域 using', '準備保存第 4 個檔案，接著執行 dotnet build'],
+        actions: [{label: '停止', primary: false}],
+        rows: [
+          {status: 'done', title: '分析程式碼結構', detail: '檢查 184 個 C# 檔案，確認 12 處候選', side: '完成'},
+          {status: 'done', title: '制定安全清理範圍', detail: '保留全域 using 與條件編譯引用', side: '完成'},
+          {status: 'active', title: '更新服務與測試', detail: '編輯 4 個檔案 · 1 個背景工作', side: '進行中', sub: [['done','CredentialService.cs','已保存'],['active','SessionService.cs','正在清理'],['pending','建置與測試','等待中']]}
+        ],
+        evidence: '變更證據 · 4 個檔案 · +0 −12', files: [['backend/Services/SessionService.cs','−5'],['backend/Services/CredentialService.cs','−3'],['backend/Tests/SessionServiceTests.cs','−2'],['backend/Tests/CredentialTests.cs','−2']],
+        code: '證據摘要\n• 只移除編譯器確認未使用的命名空間\n• 尚未發現行為變更\n• 完整 diff、命令與模型記錄保留在 Inspector'
+      },
+      parallel: {
+        title: '完成 Room 執行視圖', state: '3 個工作並行', elapsed: '6 分 18 秒', kicker: '並行實作',
+        focus: '後端、前端與測試同時進行', text: '2 項運行中 · 1 項完成；全部完成後自動整合。', metric: '3 個工作<br>7 個檔案',
+        stages: ['done', 'done', 'active', 'pending', 'pending'], count: '1 項完成 · 2 項進行中',
+        streams: ['前端正在聚合 streaming 摘要；後端正在驗證狀態投影', '測試工作已完成 38 項斷言，等待其他分支', '兩個工作仍在運行；完成後將進行衝突檢查'],
+        actions: [{label: '停止全部', primary: false}],
+        rows: [
+          {status: 'active', title: '後端 · 統一 Room / Attempt 狀態', detail: '正在跑整合測試', side: '4:52', sub: [['done','狀態投影','已完成'],['active','整合測試','84 / 126'],['pending','輸出契約','等待中']]},
+          {status: 'active', title: '前端 · 聚合運行摘要', detail: '正在更新 SessionRoomView.tsx', side: '3:41'},
+          {status: 'done', title: '測試 · 核心互動契約', detail: '38 項斷言全部通過', side: '完成'}
+        ],
+        evidence: '工作證據 · 3 個分支 · 7 個檔案', files: [['backend/RunPhaseProjector.cs','+42 −18'],['frontend/SessionRoomView.tsx','+96 −74'],['frontend/live-run-summary.test.ts','+38']],
+        code: '並行規則\n• 工作位置保持穩定，完成後不重排\n• 子工作只有一次性狀態轉換，持續動效只在父層\n• 合併前自動檢查衝突、測試與輸出契約'
+      },
+      approval: {
+        title: '優化查詢效能', state: '需要你', elapsed: '4 分 06 秒', kicker: '需要你的確認',
+        focus: '是否套用資料庫索引遷移？', text: '會新增一個可回滾索引，預計降低查詢延遲；不會刪除或改寫資料。', metric: '執行已暫停<br>工作已保存',
+        stages: ['done', 'done', 'done', 'waiting', 'pending'], count: '3 項完成 · 等待 1 個決定',
+        streams: ['推薦：套用索引後繼續驗證。你也可以先查看 SQL 差異。'],
+        actions: [{label: '套用建議並繼續', primary: true}, {label: '查看 SQL 差異', primary: false}, {label: '暫不套用', primary: false}],
+        rows: [
+          {status: 'done', title: '定位慢查詢', detail: 'P95 1.8s · 主要耗時在 Session lookup', side: '完成'},
+          {status: 'done', title: '建立安全遷移', detail: '只新增索引；已包含 Down 回滾', side: '完成'},
+          {status: 'waiting', title: '套用到開發資料庫', detail: '需要授權資料庫寫入', side: '等你確認'}
+        ],
+        evidence: '決策證據 · 1 個 SQL 遷移 · 可回滾', files: [['backend/Migrations/AddSessionLookupIndex.cs','+31'],['backend/Migrations/AppDbContextSnapshot.cs','+8']],
+        code: '影響\n• 新增複合索引 IX_Sessions_TeamId_UpdatedAt\n• 不鎖定或改寫既有資料\n• 可用 Down() 完整回滾'
+      },
+      failure: {
+        title: '更新 Room 快照測試', state: '已暫停', elapsed: '8 分 32 秒', kicker: '驗證未通過',
+        focus: '1 個快照測試需要更新', text: '程式修改已安全保留；其他 84 項測試通過，沒有偵測到執行期錯誤。', metric: '84 通過<br>1 失敗',
+        stages: ['done', 'done', 'done', 'error', 'pending'], count: '3 項完成 · 1 項需處理',
+        streams: ['失敗原因已定位：預期文案仍是舊的「Working」。'],
+        actions: [{label: '自動修正並重跑', primary: true}, {label: '查看失敗差異', primary: false}, {label: '保留修改並結束', primary: false}],
+        rows: [
+          {status: 'done', title: '修改 Room 顯示邏輯', detail: '4 個檔案已保存', side: '完成'},
+          {status: 'done', title: '執行測試套件', detail: '84 項通過', side: '完成'},
+          {status: 'error', title: '快照驗證', detail: '1 個預期文案與新 UI 不符', side: '需修正', sub: [['done','程式行為','正常'],['error','SessionRoomView snapshot','1 處差異'],['pending','重新驗證','尚未執行']]}
+        ],
+        evidence: '失敗證據 · 1 個快照差異 · 修改均已保留', files: [['frontend/SessionRoomView.test.tsx','expected: Working → 正在執行']],
+        code: '恢復路徑\n1. 更新受影響的快照斷言\n2. 只重跑 SessionRoomView 測試\n3. 通過後繼續完整驗證'
+      },
+      done: {
+        title: '清理未使用的 using', state: '已完成', elapsed: '7 分 48 秒', kicker: '完成',
+        focus: '已移除未使用的 using', text: '修改 8 個檔案 · 移除 27 處 · 建置成功 · 126 項測試全部通過。', metric: '8 個檔案<br>0 個風險',
+        stages: ['done', 'done', 'done', 'done', 'done'], count: '5 / 5 項完成',
+        streams: ['沒有行為變更，也沒有未解決事項。'],
+        actions: [{label: '查看變更', primary: true}, {label: '查看執行記錄', primary: false}],
+        rows: [
+          {status: 'done', title: '程式碼清理', detail: '8 個檔案 · 移除 27 處未使用引用', side: '完成'},
+          {status: 'done', title: '建置驗證', detail: '0 錯誤 · 0 警告', side: '通過'},
+          {status: 'done', title: '測試驗證', detail: '126 / 126 項測試通過', side: '通過'}
+        ],
+        evidence: '結果證據 · 8 個檔案 · −27 · 126 項測試', files: [['backend/Services','5 個檔案 · −19'],['backend/Tests','3 個檔案 · −8'],['dotnet build','成功'],['dotnet test','126 passed']],
+        code: '交付摘要\n• 完成使用者要求的清理\n• 編譯與測試證據完整\n• 嘗試歷史與技術記錄仍可在 Inspector 查閱'
+      }
+    };
+
+    let sceneKey = 'running';
+    let streamIndex = 0;
+    let timer = null;
+    const symbol = (status) => status === 'done' ? '✓' : status === 'active' ? '◌' : status === 'waiting' ? 'Ⅱ' : status === 'error' ? '×' : '·';
+
+    function renderStage(scene) {
+      document.getElementById('rv-stage').innerHTML = stageLabels.map((label, i) => `<div class="rvision-stage-node" data-status="${scene.stages[i]}"><span class="rvision-stage-dot">${symbol(scene.stages[i])}</span><span class="text-small">${label}</span></div>`).join('');
+    }
+
+    function renderRows(scene) {
+      document.getElementById('rv-story').innerHTML = scene.rows.map((row) => {
+        const sub = row.sub ? `<div class="rvision-subrows">${row.sub.map((item) => `<div class="rvision-subrow text-small"><span class="rvision-row-mark">${symbol(item[0])}</span><span>${item[1]}</span><span class="rvision-chip">${item[2]}</span></div>`).join('')}</div>` : '';
+        return `<div class="rvision-row" data-status="${row.status}"><span class="rvision-row-mark">${symbol(row.status)}</span><div><div class="rvision-row-title">${row.title}</div><div class="rvision-row-detail text-small">${row.detail}</div></div><div class="rvision-row-side text-small">${row.side}</div>${sub}</div>`;
+      }).join('');
+    }
+
+    function renderActions(scene) {
+      document.getElementById('rv-actions').innerHTML = scene.actions.map((action) => `<button class="${action.primary ? 'btn-primary' : 'btn'}" type="button">${action.label}</button>`).join('');
+    }
+
+    function renderEvidence(scene) {
+      document.getElementById('rv-evidence-content').innerHTML = `<div class="rvision-files">${scene.files.map((file) => `<div class="rvision-file text-small"><code>${file[0]}</code><span>${file[1]}</span></div>`).join('')}</div><pre class="text-small">${scene.code}</pre>`;
+    }
+
+    function setStream(scene, index) {
+      const stream = document.getElementById('rv-stream');
+      stream.style.animation = 'none';
+      document.getElementById('rv-stream-text').textContent = scene.streams[index % scene.streams.length];
+      void stream.offsetWidth;
+      stream.style.animation = '';
+    }
+
+    function startStream(scene) {
+      if (timer) window.clearInterval(timer);
+      streamIndex = 0;
+      setStream(scene, streamIndex);
+      if (sceneKey === 'running' || sceneKey === 'parallel') {
+        timer = window.setInterval(() => { streamIndex += 1; setStream(scene, streamIndex); }, 2600);
+      }
+    }
+
+    function render() {
+      const scene = scenes[sceneKey];
+      root.dataset.scene = sceneKey;
+      document.getElementById('rv-title').textContent = scene.title;
+      document.getElementById('rv-breadcrumb').textContent = scene.title;
+      document.getElementById('rv-state-label').textContent = scene.state;
+      document.getElementById('rv-elapsed').textContent = scene.elapsed;
+      document.getElementById('rv-kicker').textContent = scene.kicker;
+      document.getElementById('rv-focus-title').textContent = scene.focus;
+      document.getElementById('rv-focus-text').textContent = scene.text;
+      document.getElementById('rv-focus-metric').innerHTML = scene.metric;
+      document.getElementById('rv-story-count').textContent = scene.count;
+      document.getElementById('rv-evidence-label').textContent = scene.evidence;
+      renderStage(scene);
+      renderRows(scene);
+      renderActions(scene);
+      renderEvidence(scene);
+      startStream(scene);
+      root.querySelectorAll('[data-scene]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.scene === sceneKey)));
+    }
+
+    root.querySelectorAll('[data-scene]').forEach((button) => button.addEventListener('click', () => { sceneKey = button.dataset.scene; render(); }));
+    document.getElementById('rvision-density').addEventListener('click', (event) => {
+      const pro = root.dataset.density !== 'pro';
+      root.dataset.density = pro ? 'pro' : 'simple';
+      event.currentTarget.setAttribute('aria-pressed', String(pro));
+      event.currentTarget.textContent = pro ? '隱藏專業資訊' : '專業資訊';
+    });
+    render();
+  })();
+</script>

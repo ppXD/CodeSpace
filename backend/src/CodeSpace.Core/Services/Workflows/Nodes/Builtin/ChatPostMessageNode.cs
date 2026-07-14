@@ -83,8 +83,8 @@ public sealed class ChatPostMessageNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Target conversation. Pick a channel, or switch to Expression to bind it dynamically (e.g. {{trigger.channelId}})." },
-                "body": { "type": "string", "minLength": 1, "description": "The message text. Supports {{ }} references." },
+                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Target conversation. Pick a channel, or switch to Expression to bind it dynamically (e.g. {{trigger.channelId}}).", "x-spotlight": 1 },
+                "body": { "type": "string", "minLength": 1, "description": "The message text. Supports {{ }} references.", "x-spotlight": 2 },
                 "actions": {
                   "type": "array",
                   "x-interactionField": true,
