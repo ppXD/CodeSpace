@@ -19,12 +19,12 @@ import type { NodeFooterProps } from "./index";
  *
  *  - WORKING — while the run is active (or the node paints Running), a compact tail of the last 3 events
  *    (per-kind chip · kind · short text), a deduped changed-files count, and any token/cost the run detail
- *    carries. Header "代理工作中" with the shared spinner.
+ *    carries. Header "Agent working" with the shared spinner.
  *  - AWAITING APPROVAL — when the governed ledger has a tool call in `AwaitingApproval`, an AMBER banner
- *    "等待批准: {tool}" + an inline approve/deny row, so "the agent is working" vs "the agent needs YOU" are
+ *    "Awaiting approval: {tool}" + an inline approve/deny row, so "the agent is working" vs "the agent needs YOU" are
  *    visually unmistakable. (The decision itself is not wired yet — see the TODO on {@link ApprovalBar}.)
  *  - TERMINAL — the shared {@link ReceiptFooter} bar + expand (which already embeds the agent timeline +
- *    tool-call audit), stamped with the run's summary · branch · +N 檔 · tokens · cost. For a supervisor, the
+ *    tool-call audit), stamped with the run's summary · branch · +N files · tokens · cost. For a supervisor, the
  *    stamp also carries the status triad tone so a `Stopped` run never reads as green success.
  *
  * Degrades cleanly: a node with no `agentRunId` (or one not reached yet) falls back to the plain receipt.
@@ -72,11 +72,11 @@ function FeedBar({ events, metricsSource, supervisor, rows }: { events: AgentRun
     <div className="wf-rf-result wf-rf-feed nodrag nopan" data-status="running">
       <div className="wf-rf-feed-head">
         <span className="wf-rf-status-spin" aria-hidden="true" />
-        <span className="wf-rf-feed-title">代理工作中</span>
+        <span className="wf-rf-feed-title">Agent working</span>
         {turn != null && <span className="wf-rf-feed-turn">turn {turn}</span>}
         {hasMeta && (
           <span className="wf-rf-feed-meta">
-            {changed > 0 && <span>{changed} 檔</span>}
+            {changed > 0 && <span>{changed} files</span>}
             {metrics.tokens != null && <span>{formatTokens(metrics.tokens)}</span>}
             {metrics.costUsd != null && <span>{formatUsd(metrics.costUsd)}</span>}
           </span>
@@ -115,14 +115,14 @@ function ApprovalBar({ tool }: { tool: ToolCallView }) {
   const stop = (e: React.MouseEvent) => e.stopPropagation();
 
   return (
-    <div className="wf-rf-result wf-rf-feed nodrag nopan" data-approval role="group" aria-label={`等待批准 ${tool.toolKind}`}>
+    <div className="wf-rf-result wf-rf-feed nodrag nopan" data-approval role="group" aria-label={`Awaiting approval ${tool.toolKind}`}>
       <div className="wf-rf-feed-head">
         <span className="wf-rf-feed-ic" data-icon="shield" aria-hidden="true"><Ic.Shield size={12} /></span>
-        <span className="wf-rf-feed-title">等待批准: {tool.toolKind}</span>
+        <span className="wf-rf-feed-title">Awaiting approval: {tool.toolKind}</span>
       </div>
       <div className="wf-rf-approve-row">
-        <button type="button" className="wf-rf-approve" onClick={stop} title="批准 — 尚未接線 (B3-followup)">批准</button>
-        <button type="button" className="wf-rf-deny" onClick={stop} title="拒絕 — 尚未接線 (B3-followup)">拒絕</button>
+        <button type="button" className="wf-rf-approve" onClick={stop} title="Approve — not yet wired (B3-followup)">Approve</button>
+        <button type="button" className="wf-rf-deny" onClick={stop} title="Deny — not yet wired (B3-followup)">Deny</button>
       </div>
     </div>
   );
@@ -132,7 +132,7 @@ function ApprovalBar({ tool }: { tool: ToolCallView }) {
 
 /**
  * The terminal label that replaces the plain "Success" in the reused receipt bar: the run's summary (first line,
- * truncated), a mono branch chip, and a `+N 檔 · tokens · cost` metric strip — all read DEFENSIVELY off
+ * truncated), a mono branch chip, and a `+N files · tokens · cost` metric strip — all read DEFENSIVELY off
  * `rows[0].outputs`. For a supervisor it also derives the status-triad tone (`Completed`=good, `Stopped`=warn,
  * `AcceptanceFailed`=failure) so a stopped run's stamp reads amber, never green. Returns null when there's
  * nothing agent-specific to stamp, so ReceiptFooter falls back to its default status label.
@@ -157,7 +157,7 @@ function agentReceiptStamp(outputs: unknown, supervisor: boolean): ReactNode | n
       {branch && <span className="wf-rf-agent-branch"><Ic.Branch size={11} />{branch}</span>}
       {hasMetrics && (
         <span className="wf-rf-agent-metrics">
-          {metrics.changedFiles != null && <span>+{metrics.changedFiles} 檔</span>}
+          {metrics.changedFiles != null && <span>+{metrics.changedFiles} files</span>}
           {metrics.tokens != null && <span>{formatTokens(metrics.tokens)}</span>}
           {metrics.costUsd != null && <span>{formatUsd(metrics.costUsd)}</span>}
         </span>
@@ -231,9 +231,9 @@ export function supervisorTone(status: string | undefined): "success" | "warn" |
 
 /** A short human label for a supervisor terminal status (used when there's no summary to lead with). */
 function supervisorLabel(status: string): string {
-  if (status === "Stopped") return "已停止";
-  if (status === "AcceptanceFailed") return "驗收未過";
-  if (status === "Completed") return "已完成";
+  if (status === "Stopped") return "Stopped";
+  if (status === "AcceptanceFailed") return "Acceptance failed";
+  if (status === "Completed") return "Completed";
   return status;
 }
 

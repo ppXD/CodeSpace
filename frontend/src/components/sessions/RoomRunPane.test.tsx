@@ -7,12 +7,12 @@ import { RoomRunPane } from "./RoomRunPane";
 /**
  * The run companion pane's shell. It mounts the run's RunCanvas (assembled exactly as RunDetailView does) and
  * frames it with a per-turn title + the run's status pill + a close control. These pin the D1 contract: the
- * header reads "畫布 · 回合 {N}" with the live status, the canvas gets the run's pinned definition/nodes/status,
+ * header reads "Canvas · Turn {N}" with the live status, the canvas gets the run's pinned definition/nodes/status,
  * and close fires the callback. RunCanvas is ReactFlow-heavy, so it's stubbed to echo the props it receives.
  */
 const { useWorkflowRunMock } = vi.hoisted(() => ({ useWorkflowRunMock: vi.fn() }));
 
-// RunTrace (the 紀錄 tab) reads the raw ledger via useRunRecords — mock it so the real trace surface renders without a fetch.
+// RunTrace (the Trace tab) reads the raw ledger via useRunRecords — mock it so the real trace surface renders without a fetch.
 vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
   useNodeManifests: () => ({ data: [] }),
@@ -48,7 +48,7 @@ describe("RoomRunPane", () => {
 
     render(<RoomRunPane runId="run-1" turn={3} onClose={vi.fn()} />);
 
-    expect(screen.getByText("畫布 · 回合 3")).toBeInTheDocument();
+    expect(screen.getByText("Canvas · Turn 3")).toBeInTheDocument();
     expect(screen.getByText("Running")).toBeInTheDocument();  // the run's status pill
 
     const canvas = screen.getByTestId("run-canvas");
@@ -70,7 +70,7 @@ describe("RoomRunPane", () => {
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={onClose} />);
 
-    fireEvent.click(screen.getByLabelText("關閉畫布"));
+    fireEvent.click(screen.getByLabelText("Close canvas"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -80,7 +80,7 @@ describe("RoomRunPane", () => {
     render(<RoomRunPane runId="run-1" turn={2} onClose={vi.fn()} />);
 
     expect(screen.queryByTestId("run-canvas")).toBeNull();
-    expect(screen.getByText("這次執行沒有可顯示的流程快照。")).toBeInTheDocument();
+    expect(screen.getByText("This run has no flow snapshot to show.")).toBeInTheDocument();
   });
 
   it("shows the back button only as an affordance the narrow-screen overlay reveals (also closes)", () => {
@@ -89,47 +89,46 @@ describe("RoomRunPane", () => {
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={onClose} />);
 
-    fireEvent.click(screen.getByLabelText("返回對話"));
+    fireEvent.click(screen.getByLabelText("Back to conversation"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  // ─── D5 mini-tabs (畫布 / 變更 / 紀錄) ───
+  // ─── D5 mini-tabs (Canvas / Changes / Trace) ───
 
-  it("renders the three mini-tabs with 畫布 selected by default (uncontrolled)", () => {
+  it("renders the three mini-tabs with Canvas selected by default (uncontrolled)", () => {
     useWorkflowRunMock.mockReturnValue(ok(detail({})));
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["畫布", "變更", "紀錄"]);
-    expect(screen.getByRole("tab", { name: "畫布" })).toHaveAttribute("aria-selected", "true");
+    expect(tabs.map((t) => t.textContent)).toEqual(["Canvas", "Changes", "Trace"]);
+    expect(screen.getByRole("tab", { name: "Canvas" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("run-canvas")).toBeInTheDocument();
   });
 
-  it("switches to the RunTrace surface when 紀錄 is clicked, and aria-selected tracks it", () => {
+  it("switches to the RunTrace surface when Trace is clicked, and aria-selected tracks it", () => {
     useWorkflowRunMock.mockReturnValue(ok(detail({})));
 
     const { container } = render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "紀錄" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Trace" }));
 
     expect(container.querySelector(".run-trace")).not.toBeNull();       // the real trace ledger rendered
     expect(screen.queryByTestId("run-canvas")).toBeNull();               // the canvas is gone
-    expect(screen.getByRole("tab", { name: "紀錄" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "畫布" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Trace" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Canvas" })).toHaveAttribute("aria-selected", "false");
   });
 
-  it("shows the coming-soon placeholder when 變更 is clicked", () => {
+  it("shows the coming-soon placeholder when Changes is clicked", () => {
     useWorkflowRunMock.mockReturnValue(ok(detail({})));
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "變更" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
 
     expect(screen.getByText("Coming soon")).toBeInTheDocument();
-    expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.queryByTestId("run-canvas")).toBeNull();
-    expect(screen.getByRole("tab", { name: "變更" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("is controlled by `view` and reports clicks via onViewChange (URL-driven mode)", () => {
@@ -139,37 +138,37 @@ describe("RoomRunPane", () => {
     render(<RoomRunPane runId="run-1" turn={1} view="trace" onViewChange={onViewChange} onClose={vi.fn()} />);
 
     // `view` wins: the trace surface shows even though the internal default is canvas.
-    expect(screen.getByRole("tab", { name: "紀錄" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Trace" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByTestId("run-canvas")).toBeNull();
 
     // A click reports up (no internal switch) so the URL stays the single source of truth.
-    fireEvent.click(screen.getByRole("tab", { name: "畫布" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Canvas" }));
     expect(onViewChange).toHaveBeenCalledWith("canvas");
-    expect(screen.getByRole("tab", { name: "紀錄" })).toHaveAttribute("aria-selected", "true");  // unchanged until the prop updates
+    expect(screen.getByRole("tab", { name: "Trace" })).toHaveAttribute("aria-selected", "true");  // unchanged until the prop updates
   });
 
   // ─── D2 follow/pin toggle + jump-to-latest chip ───
 
-  it("shows the follow toggle label in follow mode and the 跟隨中 hint, and fires onToggleBind", () => {
+  it("shows the follow toggle label in follow mode and the Following hint, and fires onToggleBind", () => {
     useWorkflowRunMock.mockReturnValue(ok(detail({})));
     const onToggleBind = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={5} mode="follow" onToggleBind={onToggleBind} onClose={vi.fn()} />);
 
-    expect(screen.getByText("跟隨中")).toBeInTheDocument();
-    const toggle = screen.getByRole("button", { name: /跟隨最新回合/ });
+    expect(screen.getByText("Following")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Follow latest/ });
     fireEvent.click(toggle);
     expect(onToggleBind).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the pinned toggle label in pinned mode (no 跟隨中 hint), and fires onToggleBind", () => {
+  it("shows the pinned toggle label in pinned mode (no Following hint), and fires onToggleBind", () => {
     useWorkflowRunMock.mockReturnValue(ok(detail({})));
     const onToggleBind = vi.fn();
 
     render(<RoomRunPane runId="run-1" turn={2} mode="pinned" onToggleBind={onToggleBind} onClose={vi.fn()} />);
 
-    expect(screen.queryByText("跟隨中")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /已釘選/ }));
+    expect(screen.queryByText("Following")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Pinned/ }));
     expect(onToggleBind).toHaveBeenCalledTimes(1);
   });
 
@@ -178,8 +177,8 @@ describe("RoomRunPane", () => {
 
     render(<RoomRunPane runId="run-1" turn={1} onClose={vi.fn()} />);
 
-    expect(screen.queryByRole("button", { name: /跟隨最新回合|已釘選/ })).toBeNull();
-    expect(screen.queryByText("跟隨中")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Follow latest|Pinned/ })).toBeNull();
+    expect(screen.queryByText("Following")).toBeNull();
   });
 
   it("renders the jump-to-latest chip only when jumpToLatest is set, and fires its handler", () => {
@@ -188,12 +187,12 @@ describe("RoomRunPane", () => {
 
     const { rerender } = render(<RoomRunPane runId="run-1" turn={2} mode="pinned" jumpToLatest={7} onJumpToLatest={onJumpToLatest} onClose={vi.fn()} />);
 
-    const chip = screen.getByRole("button", { name: /最新:回合 7 執行中/ });
+    const chip = screen.getByRole("button", { name: /Latest: Turn 7 Running/ });
     fireEvent.click(chip);
     expect(onJumpToLatest).toHaveBeenCalledTimes(1);
 
     // Cleared → the chip is gone.
     rerender(<RoomRunPane runId="run-1" turn={2} mode="pinned" jumpToLatest={null} onJumpToLatest={onJumpToLatest} onClose={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: /執行中/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Running/ })).toBeNull();
   });
 });

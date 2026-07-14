@@ -16,7 +16,7 @@ import type { NodeFooterProps } from "./index";
  * two things the plain receipt can't say about a network call: WHILE RUNNING it paints the live external-call
  * span (verb + shortened target + a ticking elapsed, and a depletion ring for the timeout-bounded `http.request`)
  * off the {@link useNodeLiveContext} live-signal store; ONCE TERMINAL it replaces the generic "Success · 1.2s"
- * label with a per-type receipt digest ({@link digestExternalCall}) — "#42 已開啟", "merged · a1b2c3d", "5/5 ·
+ * label with a per-type receipt digest ({@link digestExternalCall}) — "#42 opened", "merged · a1b2c3d", "5/5 ·
  * success" — while reusing ReceiptFooter's exact bar + expand panel for everything else. Degrades cleanly: no
  * live store (editor / no run) → renders from `rows` alone.
  */
@@ -140,7 +140,7 @@ export function digestExternalCall(typeKey: string, rows: WorkflowRunNodeSummary
   }
 }
 
-/** git.open_pr / git.create_issue → `#{number} 已開啟 ↗` (the arrow links to the created url/webUrl when present). */
+/** git.open_pr / git.create_issue → `#{number} opened ↗` (the arrow links to the created url/webUrl when present). */
 function openedDigest(out: Record<string, unknown>): ExternalCallDigest {
   const number = readNumber(out, "number");
   const url = readString(out, "url") ?? readString(out, "webUrl");
@@ -149,7 +149,7 @@ function openedDigest(out: Record<string, unknown>): ExternalCallDigest {
     tone: "success",
     label: (
       <>
-        {number != null && <span className="wf-rf-digest-mono">#{number}</span>} 已開啟{url && <DigestLink href={url} />}
+        {number != null && <span className="wf-rf-digest-mono">#{number}</span>} opened{url && <DigestLink href={url} />}
       </>
     ),
   };
@@ -180,13 +180,13 @@ function checksDigest(out: Record<string, unknown>): ExternalCallDigest {
   return { tone, label: `${passing}/${total}${state ? ` · ${state}` : ""}` };
 }
 
-/** git.fetch_pr_diff → `{files} 檔 · +{additions} −{deletions}`. */
+/** git.fetch_pr_diff → `{files} files · +{additions} −{deletions}`. */
 function diffDigest(out: Record<string, unknown>): ExternalCallDigest {
   const files = readArrayLength(out, "files") ?? 0;
   const additions = readNumber(out, "additions") ?? 0;
   const deletions = readNumber(out, "deletions") ?? 0;
 
-  return { tone: "success", label: `${files} 檔 · +${additions} −${deletions}` };
+  return { tone: "success", label: `${files} files · +${additions} −${deletions}` };
 }
 
 /** git.list_prs → `{count} PRs`; null when neither the count nor the array is present. */
@@ -205,11 +205,11 @@ function reviewDigest(out: Record<string, unknown>): ExternalCallDigest | null {
   return { tone: verdict === "request_changes" ? "warn" : "success", label: verdict };
 }
 
-/** git.comment_issue / git.post_pr_comment → `已發布` + link when webUrl is present (a GitLab note has none → no link). */
+/** git.comment_issue / git.post_pr_comment → `Published` + link when webUrl is present (a GitLab note has none → no link). */
 function commentDigest(out: Record<string, unknown>): ExternalCallDigest {
   const url = readString(out, "webUrl");
 
-  return { tone: "success", label: <>已發布{url && <DigestLink href={url} />}</> };
+  return { tone: "success", label: <>Published{url && <DigestLink href={url} />}</> };
 }
 
 /** git.close_issue → the resulting state (open → closed); null when absent. */

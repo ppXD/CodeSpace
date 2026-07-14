@@ -56,7 +56,7 @@ function mergeCounts(bd: ReturnType<typeof fanBreakdown>, live: { done: number; 
 
 /**
  * The flow.map fan-out result, embedded under the canvas map/agent node — the same activity-terminal language as the
- * Activity tab, laid out in the graph. It renders a summary line (N branches + per-state counts, incl. parked "等待"), a
+ * Activity tab, laid out in the graph. It renders a summary line (N branches + per-state counts, incl. parked "Waiting"), a
  * per-branch status dot strip you click to focus a branch (only the branch that JUST flipped pulses), and the focused
  * branch's terminal (its error / output / live agent run, via `renderBranch`). When every branch has settled, the strip
  * folds into a single "results [N]" chip. Reads the canvas live store (when present) for immediate counts + the planned
@@ -118,7 +118,7 @@ export function MapFanout({ rows, renderBranch, inline }: { rows: WorkflowRunNod
         <span className="wf-rf-fanout-total">{c.total} {c.total === 1 ? "branch" : "branches"}</span>
         {c.done > 0 && <span data-state="done">{c.done} done</span>}
         {c.running > 0 && <span data-state="running">{c.running} running</span>}
-        {c.waiting > 0 && <span data-state="waiting">· {c.waiting} 等待</span>}
+        {c.waiting > 0 && <span data-state="waiting">· {c.waiting} waiting</span>}
         {c.failed > 0 && <span data-state="failed">{c.failed} failed</span>}
         {c.queued > 0 && <span data-state="queued">{c.queued} queued</span>}
       </div>

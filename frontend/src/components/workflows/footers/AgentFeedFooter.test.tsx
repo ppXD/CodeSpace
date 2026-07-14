@@ -96,10 +96,10 @@ describe("AgentFeedFooter — working feed", () => {
     ];
     const { container } = renderFooter("Running", [agentRow({ status: "Running" })]);
 
-    expect(container.querySelector(".wf-rf-feed-title")?.textContent).toBe("代理工作中");
+    expect(container.querySelector(".wf-rf-feed-title")?.textContent).toBe("Agent working");
     expect(container.querySelectorAll(".wf-rf-feed-row")).toHaveLength(3);            // DOM capped at 3 rows
     expect(iconKeys(container)).toEqual(["wrench", "terminal", "chat"]);              // per-kind icons, in order
-    expect(container.querySelector(".wf-rf-feed-meta")?.textContent).toContain("2 檔");  // deduped across ALL events
+    expect(container.querySelector(".wf-rf-feed-meta")?.textContent).toContain("2 files");  // deduped across ALL events
   });
 
   it("an unknown event kind degrades to the neutral dot icon without crashing", () => {
@@ -117,7 +117,7 @@ describe("AgentFeedFooter — working feed", () => {
     const { container } = renderFooter("Suspended", [agentRow()]);
 
     expect(container.querySelector(".wf-rf-feed")?.getAttribute("data-approval")).toBeNull();
-    expect(container.querySelector(".wf-rf-feed-title")?.textContent).toBe("代理工作中");
+    expect(container.querySelector(".wf-rf-feed-title")?.textContent).toBe("Agent working");
   });
 });
 
@@ -129,11 +129,11 @@ describe("AgentFeedFooter — awaiting approval", () => {
 
     const feed = container.querySelector(".wf-rf-feed");
     expect(feed?.hasAttribute("data-approval")).toBe(true);               // amber approval state
-    expect(feed?.querySelector(".wf-rf-feed-title")?.textContent).toContain("等待批准");
+    expect(feed?.querySelector(".wf-rf-feed-title")?.textContent).toContain("Awaiting approval");
     expect(feed?.querySelector(".wf-rf-feed-title")?.textContent).toContain("git.push");
     // Inline decision affordances render (wiring deferred — see the ApprovalBar TODO).
-    expect(getByRole("button", { name: "批准" })).not.toBeNull();
-    expect(getByRole("button", { name: "拒絕" })).not.toBeNull();
+    expect(getByRole("button", { name: "Approve" })).not.toBeNull();
+    expect(getByRole("button", { name: "Deny" })).not.toBeNull();
   });
 });
 
@@ -145,7 +145,7 @@ describe("AgentFeedFooter — terminal receipt stamp", () => {
     expect(container.querySelector(".wf-rf-result-bar")).not.toBeNull();               // reuses ReceiptFooter's bar
     expect(container.querySelector(".wf-rf-agent-lead")?.textContent).toContain("Refactored the parser");
     expect(container.querySelector(".wf-rf-agent-branch")?.textContent).toContain("feat/parser");
-    expect(container.querySelector(".wf-rf-agent-metrics")?.textContent).toContain("+3 檔");
+    expect(container.querySelector(".wf-rf-agent-metrics")?.textContent).toContain("+3 files");
   });
 
   it("a node with NO agentRunId degrades to the plain receipt (default status label, no feed) without throwing", () => {

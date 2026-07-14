@@ -13,7 +13,7 @@ import type { NodeFooterProps } from "./index";
  * The footer for the AI / LLM family — every typeKey the registry resolves to the `tokenStream` kind (`llm.complete`,
  * `plan.author`, and any future AI/Planning node). It reads the same coze-style `.wf-rf-result` language as
  * {@link ReceiptFooter} but adds the one thing a plain receipt can't show: the LIVE generation, off the
- * {@link useNodeLiveContext} interaction-delta signal (A4). WHILE STREAMING it paints a `生成中` bar with a blinking
+ * {@link useNodeLiveContext} interaction-delta signal (A4). WHILE STREAMING it paints a `Generating` bar with a blinking
  * caret + a right-aligned ≈token estimate (chars÷4) + three shimmer lines (a TEXTURE that conveys "text flowing" — never
  * fabricated text; counts only, so memory stays flat). WHILE BUFFERED (a non-streamed call — no live deltas) it shows a
  * gentle sparkle + elapsed instead, with NO fake shimmer. ONCE TERMINAL it stamps a generic token digest
@@ -37,7 +37,7 @@ export function TokenStreamFooter(props: NodeFooterProps) {
   return <ReceiptFooter {...props} labelSlot={<span className="wf-rf-digest" data-tone={digest.tone}>{digest.label}</span>} />;
 }
 
-/** The live streaming bar: `生成中` + a blinking caret, a right-aligned ≈token estimate, and 3 shimmer lines (texture, not text). */
+/** The live streaming bar: `Generating` + a blinking caret, a right-aligned ≈token estimate, and 3 shimmer lines (texture, not text). */
 function StreamingBar({ chars, title }: { chars: number; title?: string }) {
   const tokens = Math.round(chars / 4);
 
@@ -45,7 +45,7 @@ function StreamingBar({ chars, title }: { chars: number; title?: string }) {
     <div className="wf-rf-result wf-rf-tok nodrag nopan" data-status="running">
       <div className="wf-rf-result-bar" title={title}>
         <span className="wf-rf-result-glyph" aria-hidden="true"><Ic.Sparkles size={12} /></span>
-        <span className="wf-rf-result-label">生成中</span>
+        <span className="wf-rf-result-label">Generating</span>
         <span className="wf-rf-tok-caret" aria-hidden="true" />
         <span className="wf-rf-tok-count">≈{tokens.toLocaleString()} tok</span>
       </div>
@@ -70,7 +70,7 @@ function BufferedBar({ rows, now, title }: { rows: WorkflowRunNodeSummary[]; now
         <span className="wf-rf-result-glyph" aria-hidden="true">
           {hasStart ? <span className="wf-rf-tok-spark"><Ic.Sparkles size={12} /></span> : <span className="wf-rf-status-spin" />}
         </span>
-        <span className="wf-rf-result-label">生成中</span>
+        <span className="wf-rf-result-label">Generating</span>
         {hasStart && <span className="wf-rf-result-dur">{formatElapsed(now - start)}</span>}
       </div>
     </div>
@@ -89,7 +89,7 @@ export interface TokenDigest {
  * outcome tone, or null when no token counts landed (the footer then falls back to the plain status·duration bar, so a
  * `plan.author` or any AI node without token outputs still reads cleanly). Shape: `{in}→{out} tok`, then `· ${cost}` when
  * `costUsd` is present (formatted to cents), then a `json ✓` marker when an `outputs.json` object exists. A
- * `finishReason === "length"` (the model hit its output cap) flips the tone to `warn` and appends `· 已截斷`.
+ * `finishReason === "length"` (the model hit its output cap) flips the tone to `warn` and appends `· truncated`.
  */
 export function digestTokens(rows: WorkflowRunNodeSummary[]): TokenDigest | null {
   const out = readOutputs(rows);
@@ -113,7 +113,7 @@ export function digestTokens(rows: WorkflowRunNodeSummary[]): TokenDigest | null
         {" tok"}
         {cost !== undefined && <> · <span className="wf-rf-digest-mono">{formatCostUsd(cost)}</span></>}
         {hasJson && <> · <span className="wf-rf-tok-json">json ✓</span></>}
-        {truncated && " · 已截斷"}
+        {truncated && " · truncated"}
       </>
     ),
   };

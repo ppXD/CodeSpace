@@ -78,7 +78,7 @@ function IntegrateRunning({ rows, now, title }: { rows: WorkflowRunNodeSummary[]
     <div className="wf-rf-result wf-pf wf-pf-int nodrag nopan" data-status="running">
       <div className="wf-rf-result-bar" title={title}>
         <span className="wf-rf-result-glyph" aria-hidden="true"><span className="wf-rf-status-spin" /></span>
-        <span className="wf-rf-result-label">整合中</span>
+        <span className="wf-rf-result-label">Integrating</span>
         {hasStart && <span className="wf-rf-result-dur">{formatElapsed(now - start)}</span>}
       </div>
       <div className="wf-pf-rail" aria-hidden="true">
@@ -129,7 +129,7 @@ function IntegrateTerminal(props: NodeFooterProps) {
         {expandable && <span className="wf-rf-result-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>}
       </button>
 
-      {kind === "conflicted" && <div className="wf-pf-reassure">什麼都沒推 — 代理分支保留</div>}
+      {kind === "conflicted" && <div className="wf-pf-reassure">Nothing pushed — agent branch preserved</div>}
 
       {open && expandable && row && (
         <div className="wf-rf-result-panel nowheel nodrag" onClick={(e) => e.stopPropagation()}>
@@ -177,7 +177,7 @@ function RunCommandRunning({ data, rows, call, now, title }: { data: WorkflowNod
     <div className="wf-rf-result wf-pf wf-pf-cmd nodrag nopan" data-status="running">
       <div className="wf-rf-result-bar" title={title}>
         <span className="wf-rf-result-glyph" aria-hidden="true"><Ic.Command size={12} /></span>
-        <span className="wf-rf-result-label">執行中</span>
+        <span className="wf-rf-result-label">Running</span>
         <span className="wf-pf-cursor" aria-hidden="true" />
         {ringPercent != null && <span className="wf-ring wf-pf-ring wf-rf-result-ring" aria-hidden="true" style={{ "--wf-ring-p": `${ringPercent}%` } as CSSProperties} />}
         {elapsedMs != null && <span className="wf-rf-result-dur">{formatElapsed(elapsedMs)}</span>}
@@ -271,7 +271,7 @@ function integrateDigest(out: Record<string, unknown>): PipelineDigest | null {
       tone: "warn",
       label: (
         <>
-          {first ? <span className="wf-pf-conflict-label">{first.label}</span> : <span>衝突</span>}
+          {first ? <span className="wf-pf-conflict-label">{first.label}</span> : <span>Conflict</span>}
           {reason && <span className="wf-pf-conflict-reason">— {reason}</span>}
         </>
       ),
@@ -279,7 +279,7 @@ function integrateDigest(out: Record<string, unknown>): PipelineDigest | null {
   }
 
   // Empty — a benign no-op (the node succeeded with nothing to do), so it is muted, never a warning tone.
-  return { tone: "success", label: <span className="wf-pf-muted">無可整合</span> };
+  return { tone: "success", label: <span className="wf-pf-muted">Nothing to integrate</span> };
 }
 
 /** The first non-applied contribution from `outputs.conflicts[]` — its label + reason; null when the array is absent/empty or the entry has no label. */
@@ -306,10 +306,10 @@ function runCommandDigest(out: Record<string, unknown>): PipelineDigest | null {
   if (!timedOut && exitCode === undefined) return null;   // neither an exit code nor a timeout landed → nothing to stamp
 
   const bytes = bytesLabel(out);
-  const clip = hasArtifact(out) ? <span className="wf-pf-clip" title="完整輸出已保存為工件" aria-label="輸出工件">📎</span> : null;
+  const clip = hasArtifact(out) ? <span className="wf-pf-clip" title="Full output saved as an artifact" aria-label="Output artifact">📎</span> : null;
 
   if (timedOut) {
-    return { tone: "warn", label: <><span className="wf-pf-timeout"><Ic.Clock size={11} /> 逾時</span>{bytes}{clip}</> };
+    return { tone: "warn", label: <><span className="wf-pf-timeout"><Ic.Clock size={11} /> Timed out</span>{bytes}{clip}</> };
   }
 
   const ok = exitCode === 0;
