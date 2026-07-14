@@ -65,12 +65,14 @@ public sealed class AgentMetricsReader : IScopedDependency
             .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses + the cost pricing live in one unit-testable place. Tokens/files null until the result lands; model null when the task left it blank; cost null when the model is unpriced (fail-open).</summary>
+    /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses + the cost pricing live in one unit-testable place. Tokens/files null until the result lands; model = what the run reported preferred over the spawn-pinned task model, null when neither carried one; cost null when the model is unpriced (fail-open).</summary>
     public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, string? rowError, int toolCount, DateTimeOffset now)
     {
         var result = TryDeserialize<ResultSlice>(resultJson);
         var task = TryDeserialize<TaskSlice>(taskJson);
-        var rawModel = task?.Model;
+        // Prefer the model the run ACTUALLY reported off its event stream over the spawn-PINNED task model, so an UNPINNED
+        // run (common for Codex, which the operator often leaves blank) still shows what it used instead of a blank cell.
+        var rawModel = !string.IsNullOrWhiteSpace(result?.Model) ? result!.Model : task?.Model;
         var model = string.IsNullOrWhiteSpace(rawModel) ? null : rawModel;
 
         var tokens = result?.TokenUsage;
@@ -139,8 +141,8 @@ public sealed class AgentMetricsReader : IScopedDependency
         return string.Concat(text.AsSpan(0, cut).TrimEnd(), "…");
     }
 
-    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) + the per-file diffstat + the failure error — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
-    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error);
+    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the model the run actually ran + the changed-file list (for its COUNT) + the per-file diffstat + the failure error — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
+    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, string? Model, IReadOnlyList<string>? ChangedFiles, IReadOnlyList<FileDiffStat>? FileStats, string? Error);
 
     /// <summary>The display leaves of <c>AgentTask</c> — its model + goal + display title + resume marker + harness kind — a narrow projection so the task envelope's heavy fields (workspace / permissions / tools) are never materialized here.</summary>
     private sealed record TaskSlice(string? Model, string? Goal, string? DisplayTitle, string? ResumeFromSessionId, string? Harness);
