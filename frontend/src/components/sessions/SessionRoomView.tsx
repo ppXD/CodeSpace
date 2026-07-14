@@ -252,10 +252,17 @@ export function SessionRoomView({ teamSlug, room, journal, initialPaneTurn, init
   // Summon from a turn's ⧉ Canvas card / footer action → PIN the pane to that turn (a deliberate "show me THIS turn"), on
   // the given mini-tab (canvas by default, trace when summoned from a failure diagnostic). No node → the whole-map view
   // (and clears any prior ?node focus, since a different turn is now in view).
-  const summonPane = (turn: number, view: PaneView = "canvas") => commitBinding({ open: true, mode: "pinned", turn, view });
+  const summonPane = (turn: number, view: PaneView = "canvas") => {
+    // Toggle: clicking a turn's open-canvas affordance again (same turn + view already shown) closes the pane.
+    const shown = binding.open && binding.view === view ? bindingTurn(binding, latestTurn?.turnIndex ?? null) : null;
+    if (shown === turn) { commitBinding({ open: false }); return; }
+    commitBinding({ open: true, mode: "pinned", turn, view });
+  };
   // D3 forward jump from a journal beat → PIN the pane to that turn's canvas AND focus (center + ring) the given node.
   const summonPaneNode = (turn: number, node: string) => commitBinding({ open: true, mode: "pinned", turn, view: "canvas", node });
   const closePane = () => commitBinding({ open: false });
+  // The turn whose canvas is currently open (or null) — drives the open-canvas buttons' pressed state, since they toggle.
+  const paneCanvasTurn = binding.open && binding.view === "canvas" ? bindingTurn(binding, latestTurn?.turnIndex ?? null) : null;
 
   // The follow/pin toggle: pinned → follow (rebinds to the latest turn); follow → pinned (freezes the turn shown NOW).
   // Either way the pane rebinds to a (possibly) different turn, so the pinned node focus is dropped.
@@ -354,7 +361,7 @@ export function SessionRoomView({ teamSlug, room, journal, initialPaneTurn, init
           <div className="room-scroll">
             <div className="room-thread">
               {room.blocks.map((b) => (
-                <TopBlock key={b.id} block={b} anchorId={room.anchorBlockId} nowMs={nowMs} onOpenRun={openRun} onSummonPane={summonPane} onSummonPaneNode={summonPaneNode} />
+                <TopBlock key={b.id} block={b} anchorId={room.anchorBlockId} nowMs={nowMs} onOpenRun={openRun} onSummonPane={summonPane} onSummonPaneNode={summonPaneNode} paneCanvasTurn={paneCanvasTurn} />
               ))}
               {turnCount === 0 && <div className="room-empty">No turns yet.</div>}
             </div>
@@ -566,9 +573,9 @@ function baseName(path: string): string {
 }
 
 /** A top-level block: the user's message bubble, an assistant turn, or a forward-compat fallback. */
-function TopBlock({ block, anchorId, nowMs, onOpenRun, onSummonPane, onSummonPaneNode }: { block: RoomBlock; anchorId?: string | null; nowMs: number; onOpenRun: (runId: string) => void; onSummonPane?: (turn: number, view: PaneView) => void; onSummonPaneNode?: (turn: number, node: string) => void }) {
+function TopBlock({ block, anchorId, nowMs, onOpenRun, onSummonPane, onSummonPaneNode, paneCanvasTurn }: { block: RoomBlock; anchorId?: string | null; nowMs: number; onOpenRun: (runId: string) => void; onSummonPane?: (turn: number, view: PaneView) => void; onSummonPaneNode?: (turn: number, node: string) => void; paneCanvasTurn?: number | null }) {
   if (block.type === "user_message") return <UserBubble text={block.text} at={block.at} nowMs={nowMs} />;
-  if (block.type === "assistant_turn") return <AssistantTurn turn={block} anchored={anchorId === block.id} nowMs={nowMs} onOpenRun={onOpenRun} onSummonPane={onSummonPane} onSummonPaneNode={onSummonPaneNode} />;
+  if (block.type === "assistant_turn") return <AssistantTurn turn={block} anchored={anchorId === block.id} nowMs={nowMs} onOpenRun={onOpenRun} onSummonPane={onSummonPane} onSummonPaneNode={onSummonPaneNode} canvasOpen={paneCanvasTurn != null && paneCanvasTurn === block.turnIndex} />;
   return <p className="room-para room-muted">{describeUnknown(block)}</p>;
 }
 
@@ -594,7 +601,7 @@ function UserBubble({ text, at, nowMs }: { text: string; at?: string | null; now
 }
 
 /** The AI's reply for one turn — header (avatar + name + status + duration + collapse), then the transcript body. */
-function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummonPaneNode }: { turn: AssistantTurnBlock; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void; onSummonPane?: (turn: number, view: PaneView) => void; onSummonPaneNode?: (turn: number, node: string) => void }) {
+function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummonPaneNode, canvasOpen }: { turn: AssistantTurnBlock; anchored: boolean; nowMs: number; onOpenRun: (runId: string) => void; onSummonPane?: (turn: number, view: PaneView) => void; onSummonPaneNode?: (turn: number, node: string) => void; canvasOpen?: boolean }) {
   const live = isRunActive(turn.status);
 
   // D3 forward jump: a per-turn node-focus callback the journal beats consume via PaneNodeFocusContext. Bound to THIS
@@ -665,7 +672,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
             <div className="room-turn-body">
               {lead && <p className="room-lead"><Inline text={lead} /></p>}
 
-              {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} turnStatus={turn.status} onSummon={openCanvas} />}
+              {turn.map && turn.map.steps.length > 0 && <RoomExecution steps={turn.map.steps} turnStatus={turn.status} onSummon={openCanvas} canvasOpen={canvasOpen} />}
 
               {failureCard && <InnerBlock key={failureCard.id} block={failureCard} pdById={pdById} onOpenTrace={openTrace} />}
 
@@ -725,7 +732,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
 
               {live && <TurnLiveStream runId={turn.runId} />}
 
-              <TurnActions actions={turn.actions} turn={turn} onOpenCanvas={openCanvas} onOpenRun={onOpenRun} />
+              <TurnActions actions={turn.actions} turn={turn} onOpenCanvas={openCanvas} onOpenRun={onOpenRun} canvasOpen={canvasOpen} />
 
               {live && <LiveRunBar turn={turn} />}
             </div>
@@ -786,7 +793,7 @@ function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttemp
 
 /** The execution map — the design's bordered EXECUTION panel: backend-ordered stages as status circles with a label
  *  + per-stage detail, joined by connectors that read solid / dashed / animated by the surrounding stage states. */
-function RoomExecution({ steps, turnStatus, onSummon }: { steps: ExecutionMapStep[]; turnStatus: WorkflowRunStatus; onSummon?: () => void }) {
+function RoomExecution({ steps, turnStatus, onSummon, canvasOpen }: { steps: ExecutionMapStep[]; turnStatus: WorkflowRunStatus; onSummon?: () => void; canvasOpen?: boolean }) {
   // A halted run's later stages never ran — so an idle stage reads "not reached", not the backend's "stopped" (which
   // implies it was doing something). The caption names why the tail is empty; "stopped" now means only a user cancel.
   const failed = turnStatus === "Failure";
@@ -797,7 +804,7 @@ function RoomExecution({ steps, turnStatus, onSummon }: { steps: ExecutionMapSte
       <div className="room-exec-head">
         <div className="room-exec-label">Execution</div>
         {/* Summon the run companion pane — opens this turn's RunCanvas docked on the right (Claude-artifacts style). */}
-        {onSummon && <button type="button" className="room-exec-canvas" onClick={onSummon} title="Open this turn's execution graph in the canvas"><span className="room-exec-canvas-ic" aria-hidden="true">⧉</span> Open canvas</button>}
+        {onSummon && <button type="button" className="room-exec-canvas" data-open={canvasOpen || undefined} onClick={onSummon} title={canvasOpen ? "Close the canvas" : "Open this turn's execution graph in the canvas"}>⧉ Open canvas</button>}
       </div>
       <div className="room-exec-flow">
         {steps.map((s, i) => {
@@ -1909,7 +1916,7 @@ function DecisionPreview({ decision }: { decision: DecisionBlock }) {
 /** The turn footer actions — the doing-actions first (Continue / Re-run / Open PR), then "Open canvas" LAST. Re-run
  *  confirms before firing. Stop is NOT here: while running it lives in the pinned LiveRunBar with the progress it stops.
  *  Capability-gated by the backend (never 422s). */
-function TurnActions({ actions, turn, onOpenCanvas, onOpenRun }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenCanvas?: () => void; onOpenRun: (runId: string) => void }) {
+function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen }: { actions: RoomAction[]; turn: AssistantTurnBlock; onOpenCanvas?: () => void; onOpenRun: (runId: string) => void; canvasOpen?: boolean }) {
   const replay = useReplayRun();
   const cont = useContinueRun(turn.runId);
   const openPr = useOpenPullRequest(turn.runId);
@@ -1964,7 +1971,7 @@ function TurnActions({ actions, turn, onOpenCanvas, onOpenRun }: { actions: Room
         }
         return null;
       })}
-      {trace && onOpenCanvas && <button className="room-btn-ghost" onClick={onOpenCanvas} title="Open this turn's execution graph in the canvas">⧉ Open canvas</button>}
+      {trace && onOpenCanvas && <button className="room-btn room-btn-canvas" data-open={canvasOpen || undefined} onClick={onOpenCanvas} title={canvasOpen ? "Close the canvas" : "Open this turn's execution graph in the canvas"}><span aria-hidden="true">⧉</span> Open canvas</button>}
     </div>
   );
 }
