@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -172,6 +172,68 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
             .FirstOrDefault();
 
         return match is null ? null : Path.GetRelativePath(configHome, match);
+    }
+
+    /// <summary>
+    /// IAgentTranscriptModelSource — the model Codex ACTUALLY ran, read from its captured session rollout. Codex omits the
+    /// model from its live <c>--json</c> stream (chosen server-side), so <see cref="AgentModelReader"/> finds none there;
+    /// the rollout is the one authoritative record. Pure delegation to <see cref="TryReadModelFromRollout"/> — never throws.
+    /// </summary>
+    public string? TryReadModelFromTranscript(string transcript) => TryReadModelFromRollout(transcript);
+
+    /// <summary>Model keys a Codex rollout <c>turn_context</c> payload may carry (<c>model</c>; <c>model_name</c> tolerated for a version bump), kept aligned with <see cref="AgentModelReader"/>'s stream keys.</summary>
+    private static readonly string[] RolloutModelKeys = { "model", "model_name" };
+
+    /// <summary>
+    /// Read the model off a Codex session rollout JSONL. Codex records the model ONLY on <c>turn_context</c> records at
+    /// <c>payload.model</c> (never <c>session_meta</c>, which carries only <c>model_provider</c>). A resumed/continued thread
+    /// APPENDS its new turns in place, so a rollout can carry SEVERAL <c>turn_context</c> models (the thread's history) — the
+    /// LAST is the model this run ended on, so it wins (a first-wins scan would return the OLDEST, stale on any resume or
+    /// mid-run switch). Tolerant: malformed lines are skipped and a rollout that never named a model (e.g. a run that died
+    /// before its first turn) → null. NEVER throws. Pinned by a unit test against a real rollout shape (re-verify on a codex bump).
+    /// </summary>
+    internal static string? TryReadModelFromRollout(string transcript)
+    {
+        string? model = null;
+
+        foreach (var line in transcript.Split('\n'))
+            if (TryReadTurnContextModel(line, out var m)) model = m;   // last turn_context wins — the model the run ended on
+
+        return model;
+    }
+
+    private static bool TryReadTurnContextModel(string line, out string model)
+    {
+        model = "";
+
+        if (string.IsNullOrWhiteSpace(line)) return false;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object) return false;
+
+            // Only turn_context records name the model — ignore every other record so a sibling payload.model can't shadow it.
+            if (!(root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String && t.GetString() == "turn_context")) return false;
+
+            return root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object && TryReadModelKey(payload, out model);
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool TryReadModelKey(JsonElement obj, out string model)
+    {
+        foreach (var key in RolloutModelKeys)
+            if (obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && v.GetString() is { Length: > 0 } s)
+            {
+                model = s;
+                return true;
+            }
+
+        model = "";
+        return false;
     }
 
     /// <summary>

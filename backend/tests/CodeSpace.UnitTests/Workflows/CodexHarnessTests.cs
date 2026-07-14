@@ -760,4 +760,79 @@ public class CodexHarnessTests
             System.Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, original);
         }
     }
+
+    // ── IAgentTranscriptModelSource: read the model Codex actually ran off its captured rollout ──────────────────
+    // Codex omits the model from its --json stream (chosen server-side); the rollout's turn_context.payload.model is the
+    // one authoritative record. These pin the tolerant parse against the real 0.142.x rollout shape.
+
+    [Fact]
+    public void Declares_the_transcript_model_source_capability()
+    {
+        // Codex opts into the sibling capability (Claude does NOT — its stream already names the model).
+        (Harness as IAgentTranscriptModelSource).ShouldNotBeNull("Codex reads its model from the rollout, so it must implement the capability");
+    }
+
+    [Fact]
+    public void Reads_the_model_from_a_turn_context_rollout()
+    {
+        // Real shape: a session_meta header (carries model_provider, NEVER model) then a turn_context (payload.model).
+        const string rollout = """
+        {"timestamp":"2026-07-14T03:13:58Z","type":"session_meta","payload":{"session_id":"019f","model_provider":"codespace","cwd":"/w"}}
+        {"timestamp":"2026-07-14T03:13:59Z","type":"turn_context","payload":{"cwd":"/w","model":"metis-coder-max","effort":null}}
+        """;
+
+        CodexHarness.TryReadModelFromRollout(rollout).ShouldBe("metis-coder-max");
+    }
+
+    [Fact]
+    public void Returns_the_LAST_turn_context_model_when_the_thread_resumed()
+    {
+        // A resumed/continued thread appends its new turns in place, so a rollout carries several models — the LAST turn is
+        // the one this run ended on; a first-wins scan would return the stale oldest.
+        const string rollout = """
+        {"type":"session_meta","payload":{"model_provider":"codespace"}}
+        {"type":"turn_context","payload":{"model":"gpt-5.3-codex"}}
+        {"type":"response_item","payload":{"text":"working"}}
+        {"type":"turn_context","payload":{"model":"gpt-5.5-codex"}}
+        """;
+
+        CodexHarness.TryReadModelFromRollout(rollout).ShouldBe("gpt-5.5-codex", "the model the run ended on wins, not the oldest in the thread");
+    }
+
+    [Fact]
+    public void Reads_a_model_name_alias_under_the_turn_context_payload()
+    {
+        const string rollout = """{"type":"turn_context","payload":{"model_name":"gpt-5.6-sol"}}""";
+
+        CodexHarness.TryReadModelFromRollout(rollout).ShouldBe("gpt-5.6-sol");
+    }
+
+    [Fact]
+    public void Tolerates_malformed_lines_and_still_reads_a_later_turn_context_model()
+    {
+        const string rollout = """
+        not json at all
+        {"type":"session_meta","payload":{"model_provider":"codespace"}
+        {"type":"turn_context","payload":{"model":"metis-coder-plus"}}
+        """;
+
+        CodexHarness.TryReadModelFromRollout(rollout).ShouldBe("metis-coder-plus", "a malformed line is skipped, never fatal");
+    }
+
+    [Fact]
+    public void Returns_null_when_only_session_meta_is_present()
+    {
+        // The early-failure gap: a run that died before its first turn has a rollout with NO model anywhere (session_meta
+        // carries model_provider, not model) → null, an accepted graceful degradation (same as a resume cold-start).
+        const string rollout = """{"type":"session_meta","payload":{"model_provider":"codespace","session_id":"019f"}}""";
+
+        CodexHarness.TryReadModelFromRollout(rollout).ShouldBeNull("session_meta names no model");
+    }
+
+    [Fact]
+    public void Returns_null_for_an_empty_or_whitespace_rollout()
+    {
+        CodexHarness.TryReadModelFromRollout("").ShouldBeNull();
+        CodexHarness.TryReadModelFromRollout("   \n  \n").ShouldBeNull();
+    }
 }

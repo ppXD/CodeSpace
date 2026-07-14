@@ -569,6 +569,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// it NEVER flips an otherwise-successful run to Failed). The live path passes a null <paramref name="handle"/> and
     /// re-reads the one recorded at launch; the durable RE-ATTACH path passes its in-scope handle (the config home under
     /// its spool is exactly what re-attach is tailing) so a run that completes after a worker restart stays resumable too.
+    /// Also LAST-RESORT model capture: when the live stream named no model (<see cref="AgentModelReader"/> found none) but the
+    /// harness reads one from this same transcript (<see cref="IAgentTranscriptModelSource"/> — Codex records its model only
+    /// in the rollout), the captured model backfills <see cref="AgentRunResult.Model"/>. Rides the same guards as resume, so
+    /// it degrades exactly where resume does (no session id / no durable handle / rollout not on disk / over the size cap).
     /// </summary>
     private async Task<AgentRunResult> CaptureSessionTranscriptAsync(Guid runId, AgentTask task, AgentRunResult result, IAgentHarness harness, SandboxHandle? handle, CancellationToken cancellationToken)
     {
@@ -605,7 +609,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 return result;
             }
 
-            return result with { SessionTranscript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false) };
+            var transcript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+
+            return BackfillTranscriptModel(result, harness) with { SessionTranscript = transcript };
+
+            AgentRunResult BackfillTranscriptModel(AgentRunResult captured, IAgentHarness h) =>
+                string.IsNullOrEmpty(captured.Model) && h is IAgentTranscriptModelSource source && source.TryReadModelFromTranscript(transcript) is { Length: > 0 } model
+                    ? captured with { Model = model }
+                    : captured;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
