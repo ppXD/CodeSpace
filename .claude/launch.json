@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/mars/Projects/CodeSpace/backend/src/CodeSpace.Api && ASPNETCORE_ENVIRONMENT=Development dotnet run --no-launch-profile --urls http://localhost:5099"],
+      "port": 5099
+    },
+    {
+      "name": "backend-serve",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/mars/Projects/CodeSpace-serve/backend/src/CodeSpace.Api && ASPNETCORE_ENVIRONMENT=Development dotnet run --no-launch-profile --urls http://localhost:5099"],
+      "port": 5099
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/Users/mars/Projects/CodeSpace/.claude/worktrees/stability-p0/frontend", "exec", "vite", "--port", "5186", "--strictPort"],
+      "port": 5186
+    },
+    {
+      "name": "frontend-main",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/Users/mars/Projects/CodeSpace/frontend", "exec", "vite", "--port", "5180", "--strictPort"],
+      "port": 5180
+    },
+    {
+      "name": "frontend-serve",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/Users/mars/Projects/CodeSpace-serve/frontend", "exec", "vite", "--port", "5180", "--strictPort"],
+      "port": 5180
+    },
+    {
+      "name": "frontend-verify",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/Users/mars/Projects/CodeSpace/frontend", "exec", "vite", "--port", "5197", "--strictPort"],
+      "port": 5197
+    }
+  ]
+}

@@ -1,4 +1,5 @@
-import { createContext, Fragment, type ReactNode, useContext, useEffect, useState } from "react";
+/* eslint-disable react-refresh/only-export-components -- the room view co-locates its pure pane-binding helpers (resolveBinding, resolvePaneFromTurn, journalStepNodeId, shouldShowJumpToLatest) with the component; fast-refresh granularity is moot for these. */
+import { createContext, Fragment, type ReactNode, useContext, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import type {
@@ -46,6 +47,7 @@ import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 import { statusWord } from "@/lib/runStatus";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
+import { useNowTick } from "@/hooks/use-now-tick";
 import { liveRunSummary } from "./live-run-summary";
 import { partitionForFailureHoist } from "./room-blocks";
 
@@ -81,11 +83,7 @@ const useJournal = () => useContext(JournalContext);
 export function SessionRoomView({ teamSlug, room, onOpenRoom, journal }: { teamSlug: string; room: RoomView; onOpenRoom: (runId?: string) => void; journal?: JournalView | null }) {
   const navigate = useNavigate();
 
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 5_000);
-    return () => clearInterval(t);
-  }, []);
+  const nowMs = useNowTick();
 
   const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runNumber", params: { teamSlug, runNumber: runId } });
 

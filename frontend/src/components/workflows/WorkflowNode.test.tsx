@@ -70,6 +70,31 @@ describe("WorkflowNode card", () => {
     expect(run.container.querySelector('.wf-rf-status-badge[data-status="success"]')).not.toBeNull();
   });
 
+  it("renders spotlight chips when present, and no .wf-rf-spot row when absent (card-height parity)", () => {
+    const withChips = renderNode({
+      spotlight: [
+        { key: "harness", value: "claude-code", tone: "neutral" },
+        { key: "schedule", label: "cron", value: "0 9 * * 1-5", tone: "mono" },
+      ],
+    });
+    const chips = withChips.container.querySelectorAll(".wf-rf-spot-chip");
+    expect(chips.length).toBe(2);
+    expect(chips[0].getAttribute("data-tone")).toBe("neutral");
+    expect(chips[0].textContent).toBe("claude-code");
+    expect(chips[1].querySelector("b")?.textContent).toBe("cron");   // label prefix
+    expect(chips[1].getAttribute("data-tone")).toBe("mono");
+
+    // A node with no spotlight (undefined) renders no extra row at all — same anatomy as today.
+    expect(renderNode({}).container.querySelector(".wf-rf-spot")).toBeNull();
+    // An explicitly empty array is also nothing extra.
+    expect(renderNode({ spotlight: [] }).container.querySelector(".wf-rf-spot")).toBeNull();
+  });
+
+  it("marks an unset spotlight chip with data-unset for the muted placeholder", () => {
+    const { container } = renderNode({ spotlight: [{ key: "schedule", value: "Cron schedule", unset: true, tone: "neutral" }] });
+    expect(container.querySelector(".wf-rf-spot-chip")?.getAttribute("data-unset")).toBe("true");
+  });
+
   it("renders one labelled source handle per named output (logic.if true/false), not an anonymous handle", () => {
     const named = renderNode({ outputs: [{ name: "true", displayName: "True" }, { name: "false", displayName: "False" }] });
 
