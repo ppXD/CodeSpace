@@ -6,8 +6,10 @@ import type { WorkflowNodeData } from "../WorkflowNode";
 import { AgentFeedFooter } from "./AgentFeedFooter";
 import { BranchDotsFooter } from "./BranchDotsFooter";
 import { ExternalCallFooter } from "./ExternalCallFooter";
+import { PipelineFooter } from "./PipelineFooter";
 import { ReceiptFooter } from "./ReceiptFooter";
 import { TokenStreamFooter } from "./TokenStreamFooter";
+import { TriggerReceiptFooter } from "./TriggerReceiptFooter";
 import { WaitFooter } from "./WaitFooter";
 
 /**
@@ -71,17 +73,21 @@ export function resolveFooterKind(typeKey: string, category: string, kind: NodeK
  * one PR at a time, with the rest of the pipeline untouched. Bespoke so far: `branchDots` → {@link BranchDotsFooter},
  * `externalCall` → {@link ExternalCallFooter} (live call span + per-type receipt digest), `wait` →
  * {@link WaitFooter} (the suspend family's calm countdown bar), `tokenStream` → {@link TokenStreamFooter}
- * (the AI/LLM family's live generation texture + token digest), and `agentFeed` → {@link AgentFeedFooter}
- * (the live agent event feed + amber approval state + terminal agent/supervisor receipt stamp); every
+ * (the AI/LLM family's live generation texture + token digest), `agentFeed` → {@link AgentFeedFooter}
+ * (the live agent event feed + amber approval state + terminal agent/supervisor receipt stamp), `pipeline`
+ * → {@link PipelineFooter} (the multi-stage git.integrate / run_command family — an indeterminate stage rail or
+ * a timeout-bounded command cursor while running, and a branchable outcome digest where Conflicted / non-zero
+ * exit read amber, never red), and `receipt` → {@link TriggerReceiptFooter} (the coze bar plus a per-trigger receipt
+ * digest for the trigger family, and a passthrough to the plain receipt for every other receipt-kind node); every
  * remaining kind still renders the coze-style {@link ReceiptFooter}.
  */
 export const FOOTERS: Record<NodeFooterKind, ComponentType<NodeFooterProps>> = {
-  receipt: ReceiptFooter,
+  receipt: TriggerReceiptFooter,
   externalCall: ExternalCallFooter,
   tokenStream: TokenStreamFooter,
   agentFeed: AgentFeedFooter,
   branchDots: BranchDotsFooter,
   wait: WaitFooter,
-  pipeline: ReceiptFooter,
+  pipeline: PipelineFooter,
   verdict: ReceiptFooter,
 };

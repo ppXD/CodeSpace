@@ -82,9 +82,14 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
 
   const nodes = useMemo<Node<WorkflowNodeData>[]>(
     () => {
+      // The ≤2 most-recently-started running nodes get the full pulse (C3 animation budget); every other
+      // running node stays a calm static accent ring. Computed here (not a separate memo) so it rides the
+      // same rows/status inputs and a hot↔cold flip re-renders that card (hot is in the patch fingerprint).
+      const hotNodeIds = computeHotNodeIds(statuses, rowsByNodeId);
+
       const built = definitionToRfNodes(definition, manifestByType).map((n) => {
         const fanout = collapse.fanoutRowsByMapId.get(n.id);
-        const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), rerunnableFromHere: rerunnable.has(n.id), runRows: rowsByNodeId.get(n.id), fanout };
+        const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), rerunnableFromHere: rerunnable.has(n.id), runRows: rowsByNodeId.get(n.id), fanout, hot: hotNodeIds.has(n.id) || undefined };
 
         // A collapsed map → an auto-sized fan-out card: keep its structure (incl. parentId for a nested map), drop
         // only the container sizing. See collapsedMapNode.
@@ -167,23 +172,59 @@ function RunProgress({ statuses, runActive }: { statuses: Map<string, NodeStatus
 }
 
 /** The editor's edge mapping + an n8n-style run overlay: the path the run actually took lights up. */
-function definitionToRunEdges(def: WorkflowDefinition, statuses: Map<string, NodeStatus>, runActive: boolean): Edge[] {
+export function definitionToRunEdges(def: WorkflowDefinition, statuses: Map<string, NodeStatus>, runActive: boolean): Edge[] {
   return def.edges.map((e, idx) => {
     const isError = e.sourceHandle === ERROR_HANDLE;
     const isCatch = e.sourceHandle === CATCH_HANDLE;
     const flow = runEdgeFlow(statuses.get(e.from), statuses.get(e.to), runActive);
+
+    // Compose the route class (error/catch, for stroke styling regardless of liveness) with the run-state
+    // class (taken/dead/verdict, from runEdgeFlow) so the canvas can style both dimensions of an edge.
+    const routeClass = isError ? "wf-rf-edge-error" : isCatch ? "wf-rf-edge-catch" : undefined;
+    const stateClass = flow.cls ? `wf-rf-edge-${flow.cls}` : undefined;
+    const className = [routeClass, stateClass].filter(Boolean).join(" ") || undefined;
+
     return {
       id: `e${idx}-${e.from}-${e.to}`,
       source: e.from,
       target: e.to,
       sourceHandle: e.sourceHandle ?? undefined,
       type: "default",
-      animated: flow.animated || isError || isCatch || undefined,
+      // An error/catch edge marches only while the run is live; a terminal run's error/catch edge is static.
+      animated: flow.animated || ((isError || isCatch) && runActive) || undefined,
       label: e.condition ?? undefined,
       style: flow.stroke ? { stroke: flow.stroke, strokeWidth: 2 } : undefined,
-      ...(isError ? { className: "wf-rf-edge-error" } : isCatch ? { className: "wf-rf-edge-catch" } : {}),
+      ...(className ? { className } : {}),
     };
   });
+}
+
+/**
+ * The animation budget: at most this many running nodes may pulse at once. A 12-branch running map (or a
+ * wide fan-out) would otherwise light the canvas up as a christmas tree of simultaneous breathing glows.
+ */
+const HOT_NODE_BUDGET = 2;
+
+/**
+ * The "hot set" — the ≤2 most-recently-started running nodes, whose cards keep the full pulse (C3 animation
+ * budget). A node's start time is the MAX startedAt across its rows (a fan-out's latest branch); ties break
+ * deterministically by nodeId so the set is stable across polls. Non-running nodes are never hot.
+ */
+function computeHotNodeIds(statuses: Map<string, NodeStatus>, rowsByNodeId: Map<string, WorkflowRunNodeSummary[]>): Set<string> {
+  const running: { id: string; startedAt: string }[] = [];
+
+  for (const [id, status] of statuses) {
+    if (status !== "Running") continue;
+
+    const rows = rowsByNodeId.get(id) ?? [];
+    const startedAt = rows.reduce((max, r) => (r.startedAt && r.startedAt > max ? r.startedAt : max), "");
+    running.push({ id, startedAt });
+  }
+
+  // Most recent first (ISO timestamps compare lexically); on a tie, lower nodeId first — deterministic.
+  running.sort((a, b) => (a.startedAt !== b.startedAt ? (a.startedAt < b.startedAt ? 1 : -1) : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  return new Set(running.slice(0, HOT_NODE_BUDGET).map((r) => r.id));
 }
 
 /** Group a run's rows by node id — one entry for a plain node, N for a map/loop fan-out. */

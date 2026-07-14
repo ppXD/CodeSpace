@@ -44,12 +44,21 @@ const definition: WorkflowDefinition = {
   edges: [],
 };
 
+// Distinct, fixed start times so the C3 hot-set (≤2 most-recently-started running nodes) is deterministic
+// AND stable across the poll: n1 & n3 are the two most recent, so they stay hot while n2 (older) flips —
+// keeping this test about reference-stabilization, not about hot-set churn (that's covered in RunCanvas.budget).
+const STARTED_AT: Record<string, string> = {
+  n1: "2026-07-13T00:00:03.000Z",
+  n2: "2026-07-13T00:00:01.000Z",
+  n3: "2026-07-13T00:00:02.000Z",
+};
+
 /** A fresh runNodes array with fresh row objects (exactly what a real 2s poll produces). */
 function rows(statuses: Record<string, NodeStatus>): WorkflowRunNodeSummary[] {
   return Object.entries(statuses).map(([nodeId, status]) => ({
     nodeId, iterationKey: "", status, inputs: {}, outputs: {}, error: null,
-    startedAt: "2026-07-13T00:00:00.000Z",
-    completedAt: status === "Running" ? null : "2026-07-13T00:00:02.000Z",
+    startedAt: STARTED_AT[nodeId],
+    completedAt: status === "Running" ? null : "2026-07-13T00:00:04.000Z",
   }));
 }
 

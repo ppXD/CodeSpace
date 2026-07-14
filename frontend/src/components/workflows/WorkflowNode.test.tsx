@@ -74,6 +74,16 @@ describe("WorkflowNode card", () => {
     expect(run.container.querySelector('.wf-rf-status-badge[data-status="success"]')).not.toBeNull();
   });
 
+  it("threads data.hot onto the card as data-hot (C3 animation budget), and omits it otherwise", () => {
+    const hot = renderNode({ runStatus: "Running", hot: true });
+    expect(hot.container.querySelector(".wf-rf-node")?.getAttribute("data-hot")).toBe("true");
+
+    // A running-but-not-hot node carries no marker → the CSS gives it the calm static ring, not the pulse.
+    const cold = renderNode({ runStatus: "Running", hot: false });
+    expect(cold.container.querySelector(".wf-rf-node")?.hasAttribute("data-hot")).toBe(false);
+    expect(renderNode({ runStatus: "Running" }).container.querySelector(".wf-rf-node")?.hasAttribute("data-hot")).toBe(false);
+  });
+
   it("renders spotlight chips when present, and no .wf-rf-spot row when absent (card-height parity)", () => {
     const withChips = renderNode({
       spotlight: [
@@ -250,5 +260,130 @@ describe("WorkflowNode result footer — agent.run + sub-workflow embeds (S3)", 
       runRows: [row({ status: "Suspended", agentRunId: "agent-7", startedAt: "2026-06-22T00:00:00.000Z", completedAt: null })],
     });
     expect(run.container.querySelector(".wf-rf-node")?.getAttribute("data-run-status")).toBe("Suspended");
+  });
+});
+
+/**
+ * The B7 one-shot status beats: a node that TRANSITIONS into a beat-worthy Success while mounted stamps a
+ * `data-beat` on its card (which the A1 CSS plays once). The initial render must NOT beat — opening a finished
+ * run is silent (that no-replay guard is covered exhaustively in useStatusBeat.test.ts).
+ */
+function renderForBeat(initial: Partial<WorkflowNodeData>) {
+  const build = (over: Partial<WorkflowNodeData>) => {
+    const data: WorkflowNodeData = {
+      nodeId: "n", typeKey: "trigger.push", displayName: "Trigger", iconKey: null, kind: "Trigger", category: "Triggers", label: null,
+      ...over,
+    };
+    const props = { id: data.nodeId, data, selected: false } as unknown as NodeProps;
+    return (
+      <ReactFlowProvider>
+        <RunOpenContext.Provider value={null}>
+          <WorkflowNode {...props} />
+        </RunOpenContext.Provider>
+      </ReactFlowProvider>
+    );
+  };
+  const utils = render(build(initial));
+  return { ...utils, rerenderWith: (over: Partial<WorkflowNodeData>) => utils.rerender(build(over)) };
+}
+
+describe("WorkflowNode status beats", () => {
+  it("stamps data-beat=ignite when a trigger transitions to Success (and none on the initial render)", () => {
+    const r = renderForBeat({ kind: "Trigger", typeKey: "trigger.push", runStatus: "Running" });
+    expect(r.container.querySelector(".wf-rf-node")?.getAttribute("data-beat")).toBeNull();   // no replay on mount
+
+    r.rerenderWith({ kind: "Trigger", typeKey: "trigger.push", runStatus: "Success" });
+    expect(r.container.querySelector(".wf-rf-node")?.getAttribute("data-beat")).toBe("ignite");
+  });
+
+  it("stamps data-beat=settle when a terminal transitions to Success", () => {
+    const r = renderForBeat({ kind: "Terminal", typeKey: "builtin.terminal", runStatus: "Running" });
+    r.rerenderWith({ kind: "Terminal", typeKey: "builtin.terminal", runStatus: "Success" });
+    expect(r.container.querySelector(".wf-rf-node")?.getAttribute("data-beat")).toBe("settle");
+  });
+});
+
+/**
+ * C2 — the live counter in a container frame's HEADER (.wf-rf-loop-meta). Distinct from the fan-out FOOTER
+ * (BranchDotsFooter / NodeRunFooter) the container already renders — this suite asserts only the header read.
+ *
+ * Loop-iteration convention: the pass number is the highest body iteration index seen PLUS 1 (1-based), so
+ * rows at #0/#1/#2 read "第 3 輪" (the loop has entered its 3rd pass). The "/ max" suffix appears only when the
+ * card carries `config.maxIterations` — which definitionToRfNodes does NOT copy onto card data today, so the
+ * suffix is normally absent (degraded to a bare count). Try's taken-handle stamp is DEFERRED: the run row has
+ * no routingHints field, so the header renders nothing for a try rather than fake a signal.
+ */
+describe("ContainerNode live header counter (C2)", () => {
+  function mapRow(index: number, status: WorkflowRunNodeSummary["status"]): WorkflowRunNodeSummary {
+    return row({ nodeId: "worker", containerKind: "flow.map", iterationKey: `enrich#${index}`, status });
+  }
+  function loopRow(index: number, status: WorkflowRunNodeSummary["status"] = "Success"): WorkflowRunNodeSummary {
+    return row({ nodeId: "step", containerKind: "flow.loop", iterationKey: `poll#${index}`, status });
+  }
+
+  it("map header reads {done}/{total} branches with the B4 running/waiting breakdown", () => {
+    const run = renderNode({
+      nodeId: "enrich", typeKey: "flow.map", displayName: "Map", kind: "Map", category: "Logic",
+      runStatus: "Running",
+      runRows: [
+        mapRow(0, "Success"), mapRow(1, "Success"), mapRow(2, "Success"),
+        mapRow(3, "Running"), mapRow(4, "Suspended"),   // 1 running + 1 waiting(Suspended)
+      ],
+    });
+    const meta = run.container.querySelector(".wf-rf-loop-meta");
+    expect(meta).not.toBeNull();
+    expect(meta?.textContent).toContain("3/5");        // done / total
+    expect(meta?.textContent).toContain("branches");
+    expect(meta?.textContent).toContain("1 running");
+    expect(meta?.textContent).toContain("等待");        // the Suspended branch reads as waiting, per B4
+  });
+
+  it("loop header reads the current pass = highest iteration index + 1", () => {
+    const run = renderNode({
+      nodeId: "poll", typeKey: "flow.loop", displayName: "Loop", kind: "Loop", category: "Logic",
+      runStatus: "Running",
+      runRows: [loopRow(0), loopRow(1), loopRow(2, "Running")],
+    });
+    const meta = run.container.querySelector(".wf-rf-loop-meta");
+    expect(meta?.textContent).toContain("第 3");   // indices #0..#2 → 3rd pass
+    expect(meta?.textContent).toContain("輪");
+    expect(meta?.textContent).not.toContain("/");  // no maxIterations on the card → no "/ N" suffix
+  });
+
+  it("loop header appends / max when the card carries config.maxIterations", () => {
+    const run = renderNode({
+      nodeId: "poll", typeKey: "flow.loop", displayName: "Loop", kind: "Loop", category: "Logic",
+      runStatus: "Running",
+      config: { maxIterations: 5 },
+      runRows: [loopRow(0), loopRow(1), loopRow(2)],
+    });
+    expect(run.container.querySelector(".wf-rf-loop-meta")?.textContent).toContain("第 3 / 5 輪");
+  });
+
+  it("try header is deferred — renders the frame but no meta (routingHints not on the run row)", () => {
+    const run = renderNode({
+      nodeId: "guard", typeKey: "flow.try", displayName: "Try", kind: "Try", category: "Logic",
+      runStatus: "Success",
+      runRows: [row({ nodeId: "guard", iterationKey: "", status: "Success" })],
+    });
+    expect(run.container.querySelector(".wf-rf-loop")).not.toBeNull();       // frame still renders
+    expect(run.container.querySelector(".wf-rf-loop-meta")).toBeNull();      // no header stamp for a try
+  });
+
+  it("shows no meta for a container with no run rows (editor)", () => {
+    const editor = renderNode({ nodeId: "poll", typeKey: "flow.loop", displayName: "Loop", kind: "Loop", category: "Logic" });
+    expect(editor.container.querySelector(".wf-rf-loop")).not.toBeNull();
+    expect(editor.container.querySelector(".wf-rf-loop-meta")).toBeNull();
+  });
+
+  it("shows no map meta when the container carries only its own non-branch row (degrades gracefully)", () => {
+    // In a run view a container's own runRows are its single top-level row (empty iterationKey), NOT the fanned
+    // body branch rows — so fanBranches finds nothing and the header renders no meta. See the report's note.
+    const run = renderNode({
+      nodeId: "enrich", typeKey: "flow.map", displayName: "Map", kind: "Map", category: "Logic",
+      runStatus: "Running",
+      runRows: [row({ nodeId: "enrich", iterationKey: "", containerKind: null, status: "Running" })],
+    });
+    expect(run.container.querySelector(".wf-rf-loop-meta")).toBeNull();
   });
 });
