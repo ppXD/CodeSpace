@@ -42,9 +42,15 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
 
     public async Task<UnattendedDeliveryScorecard> ComputeAsync(Guid teamId, DateTimeOffset? since, CancellationToken cancellationToken)
     {
-        var runs = await RecentTerminalRunsAsync(teamId, since, cancellationToken).ConfigureAwait(false);
+        var population = await RecentTerminalRunsAsync(teamId, since, cancellationToken).ConfigureAwait(false);
+        var suspendedRuns = await SuspendedRunCountAsync(teamId, since, cancellationToken).ConfigureAwait(false);
 
-        if (runs.Count == 0) return Empty();
+        // Era-aware denominator (option c): rates are over CONTRACT-ERA runs only — a pre-protocol run is counted
+        // visibly (LegacyRuns) but never scored; old tape is never re-derived into a verdict.
+        var legacyRuns = population.Count(r => r.CompletionPolicyVersion is null);
+        var runs = population.Where(r => r.CompletionPolicyVersion is not null).ToList();
+
+        if (runs.Count == 0) return Empty() with { Rollup = Empty().Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns } };
 
         var runIds = runs.Select(r => r.Id).ToList();
 
@@ -57,7 +63,9 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
             .Select(r => ProjectRun(r.Id, r.Status, manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd, degradedStopRuns.Contains(r.Id)))
             .ToList();
 
-        return UnattendedDeliveryScorer.Compute(outcomes);
+        var card = UnattendedDeliveryScorer.Compute(outcomes);
+
+        return card with { Rollup = card.Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns } };
     }
 
     /// <summary>
@@ -79,8 +87,18 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         return await query
             .OrderByDescending(r => r.CreatedDate)
             .Take(RecentRunCap)
-            .Select(r => new TerminalRun(r.Id, r.Status))
+            .Select(r => new TerminalRun(r.Id, r.Status, r.CompletionPolicyVersion))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Currently-suspended runs created in the window — the parked population the terminal denominator cannot see.</summary>
+    private async Task<int> SuspendedRunCountAsync(Guid teamId, DateTimeOffset? since, CancellationToken cancellationToken)
+    {
+        var query = _db.WorkflowRun.AsNoTracking().Where(r => r.TeamId == teamId && r.Status == WorkflowRunStatus.Suspended);
+
+        if (since is { } from) query = query.Where(r => r.CreatedDate >= from);
+
+        return await query.CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Project one run's manifests + human-touch count + cost into the pure scorer's input noun.</summary>
@@ -168,5 +186,5 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     private static readonly IReadOnlyList<PublishManifest> EmptyManifests = Array.Empty<PublishManifest>();
 
     /// <summary>A terminal run's id + its own honest <see cref="WorkflowRunStatus"/> — the fallback <see cref="IsSolved"/> needs when no manifest carries an objective acceptance grade.</summary>
-    private readonly record struct TerminalRun(Guid Id, WorkflowRunStatus Status);
+    private readonly record struct TerminalRun(Guid Id, WorkflowRunStatus Status, int? CompletionPolicyVersion);
 }
