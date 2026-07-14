@@ -3,9 +3,11 @@ import type { ComponentType } from "react";
 import type { NodeKind, NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
 
 import type { WorkflowNodeData } from "../WorkflowNode";
+import { AgentFeedFooter } from "./AgentFeedFooter";
 import { BranchDotsFooter } from "./BranchDotsFooter";
 import { ExternalCallFooter } from "./ExternalCallFooter";
 import { ReceiptFooter } from "./ReceiptFooter";
+import { TokenStreamFooter } from "./TokenStreamFooter";
 import { WaitFooter } from "./WaitFooter";
 
 /**
@@ -67,15 +69,17 @@ export function resolveFooterKind(typeKey: string, category: string, kind: NodeK
 /**
  * The kind → component registry Phase B plugs into: each footer kind swaps to its bespoke component here,
  * one PR at a time, with the rest of the pipeline untouched. Bespoke so far: `branchDots` → {@link BranchDotsFooter},
- * `externalCall` → {@link ExternalCallFooter} (live call span + per-type receipt digest), and `wait` →
- * {@link WaitFooter} (the suspend family's calm countdown bar); every remaining kind still renders the
- * coze-style {@link ReceiptFooter}.
+ * `externalCall` → {@link ExternalCallFooter} (live call span + per-type receipt digest), `wait` →
+ * {@link WaitFooter} (the suspend family's calm countdown bar), `tokenStream` → {@link TokenStreamFooter}
+ * (the AI/LLM family's live generation texture + token digest), and `agentFeed` → {@link AgentFeedFooter}
+ * (the live agent event feed + amber approval state + terminal agent/supervisor receipt stamp); every
+ * remaining kind still renders the coze-style {@link ReceiptFooter}.
  */
 export const FOOTERS: Record<NodeFooterKind, ComponentType<NodeFooterProps>> = {
   receipt: ReceiptFooter,
   externalCall: ExternalCallFooter,
-  tokenStream: ReceiptFooter,
-  agentFeed: ReceiptFooter,
+  tokenStream: TokenStreamFooter,
+  agentFeed: AgentFeedFooter,
   branchDots: BranchDotsFooter,
   wait: WaitFooter,
   pipeline: ReceiptFooter,

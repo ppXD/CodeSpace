@@ -15,7 +15,11 @@ vi.mock("./AgentToolCalls", () => ({ AgentToolCalls: ({ agentRunId }: { agentRun
 // WorkflowNode reads a parked agent.run node's LIVE status via useAgentRun — mock it (the real hook needs a
 // QueryClient). `agentHook.status` drives what the node sees; reset after each test.
 const agentHook = vi.hoisted(() => ({ status: undefined as string | undefined }));
-vi.mock("@/hooks/use-agents", () => ({ useAgentRun: () => ({ data: agentHook.status ? { status: agentHook.status } : undefined }) }));
+vi.mock("@/hooks/use-agents", () => ({
+  useAgentRun: () => ({ data: agentHook.status ? { status: agentHook.status } : undefined }),
+  useAgentRunEvents: () => ({ data: [] }),
+  useToolCalls: () => ({ data: [] }),
+}));
 afterEach(() => { agentHook.status = undefined; });
 
 /**
@@ -145,7 +149,11 @@ describe("WorkflowNode coze-style result footer", () => {
   });
 
   it("shows no duration while a node is still running", () => {
+    // A receipt-family node pins the generic coze bar's mid-run behavior (no duration until the row completes).
+    // llm.complete now owns the bespoke tokenStream footer, whose Running treatment (生成中 + a live estimate /
+    // elapsed) is covered in TokenStreamFooter.test.tsx.
     const run = renderNode({
+      typeKey: "trigger.manual", category: "Triggers",
       runStatus: "Running",
       runRows: [row({ status: "Running", outputs: {}, startedAt: "2026-06-22T00:00:00.000Z", completedAt: null })],
     });
@@ -224,12 +232,15 @@ describe("WorkflowNode result footer — agent.run + sub-workflow embeds (S3)", 
   it("surfaces a parked agent.run node's live status as Running (not the idle Suspended)", () => {
     agentHook.status = "Running";   // the agent is actively working while the node parks
     const run = renderNode({
+      typeKey: "agent.run", category: "Agent",
       runStatus: "Suspended",
       runRows: [row({ status: "Suspended", agentRunId: "agent-7", startedAt: "2026-06-22T00:00:00.000Z", completedAt: null })],
     });
+    // Card override: the parked-on-a-live-agent node paints as Running, not an idle wait.
     expect(run.container.querySelector(".wf-rf-node")?.getAttribute("data-run-status")).toBe("Running");
-    expect(run.container.querySelector(".wf-rf-result-label")?.textContent).toBe("Running");
-    expect(run.container.querySelector(".wf-rf-result-bar")?.getAttribute("title")).toContain("Parked");   // engine truth on hover
+    // Footer: agent.run routes to the agent feed, whose live "working" head is the not-idle signal
+    // (the feed's own moods — working vs awaiting-approval vs receipt — are covered in AgentFeedFooter.test.tsx).
+    expect(run.container.querySelector(".wf-rf-feed-title")?.textContent).toBe("代理工作中");
   });
 
   it("keeps a node Suspended once its agent is no longer active", () => {

@@ -166,8 +166,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 }
 .acs-root .chrome-btn:hover { color: var(--ink); border-color: var(--line-2); }
 
-/* ============================================================
- * Sidebar
+/* ===================================================== * Sidebar
  * ============================================================ */
 .acs-root .sb {
   background: var(--panel-2); border-right: 1px solid var(--line);
@@ -332,8 +331,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .app[data-sidebar="collapsed"] .sb-ws { justify-content: center; padding: 8px; margin: 8px 6px; }
 .acs-root .app[data-sidebar="collapsed"] .sb-foot { justify-content: center; padding: 8px 0; }
 
-/* ============================================================
- * Content (Repositories list)
+/* ===================================================== * Content (Repositories list)
  * ============================================================ */
 .acs-root .ct { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .ct-head { padding: 18px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
@@ -634,8 +632,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .mc-addmodel > svg { color: var(--muted); }
 
 
-/* ============================================================
- * Repo detail
+/* ===================================================== * Repo detail
  * ============================================================ */
 .acs-root .rd { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .rd-head { padding: 14px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
@@ -698,8 +695,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .rd-stub-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; letter-spacing: -0.005em; }
 .acs-root .rd-stub-p { font-size: 13px; line-height: 1.55; max-width: 380px; margin: 0 auto; }
 
-/* ============================================================
- * Pull requests panel — GitHub-inspired in the CodeSpace palette.
+/* ===================================================== * Pull requests panel — GitHub-inspired in the CodeSpace palette.
  *
  * Visual model = ONE single card:
  *   - Toolbar (filter tabs + escape-hatch) blends into the card top with the
@@ -1423,8 +1419,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 }
 .acs-root .prd-merge-p { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
 
-/* ============================================================
- * Modals — shared chrome (portaled to body, so NOT scoped under .acs-root)
+/* ===================================================== * Modals — shared chrome (portaled to body, so NOT scoped under .acs-root)
  * ============================================================ */
 .mdl-mask { position: fixed; inset: 0; z-index: 80; background: rgba(20,15,8,.32); backdrop-filter: blur(2px); animation: mdlMask .14s ease; }
 @keyframes mdlMask { from { opacity: 0; } to { opacity: 1; } }
@@ -3365,6 +3360,92 @@ textarea:-webkit-autofill {
 .acs-root .wf-wait-stamp[data-tone="reject"] { background: #FCEDED; color: #9E3535; }
 .acs-root .wf-wait-stamp[data-tone="neutral"] { background: var(--panel-2); color: var(--muted); }
 .acs-root .wf-wait-resolved .wf-rf-result-dur { margin-left: 8px; }
+
+/* B2 token-stream footer (TokenStreamFooter) — the AI/LLM family's live generation texture. It RIDES the shared
+   `.wf-rf-result*` running bar (above) and reuses the B1 `.wf-rf-digest*` label for the terminal token digest; this
+   block adds only the streaming affordances: a blinking caret, a right-aligned ≈token estimate, three shimmer lines
+   (a TEXTURE that reads as "text flowing" — never real text), the buffered sparkle pulse, and the `json ✓` marker.
+   Animations are cheap (opacity + background-position only) and FROZEN under reduced motion. */
+.acs-root .wf-rf-tok-count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .wf-rf-tok-caret { width: 5px; height: 12px; margin-left: 2px; border-radius: 1px; background: var(--accent); animation: wf-rf-tok-blink 1.06s step-end infinite; }
+.acs-root .wf-rf-tok-spark { display: inline-flex; color: var(--accent); animation: wf-rf-tok-pulse 1.4s ease-in-out infinite; }
+
+.acs-root .wf-rf-tok-lines { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding: 1px; }
+.acs-root .wf-rf-tok-line {
+  height: 7px; border-radius: 4px; background-size: 200% 100%;
+  background-image: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 12%, var(--panel-2)) 0%,
+    color-mix(in srgb, var(--accent) 32%, var(--panel-2)) 50%,
+    color-mix(in srgb, var(--accent) 12%, var(--panel-2)) 100%);
+  animation: wf-rf-tok-flow 1.5s linear infinite;
+}
+.acs-root .wf-rf-tok-line:nth-child(1) { width: 96%; }
+.acs-root .wf-rf-tok-line:nth-child(2) { width: 82%; animation-delay: .2s; }
+.acs-root .wf-rf-tok-line:nth-child(3) { width: 58%; animation-delay: .4s; }
+
+.acs-root .wf-rf-tok-json { font-size: 10px; font-weight: 700; color: #1F6B3F; }
+
+@keyframes wf-rf-tok-flow  { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes wf-rf-tok-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+@keyframes wf-rf-tok-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .wf-rf-tok-line, .acs-root .wf-rf-tok-caret, .acs-root .wf-rf-tok-spark { animation: none; }
+  .acs-root .wf-rf-tok-caret { opacity: 1; }
+  .acs-root .wf-rf-tok-line { background-position: 0 0; }
+}
+/* ── B3 agent feed footer (AgentFeedFooter) — the flagship live footer for agent.run / agent.supervisor. It
+   CONSUMES the shared `.wf-rf-result` absolute placement + the shared `.wf-rf-status-spin`, and adds three
+   moods: a compact 3-row live event feed (per-kind chip · kind · short text), the AMBER awaiting-approval
+   banner, and the terminal agent/supervisor receipt stamp. Older feed rows recede via static `nth-last-child`
+   opacity — no new keyframes, so it is reduced-motion safe by construction. The `data-run-status` /
+   `.wf-ring` / beat blocks are untouched. ── */
+.acs-root .wf-rf-feed { padding: 6px 9px; border-radius: 8px; border: 1px solid var(--accent); background: #FFF6EF; box-shadow: 0 1px 2px rgba(31,30,29,0.05); font-size: 11px; color: var(--ink-2); }
+.acs-root .wf-rf-feed-head { display: flex; align-items: center; gap: 6px; }
+.acs-root .wf-rf-feed-title { font-weight: 600; letter-spacing: -.01em; }
+.acs-root .wf-rf-feed-turn { font-size: 10px; font-weight: 700; color: var(--accent); }
+.acs-root .wf-rf-feed-meta { margin-left: auto; display: inline-flex; gap: 7px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.acs-root .wf-rf-feed-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.acs-root .wf-rf-feed-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Older rows recede so the newest (bottom) reads first — static opacity, no animation. */
+.acs-root .wf-rf-feed-row:nth-last-child(3) { opacity: .5; }
+.acs-root .wf-rf-feed-row:nth-last-child(2) { opacity: .78; }
+.acs-root .wf-rf-feed-ic { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 5px; background: var(--panel-2); color: var(--muted-2); flex-shrink: 0; }
+.acs-root .wf-rf-feed-ic > svg { display: block; }
+/* per-kind chip tint — generic; an unknown kind keeps the neutral dot chip */
+.acs-root .wf-rf-feed-ic[data-icon="wrench"]      { color: #5B4B8A; }
+.acs-root .wf-rf-feed-ic[data-icon="terminal"]    { color: var(--ink-2); }
+.acs-root .wf-rf-feed-ic[data-icon="file-diff"]   { color: #1F6B3F; }
+.acs-root .wf-rf-feed-ic[data-icon="beaker"]      { color: #8A5A1B; }
+.acs-root .wf-rf-feed-ic[data-icon="chat"]        { color: var(--accent); }
+.acs-root .wf-rf-feed-ic[data-icon="sparkle"]     { color: #7A6BB0; }
+.acs-root .wf-rf-feed-ic[data-icon="list-checks"] { color: #1F6B3F; }
+.acs-root .wf-rf-feed-kind { font-weight: 600; color: var(--muted); flex-shrink: 0; }
+.acs-root .wf-rf-feed-text { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* Awaiting-approval — AMBER, so "the agent is working" vs "the agent needs YOU" are visually unmistakable. */
+.acs-root .wf-rf-feed[data-approval] { border-color: #E4B980; background: #FBF1E1; }
+.acs-root .wf-rf-feed[data-approval] .wf-rf-feed-title { color: #8A5A1B; }
+.acs-root .wf-rf-feed[data-approval] .wf-rf-feed-ic { background: #F4E3CB; color: #8A5A1B; }
+.acs-root .wf-rf-approve-row { display: flex; gap: 6px; margin-top: 7px; }
+.acs-root .wf-rf-approve, .acs-root .wf-rf-deny { font: inherit; font-size: 11px; font-weight: 600; padding: 3px 12px; border-radius: 7px; cursor: pointer; border: 1px solid; transition: filter .12s ease; }
+.acs-root .wf-rf-approve { background: #1F6B3F; border-color: #1F6B3F; color: #fff; }
+.acs-root .wf-rf-deny { background: var(--panel); border-color: #E7A6A6; color: #9E3535; }
+.acs-root .wf-rf-approve:hover, .acs-root .wf-rf-deny:hover { filter: brightness(1.05); }
+
+/* Terminal receipt stamp — replaces the plain "Success" label in the reused receipt bar with the run's digest. */
+.acs-root .wf-rf-agent-stamp { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.acs-root .wf-rf-agent-lead { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .wf-rf-agent-branch { display: inline-flex; align-items: center; gap: 3px; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 10px; color: #1F6B3F; background: #F2F9F5; border: 1px solid #BFE0CD; border-radius: 5px; padding: 0 5px; }
+.acs-root .wf-rf-agent-branch > svg { flex-shrink: 0; }
+.acs-root .wf-rf-agent-metrics { display: inline-flex; gap: 7px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* supervisor status triad — a Stopped run must NOT read as green success; AcceptanceFailed reads as red failure. */
+.acs-root .wf-rf-agent-stamp[data-tone="warn"]    { color: #8A5A1B; }
+.acs-root .wf-rf-agent-stamp[data-tone="warn"] .wf-rf-agent-lead    { color: #8A5A1B; }
+.acs-root .wf-rf-agent-stamp[data-tone="failure"] { color: #9E3535; }
+.acs-root .wf-rf-agent-stamp[data-tone="failure"] .wf-rf-agent-lead { color: #9E3535; }
+.acs-root .wf-rf-agent-stamp[data-tone="success"] .wf-rf-agent-lead { color: #1F6B3F; }
 
 /* Unified Rerun control (RerunMenu) — a filled-accent split button (primary + caret) + a dropdown of every rerun the
    surface offers: the current action checkmarked, the bulk "Rerun all failed items" badged "suggested", and "Rerun
