@@ -1,0 +1,76 @@
+name: Backend · Real model canary
+
+# DUAL-LANE (v4.2 gateway ruling), the FLOATING half: watches provider/model DRIFT against the latest model while
+# real-model.yml stays the PINNED, blocking qualification baseline. Report-only by construction — never a required
+# check, never gates a merge, own concurrency group so it can never cancel (or be cancelled by) a qualification
+# window. Runs the cheapest capability probe (the supervisor/session decision evals — DB-free component tier).
+#
+# Semantics (the adjudicated ruling, verbatim):
+#   - a red HERE with a green pinned lane = the FLOATING model drifted → alert, evaluate, maybe re-pin;
+#   - a red on BOTH lanes = a genuine protocol/capability miss → stays red, never "fixed" by pinning;
+#   - provider outage classifies InfraUnknown in the harness — not a capability failure, and never release-green.
+#   - a floating model that meets the bar is PROMOTION INPUT for the next pinned bundle (an explicit re-pin).
+#
+# Enabled by setting the repo VARIABLE CODESPACE_LLM_FLOATING_MODEL_ID (the model id is not a secret); unset, the
+# whole workflow self-skips at zero cost. Nightly + on-demand — drift is a slow signal, not a per-push one.
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # nightly, 18:00 UTC (02:00 UTC+8 — off the owner's working hours)
+  workflow_dispatch:
+
+concurrency:
+  group: real-model-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: floating canary (decision evals, report-only)
+    runs-on: ubuntu-latest
+    if: ${{ vars.CODESPACE_LLM_FLOATING_MODEL_ID != '' }}
+    continue-on-error: true
+    timeout-minutes: 120
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ vars.CODESPACE_LLM_FLOATING_MODEL_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Probe the floating model (same evals, same gates — the verdict is a REPORT)
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelSampling|FullyQualifiedName~RealModelCustom"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-canary.trx"
+          --results-directory backend/TestResults
+
+      - name: Drift summary
+        if: always()
+        run: |
+          trx=backend/TestResults/real-model-canary.trx
+          test -f "$trx" || { echo "::warning::canary produced no trx — probe never ran"; exit 0; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          failed=$(grep -oE 'failed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "## Floating canary — model \`${CODESPACE_LLM_MODEL_ID}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "executed=${executed:-0} passed=${passed:-0} failed=${failed:-0}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${failed:-0}" -gt 0 ]; then
+            echo "::warning::Floating model drift signal: ${failed} failing eval(s). Compare against the pinned lane before any re-pin decision."
+          fi
