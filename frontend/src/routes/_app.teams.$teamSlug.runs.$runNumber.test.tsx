@@ -2,9 +2,10 @@ import { Outlet } from "@tanstack/react-router";
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { RoomBlock } from "@/api/sessions";
 import type { MeResponse, MeTeam } from "@/api/types";
 import { renderRoute, stubFetch } from "@/test/route-harness";
-import { validateRunDetailSearch } from "./_app.teams.$teamSlug.runs.$runNumber";
+import { rewriteTraceDeepLink, validateRunDetailSearch } from "./_app.teams.$teamSlug.runs.$runNumber";
 
 vi.mock("@/components/AppShell", () => ({ AppShell: () => <Outlet /> }));
 
@@ -92,5 +93,77 @@ describe("run-detail trace deep-link", () => {
     it("keeps a lone trace (the default view is omitted for a clean URL)", () => {
       expect(validateRunDetailSearch({ trace: "run-1" })).toEqual({ trace: "run-1" });
     });
+
+    it("keeps the companion-pane params, alongside the modal ones", () => {
+      expect(validateRunDetailSearch({ pane: "canvas", turn: 3 })).toEqual({ pane: "canvas", turn: 3 });
+      expect(validateRunDetailSearch({ pane: "canvas", turn: "3" })).toEqual({ pane: "canvas", turn: 3 });
+      expect(validateRunDetailSearch({ trace: "run-1", pane: "canvas", turn: 2 })).toEqual({ trace: "run-1", pane: "canvas", turn: 2 });
+    });
+
+    it("keeps the widened pane mini-tabs (changes / trace), not just canvas (D5)", () => {
+      expect(validateRunDetailSearch({ pane: "changes", turn: 3 })).toEqual({ pane: "changes", turn: 3 });
+      expect(validateRunDetailSearch({ pane: "trace", turn: "5" })).toEqual({ pane: "trace", turn: 5 });
+    });
+
+    it("keeps a lone pane as FOLLOW mode (no turn), and drops an invalid turn to follow (D2)", () => {
+      expect(validateRunDetailSearch({ pane: "canvas" })).toEqual({ pane: "canvas" });          // follow: pane alone
+      expect(validateRunDetailSearch({ pane: "trace" })).toEqual({ pane: "trace" });            // follow: any mini-tab
+      expect(validateRunDetailSearch({ pane: "canvas", turn: 0 })).toEqual({ pane: "canvas" }); // non-positive turn → follow
+    });
+
+    it("drops pane when the pane value is missing/unknown (no dangling half-param)", () => {
+      expect(validateRunDetailSearch({ turn: 3 })).toEqual({});                  // pane missing → turn drops too
+      expect(validateRunDetailSearch({ pane: "bogus", turn: 3 })).toEqual({});   // unknown pane
+      expect(validateRunDetailSearch({ pane: "activity", turn: 3 })).toEqual({});// a modal-only view isn't a pane view
+    });
+
+    it("keeps the D3 canvas-focus `node` alongside a valid pane, and drops it without one (D3)", () => {
+      expect(validateRunDetailSearch({ pane: "canvas", turn: 2, node: "map-1" })).toEqual({ pane: "canvas", turn: 2, node: "map-1" });
+      expect(validateRunDetailSearch({ pane: "canvas", node: "map-1" })).toEqual({ pane: "canvas", node: "map-1" }); // node without a pin (follow-mode focus)
+      expect(validateRunDetailSearch({ node: "map-1" })).toEqual({});                          // node with no pane → dropped
+      expect(validateRunDetailSearch({ pane: "canvas", node: "" })).toEqual({ pane: "canvas" }); // empty node → dropped
+    });
+  });
+});
+
+/**
+ * D4 decommissioned the run-trace modal in favor of the companion pane. A legacy `?trace=`/`?view=` deep-link is
+ * one-time rewritten so it never 404s: THIS run's inner view maps to a pane mini-tab (activity → the journal, no pane);
+ * a SUB / sibling run navigates to its own page. This pins the whole redirect matrix on the pure decision function.
+ */
+describe("rewriteTraceDeepLink — legacy trace deep-link → companion pane", () => {
+  // One turn in the room: turn 3 IS this run. The pinned pane resolves its turn by matching runId in the blocks.
+  const blocks = [{ type: "assistant_turn", id: "t3", turnIndex: 3, runId: "this-run" } as unknown as RoomBlock];
+
+  it("is a no-op when there's no legacy ?trace", () => {
+    expect(rewriteTraceDeepLink(undefined, "canvas", "this-run", blocks)).toEqual({ kind: "none" });
+  });
+
+  it("maps THIS run's canvas / changes / trace views to the matching pinned mini-tab", () => {
+    expect(rewriteTraceDeepLink("this-run", "canvas", "this-run", blocks)).toEqual({ kind: "pane", pane: "canvas", turn: 3 });
+    expect(rewriteTraceDeepLink("this-run", "changes", "this-run", blocks)).toEqual({ kind: "pane", pane: "changes", turn: 3 });
+    expect(rewriteTraceDeepLink("this-run", "trace", "this-run", blocks)).toEqual({ kind: "pane", pane: "trace", turn: 3 });
+  });
+
+  it("treats a missing ?view as the modal's default tab (trace)", () => {
+    expect(rewriteTraceDeepLink("this-run", undefined, "this-run", blocks)).toEqual({ kind: "pane", pane: "trace", turn: 3 });
+  });
+
+  it("drops THIS run's activity view to the journal (no pane)", () => {
+    expect(rewriteTraceDeepLink("this-run", "activity", "this-run", blocks)).toEqual({ kind: "clear" });
+  });
+
+  it("navigates a SUB / sibling run to its own page", () => {
+    expect(rewriteTraceDeepLink("other-run", "trace", "this-run", blocks)).toEqual({ kind: "subrun", runId: "other-run" });
+    expect(rewriteTraceDeepLink("other-run", "canvas", "this-run", blocks)).toEqual({ kind: "subrun", runId: "other-run" });
+  });
+
+  it("holds (pending) until the room resolves this run's turn", () => {
+    expect(rewriteTraceDeepLink("this-run", "canvas", "this-run", undefined)).toEqual({ kind: "pending" });
+  });
+
+  it("opens the pane in follow mode (turn omitted) when no turn matches this run", () => {
+    const other = [{ type: "assistant_turn", id: "t1", turnIndex: 1, runId: "someone-else" } as unknown as RoomBlock];
+    expect(rewriteTraceDeepLink("this-run", "canvas", "this-run", other)).toEqual({ kind: "pane", pane: "canvas" });
   });
 });

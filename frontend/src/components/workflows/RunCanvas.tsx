@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the canvas helpers (focusNodeOnCanvas, definitionToRunEdges) are co-located with the RunCanvas component they serve. */
-import { useMemo, useRef } from "react";
-import { Background, BackgroundVariant, Controls, Panel, ReactFlow, ReactFlowProvider, type Edge, type Node } from "@xyflow/react";
+import { useEffect, useMemo, useRef } from "react";
+import { Background, BackgroundVariant, Controls, Panel, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import type { NodeManifestDto, NodeStatus, WorkflowDefinition, WorkflowRunNodeSummary, WorkflowRunStatus } from "@/api/workflows";
@@ -31,6 +31,10 @@ interface RunCanvasProps {
   runId?: string;
   /** Open another run full-view (a sub-workflow node's child run). Provided to nodes via RunOpenContext. */
   onOpenRun?: (runId: string) => void;
+  /** D3 forward jump: center + ring the node with this id (the `?node=` deep-link the journal's jump affordances set).
+   *  Undefined leaves the canvas at its fitView. The node may not be laid out yet on first paint — the focus retries
+   *  when the nodes settle (see {@link focusNodeOnCanvas}). */
+  focusNodeId?: string;
 }
 
 /**
@@ -41,7 +45,7 @@ interface RunCanvasProps {
  * The run→node mapping is intentionally a thin, separate layer (aggregateStatus / statusByNodeId) so it
  * can be lifted later for the generic task-run view, where any run resolves to the same node-status shape.
  */
-export function RunCanvas({ definition, runNodes, runStatus, manifestByType, runId, onOpenRun }: RunCanvasProps) {
+export function RunCanvas({ definition, runNodes, runStatus, manifestByType, runId, onOpenRun, focusNodeId }: RunCanvasProps) {
   const actions = runId ? { runId, isTerminal: !isRunActive(runStatus) } : null;
   // One SSE tail per canvas, folded to per-node live signals (token deltas, external-call spans, waits) and
   // handed to the footers via context. Enabled only for a live run with an id; otherwise the store stays empty
@@ -52,7 +56,7 @@ export function RunCanvas({ definition, runNodes, runStatus, manifestByType, run
       <RunLiveContext.Provider value={liveStore}>
         <RunActionsContext.Provider value={actions}>
           <RunOpenContext.Provider value={onOpenRun ?? null}>
-            <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
+            <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} focusNodeId={focusNodeId} />
           </RunOpenContext.Provider>
         </RunActionsContext.Provider>
       </RunLiveContext.Provider>
@@ -60,7 +64,7 @@ export function RunCanvas({ definition, runNodes, runStatus, manifestByType, run
   );
 }
 
-function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: RunCanvasProps) {
+function RunCanvasInner({ definition, runNodes, runStatus, manifestByType, focusNodeId }: RunCanvasProps) {
   const statuses = useMemo(() => statusByNodeId(runNodes), [runNodes]);
   const rowsByNodeId = useMemo(() => rowsByNode(runNodes), [runNodes]);
   // The server-gated set of nodes a from-node rerun would ACCEPT (only a top-level row carries the flag) — drives
@@ -123,10 +127,26 @@ function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: Run
     [definition, statuses, runActive, collapse],
   );
 
+  // D3 forward jump: center + ring the deep-linked node. The class rides ONLY the focused node's RF wrapper (a fresh
+  // object for that one node — every other keeps its patchNodes-stabilized reference, so the poll-time re-render
+  // isolation still holds). The class isn't part of the run fingerprint, so it must be applied HERE (outside the
+  // patched build), not baked into node.data where patchNodes would swallow it.
+  const displayNodes = useMemo(
+    () => (focusNodeId ? nodes.map((n) => (n.id === focusNodeId ? { ...n, className: [n.className, "wf-rf-focus"].filter(Boolean).join(" ") } : n)) : nodes),
+    [nodes, focusNodeId],
+  );
+
+  // Imperatively pan the viewport onto the focused node. Re-run when the node set settles (a deep-linked ?node= that
+  // arrives before the nodes lay out finds no node the first time and simply retries on the next nodes change).
+  const { setCenter, getNode } = useReactFlow();
+  useEffect(() => {
+    focusNodeOnCanvas(focusNodeId, getNode, setCenter);
+  }, [focusNodeId, getNode, setCenter, nodes]);
+
   return (
     <div className="wf-run-canvas">
       <ReactFlow
-        nodes={nodes}
+        nodes={displayNodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         fitView
@@ -169,6 +189,43 @@ function RunProgress({ statuses, runActive }: { statuses: Map<string, NodeStatus
       {c.failure > 0 && <span className="wf-run-progress-stat wf-run-progress-failed">{c.failure} failed</span>}
     </div>
   );
+}
+
+/** The zoom the canvas settles to when a jump focuses a node — close enough to read the card, not so close the
+ *  surrounding graph is lost. The pan is animated so the eye tracks where it landed. */
+const FOCUS_ZOOM = 1.1;
+const FOCUS_DURATION_MS = 500;
+
+/** The minimal node shape {@link focusNodeOnCanvas} reads — React Flow's `getNode` return, narrowed to what centering needs. */
+interface FocusableNode {
+  position: { x: number; y: number };
+  measured?: { width?: number | null; height?: number | null } | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * Center + zoom the canvas viewport on a node, by id — the imperative half of the D3 forward jump. Pure over its
+ * injected `getNode` / `setCenter` (React Flow's own, from useReactFlow) so it's unit-testable without rendering the
+ * whole flow. Returns false (a clean no-op) when the id is empty OR the node isn't in the graph yet — a deep-linked
+ * `?node=` that arrives before the nodes lay out therefore never throws; the effect just retries on the next nodes
+ * change. Centers on the node's MIDDLE (position + half its measured size) so the card lands under the viewport center.
+ */
+export function focusNodeOnCanvas(
+  focusNodeId: string | undefined,
+  getNode: (id: string) => FocusableNode | undefined,
+  setCenter: (x: number, y: number, opts?: { zoom?: number; duration?: number }) => void,
+): boolean {
+  if (!focusNodeId) return false;
+
+  const node = getNode(focusNodeId);
+  if (!node) return false;
+
+  const w = node.measured?.width ?? node.width ?? 0;
+  const h = node.measured?.height ?? node.height ?? 0;
+
+  setCenter(node.position.x + w / 2, node.position.y + h / 2, { zoom: FOCUS_ZOOM, duration: FOCUS_DURATION_MS });
+  return true;
 }
 
 /** The editor's edge mapping + an n8n-style run overlay: the path the run actually took lights up. */
