@@ -15,4 +15,14 @@ public sealed class LocalProcessRunnerTests : SandboxRunnerContractTests
 
     [Fact]
     public void Kind_is_local() => Runner.Kind.ShouldBe("local");
+
+    [Fact]
+    public void The_durable_supervisor_script_redirects_the_agent_stdin_from_dev_null()
+    {
+        // Without this, a durable agent process INHERITS the worker's stdin. codex exec reads "additional input from
+        // stdin" (the prompt itself rides argv), so an inherited never-closing stdin (a supervising pipe) hangs the run
+        // forever with zero output. Removing the redirect silently reintroduces that hang — pin it (Rule 8).
+        LocalProcessRunner.SupervisorScript.ShouldContain("</dev/null", Case.Sensitive,
+            "the agent command must redirect stdin from /dev/null so a stdin-reading harness gets EOF, never the worker's inherited stdin");
+    }
 }

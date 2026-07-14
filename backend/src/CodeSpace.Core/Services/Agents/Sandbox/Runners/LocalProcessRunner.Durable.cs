@@ -77,11 +77,17 @@ public sealed partial class LocalProcessRunner
     /// The supervisor script: FIRST record the supervisor's own pid (<c>$$</c>) to the pid file — read back in
     /// LaunchAsync because under <c>setsid</c> the launched process's own id isn't a reliable handle (setsid
     /// either execs the shell in place or forks it). Then run the command (the positional <c>"$@"</c>) with
-    /// stdout→out.log, stderr→err.log, and finally write the exit code to the marker. The marker is written
-    /// AFTER the command and BEFORE the shell exits, so "marker present" reliably means "the command finished
+    /// stdout→out.log, stderr→err.log, stdin←/dev/null, and finally write the exit code to the marker. The marker is
+    /// written AFTER the command and BEFORE the shell exits, so "marker present" reliably means "the command finished
     /// with this code" and "shell gone with no marker" means it was killed before recording one.
+    ///
+    /// <para>stdin is redirected from <c>/dev/null</c> so the agent process gets an immediate EOF instead of INHERITING
+    /// the worker's stdin. A harness that reads stdin (<c>codex exec</c> reads "additional input from stdin" even with the
+    /// prompt in argv; the prompt itself always rides argv) would otherwise BLOCK FOREVER when the worker was launched with
+    /// an open, never-closing stdin (e.g. a supervising process's pipe) — a hung run with zero output. Neither harness needs
+    /// stdin, so closing it is always safe. Pinned by a test.</para>
     /// </summary>
-    private const string SupervisorScript = "printf '%s' \"$$\" >\"$CSP_PID\"; \"$@\" >\"$CSP_OUT\" 2>\"$CSP_ERR\"; printf '%s' \"$?\" >\"$CSP_EXIT\"";
+    internal const string SupervisorScript = "printf '%s' \"$$\" >\"$CSP_PID\"; \"$@\" >\"$CSP_OUT\" 2>\"$CSP_ERR\" </dev/null; printf '%s' \"$?\" >\"$CSP_EXIT\"";
 
     /// <summary>How long the filtered-egress netns setup may take before the launch fails closed — the ip/nft/sysctl commands are sub-second, so a slow setup is a host problem, not a long-running run.</summary>
     private const int EgressSetupTimeoutSeconds = 20;
