@@ -21,12 +21,14 @@ public sealed class RoomPullRequestService : IRoomPullRequestService, IScopedDep
     private readonly CodeSpaceDbContext _db;
     private readonly ISupervisorDecisionLog _ledger;
     private readonly ISupervisorPullRequestOpener _opener;
+    private readonly ISessionTurnCache _cache;
 
-    public RoomPullRequestService(CodeSpaceDbContext db, ISupervisorDecisionLog ledger, ISupervisorPullRequestOpener opener)
+    public RoomPullRequestService(CodeSpaceDbContext db, ISupervisorDecisionLog ledger, ISupervisorPullRequestOpener opener, ISessionTurnCache cache)
     {
         _db = db;
         _ledger = ledger;
         _opener = opener;
+        _cache = cache;
     }
 
     public async Task<RoomPullRequestResult> OpenAsync(Guid workflowRunId, Guid teamId, Guid? actorUserId, CancellationToken cancellationToken)
@@ -61,6 +63,10 @@ public sealed class RoomPullRequestService : IRoomPullRequestService, IScopedDep
                 ? "This run's published branch has no resolvable repository."
                 : "This run has no published branch to open a pull request from.");
         }
+
+        // Opening a PR mutates the (already-terminal) run's Room block — its publish state + delivery card now carry the
+        // opened PR. Evict the cached projection so the next room read recomputes it instead of serving the pre-PR block.
+        _cache.Evict(workflowRunId);
 
         return result;
     }
