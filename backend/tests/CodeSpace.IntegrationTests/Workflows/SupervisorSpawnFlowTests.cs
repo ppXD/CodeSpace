@@ -206,6 +206,13 @@ public class SupervisorSpawnFlowTests : IDisposable
                 // P1b: the effective contract's canonical hash rides the ref — self-describing + non-empty.
                 workUnit.GetProperty("contractHash").GetString()!.ShouldStartWith("sha256/canonical-json-v1:");
             }
+
+            // P2a-2 (R): the staged units' acceptance obligations are durable requirement rows AT AUTHORIZATION,
+            // spec-hash-bound to the same effective contract the WorkUnitRef carries.
+            var requirements = await verify.Resolve<Core.Services.Completion.ICompletionContractStore>()
+                .ListRequirementsAsync(runId, teamId, CancellationToken.None);
+            requirements.Count.ShouldBe(2);
+            requirements.ShouldAllBe(r => r.Kind == Messages.Contracts.ContractKinds.Acceptance && r.SpecHash!.StartsWith("sha256/canonical-json-v1:"));
         }
         finally
         {
