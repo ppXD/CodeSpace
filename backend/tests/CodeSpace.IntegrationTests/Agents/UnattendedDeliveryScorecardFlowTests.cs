@@ -121,6 +121,50 @@ public class UnattendedDeliveryScorecardFlowTests
         run.Solved.ShouldBeFalse("the run's own honest terminal status is Failure — nothing graded it either way, but the fallback must never call a failed run solved");
     }
 
+    [Theory]
+    [InlineData("{\"reason\":\"no progress\"}", "{}", false)]                                          // forced stop → never a fallback solve
+    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"could-not-finish\",\"summary\":\"s\"}", false)]  // model give-up → never a fallback solve
+    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"success\",\"summary\":\"s\"}", true)]           // clean succeeded stop → fallback stands
+    public async Task A_degraded_supervisor_stop_never_reads_solved_through_the_status_fallback(string stopPayload, string stopOutcome, bool expectedSolved)
+    {
+        // P2b-prep metric-shift, pinned: degraded stops land engine Success BY DESIGN (AgentSupervisorNode returns
+        // Ok for every terminal turn) — THE north-star inflation both audits named. An oracle verdict still
+        // overrides in both directions; only the no-oracle fallback changes.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.NotApplicable, PublishState.Pushed);
+        await SeedStopDecisionAsync(teamId, runId, stopPayload, stopOutcome);
+
+        (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId).Solved.ShouldBe(expectedSolved);
+    }
+
+    [Fact]
+    public async Task An_oracle_verdict_still_overrides_a_degraded_stop_in_both_directions()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedStopDecisionAsync(teamId, runId, "{\"reason\":\"no progress\"}", "{}");
+
+        (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId).Solved
+            .ShouldBeTrue("a manifest graded Passed is an oracle that RAN — it outranks the stop classification");
+    }
+
+    private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string payloadJson, string outcomeJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new CodeSpace.Core.Persistence.Entities.SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = 99,
+            DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task A_cancelled_run_is_in_the_terminal_population_and_is_not_solved()
     {

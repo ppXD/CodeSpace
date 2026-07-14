@@ -85,6 +85,7 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         if (latest == assessmentJson) return false;   // unchanged — append-only with change detection
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var degradedStop = (await UnattendedDeliveryScorecardService.DegradedStopRunIdsAsync(_db, new[] { runId }, teamId, cancellationToken).ConfigureAwait(false)).Contains(runId);
 
         _db.CompletionAssessmentRecord.Add(new CompletionAssessmentRecord
         {
@@ -97,7 +98,7 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             Verification = composed.Assessment.Verification.ToString(),
             AssessmentJson = assessmentJson,
             // The legacy ladder's verdict AT COMPOSE TIME — the delta query's other half.
-            LegacyIsSolved = UnattendedDeliveryScorecardService.IsSolved(manifests, status),
+            LegacyIsSolved = UnattendedDeliveryScorecardService.IsSolved(manifests, status, degradedStop),
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });

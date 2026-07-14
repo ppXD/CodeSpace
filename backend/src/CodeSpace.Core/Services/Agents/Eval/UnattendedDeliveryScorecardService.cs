@@ -51,9 +51,10 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         var manifestsByRun = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var touchesByRun = await _humanTouches.CountByWorkflowRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var costsByRun = await _cost.ComputeRunsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
+        var degradedStopRuns = await DegradedStopRunIdsAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
 
         var outcomes = runs
-            .Select(r => ProjectRun(r.Id, r.Status, manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd))
+            .Select(r => ProjectRun(r.Id, r.Status, manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd, degradedStopRuns.Contains(r.Id)))
             .ToList();
 
         return UnattendedDeliveryScorer.Compute(outcomes);
@@ -83,10 +84,10 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     }
 
     /// <summary>Project one run's manifests + human-touch count + cost into the pure scorer's input noun.</summary>
-    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, WorkflowRunStatus terminalStatus, IReadOnlyList<PublishManifest> manifests, int humanTouches, decimal? costUsd) => new()
+    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, WorkflowRunStatus terminalStatus, IReadOnlyList<PublishManifest> manifests, int humanTouches, decimal? costUsd, bool degradedStop) => new()
     {
         WorkflowRunId = runId,
-        Solved = IsSolved(manifests, terminalStatus),
+        Solved = IsSolved(manifests, terminalStatus, degradedStop),
         Delivered = IsDelivered(manifests),
         HumanTouches = humanTouches,
         CostUsd = costUsd,
@@ -103,13 +104,43 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// never penalized for having none, but a Failure/Cancelled run is never counted solved just because nothing
     /// graded it either way.
     /// </summary>
-    public static bool IsSolved(IReadOnlyList<PublishManifest> manifests, WorkflowRunStatus terminalStatus)
+    public static bool IsSolved(IReadOnlyList<PublishManifest> manifests, WorkflowRunStatus terminalStatus, bool degradedStop)
     {
         if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Failed)) return false;
 
         if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Passed)) return true;
 
-        return terminalStatus == WorkflowRunStatus.Success;
+        // P2b-prep (metric-shift, its own pinned PR): a DEGRADED supervisor stop (forced bound / model give-up)
+        // lands engine Success by design — the status fallback must not read it Solved. An oracle verdict above
+        // still overrides in both directions; this only removes the no-oracle inflation the genericity audit and
+        // the external review both named as THE north-star inflation.
+        return terminalStatus == WorkflowRunStatus.Success && !degradedStop;
+    }
+
+    /// <summary>
+    /// The runs whose LAST supervisor stop classifies degraded (forced / give-up) — the shared discriminator the
+    /// scorecard's fallback and the shadow snapshot both read (one implementation, never forked). One batched
+    /// query; a run with no stop decision (single-agent, plan-map, failed-outright supervisor) is absent — its
+    /// honest terminal status stands.
+    /// </summary>
+    public static async Task<HashSet<Guid>> DegradedStopRunIdsAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0) return new HashSet<Guid>();
+
+        var rows = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.TeamId == teamId && runIds.Contains(d.SupervisorRunId) && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .Select(d => new { d.SupervisorRunId, d.Sequence, d.PayloadJson, d.OutcomeJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows
+            .GroupBy(d => d.SupervisorRunId)
+            .Where(g =>
+            {
+                var last = g.OrderByDescending(d => d.Sequence).First();
+                return Supervisor.SupervisorOutcome.ClassifyStop(last.PayloadJson, last.OutcomeJson).Kind != SupervisorStopKind.Succeeded;
+            })
+            .Select(g => g.Key)
+            .ToHashSet();
     }
 
     /// <summary>At least one manifest actually left the sandbox — pushed to a remote branch, or (a stronger signal) has an opened PR/MR.</summary>
