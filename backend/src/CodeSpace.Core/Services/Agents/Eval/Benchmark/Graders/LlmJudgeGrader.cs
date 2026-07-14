@@ -40,7 +40,7 @@ public sealed class LlmJudgeGrader : IBenchmarkGrader, ISingletonDependency
     {
         if (string.IsNullOrWhiteSpace(context.WorkspaceDirectory)) return Fail("no-workspace");
         if (context.TeamId is not { } teamId) return Fail("grade-error: no-team — the rubric judge needs the run's team to resolve a model");
-        if (context.Acceptance?.Rubric is not { Criteria.Count: > 0 } rubric) return Fail("no-rubric");
+        if (context.Acceptance?.Rubric is not { Criteria.Count: > 0 } rubric) return Fail("no-rubric", GradeFailureClass.SpecIncomplete);
 
         var paths = context.Task.TestCommand;
 
@@ -135,5 +135,5 @@ public sealed class LlmJudgeGrader : IBenchmarkGrader, ISingletonDependency
         return builder.ToString().TrimEnd(';');
     }
 
-    private static BenchmarkGrade Fail(string detail) => new() { Passed = false, Detail = detail };
+    private static BenchmarkGrade Fail(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };
 }

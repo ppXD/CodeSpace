@@ -1245,7 +1245,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogWarning(ex, "Agent run {RunId}: the acceptance grade failed unexpectedly; recording not-accepted", run.Id);
 
-            grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+            grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
 
         if (grade.Passed)

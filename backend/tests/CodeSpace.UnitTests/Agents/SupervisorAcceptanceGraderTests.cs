@@ -390,6 +390,35 @@ public class SupervisorAcceptanceGraderTests
         AgentAcceptanceContract.IsInfraFailure(detail, workPresent: false).ShouldBe(expected);
     }
 
+    [Theory]
+    [InlineData(Messages.Agents.Benchmark.GradeFailureClass.GraderFault, true)]
+    [InlineData(Messages.Agents.Benchmark.GradeFailureClass.Environment, true)]
+    [InlineData(Messages.Agents.Benchmark.GradeFailureClass.SpecIncomplete, true)]
+    [InlineData(Messages.Agents.Benchmark.GradeFailureClass.Genuine, false)]
+    public void A_minted_failure_class_outranks_the_detail_string(Messages.Agents.Benchmark.GradeFailureClass failureClass, bool expectedInfra)
+    {
+        // P2a-3b: the TYPE is the classification; the detail is display. A detail that would string-classify the
+        // OTHER way proves the type wins.
+        var contradictingDetail = expectedInfra ? "tests-failed-exit-1" : "grade-error: boom";
+        var grade = new Messages.Agents.Benchmark.BenchmarkGrade { Passed = false, Detail = contradictingDetail, Class = failureClass };
+
+        AgentAcceptanceContract.IsInfraFailure(grade, workPresent: false).ShouldBe(expectedInfra);
+    }
+
+    [Fact]
+    public void An_unminted_grade_falls_back_to_the_detail_conventions()
+    {
+        var grade = new Messages.Agents.Benchmark.BenchmarkGrade { Passed = false, Detail = "clone-failed: refused" };
+
+        AgentAcceptanceContract.IsInfraFailure(grade, workPresent: false).ShouldBeTrue("a pre-typing arm still classifies by the pinned conventions");
+    }
+
+    [Fact]
+    public void The_grader_arms_mint_their_classes()
+    {
+        Enum.GetNames<Messages.Agents.Benchmark.GradeFailureClass>().ShouldBe(new[] { "Genuine", "GraderFault", "Environment", "SpecIncomplete" }, "wire names are tape-bound");
+    }
+
     [Fact]
     public void A_tagged_no_branch_or_repo_keeps_its_work_present_semantics()
     {
