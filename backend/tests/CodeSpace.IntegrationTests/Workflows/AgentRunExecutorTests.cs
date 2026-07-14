@@ -254,6 +254,28 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task An_auto_runs_resolved_credential_default_model_is_persisted_on_the_run_at_dispatch()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", "sk-auto-model");
+        await SeedDefaultCredentialModelAsync(credId, "cred-default-model");
+
+        // An AUTO run: no pinned model, only the credential. Staging resolves the credential's default and must persist it
+        // onto the run NOW — so the identity strip shows the model from dispatch, not only after the result lands.
+        var runId = await CreateUnpinnedRunWithCredentialAsync(teamId, credId);
+
+        await ExecuteAsync(runId, new ProjectingScriptedHarness("scripted-provider", "SCRIPTED_MODEL_KEY", "echo done"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        var persisted = System.Text.Json.JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options);
+        persisted!.Model.ShouldBe("cred-default-model", "the resolved credential-default model is written to the run's task at dispatch, so the live projection shows it before completion");
+    }
+
+    [Fact]
     public async Task A_pinned_credential_from_another_team_lands_the_run_failed_clean()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -853,6 +875,24 @@ public class AgentRunExecutorTests
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
+    }
+
+    private async Task<Guid> CreateUnpinnedRunWithCredentialAsync(Guid teamId, Guid modelCredentialId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = null, ModelCredentialId = modelCredentialId },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    private async Task SeedDefaultCredentialModelAsync(Guid modelCredentialId, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = modelCredentialId, ModelId = modelId, IsDefault = true, Enabled = true });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedModelCredentialAsync(Guid teamId, string provider, string plaintextKey)
