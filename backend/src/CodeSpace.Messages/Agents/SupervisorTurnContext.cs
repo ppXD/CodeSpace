@@ -83,6 +83,9 @@ public sealed record SupervisorTurnContext
     /// <summary>P3.5 — the run's realized-spend cap in USD (carried from <c>SupervisorGoalPlan.MaxCostUsd</c> so the DECIDER can recite it — <c>DecideAsync</c> receives only this context, never the plan). Null = no cost cap; the budget recitation renders nothing.</summary>
     public decimal? MaxCostUsd { get; init; }
 
+    /// <summary>W-hard — the run's total-spawn cap (carried from <c>SupervisorGoalPlan.MaxTotalSpawns</c>, same plumbing as <see cref="MaxCostUsd"/>): the budget ledger's per-attempt estimate divisor (cap ÷ spawns = the natural reservation slice). Null on legacy contexts; readers fall back to the lane default.</summary>
+    public int? MaxTotalSpawns { get; init; }
+
     private static readonly IReadOnlyDictionary<string, decimal> EmptySpendByKind = new Dictionary<string, decimal>();
 
     /// <summary>

@@ -221,6 +221,38 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_staged_wave_reserves_its_budget_slices_idempotently()
+    {
+        // W-hard 2a: the capped run's wave reserved one slice per attempt at the staging chokepoint.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, supervisorConfig: """{"goal":"ship the feature","maxCostUsd":10}""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var reservations = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            reservations.Count.ShouldBe(2, "one slice per staged attempt");
+            reservations.ShouldAllBe(r => r.Kind == "agent-attempt" && r.State == Core.Services.Workflows.Budget.BudgetReservationStates.Reserved);
+            reservations.Select(r => r.ScopeKey).OrderBy(k => k).ShouldBe(new[] { "sup#turn1#0", "sup#turn1#1" });
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_spawn_with_per_agent_dispatch_stages_two_agents_with_distinct_roles_and_overrides()
     {
         // L4 arc B headline: ONE spawn fans out TWO agents the MODEL shaped differently — the per-agent role folds into

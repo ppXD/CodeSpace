@@ -57,13 +57,14 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly IWorkPlanService _workPlans;
     private readonly Completion.ICompletionContractStore _contracts;
+    private readonly Workflows.Budget.IBudgetLedger _budget;
     // The publish guard chain (Order ascending), the SAME registry AgentRunExecutor's per-agent push evaluates —
     // so an integration's push respects the identical repo policy / credential floor. Sorted once at construction.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ISupervisorPullRequestOpener _pullRequestOpener;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, Completion.ICompletionContractStore contracts, IEnumerable<IPublishGuard> publishGuards, ISupervisorPullRequestOpener pullRequestOpener, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, IPublishManifestStore manifests, ILLMClientRegistry llm, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IWorkPlanService workPlans, Completion.ICompletionContractStore contracts, Workflows.Budget.IBudgetLedger budget, IEnumerable<IPublishGuard> publishGuards, ISupervisorPullRequestOpener pullRequestOpener, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -79,6 +80,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _harnesses = harnesses;
         _workPlans = workPlans;
         _contracts = contracts;
+        _budget = budget;
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
         _pullRequestOpener = pullRequestOpener;
         _logger = logger;
