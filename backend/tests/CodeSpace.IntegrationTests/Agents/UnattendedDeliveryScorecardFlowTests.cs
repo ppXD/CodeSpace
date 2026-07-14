@@ -166,6 +166,36 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
+    public async Task A_pre_protocol_run_is_visible_but_never_scored()
+    {
+        // Era-aware denominator (option c): a rate names exactly what it was measured over — a legacy run counts
+        // in LegacyRuns, never in TotalRuns or any rate; old tape is never re-derived into a verdict.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var legacyId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success, contractEra: false);
+        var modernId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, modernId, PublishAcceptanceState.Passed, PublishState.Pushed);
+
+        var card = await ComputeAsync(teamId);
+
+        card.Rollup.LegacyRuns.ShouldBe(1);
+        card.Rollup.TotalRuns.ShouldBe(1, "the denominator is contract-era ONLY");
+        card.Runs.ShouldAllBe(r => r.WorkflowRunId != legacyId);
+    }
+
+    [Fact]
+    public async Task The_parked_population_is_surfaced_beside_the_terminal_denominator()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Suspended);
+        await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+
+        var card = await ComputeAsync(teamId);
+
+        card.Rollup.SuspendedRuns.ShouldBe(1, "a park-heavy period must never silently flatter the rates");
+        card.Rollup.TotalRuns.ShouldBe(1, "suspended runs stay out of the terminal denominator — they are surfaced, not scored");
+    }
+
+    [Fact]
     public async Task A_cancelled_run_is_in_the_terminal_population_and_is_not_solved()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -481,7 +511,7 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     /// <summary>A snapshot-style (WorkflowId-less) terminal run — the single-agent lane's shape. Passing an explicit <paramref name="createdAt"/> survives the auditing interceptor (which only stamps CreatedDate when it is the default value).</summary>
-    private async Task<Guid> SeedTerminalRunAsync(Guid teamId, WorkflowRunStatus status, DateTimeOffset? createdAt = null)
+    private async Task<Guid> SeedTerminalRunAsync(Guid teamId, WorkflowRunStatus status, DateTimeOffset? createdAt = null, bool contractEra = true)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -506,6 +536,8 @@ public class UnattendedDeliveryScorecardFlowTests
 
         db.WorkflowRun.Add(new WorkflowRun
         {
+            CompletionPolicyVersion = contractEra ? Core.Services.Completion.CompletionPolicy.CurrentVersion : null,
+            CompletionEnforcementMode = contractEra ? Core.Services.Completion.CompletionPolicy.CurrentMode.ToString() : null,
             Id = runId,
             TeamId = teamId,
             RunRequestId = requestId,

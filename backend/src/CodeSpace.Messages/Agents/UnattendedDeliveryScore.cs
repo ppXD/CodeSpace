@@ -73,6 +73,12 @@ public sealed record UnattendedDeliveryRollup
 
     /// <summary>Runs whose cost could not be priced — the fail-open honesty qualifier on <see cref="TotalCostUsd"/>.</summary>
     public required int UnknownCostRuns { get; init; }
+
+    /// <summary>P2b-prep (era-aware denominator, option c): PRE-PROTOCOL terminal runs in the window — visible, never scored: a rate names exactly what it was measured over, and old tape is never re-derived into a verdict. Every rate above is over contract-era runs ONLY.</summary>
+    public int LegacyRuns { get; init; }
+
+    /// <summary>Currently-SUSPENDED runs created in the window — the parked population the terminal denominator cannot see. Surfaced so a park-heavy period can never silently flatter the rates.</summary>
+    public int SuspendedRuns { get; init; }
 }
 
 /// <summary>The team's unattended-delivery scorecard — the cross-run north-star roll-up plus recent per-run scores. The north-star-metric analogue of <see cref="SupervisorScorecard"/> / <see cref="AgentRunScorecard"/>.</summary>
