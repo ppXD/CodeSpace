@@ -39,40 +39,42 @@ public class RoomProjectorFlowTests
     public RoomProjectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Projects_the_thread_with_a_focused_latest_turn_and_a_collapsed_prior_turn()
+    public async Task Projects_every_turn_richly_not_just_the_focused_one()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var sessionId = await SeedSessionAsync(teamId, "Build the dashboard");
 
-        await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "First task", resultSummary: "First task done");
+        var run1 = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "First task", resultSummary: "First task done");
+        var watermark1 = await SeedRecordsAsync(run1, count: 2);
         var run2 = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Second task", resultSummary: "Second task done");
-        var watermark = await SeedRecordsAsync(run2, count: 3);
+        var watermark2 = await SeedRecordsAsync(run2, count: 3);
 
         var room = await ProjectByRunAsync(run2, teamId);
 
         room.ShouldNotBeNull();
         room!.SessionId.ShouldBe(sessionId);
         room.Title.ShouldBe("Build the dashboard");
-        room.AnchorBlockId.ShouldBe("turn-2", "entering by the latest run focuses its turn");
-        room.Cursor.ShouldBe(watermark, "the cursor is the focused run's change watermark");
+        room.AnchorBlockId.ShouldBe("turn-2", "entering by the latest run focuses its turn (the scroll anchor)");
+        room.Cursor.ShouldBe(Math.Max(watermark1, watermark2), "the cursor is the newest change watermark across the turns");
 
         room.Blocks.OfType<UserMessageBlock>().Select(b => b.Text).ShouldBe(new[] { "First task", "Second task" }, "the user messages are the per-turn goals, oldest first");
 
         var turns = room.Blocks.OfType<AssistantTurnBlock>().OrderBy(t => t.TurnIndex).ToList();
         turns.Count.ShouldBe(2);
 
-        var collapsed = turns[0];
-        collapsed.TurnIndex.ShouldBe(1);
-        collapsed.Blocks.ShouldBeEmpty("a non-focused turn is a light card — no inner blocks");
-        collapsed.Map.ShouldBeNull();
-        collapsed.Seq.ShouldBe(0);
-        collapsed.Summary.ShouldBe("First task done", "the collapsed card shows the turn's result");
-        collapsed.Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "a collapsed card still carries its capability-aware actions");
+        // Every turn is richly projected now — the prior turn is no longer a Seq-0 light card. Its OWN watermark proves it
+        // went through the full projection, so its execution UI (map / inner blocks) is available on expand, not just "Done.".
+        var prior = turns[0];
+        prior.TurnIndex.ShouldBe(1);
+        prior.RunId.ShouldBe(run1);
+        prior.Seq.ShouldBe(watermark1, "a past turn carries its OWN change watermark — the rich projection, not a Seq-0 light card");
+        prior.Summary.ShouldBe("First task done", "a turn with a result but no execution narrative still shows its result");
+        prior.Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "a past turn still carries its capability-aware actions");
 
         var focused = turns[1];
         focused.TurnIndex.ShouldBe(2);
         focused.RunId.ShouldBe(run2);
-        focused.Seq.ShouldBe(watermark);
+        focused.Seq.ShouldBe(watermark2);
         focused.Actions.ShouldContain(a => a.Kind == RoomActionKind.RerunTurn && a.Enabled, "a finished focused turn offers a rerun");
     }
 
@@ -129,7 +131,7 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
-    public async Task A_collapsed_turn_with_no_recorded_result_uses_the_status_summary_and_keeps_its_actions()
+    public async Task A_past_failed_turn_is_richly_projected_and_keeps_its_actions()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var sessionId = await SeedSessionAsync(teamId, "Mixed");
@@ -139,9 +141,11 @@ public class RoomProjectorFlowTests
 
         var room = await ProjectByRunAsync(run2, teamId);
 
-        var collapsed = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
-        collapsed.Summary.ShouldBe("Ended with an error.", "no recorded result → the status-derived fallback copy");
-        collapsed.Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "a collapsed card still carries its actions");
+        // A past turn is no longer a light card — it carries its own terminal status + actions; its detail (map / blocks /
+        // diagnostic) comes from the rich narrative rather than a status-derived fallback copy.
+        var prior = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        prior.Status.ShouldBe(WorkflowRunStatus.Failure, "a past turn carries its own terminal status");
+        prior.Actions.ShouldContain(a => a.Kind == RoomActionKind.OpenTrace, "a past turn still carries its capability-aware actions");
     }
 
     [Fact]

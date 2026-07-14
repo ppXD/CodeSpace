@@ -22,10 +22,12 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 
 /// <summary>
 /// Default <see cref="IRoomProjector"/>. Reuses the turn skeleton from <see cref="ISessionReadService"/> (one query,
-/// goals + latest-attempt run id + status per turn) and enriches ONLY the focused turn with the heavy projections —
-/// the phase tree (<see cref="IRunPhaseProjector"/>), the pending decisions, the capability-aware actions, and the
-/// change watermark. Non-focused turns are light cards (re-focus = a cheap re-navigation). All copy / order lives in
-/// the pure <see cref="RoomNarrative"/>. READ-ONLY.
+/// goals + latest-attempt run id + status per turn) and enriches EVERY turn with the heavy projections — the phase
+/// tree (<see cref="IRunPhaseProjector"/>), the pending decisions, the capability-aware actions, and the change
+/// watermark — so each turn's full execution UI is available on expand, not just the focused one. The focused turn
+/// honours the requested attempt (anchor run); every other turn focuses its own latest run. All copy / order lives in
+/// the pure <see cref="RoomNarrative"/>. READ-ONLY. (Past turns are terminal, so their projection is stable and a
+/// candidate for caching to avoid re-reading immutable turns on every live poll.)
 /// </summary>
 public sealed class RoomProjector : IRoomProjector, IScopedDependency
 {
@@ -87,9 +89,10 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             if (turn.UserMessage is { Length: > 0 } message)
                 blocks.Add(new UserMessageBlock { Id = $"turn-{turn.TurnIndex}:user", Seq = 0, Text = message, At = turn.CreatedDate });
 
-            var assistant = focused != null && turn.TurnIndex == focused.TurnIndex
-                ? await BuildFocusedTurnAsync(turn, anchorRunId, teamId, cancellationToken).ConfigureAwait(false)
-                : BuildCollapsedTurn(turn);
+            // Project EVERY turn richly so each one's full execution UI is available on expand. The focused turn honours
+            // the requested attempt (anchorRunId); every other turn focuses its own latest run (anchor null → the latest).
+            var isFocused = focused != null && turn.TurnIndex == focused.TurnIndex;
+            var assistant = await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
 
             cursor = Math.Max(cursor, assistant.Seq);
             blocks.Add(assistant);
@@ -107,7 +110,7 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         };
     }
 
-    private async Task<AssistantTurnBlock> BuildFocusedTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<AssistantTurnBlock> BuildTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         // Focus the REQUESTED attempt (the anchor run), so the header switcher can show ANY attempt's whole flow — not
         // always the latest. A prior attempt carries its own status / error / timing (the turn skeleton has the latest's).
@@ -140,7 +143,9 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
             TurnRunId = turn.TurnRunId,
             RunId = runId,
             Status = focus.Status,
-            Summary = narrative.Summary,
+            // Fall back to the turn's own recorded result when the narrative has none — a turn with a result but sparse
+            // execution records would otherwise show a blank lead (matches the journal projector + the prior light card).
+            Summary = narrative.Summary ?? (focus.IsLatest && turn.Result is { Length: > 0 } r ? r : null),
             Map = narrative.Map,
             Blocks = narrative.Blocks,
             Actions = _actions.ResolveTurnActions(runId, focus.Status, publish),
@@ -197,24 +202,6 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, IsLatest: anchor == turn.RunId);
     }
 
-    /// <summary>A light card for a non-focused turn — summary + status + actions, no map / inner blocks (the frontend re-focuses by navigating to the run).</summary>
-    private AssistantTurnBlock BuildCollapsedTurn(SessionTurn turn) => new()
-    {
-        Id = $"turn-{turn.TurnIndex}",
-        Seq = 0,
-        TurnIndex = turn.TurnIndex,
-        TurnRunId = turn.TurnRunId,
-        RunId = turn.RunId,
-        Status = turn.RunStatus,
-        Summary = turn.Result is { Length: > 0 } r ? r : CollapsedSummary(turn.RunStatus),
-        Map = null,
-        Blocks = Array.Empty<RoomBlock>(),
-        Actions = _actions.ResolveTurnActions(turn.RunId, turn.RunStatus),
-        At = turn.CreatedDate,
-        DurationMs = DurationMs(turn),
-        Attempts = AttemptsOf(turn, turn.RunId),
-    };
-
     /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt). <paramref name="focusRunId"/> marks the shown one (the attempt the room is currently focused on), so switching to a prior attempt re-marks it "shown".</summary>
     private static IReadOnlyList<RoomTurnAttempt> AttemptsOf(SessionTurn turn, Guid focusRunId)
     {
@@ -234,8 +221,6 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// StartedAt to its final leg, which would under-report the whole-turn elapsed (28m read as 36s). A LIVE turn shows
     /// elapsed since it actually started (null before then, so a queued turn shows no growing time).
     /// </summary>
-    private static long? DurationMs(SessionTurn turn) => DurationOf(turn.CreatedDate, turn.StartedAt, turn.CompletedAt);
-
     private static long? DurationOf(DateTimeOffset createdDate, DateTimeOffset? startedAt, DateTimeOffset? completedAt)
     {
         if (completedAt is { } end)
@@ -249,15 +234,6 @@ public sealed class RoomProjector : IRoomProjector, IScopedDependency
         var ms = (long)(DateTimeOffset.UtcNow - start).TotalMilliseconds;
         return ms >= 0 ? ms : null;
     }
-
-    private static string CollapsedSummary(Messages.Enums.WorkflowRunStatus status) => status switch
-    {
-        Messages.Enums.WorkflowRunStatus.Success => "Done.",
-        Messages.Enums.WorkflowRunStatus.Failure => "Ended with an error.",
-        Messages.Enums.WorkflowRunStatus.Cancelled => "Cancelled.",
-        Messages.Enums.WorkflowRunStatus.Suspended => "Waiting for input.",
-        _ => "Working…",
-    };
 
     /// <summary>
     /// Gather the focused turn's facts from the substrate — one decision-tape read (subtasks · changed files ·

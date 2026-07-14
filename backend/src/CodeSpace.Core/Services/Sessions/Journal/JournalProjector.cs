@@ -6,13 +6,13 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Core.Services.Sessions.Journal;
 
 /// <summary>
-/// Default <see cref="IJournalProjector"/> — mirrors the legacy room projector's shape (reuse the turn skeleton from
-/// <see cref="ISessionReadService"/>, one query) but produces the JOURNAL: the focused turn is walked into its
-/// chronological <see cref="JournalStep"/>s (via <see cref="IJournalWalk"/> — the one place the heavy per-run read
-/// happens), every other turn is a light card (summary + status, no steps; refocus = a cheap re-navigation to that run).
-/// Entering by a run id focuses the SPECIFIC attempt it names — a prior/reran attempt shows ITS OWN status, timing, and
-/// walked steps (not the newest), matching the room. READ-ONLY. <see cref="JournalView.Cursor"/> = the focused turn's
-/// newest step cursor (the delta head).
+/// Default <see cref="IJournalProjector"/> — mirrors the room projector's shape (reuse the turn skeleton from
+/// <see cref="ISessionReadService"/>, one query) but produces the JOURNAL: EVERY turn is walked into its chronological
+/// <see cref="JournalStep"/>s (via <see cref="IJournalWalk"/> — one heavy per-run read per turn), so each turn's full
+/// journal is available on expand, not just the focused one. Entering by a run id focuses the SPECIFIC attempt it names
+/// — a prior/reran attempt shows ITS OWN status, timing, and walked steps (not the newest), matching the room.
+/// READ-ONLY. <see cref="JournalView.Cursor"/> = the FOCUSED turn's newest step cursor (the delta head); past turns are
+/// terminal so their steps are immutable (a caching candidate to avoid re-walking on every live poll).
 /// </summary>
 public sealed class JournalProjector : IJournalProjector, IScopedDependency
 {
@@ -57,19 +57,15 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
 
         foreach (var turn in detail.Turns)
         {
-            if (focusedTurn != null && turn.TurnIndex == focusedTurn.TurnIndex)
-            {
-                var focus = ResolveFocus(turn, anchorRunId);
-                var steps = await _walk.WalkAsync(focus.RunId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<JournalStep>();
+            // Walk EVERY turn into its steps so each turn's full journal is available on expand, not just the focused one.
+            // The focused turn honours the requested attempt; every other turn walks its own latest run (anchor null).
+            var isFocused = focusedTurn != null && turn.TurnIndex == focusedTurn.TurnIndex;
+            var focus = ResolveFocus(turn, isFocused ? anchorRunId : null);
+            var steps = await _walk.WalkAsync(focus.RunId, teamId, cancellationToken).ConfigureAwait(false) ?? Array.Empty<JournalStep>();
 
-                if (steps.Count > 0) cursor = steps[^1].Cursor;   // the newest step — the delta head
+            if (isFocused && steps.Count > 0) cursor = steps[^1].Cursor;   // the delta head stays the focused turn's newest step
 
-                turns.Add(FocusedTurn(turn, focus, steps));
-            }
-            else
-            {
-                turns.Add(CollapsedTurn(turn));
-            }
+            turns.Add(BuildTurn(turn, focus, steps, isFocused));
         }
 
         return new JournalView
@@ -105,7 +101,8 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         return attempt is null ? latest : new FocusRun(attempt.RunId, attempt.Status, attempt.CreatedDate, StartedAt: null, CompletedAt: null, IsLatest: false);
     }
 
-    private static JournalTurn FocusedTurn(SessionTurn turn, FocusRun focus, IReadOnlyList<JournalStep> steps) => new()
+    /// <summary>A fully-walked turn — its chronological steps + attempt ladder. <paramref name="focused"/> marks the one turn the view is anchored on (scroll target + the ?since delta head); every turn is walked, so all are rich.</summary>
+    private static JournalTurn BuildTurn(SessionTurn turn, FocusRun focus, IReadOnlyList<JournalStep> steps, bool focused) => new()
     {
         TurnIndex = turn.TurnIndex,
         TurnRunId = turn.TurnRunId,
@@ -116,25 +113,10 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         Summary = focus.IsLatest && turn.Result is { Length: > 0 } r ? r : null,
         At = focus.CreatedDate,
         DurationMs = DurationOf(focus.CreatedDate, focus.StartedAt, focus.CompletedAt),
-        Focused = true,
+        Focused = focused,
         Attempts = MapAttempts(turn, focusedRunId: focus.RunId),
         Steps = steps,
         StepCount = steps.Count,   // the FULL total — a ?since delta trims Steps but keeps this, so the client can self-heal
-    };
-
-    private static JournalTurn CollapsedTurn(SessionTurn turn) => new()
-    {
-        TurnIndex = turn.TurnIndex,
-        TurnRunId = turn.TurnRunId,
-        RunId = turn.RunId,
-        Status = turn.RunStatus,
-        UserMessage = turn.UserMessage is { Length: > 0 } m ? m : null,
-        Summary = turn.Result is { Length: > 0 } r ? r : CollapsedSummary(turn.RunStatus),
-        At = turn.CreatedDate,
-        DurationMs = DurationOf(turn.CreatedDate, turn.StartedAt, turn.CompletedAt),
-        Focused = false,
-        Attempts = MapAttempts(turn, focusedRunId: null),   // a collapsed turn's ladder is a preview — none focused
-        Steps = Array.Empty<JournalStep>(),
     };
 
     /// <summary>Project the skeleton's attempt ladder (already loaded — no extra read) into the wire shape, marking the focused attempt on the focused turn. Empty when the turn was never reran (the skeleton carries no ladder).</summary>
@@ -168,13 +150,4 @@ public sealed class JournalProjector : IJournalProjector, IScopedDependency
         var ms = (long)(DateTimeOffset.UtcNow - start).TotalMilliseconds;
         return ms >= 0 ? ms : null;
     }
-
-    private static string CollapsedSummary(WorkflowRunStatus status) => status switch
-    {
-        WorkflowRunStatus.Success => "Done.",
-        WorkflowRunStatus.Failure => "Ended with an error.",
-        WorkflowRunStatus.Cancelled => "Cancelled.",
-        WorkflowRunStatus.Suspended => "Waiting for input.",
-        _ => "Working…",
-    };
 }
