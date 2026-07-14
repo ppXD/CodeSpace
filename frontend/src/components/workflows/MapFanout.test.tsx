@@ -1,13 +1,21 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
+import { RunLiveContext, type RunLiveStore } from "@/hooks/use-run-live";
+import type { NodeLiveSignals, RunLiveState } from "@/lib/runLiveFold";
 
 import { MapFanout } from "./MapFanout";
 
 /** A flow.map element-branch row keyed `map#<index>`, the shape the agent body fans out into. */
 function branch(index: number, status: NodeStatus): WorkflowRunNodeSummary {
   return { nodeId: "agent", iterationKey: `map#${index}`, containerKind: "flow.map", status, inputs: null, outputs: null, error: null, startedAt: null, completedAt: null };
+}
+
+/** A frozen live store that reports `signals` for node "agent" — the overlay MapFanout reads via useNodeLiveContext. */
+function liveStore(signals: NodeLiveSignals): RunLiveStore {
+  const state: RunLiveState = { byNode: new Map([["agent", signals]]), lastSeq: 0, terminal: false };
+  return { getState: () => state, subscribe: () => () => {} };
 }
 
 const dots = (c: HTMLElement) => [...c.querySelectorAll<HTMLElement>(".wf-rf-fanout-dot")];
@@ -65,5 +73,86 @@ describe("MapFanout", () => {
     const { container } = render(<MapFanout rows={[loopRow]} renderBranch={() => <div>x</div>} />);
 
     expect(container.querySelector(".wf-rf-fanout")).toBeNull();
+  });
+
+  it("counts a Suspended branch as waiting — a '· N 等待' summary entry + a waiting dot (distinct from running)", () => {
+    const rows = [branch(0, "Success"), branch(1, "Suspended"), branch(2, "Running")];
+
+    const { container } = render(<MapFanout rows={rows} renderBranch={() => null} />);
+
+    expect(screen.getByText("· 1 等待")).toBeInTheDocument();
+    expect(screen.getByText("1 running")).toBeInTheDocument();                                     // Suspended no longer folds into running
+    expect(container.querySelector('.wf-rf-fanout-dot[data-state="waiting"]')).not.toBeNull();
+  });
+
+  it("pulses ONLY the branch that just flipped (data-fresh), leaving steady running cells static", () => {
+    vi.useFakeTimers();
+    try {
+      const r0 = [branch(0, "Running"), branch(1, "Running"), branch(2, "Running")];
+      const { container, rerender } = render(<MapFanout rows={r0} renderBranch={() => null} />);
+
+      expect(dots(container).filter((d) => d.hasAttribute("data-fresh"))).toHaveLength(0);          // first render: nothing "just changed"
+
+      rerender(<MapFanout rows={[branch(0, "Running"), branch(1, "Success"), branch(2, "Running")]} renderBranch={() => null} />);
+
+      const flipped = dots(container).filter((d) => d.hasAttribute("data-fresh"));
+      expect(flipped).toHaveLength(1);
+      expect(flipped[0]).toBe(dots(container)[1]);                                                   // only #1 (Running → Success)
+
+      act(() => vi.advanceTimersByTime(1300));                                                       // the transient attribute clears after ~1.2s
+      expect(dots(container).filter((d) => d.hasAttribute("data-fresh"))).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the live branches.total as the denominator, padding queued dots up to it", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => branch(i, "Running"));
+    const store = liveStore({ branches: { done: 0, failed: 0, running: 7, waiting: 0, total: 12 }, lastEventSeq: 0 });
+
+    const { container } = render(
+      <RunLiveContext.Provider value={store}><MapFanout rows={rows} renderBranch={() => null} /></RunLiveContext.Provider>,
+    );
+
+    expect(dots(container)).toHaveLength(12);                                                        // 7 rendered branches + 5 queued placeholders
+    expect(dots(container).filter((d) => d.dataset.state === "queued")).toHaveLength(5);
+    expect(screen.getByText("12 branches")).toBeInTheDocument();                                     // denominator = live total, not the 7 rows
+  });
+
+  it("falls back to the rendered branch count as denominator when the live total is absent", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => branch(i, "Running"));
+    const store = liveStore({ branches: { done: 0, failed: 0, running: 7, waiting: 0 }, lastEventSeq: 0 });
+
+    const { container } = render(
+      <RunLiveContext.Provider value={store}><MapFanout rows={rows} renderBranch={() => null} /></RunLiveContext.Provider>,
+    );
+
+    expect(dots(container)).toHaveLength(7);                                                         // no placeholders — total = rows count
+    expect(screen.getByText("7 branches")).toBeInTheDocument();
+  });
+
+  it("folds a fully-settled map into a results chip with the branch count; clicking it collapses the strip", () => {
+    const rows = [branch(0, "Success"), branch(1, "Success"), branch(2, "Failure")];
+
+    const { container } = render(<MapFanout rows={rows} renderBranch={() => null} />);
+
+    const chip = container.querySelector<HTMLElement>(".wf-rf-fanout-reduce");
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toContain("[3]");
+    expect(container.querySelector(".wf-rf-fanout-strip")).not.toBeNull();                           // strip stays reachable (existing focus-a-branch flow)
+
+    fireEvent.click(chip!);
+    expect(container.querySelector(".wf-rf-fanout-strip")).toBeNull();                               // clicking the chip folds the cells away
+  });
+
+  it("derives counts from the rows alone when there is no live store (degrades, no throw)", () => {
+    const rows = [branch(0, "Success"), branch(1, "Running")];
+
+    const { container } = render(<MapFanout rows={rows} renderBranch={() => null} />);
+
+    expect(screen.getByText("2 branches")).toBeInTheDocument();
+    expect(screen.getByText("1 done")).toBeInTheDocument();
+    expect(screen.getByText("1 running")).toBeInTheDocument();
+    expect(dots(container)).toHaveLength(2);
   });
 });

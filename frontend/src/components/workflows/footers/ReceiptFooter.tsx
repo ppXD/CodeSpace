@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- this module co-locates its render component with the small pure helpers (glyphs, formatters, digest/label builders) that only it and its sibling footers use; fast-refresh granularity is moot for these. */
-import { useContext, useState } from "react";
+import { useContext, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
@@ -17,7 +17,7 @@ import type { NodeFooterProps } from "./index";
  * space below each node is free — the bar floats there without overlapping neighbours. Renders only when
  * the node has run rows (run view); the editor card never carries it.
  */
-export function ReceiptFooter({ status, rows, title }: NodeFooterProps) {
+export function ReceiptFooter({ status, rows, title, labelSlot }: NodeFooterProps & { labelSlot?: ReactNode }) {
   const [open, setOpen] = useState(false);
   if (status === "Pending") return null;                 // not reached yet → no footer (matches coze)
 
@@ -37,7 +37,7 @@ export function ReceiptFooter({ status, rows, title }: NodeFooterProps) {
         onClick={(e) => { e.stopPropagation(); if (expandable) setOpen((v) => !v); }}
       >
         <span className="wf-rf-result-glyph" aria-hidden="true">{resultGlyph(status)}</span>
-        <span className="wf-rf-result-label">{resultLabel(status, rows)}</span>
+        <span className="wf-rf-result-label">{labelSlot ?? resultLabel(status, rows)}</span>
         {durationMs != null && <span className="wf-rf-result-dur">{formatDuration(durationMs)}</span>}
         {expandable && <span className="wf-rf-result-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>}
       </button>
@@ -110,12 +110,12 @@ export function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
 }
 
 /** A row earns the expand caret when it carries anything inspectable — output, input, error, an agent run, or a child run. */
-function isRowExpandable(row: WorkflowRunNodeSummary): boolean {
+export function isRowExpandable(row: WorkflowRunNodeSummary): boolean {
   return hasRunContent(row.outputs) || !!row.error || hasRunContent(row.inputs) || !!row.agentRunId || !!row.childRunId;
 }
 
 /** The status glyph in the result bar — mirrors the corner badge's tone vocabulary. */
-function resultGlyph(status: NodeStatus) {
+export function resultGlyph(status: NodeStatus) {
   if (status === "Success") return <Ic.Check size={12} />;
   if (status === "Failure") return <Ic.X size={12} />;
   if (status === "Suspended") return <Ic.Pause size={12} />;
@@ -133,7 +133,7 @@ function resultLabel(status: NodeStatus, rows: WorkflowRunNodeSummary[]): string
  * Total wall-clock for a node's row(s): earliest start → latest completion. Returns null while any row is
  * still running (no completion yet) so the bar shows just the live status, no misleading duration.
  */
-function aggregateDurationMs(rows: WorkflowRunNodeSummary[]): number | null {
+export function aggregateDurationMs(rows: WorkflowRunNodeSummary[]): number | null {
   const starts: number[] = [];
   let latestEnd = 0;
   for (const r of rows) {
@@ -146,7 +146,7 @@ function aggregateDurationMs(rows: WorkflowRunNodeSummary[]): number | null {
 }
 
 /** Coze-style duration: sub-second to ms precision (0.632s / 0.000s), whole seconds (22s), then minutes (2m29s). */
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms < 1000) return `${(ms / 1000).toFixed(3)}s`;
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   const m = Math.floor(ms / 60_000);

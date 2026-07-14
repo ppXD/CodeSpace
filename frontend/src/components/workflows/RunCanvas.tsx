@@ -4,6 +4,7 @@ import { Background, BackgroundVariant, Controls, Panel, ReactFlow, ReactFlowPro
 import "@xyflow/react/dist/style.css";
 
 import type { NodeManifestDto, NodeStatus, WorkflowDefinition, WorkflowRunNodeSummary, WorkflowRunStatus } from "@/api/workflows";
+import { RunLiveContext, useRunLive } from "@/hooks/use-run-live";
 import { isRunActive } from "@/hooks/use-workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
@@ -42,13 +43,19 @@ interface RunCanvasProps {
  */
 export function RunCanvas({ definition, runNodes, runStatus, manifestByType, runId, onOpenRun }: RunCanvasProps) {
   const actions = runId ? { runId, isTerminal: !isRunActive(runStatus) } : null;
+  // One SSE tail per canvas, folded to per-node live signals (token deltas, external-call spans, waits) and
+  // handed to the footers via context. Enabled only for a live run with an id; otherwise the store stays empty
+  // and footers degrade to the 2s poll data. See useRunLive / useNodeLive / RunLiveContext.
+  const liveStore = useRunLive(runId ?? "", !!runId && isRunActive(runStatus));
   return (
     <ReactFlowProvider>
-      <RunActionsContext.Provider value={actions}>
-        <RunOpenContext.Provider value={onOpenRun ?? null}>
-          <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
-        </RunOpenContext.Provider>
-      </RunActionsContext.Provider>
+      <RunLiveContext.Provider value={liveStore}>
+        <RunActionsContext.Provider value={actions}>
+          <RunOpenContext.Provider value={onOpenRun ?? null}>
+            <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
+          </RunOpenContext.Provider>
+        </RunActionsContext.Provider>
+      </RunLiveContext.Provider>
     </ReactFlowProvider>
   );
 }
