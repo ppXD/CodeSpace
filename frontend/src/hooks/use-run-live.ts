@@ -1,4 +1,4 @@
-import { createContext, useEffect, useState, useSyncExternalStore } from "react";
+import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
 
 import { streamRunRecords } from "@/api/run-stream";
 import type { RunRecordView } from "@/api/workflows";
@@ -121,11 +121,26 @@ export function useRunLive(runId: string, enabled: boolean): RunLiveStore {
 /**
  * Subscribe a single node's live signals: re-renders only when node `nodeId`'s signals object changes reference. Because
  * {@link foldRecord} keeps every untouched node's object identity across states, a footer for node X skips the render
- * churn of every other node's token deltas. Returns null while the node has no live signals yet.
+ * churn of every other node's token deltas. Returns null while the node has no live signals yet. A null `store`
+ * (no live run / SSE unavailable / rendered outside a provider) is safe — it subscribes to nothing and returns null,
+ * so a footer degrades to its poll-derived rows with no special-casing.
  */
-export function useNodeLive(store: RunLiveStore, nodeId: string): NodeLiveSignals | null {
-  return useSyncExternalStore(store.subscribe, () => store.getState().byNode.get(nodeId) ?? null);
+const NOOP_SUBSCRIBE = () => () => {};
+const NULL_SNAPSHOT = () => null;
+export function useNodeLive(store: RunLiveStore | null, nodeId: string): NodeLiveSignals | null {
+  return useSyncExternalStore(
+    store ? store.subscribe : NOOP_SUBSCRIBE,
+    store ? () => store.getState().byNode.get(nodeId) ?? null : NULL_SNAPSHOT,
+  );
 }
 
-/** Canvas-scoped store handle for later footer consumers; the mount point lands with the first footer PR. */
+/** Canvas-scoped store handle the footers read; provided by RunCanvas (see its mount of useRunLive). */
 export const RunLiveContext = createContext<RunLiveStore | null>(null);
+
+/**
+ * The footer-facing convenience: read this node's live signals straight from the canvas context. Null-safe — outside a
+ * provider (editor / tests without one) it returns null and the footer renders from its rows alone.
+ */
+export function useNodeLiveContext(nodeId: string): NodeLiveSignals | null {
+  return useNodeLive(useContext(RunLiveContext), nodeId);
+}

@@ -816,6 +816,98 @@ jobs:
             exit 1
           fi
 
+  real-model-footer-signals:
+    name: real model (run-canvas footer live-signals)
+    runs-on: ubuntu-latest
+    # THE live behavioral proof that the data the new run-canvas FOOTERS render is actually PRODUCED: a REAL model drives
+    # an engine-driven llm.complete (the footer's B1 external_call pair + B2 streamed interaction.delta feed — streaming
+    # FORCED so the live-token view has rows) AND a REAL claude agent.run emits the footer's B3 tool/file/command event
+    # feed. Two behavioral gates (~30-90s each) + best-of-N, so the 45-min ceiling holds with headroom. Self-skips
+    # LOUDLY when the secrets / claude are absent (skip ≠ pass; a fork stays green at zero cost).
+    timeout-minutes: 45
+
+    # Same UNCONFINED rationale as the injection lane: this gate's signal is that the footer's ledger/agent-event data
+    # lands, not sandbox confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner is
+    # flaky. So force the unconfined path deterministically + disable the prlimit caps for the agent-run arm.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # best-of-N capability-floor (Rule 8 escape hatch): a length-forced completion + a file-create-then-ls goal are
+      # near-deterministic, so the spare attempts just absorb a rare gateway hiccup, not model judgement variance.
+      CODESPACE_REALMODEL_EVAL_ATTEMPTS: '3'
+      # Force the llm.complete node onto its STREAMING path so a real completion persists interaction.delta rows — the
+      # footer's live-token source (threshold 1 → any maxTokens > 1 streams). The test also sets this locally.
+      CODESPACE_LLM_STREAMING_THRESHOLD_TOKENS: '1'
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-footer-signals
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        # FATAL install (a missing binary must RED the lane, never let the gating agent-feed arm self-skip green — "skip ≠ pass").
+        run: |
+          npm install -g '@anthropic-ai/claude-code@2.1.193' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.193'; }
+          claude --version
+          git --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (a real llm.complete records external_call + interaction.delta; a real claude agent.run emits its event feed)
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelFooterSignals"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-footer-signals.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the footer-signals gates actually ran (no silent skip)
+        run: |
+          trx=backend/TestResults/real-model-footer-signals.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the RealModel footer-signals gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
+
   real-model-stop-hook:
     name: real model (in-loop acceptance stop-hook)
     runs-on: ubuntu-latest
