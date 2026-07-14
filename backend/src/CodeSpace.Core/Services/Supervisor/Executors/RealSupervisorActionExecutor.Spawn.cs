@@ -309,6 +309,43 @@ public sealed partial class RealSupervisorActionExecutor
         if (existingWaitAgentIds.Count > 0)
             return ReparkOnExistingWaits(context, existingWaitAgentIds);
 
+        // W-hard 2a: ATOMIC wave admission — every attempt of this wave reserves its budget slice
+        // (cap ÷ total-spawn cap, the config-derived natural estimate) BEFORE anything stages, all-or-nothing:
+        // one rejection releases the wave's fresh reservations and returns a budget-blocked outcome the decider
+        // can read (mirroring the dependency-block precedent — positional integrity is never truncated mid-wave).
+        // Scope keys are the per-spawn iteration keys, so a crash-replayed staging lands on its own reservations
+        // (admitted as already-reserved). An uncapped run (no MaxCostUsd) reserves nothing — same authority as
+        // the realized-spend bound, which stays the user-facing stop.
+        if (context.MaxCostUsd is { } capUsd && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
+        {
+            var estimate = capUsd / Math.Max(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1);
+            var reservedKeys = new List<string>();
+
+            for (var k = 0; k < tasks.Count; k++)
+            {
+                var scopeKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}#{k}";
+                var admission = await _budget.ReserveAsync(context.SupervisorRunId, context.TeamId, "agent-attempt", scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: null, cancellationToken).ConfigureAwait(false);
+
+                if (!admission.Admitted)
+                {
+                    foreach (var key in reservedKeys)
+                        await _budget.ReleaseAsync(context.SupervisorRunId, context.TeamId, "agent-attempt", key, cancellationToken).ConfigureAwait(false);
+
+                    _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: {Reason}", tasks.Count, context.SupervisorRunId, admission.Reason);
+
+                    return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new
+                    {
+                        budgetBlocked = tasks.Select(t => t.Task.SubtaskId).ToArray(),
+                        reason = admission.Reason,
+                        committedUsd = admission.CommittedUsd,
+                        capUsd = admission.CapUsd,
+                    }, AgentJson.Options));
+                }
+
+                reservedKeys.Add(scopeKey);
+            }
+        }
+
         var orphans = await ReclaimableOrphanAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
 
         // P1a identity: every staged attempt carries the ATOMIC WorkUnitRef of the plan that dispatched it, read
