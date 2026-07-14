@@ -3248,6 +3248,20 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-result-branch-ix { font-size: 10.5px; font-weight: 700; color: var(--accent); }
 .acs-root .wf-rf-result-branch-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 
+/* ── B1 external-call footer: per-type receipt digest + live-call ring. Reuses the .wf-rf-result* bar/panel above;
+   this block only styles the digest text that replaces the plain "Success" label (tinted by outcome tone) and the
+   timeout ring that rides on the shared .wf-ring primitive. Non-2xx / request_changes read as "warn" amber, never
+   red — that outcome is branchable data, not an error. ── */
+.acs-root .wf-rf-digest { display: inline-flex; align-items: center; gap: 5px; }
+.acs-root .wf-rf-digest[data-tone="warn"]    { color: #8A5A1B; }
+.acs-root .wf-rf-digest[data-tone="failure"] { color: #9E3535; }
+.acs-root .wf-rf-digest-mono { font-variant-numeric: tabular-nums; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.acs-root .wf-rf-digest-link { display: inline-grid; place-items: center; color: var(--muted-2); }
+.acs-root .wf-rf-digest-link:hover { color: var(--accent); }
+/* Running bar: the timeout ring sits with the elapsed at the right edge (mirrors the caret alignment above). */
+.acs-root .wf-rf-result-ring { margin-left: auto; }
+.acs-root .wf-rf-result-ring + .wf-rf-result-dur { margin-left: 6px; }
+
 /* flow.map fan-out — the activity-terminal result under a map/agent node: a summary line + a per-branch status
    dot strip + one focused branch terminal. Floats below the node like .wf-rf-result; widens when a branch is open. */
 .acs-root .wf-rf-fanout {
@@ -3263,6 +3277,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-total { font-weight: 600; color: var(--ink-2); }
 .acs-root .wf-rf-fanout-sum [data-state="done"]    { color: #1F6B3F; }
 .acs-root .wf-rf-fanout-sum [data-state="running"] { color: var(--accent); }
+.acs-root .wf-rf-fanout-sum [data-state="waiting"] { color: #5B4B8A; }   /* parked on a wait — suspend tone */
 .acs-root .wf-rf-fanout-sum [data-state="failed"]  { color: #9E3535; }
 .acs-root .wf-rf-fanout-sum [data-state="queued"]  { color: var(--muted-2); }
 
@@ -3271,10 +3286,40 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-dot:hover { transform: scale(1.16); }
 .acs-root .wf-rf-fanout-dot[data-sel], .acs-root .wf-rf-fanout-dot:focus-visible { outline: none; box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 3px var(--accent); }
 .acs-root .wf-rf-fanout-dot[data-state="done"]    { background: #1F6B3F; }
-.acs-root .wf-rf-fanout-dot[data-state="running"] { background: var(--accent); animation: wf-rf-fanout-pulse 1.4s ease-in-out infinite; }
+/* B4: a steady running cell is a SOLID accent dot — only the branch that JUST flipped pulses (see [data-fresh]),
+   so a 12-branch map isn't a wall of infinite pulses. The old blanket running animation is intentionally removed. */
+.acs-root .wf-rf-fanout-dot[data-state="running"] { background: var(--accent); }
+.acs-root .wf-rf-fanout-dot[data-state="waiting"] { background: #5B4B8A; }
 .acs-root .wf-rf-fanout-dot[data-state="failed"]  { background: #9E3535; }
 .acs-root .wf-rf-fanout-dot[data-state="queued"]  { background: var(--line); }
-@keyframes wf-rf-fanout-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+.acs-root .wf-rf-fanout-dot[data-placeholder] { cursor: default; opacity: .55; }   /* known-but-not-yet-started branch (live total > rendered) */
+
+/* B4: fresh-cell pulse — a brief scale + accent-ring blip on ONLY the just-flipped branch(es); MapFanout sets
+   the attribute for ~1.2s then clears it, so the animation is transient rather than infinite. */
+.acs-root .wf-rf-fanout-dot[data-fresh] { animation: wf-rf-fanout-fresh .55s ease-out 2; }
+@keyframes wf-rf-fanout-fresh {
+  0%   { transform: scale(1);    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  40%  { transform: scale(1.34); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 transparent; }
+}
+
+/* B4: completion "reduce" chip — once every branch settles, the N cells fold into one array chip (results [N]);
+   clicking it collapses / re-expands the dot strip. Folds in with a brief scaleX (disabled under reduced motion). */
+.acs-root .wf-rf-fanout-reduce {
+  display: inline-flex; align-items: baseline; gap: 5px; margin-top: 7px;
+  font-size: 11px; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 20px;
+  padding: 3px 10px; cursor: pointer; transform-origin: left center;
+  animation: wf-rf-fanout-fold .28s ease-out;
+}
+.acs-root .wf-rf-fanout-reduce:hover { border-color: var(--accent); }
+.acs-root .wf-rf-fanout-reduce-n { color: var(--accent); }
+@keyframes wf-rf-fanout-fold { from { transform: scaleX(.4); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .wf-rf-fanout-dot[data-fresh] { animation: none; }
+  .acs-root .wf-rf-fanout-reduce { animation: none; }
+}
 
 .acs-root .wf-rf-fanout-term { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; max-height: 320px; overflow: auto; }
 .acs-root .wf-rf-fanout-term-h { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
@@ -3282,6 +3327,44 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-term-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .acs-root .wf-rf-fanout-term-st[data-status="failure"] { color: #9E3535; }
 .acs-root .wf-rf-fanout-term-st[data-status="success"] { color: #1F6B3F; }
+
+/* ── Wait / suspend footer (WaitFooter) ─────────────────────────────────────────────────────────────
+   The suspend family's footer. It CONSUMES the shared `.wf-rf-result*` bar (above) and the `.wf-ring`
+   countdown primitive (defined in the run-canvas block — NOT redefined here), and adds only the wait-
+   specific timing/detail/action rows. The Suspended bar is deliberately calm: no spinner (nothing is
+   computing) — the node CARD already breathes via `data-run-status="suspended"`. */
+.acs-root .wf-wait .wf-wait-bar { cursor: default; }
+.acs-root .wf-wait-time { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .wf-wait-count { font-weight: 600; color: #5B4B8A; }
+.acs-root .wf-wait-default { color: var(--muted-2); }
+.acs-root .wf-wait-parked { color: var(--muted); }
+.acs-root .wf-wait .wf-ring { --wf-ring-tone: #5B4B8A; }
+
+.acs-root .wf-wait-detail { margin-top: 5px; padding: 5px 8px; border-radius: 7px; background: var(--panel-2); border: 1px solid var(--line); font-size: 11px; color: var(--ink-2); word-break: break-word; }
+.acs-root .wf-wait-detail code { font-size: 10.5px; }
+.acs-root .wf-wait-hint { margin-top: 5px; font-size: 10.5px; color: var(--muted-2); }
+
+.acs-root .wf-wait-cb { display: flex; align-items: center; gap: 5px; margin-top: 5px; }
+.acs-root .wf-wait-cb-url { flex: 1; min-width: 0; font-size: 10.5px; padding: 4px 7px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); }
+.acs-root .wf-wait-cb-copy { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
+.acs-root .wf-wait-cb-copy:hover { border-color: var(--accent); color: var(--accent); }
+
+.acs-root .wf-wait-approve { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.acs-root .wf-wait-btn { font: inherit; font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 7px; border: 1px solid var(--line); cursor: pointer; }
+.acs-root .wf-wait-btn[disabled] { opacity: .6; cursor: default; }
+.acs-root .wf-wait-btn-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+.acs-root .wf-wait-btn-ok:hover:not([disabled]) { background: #C66B4B; }
+.acs-root .wf-wait-btn-no { background: var(--panel); color: var(--ink-2); }
+.acs-root .wf-wait-btn-no:hover:not([disabled]) { border-color: #E7A6A6; color: #9E3535; }
+.acs-root .wf-wait-sent { margin-top: 6px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.acs-root .wf-wait-err { margin-left: 2px; font-size: 10.5px; color: #9E3535; }
+
+/* Resolution stamp on a settled wait bar — the decision the outputs carry (approved / rejected / chosen). */
+.acs-root .wf-wait-stamp { font-size: 10px; font-weight: 700; letter-spacing: .01em; padding: 1px 7px; border-radius: 20px; white-space: nowrap; }
+.acs-root .wf-wait-stamp[data-tone="ok"] { background: #EAF5EE; color: #1F6B3F; }
+.acs-root .wf-wait-stamp[data-tone="reject"] { background: #FCEDED; color: #9E3535; }
+.acs-root .wf-wait-stamp[data-tone="neutral"] { background: var(--panel-2); color: var(--muted); }
+.acs-root .wf-wait-resolved .wf-rf-result-dur { margin-left: 8px; }
 
 /* Unified Rerun control (RerunMenu) — a filled-accent split button (primary + caret) + a dropdown of every rerun the
    surface offers: the current action checkmarked, the bulk "Rerun all failed items" badged "suggested", and "Rerun

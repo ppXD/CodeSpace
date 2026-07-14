@@ -247,21 +247,24 @@ export function fanBranches(rows: readonly WorkflowRunNodeSummary[]): FanBranch[
   return Array.from(byIndex.values()).sort((a, b) => a.index - b.index);
 }
 
-/** A fan-out's per-state branch counts for the summary line (running folds Suspended; done folds Skipped). */
+/** A fan-out's per-state branch counts for the summary line (waiting = Suspended/parked; done folds Skipped). */
 export interface FanBreakdown {
   total: number;
   done: number;
   running: number;
   failed: number;
   queued: number;
+  /** Branches parked on a wait (a `Suspended` row) — distinct from actively-running, so a parked map reads "N 等待". */
+  waiting: number;
 }
 
 export function fanBreakdown(branches: readonly FanBranch[]): FanBreakdown {
-  const b: FanBreakdown = { total: branches.length, done: 0, running: 0, failed: 0, queued: 0 };
+  const b: FanBreakdown = { total: branches.length, done: 0, running: 0, failed: 0, queued: 0, waiting: 0 };
 
   for (const { row } of branches) {
     if (row.status === "Failure") b.failed++;
-    else if (row.status === "Running" || row.status === "Suspended") b.running++;
+    else if (row.status === "Suspended") b.waiting++;
+    else if (row.status === "Running") b.running++;
     else if (row.status === "Pending") b.queued++;
     else b.done++;   // Success / Skipped — settled without failing
   }

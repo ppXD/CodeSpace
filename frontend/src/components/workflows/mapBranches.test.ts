@@ -192,7 +192,7 @@ describe("fanBranches / isMapFanout / fanBreakdown", () => {
     expect(branches[0].row.nodeId).toBe("ms");
   });
 
-  it("buckets running (incl Suspended), done (incl Skipped), failed, queued", () => {
+  it("buckets running, waiting (Suspended), done (incl Skipped), failed, queued", () => {
     const rows = [
       mapNode({ nodeId: "a", iterationKey: "map#0", status: "Success" }),
       mapNode({ nodeId: "a", iterationKey: "map#1", status: "Running" }),
@@ -201,7 +201,7 @@ describe("fanBranches / isMapFanout / fanBreakdown", () => {
       mapNode({ nodeId: "a", iterationKey: "map#4", status: "Pending" }),
       mapNode({ nodeId: "a", iterationKey: "map#5", status: "Skipped" }),
     ];
-    expect(fanBreakdown(fanBranches(rows))).toEqual({ total: 6, done: 2, running: 2, failed: 1, queued: 1 });
+    expect(fanBreakdown(fanBranches(rows))).toEqual({ total: 6, done: 2, running: 1, failed: 1, queued: 1, waiting: 1 });
   });
 });
 

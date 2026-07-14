@@ -4,7 +4,9 @@ import type { NodeKind, NodeStatus, WorkflowRunNodeSummary } from "@/api/workflo
 
 import type { WorkflowNodeData } from "../WorkflowNode";
 import { BranchDotsFooter } from "./BranchDotsFooter";
+import { ExternalCallFooter } from "./ExternalCallFooter";
 import { ReceiptFooter } from "./ReceiptFooter";
+import { WaitFooter } from "./WaitFooter";
 
 /**
  * The kinds of run-result footer a node can hang under it in a run view. Each is a self-contained
@@ -64,16 +66,18 @@ export function resolveFooterKind(typeKey: string, category: string, kind: NodeK
 
 /**
  * The kind → component registry Phase B plugs into: each footer kind swaps to its bespoke component here,
- * one PR at a time, with the rest of the pipeline untouched. THIS PR routes every kind to {@link ReceiptFooter}
- * except `branchDots` → {@link BranchDotsFooter}, so the rendered output is 1:1 with the pre-registry code.
+ * one PR at a time, with the rest of the pipeline untouched. Bespoke so far: `branchDots` → {@link BranchDotsFooter},
+ * `externalCall` → {@link ExternalCallFooter} (live call span + per-type receipt digest), and `wait` →
+ * {@link WaitFooter} (the suspend family's calm countdown bar); every remaining kind still renders the
+ * coze-style {@link ReceiptFooter}.
  */
 export const FOOTERS: Record<NodeFooterKind, ComponentType<NodeFooterProps>> = {
   receipt: ReceiptFooter,
-  externalCall: ReceiptFooter,
+  externalCall: ExternalCallFooter,
   tokenStream: ReceiptFooter,
   agentFeed: ReceiptFooter,
   branchDots: BranchDotsFooter,
-  wait: ReceiptFooter,
+  wait: WaitFooter,
   pipeline: ReceiptFooter,
   verdict: ReceiptFooter,
 };
