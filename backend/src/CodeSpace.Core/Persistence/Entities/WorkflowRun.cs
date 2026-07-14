@@ -111,6 +111,12 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public WorkflowRunStatus Status { get; set; } = WorkflowRunStatus.Pending;
     public string? Error { get; set; }
 
+    /// <summary>P2a (Lock Clause 1): the completion-protocol version this execution runs under — stamped IMMUTABLY at creation in the same transaction as the row; null = a pre-protocol Legacy run. A replay/rerun is a new execution stamped with the policy current at ITS creation.</summary>
+    public int? CompletionPolicyVersion { get; set; }
+
+    /// <summary>P2a: Legacy | Shadow | Enforced — stored as text, read fail-closed (unknown → Legacy). Enforced is only ever set by P2b's qualified-cohort rollout, never at generic creation.</summary>
+    public string? CompletionEnforcementMode { get; set; }
+
     /// <summary>
     /// Phase 3.0 — set by <see cref="Services.Workflows.Dispatch.WorkflowRunDispatcher"/>
     /// when CAS Pending → Enqueued succeeds. NULL while in Pending or after a reconciler

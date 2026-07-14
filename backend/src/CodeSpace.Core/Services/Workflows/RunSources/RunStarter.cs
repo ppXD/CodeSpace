@@ -98,6 +98,9 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             RerunFromNodeId = envelope.RerunFromNodeId,
             SessionId = session?.SessionId,
             SessionTurnIndex = session?.TurnIndex,
+            // P2a: the completion policy is part of the execution's identity — stamped at creation, immutable.
+            CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
+            CompletionEnforcementMode = Completion.CompletionPolicy.CurrentMode.ToString(),
             Status = WorkflowRunStatus.Pending,
             CreatedBy = envelope.CreatedBy,
             LastModifiedBy = envelope.CreatedBy,

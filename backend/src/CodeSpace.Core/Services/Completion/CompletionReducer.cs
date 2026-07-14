@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Completion;
 /// </summary>
 public static class CompletionReducer
 {
-    /// <summary>Reduce a CONTRACT-ERA run's envelopes + facts to its assessment. Callers gate on <see cref="CompletionCutover"/> first — a pre-cutover run takes <see cref="ReduceLegacy"/> instead, never this.</summary>
+    /// <summary>Reduce a CONTRACT-ERA run's envelopes + facts to its assessment. Callers gate on the run's stamped policy version (<see cref="CompletionPolicy.BasisFor"/>) first — a Legacy run takes <see cref="ReduceLegacy"/> instead, never this.</summary>
     public static CompletionAssessment Reduce(IReadOnlyList<RequirementEnvelope> requirements, IReadOnlyList<ReceiptEnvelope> receipts, CompletionRunFacts facts)
     {
         var execution = ClassifyExecution(facts);
@@ -48,7 +48,7 @@ public static class CompletionReducer
     }
 
     /// <summary>
-    /// The LegacyUnknown projection (CUTOVER): a run created before <see cref="CompletionCutover"/> derives ONLY
+    /// The LegacyUnknown projection: a run with NO stamped completion policy (pre-protocol) derives ONLY
     /// <see cref="CompletionAssessment.Execution"/> (its terminal status is a durable fact); every contract
     /// dimension stays <c>Unknown</c>. Old facts are never re-derived into contract truth — recomputation over a
     /// tape that predates the contract regime would manufacture false precision.
