@@ -73,6 +73,19 @@ public static class AgentAcceptanceContract
     /// no-progress evidence fold, and the workflow node's respawn verdict all share — so "retry the agent" is never
     /// spent on a failure class a retry cannot fix, at any tier.
     /// </summary>
+    /// <summary>
+    /// The TYPED overload (P2a-3b): a grade whose arm minted a <see cref="Messages.Agents.Benchmark.GradeFailureClass"/>
+    /// classifies by TYPE — the detail string is display. A grade without one (an arm not yet minting, a tape-stored
+    /// detail) falls back to the pinned string conventions below, which retire as the remaining arms and the tape
+    /// learn the type.
+    /// </summary>
+    public static bool IsInfraFailure(Messages.Agents.Benchmark.BenchmarkGrade grade, bool workPresent) => grade.Class switch
+    {
+        Messages.Agents.Benchmark.GradeFailureClass.Genuine => false,
+        Messages.Agents.Benchmark.GradeFailureClass.GraderFault or Messages.Agents.Benchmark.GradeFailureClass.Environment or Messages.Agents.Benchmark.GradeFailureClass.SpecIncomplete => true,
+        _ => IsInfraFailure(grade.Detail, workPresent),
+    };
+
     public static bool IsInfraFailure(string? detail, bool workPresent)
     {
         var effective = StripRepoTag(detail);

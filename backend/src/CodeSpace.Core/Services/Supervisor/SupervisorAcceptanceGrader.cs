@@ -55,7 +55,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         {
             // A repo/branch we cannot clone cannot be verified → fail closed to "not accepted" (never a silent pass).
             _logger.LogWarning(ex, "Acceptance grading could not clone {RepositoryId} at {Branch}; failing closed to not-accepted", repositoryId, branch);
-            return Failed($"clone-failed: {ex.Message}");
+            return Failed($"clone-failed: {ex.Message}", GradeFailureClass.Environment);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -103,7 +103,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         catch (WorkspaceException ex)
         {
             _logger.LogWarning(ex, "Acceptance grading could not clone {RepositoryId} at base {BaseSha}; failing closed to not-accepted", repositoryId, baseSha);
-            return Failed($"clone-failed: {ex.Message}");
+            return Failed($"clone-failed: {ex.Message}", GradeFailureClass.Environment);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -132,7 +132,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         catch (WorkspaceException ex)
         {
             _logger.LogWarning(ex, "Baseline grading could not clone {RepositoryId} at base {BaseSha}; recording clone-failed", repositoryId, baseSha);
-            return Failed($"clone-failed: {ex.Message}");
+            return Failed($"clone-failed: {ex.Message}", GradeFailureClass.Environment);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -229,11 +229,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         _logger.LogWarning("Acceptance grading's setup command failed in {Directory}: {Status} (exit {ExitCode}) {Stderr}", directory, result.Status, result.ExitCode, Summarize(result.Stderr));
 
         return result.Status == SandboxStatus.TimedOut
-            ? Failed("setup-timed-out")
-            : Failed($"setup-failed: {Summarize(result.Stderr)}");
+            ? Failed("setup-timed-out", GradeFailureClass.Environment)
+            : Failed($"setup-failed: {Summarize(result.Stderr)}", GradeFailureClass.Environment);
     }
 
-    private static BenchmarkGrade Failed(string detail) => new() { Passed = false, Detail = detail };
+    private static BenchmarkGrade Failed(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };
 
     private static string Summarize(string stderr) => string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
 

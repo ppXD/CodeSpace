@@ -29,7 +29,7 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
 
         return result.Status == SandboxStatus.Success
             ? new BenchmarkGrade { Passed = true, Detail = "tests-passed" }
-            : Fail(DetailFor(result));
+            : Fail(DetailFor(result), result.Status == SandboxStatus.TimedOut ? GradeFailureClass.Environment : GradeFailureClass.Genuine);
     }
 
     /// <summary>The grading command runs in the post-run workspace with a fresh, short wall-clock cap — the tests are tiny, and a hung test is a fail, not a hang. The env is the runner's scrubbed default (no agent secret injected — the grader is independent of the agent's credential).</summary>
@@ -44,5 +44,5 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
     private static string DetailFor(SandboxResult result) =>
         result.Status == SandboxStatus.TimedOut ? "tests-timed-out" : $"tests-failed-exit-{result.ExitCode}";
 
-    private static BenchmarkGrade Fail(string detail) => new() { Passed = false, Detail = detail };
+    private static BenchmarkGrade Fail(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };
 }

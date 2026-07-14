@@ -28,7 +28,7 @@ public sealed class ArtifactSchemaGrader : IBenchmarkGrader, ISingletonDependenc
         cancellationToken.ThrowIfCancellationRequested();
 
         if (string.IsNullOrWhiteSpace(context.WorkspaceDirectory)) return Task.FromResult(Fail("no-workspace"));
-        if (context.Acceptance?.Schema is not { ValueKind: JsonValueKind.Object } schema) return Task.FromResult(Fail("no-schema"));
+        if (context.Acceptance?.Schema is not { ValueKind: JsonValueKind.Object } schema) return Task.FromResult(Fail("no-schema", GradeFailureClass.SpecIncomplete));
 
         var paths = context.Task.TestCommand;
 
@@ -57,5 +57,5 @@ public sealed class ArtifactSchemaGrader : IBenchmarkGrader, ISingletonDependenc
         return Task.FromResult(new BenchmarkGrade { Passed = true, Detail = $"schema-valid: {paths.Count} artifact(s)" });
     }
 
-    private static BenchmarkGrade Fail(string detail) => new() { Passed = false, Detail = detail };
+    private static BenchmarkGrade Fail(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };
 }

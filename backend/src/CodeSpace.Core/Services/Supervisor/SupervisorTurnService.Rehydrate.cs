@@ -466,7 +466,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Acceptance grade for resolve decision {DecisionId} failed unexpectedly; recording not-accepted", decision.Id);
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
     }
 
@@ -636,7 +636,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
     }
 
@@ -655,7 +655,7 @@ public sealed partial class SupervisorTurnService
             // A candidate grade that never actually RAN (an infra-classed detail — clone/setup/timeout faults) has
             // nothing a differential could compare against: skip the baseline entirely instead of paying a second
             // full clone against the same unreachable repo / doubling a judge's model spend for an unusable pair.
-            if (Agents.AgentAcceptanceContract.IsInfraFailure(candidateGrade.Detail, workPresent: !string.IsNullOrEmpty(result.ProducedBranch))) return null;
+            if (Agents.AgentAcceptanceContract.IsInfraFailure(candidateGrade, workPresent: !string.IsNullOrEmpty(result.ProducedBranch))) return null;
 
             var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                ?? goalConfig?.AgentProfile?.RepositoryId;
@@ -686,7 +686,7 @@ public sealed partial class SupervisorTurnService
 
             // A MEASURED baseline is shareable; an infra-classed one (a transient clone fault) is not — stamping it
             // onto every sibling off the same base would spread one blip across the whole fan-out.
-            if (!Agents.AgentAcceptanceContract.IsInfraFailure(grade.Detail, workPresent: true)) baselines[key] = grade;
+            if (!Agents.AgentAcceptanceContract.IsInfraFailure(grade, workPresent: true)) baselines[key] = grade;
 
             return grade;
         }
@@ -724,7 +724,7 @@ public sealed partial class SupervisorTurnService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Per-unit multi-repo acceptance grade for agent {AgentRunId} repo '{Alias}' in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, target.Alias, decisionId);
-                return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}" };
+                return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
             }
 
             if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': {grade.Detail}" };
@@ -980,7 +980,7 @@ public sealed partial class SupervisorTurnService
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex, "Stop acceptance {Gate} grade for repo {Repo} failed unexpectedly; recording not-accepted", label, target.Alias);
-                    return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}" };
+                    return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
                 }
 
                 if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: {grade.Detail}" };
