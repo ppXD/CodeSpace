@@ -27,9 +27,11 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
 
         var result = await context.Runner.RunAsync(spec, cancellationToken).ConfigureAwait(false);
 
+        var evidence = EvidenceTextFor(context, result);
+
         return result.Status == SandboxStatus.Success
-            ? new BenchmarkGrade { Passed = true, Detail = "tests-passed" }
-            : Fail(DetailFor(result), result.Status == SandboxStatus.TimedOut ? GradeFailureClass.Environment : GradeFailureClass.Genuine);
+            ? new BenchmarkGrade { Passed = true, Detail = "tests-passed", EvidenceText = evidence }
+            : Fail(DetailFor(result), result.Status == SandboxStatus.TimedOut ? GradeFailureClass.Environment : GradeFailureClass.Genuine) with { EvidenceText = evidence };
     }
 
     /// <summary>The grading command runs in the post-run workspace with a fresh, short wall-clock cap — the tests are tiny, and a hung test is a fail, not a hang. The env is the runner's scrubbed default (no agent secret injected — the grader is independent of the agent's credential).</summary>
@@ -40,6 +42,12 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
         WorkingDirectory = context.WorkspaceDirectory,
         TimeoutSeconds = context.Task.TimeoutSeconds,
     };
+
+    /// <summary>P3a-1: the oracle run's bounded evidence — command, exit, and output TAILS (the failure lives at the end; a full log offloads elsewhere). Both verdict directions carry it: a PASS without evidence is as unauditable as a fail.</summary>
+    private static string EvidenceTextFor(BenchmarkGradingContext context, SandboxResult result) =>
+        $"$ {string.Join(' ', context.Task.TestCommand)}\nexit={result.ExitCode} status={result.Status}\n--- stdout (tail) ---\n{Tail(result.Stdout)}\n--- stderr (tail) ---\n{Tail(result.Stderr)}";
+
+    private static string Tail(string text) => text.Length <= 8_192 ? text : text[^8_192..];
 
     private static string DetailFor(SandboxResult result) =>
         result.Status == SandboxStatus.TimedOut ? "tests-timed-out" : $"tests-failed-exit-{result.ExitCode}";

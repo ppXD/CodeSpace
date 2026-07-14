@@ -153,6 +153,7 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                     WorkUnit = workUnitByAttempt.GetValueOrDefault(results[i].AgentRunId),
                     Disposition = VerificationDispositions.Classify(passed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
                     Authority = ContractAuthority.ServerPolicy,
+                    EvidenceRef = results[i].AcceptanceEvidenceId,
                     ObservedAt = DateTimeOffset.UtcNow,
                 }, cancellationToken).ConfigureAwait(false);
             }

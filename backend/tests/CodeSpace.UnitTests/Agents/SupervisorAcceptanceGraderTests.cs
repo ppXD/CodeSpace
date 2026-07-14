@@ -390,6 +390,40 @@ public class SupervisorAcceptanceGraderTests
         AgentAcceptanceContract.IsInfraFailure(detail, workPresent: false).ShouldBe(expected);
     }
 
+    [Fact]
+    public async Task Oracle_evidence_is_stored_to_CAS_and_the_grade_carries_the_id()
+    {
+        var oracle = new FakeGrader(Pass with { EvidenceText = "$ sh check.sh\nexit=0" });
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, artifacts: artifacts);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, CancellationToken.None);
+
+        grade.EvidenceArtifactId.ShouldNotBeNull("the receipt's EvidenceRef binds to this id");
+        grade.EvidenceText.ShouldBeNull("the transient text is never carried past capture");
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("check.sh");
+    }
+
+    [Fact]
+    public async Task A_store_fault_degrades_to_evidence_less_never_fails_the_grade()
+    {
+        var oracle = new FakeGrader(Pass with { EvidenceText = "output" });
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, artifacts: new ThrowingArtifactStore());
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("the verdict stands");
+        grade.EvidenceArtifactId.ShouldBeNull();
+        grade.EvidenceText.ShouldBeNull("dropped either way — evidence-less reads at most InfraUnknown once admission tightens");
+    }
+
+    internal sealed class ThrowingArtifactStore : CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore
+    {
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) => throw new InvalidOperationException("store down");
+        public Task<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactBytes?>(null);
+        public Task<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactMetadata?>(null);
+    }
+
     [Theory]
     [InlineData(Messages.Agents.Benchmark.GradeFailureClass.GraderFault, true)]
     [InlineData(Messages.Agents.Benchmark.GradeFailureClass.Environment, true)]
@@ -454,13 +488,28 @@ public class SupervisorAcceptanceGraderTests
 
     private static readonly BenchmarkGrade Pass = new() { Passed = true, Detail = "tests-passed" };
 
-    private static SupervisorAcceptanceGrader Build(FakeResolver resolver, FakeGrader oracle, string handleDir = "/tmp/clone", WorkspaceException? throwOnPrepare = null, ISandboxRunnerRegistry? runners = null, IArtifactOffloader? offloader = null) =>
+    private static SupervisorAcceptanceGrader Build(FakeResolver resolver, FakeGrader oracle, string handleDir = "/tmp/clone", WorkspaceException? throwOnPrepare = null, ISandboxRunnerRegistry? runners = null, IArtifactOffloader? offloader = null, CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore? artifacts = null) =>
         new(resolver, new FakeProviderRegistry(new FakeProvider(new FakeHandle(handleDir), throwOnPrepare)),
-            runners ?? new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), offloader ?? new FakeOffloader(), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            runners ?? new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), offloader ?? new FakeOffloader(), artifacts ?? new FakeArtifactStore(), NullLogger<SupervisorAcceptanceGrader>.Instance);
 
     private static SupervisorAcceptanceGrader BuildWithHandle(FakeHandle handle, FakeGrader oracle) =>
         new(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeProviderRegistry(new FakeProvider(handle, null)),
-            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), new FakeOffloader(), NullLogger<SupervisorAcceptanceGrader>.Instance);
+            new FakeRunnerRegistry(), new FakeGraderRegistry(oracle), new FakeOffloader(), new FakeArtifactStore(), NullLogger<SupervisorAcceptanceGrader>.Instance);
+
+    internal sealed class FakeArtifactStore : CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore
+    {
+        public List<(Guid TeamId, string Text, string ContentType)> Puts { get; } = new();
+
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
+        {
+            Puts.Add((teamId, System.Text.Encoding.UTF8.GetString(bytes.Span), contentType));
+            return Task.FromResult(Guid.NewGuid());
+        }
+
+        public Task<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactBytes?>(null);
+
+        public Task<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<CodeSpace.Core.Services.Workflows.Artifacts.ArtifactMetadata?>(null);
+    }
 
     // ── Fakes ────────────────────────────────────────────────────────────────────────
 

@@ -28,15 +28,17 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
     private readonly IArtifactOffloader _offloader;
+    private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     private readonly ILogger<SupervisorAcceptanceGrader> _logger;
 
-    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IArtifactOffloader offloader, ILogger<SupervisorAcceptanceGrader> logger)
+    public SupervisorAcceptanceGrader(IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry providers, ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, ILogger<SupervisorAcceptanceGrader> logger)
     {
         _workspaceResolver = workspaceResolver;
         _providers = providers;
         _runners = runners;
         _graders = graders;
         _offloader = offloader;
+        _artifacts = artifacts;
         _logger = logger;
     }
 
@@ -203,7 +205,32 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
 
-        return await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+        var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P3a-1: the oracle run's output becomes a durable CAS artifact — the id a receipt's <c>EvidenceRef</c> binds
+    /// to. ALWAYS stored (never inline-thresholded: an id is the contract, not a display optimization); the
+    /// transient text is dropped either way. Best-effort with a loud log — a store fault degrades the receipt to
+    /// evidence-less (admission batch 2 will read that as at-most-InfraUnknown), it never fails the grade itself.
+    /// </summary>
+    private async Task<BenchmarkGrade> CaptureEvidenceAsync(BenchmarkGrade grade, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(grade.EvidenceText)) return grade;
+
+        try
+        {
+            var id = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(grade.EvidenceText), "text/plain", cancellationToken).ConfigureAwait(false);
+
+            return grade with { EvidenceArtifactId = id, EvidenceText = null };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Storing oracle evidence failed; the grade stands evidence-less (a required contract reads at most InfraUnknown once admission tightens)");
+            return grade with { EvidenceText = null };
+        }
     }
 
     /// <summary>
