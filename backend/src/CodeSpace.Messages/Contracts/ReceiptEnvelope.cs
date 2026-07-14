@@ -30,6 +30,10 @@ public sealed record ReceiptEnvelope
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? ContentHashes { get; init; }
 
+    /// <summary>WHICH distinct target this receipt attests (a repository id, an artifact id, a delivery surface) — ReceiptAdmission counts cardinality by DISTINCT target, so duplicate receipts for one target can never fake an ExpectedCardinality=N satisfaction (P1b-4). Null → the receipt keys on its own attempt+requirement identity.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TargetRef { get; init; }
+
     /// <summary>The typed verdict — see <see cref="VerificationDisposition"/>'s mapping notes.</summary>
     public required VerificationDisposition Disposition { get; init; }
 
