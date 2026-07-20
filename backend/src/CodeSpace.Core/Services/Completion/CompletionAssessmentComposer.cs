@@ -17,6 +17,9 @@ public interface ICompletionAssessmentComposer
 {
     /// <summary>Compose a TERMINAL run's completion assessment from durable facts only. Null for an absent/foreign/non-terminal run.</summary>
     Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>P2b-1: compose AT THE TERMINAL BOUNDARY — the engine has decided <paramref name="assumeTerminalStatus"/> but not yet written it, so the run row still reads Running. Same chain, the assumed status standing in for the not-yet-written fact.</summary>
+    Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus assumeTerminalStatus, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -47,18 +50,28 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         _artifacts = artifacts;
     }
 
-    public async Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken)
+    public Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
+        ComposeAsync(workflowRunId, teamId, assumeTerminalStatus: null, cancellationToken);
+
+    public Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus assumeTerminalStatus, CancellationToken cancellationToken) =>
+        ComposeAsync(workflowRunId, teamId, (WorkflowRunStatus?)assumeTerminalStatus, cancellationToken);
+
+    private async Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus? assumeTerminalStatus, CancellationToken cancellationToken)
     {
         var run = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == workflowRunId && r.TeamId == teamId)
             .Select(r => new { r.Status, r.CompletionPolicyVersion, r.CompletionEnforcementMode })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (run is null || run.Status is not (WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)) return null;
+        if (run is null) return null;
+
+        var status = assumeTerminalStatus ?? run.Status;
+
+        if (status is not (WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)) return null;
 
         var mode = CompletionPolicy.ModeFor(run.CompletionEnforcementMode);
         var decisions = await LoadDecisionsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
-        var facts = BuildFacts(run.Status, decisions);
+        var facts = BuildFacts(status, decisions);
 
         if (CompletionPolicy.BasisFor(run.CompletionPolicyVersion) == CompletionBasis.LegacyUnknown)
             return new ComposedAssessment(CompletionReducer.ReduceLegacy(facts), mode, Array.Empty<ReceiptRejection>(), Array.Empty<string>());
