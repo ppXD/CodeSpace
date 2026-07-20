@@ -30,13 +30,17 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
     private readonly CodeSpaceDbContext _db;
     private readonly ICompletionAssessmentComposer _composer;
     private readonly IPublishManifestStore _manifests;
+    private readonly ICompletionContractStore _contracts;
+    private readonly ICompletionHandoffProbe _handoff;
     private readonly ILogger<CompletionShadowService> _logger;
 
-    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ILogger<CompletionShadowService> logger)
+    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ILogger<CompletionShadowService> logger)
     {
         _db = db;
         _composer = composer;
         _manifests = manifests;
+        _contracts = contracts;
+        _handoff = handoff;
         _logger = logger;
     }
 
@@ -87,6 +91,12 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var degradedStop = (await UnattendedDeliveryScorecardService.DegradedStopRunIdsAsync(_db, new[] { runId }, teamId, cancellationToken).ConfigureAwait(false)).Contains(runId);
 
+        // P3b-4 (INACTIVE): decide what the sealed six-state terminal WOULD be — handoff reachability is the
+        // predicate's last conjunct, probed over the run's own delivered targets. Recorded, never enforced.
+        var receipts = await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var handoffReachable = await _handoff.IsHandoffReachableAsync(runId, teamId, receipts, cancellationToken).ConfigureAwait(false);
+        var wouldBe = TerminalDecider.Decide(composed.Assessment, handoffReachable);
+
         _db.CompletionAssessmentRecord.Add(new CompletionAssessmentRecord
         {
             Id = Guid.NewGuid(),
@@ -99,6 +109,7 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             AssessmentJson = assessmentJson,
             // The legacy ladder's verdict AT COMPOSE TIME — the delta query's other half.
             LegacyIsSolved = UnattendedDeliveryScorecardService.IsSolved(manifests, status, degradedStop),
+            WouldBeTerminalDecision = wouldBe.ToString(),
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });

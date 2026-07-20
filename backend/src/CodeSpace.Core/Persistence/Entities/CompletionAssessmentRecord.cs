@@ -16,6 +16,9 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
     public string Verification { get; set; } = string.Empty;
     public string AssessmentJson { get; set; } = string.Empty;
     public bool LegacyIsSolved { get; set; }
+
+    /// <summary>P3b-4 (INACTIVE adapter): the sealed six-state <c>TerminalDecision</c> name this run WOULD receive — parity evidence for P2b; never mutates the run's terminal (Lock Clause 1). Null on pre-P3b-4 rows.</summary>
+    public string? WouldBeTerminalDecision { get; set; }
     public int RejectionCount { get; set; }
     public int ContractErrorCount { get; set; }
     public DateTimeOffset CreatedDate { get; set; }

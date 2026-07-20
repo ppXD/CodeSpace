@@ -217,6 +217,7 @@ public sealed class CompletionComposerFlowTests
 
         record.Outcome.ShouldBe("Unsolved");
         record.LegacyIsSolved.ShouldBeTrue("the legacy ladder read this engine-Success run Solved — THE degraded-inflation delta, now a standing row");
+        record.WouldBeTerminalDecision.ShouldBe("HonestFailure", "P3b-4: the sealed six-state decision this run WOULD receive, recorded INACTIVE (Lock Clause 1) — an unsolved oracle is an honest failure, never inflated");
         record.EnforcementMode.ShouldBe("Shadow");
         record.Basis.ShouldBe("ContractDerived");
 
