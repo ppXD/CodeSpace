@@ -99,6 +99,15 @@ public interface IWorkspacePushHandle
     /// Throws <see cref="WorkspaceException"/> for an unknown / read-only alias or a git failure.
     /// </summary>
     Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// P3b-2 (provider readback): the commit sha the LAST successful push to <paramref name="alias"/> (null = the
+    /// primary repo) CONFIRMED on the remote — the local tip re-read from the remote via <c>ls-remote</c> after the
+    /// push, so "arrival" is an observed remote fact, not a self-report. Null when the push didn't run, the
+    /// readback could not confirm (transient ls-remote fault), or the remote tip didn't match (raced) — absence is
+    /// honest, never a fabricated sha. Default null so read-only/fake handles are unaffected.
+    /// </summary>
+    string? LastPushedCommitSha(string? alias = null) => null;
 }
 
 /// <summary>

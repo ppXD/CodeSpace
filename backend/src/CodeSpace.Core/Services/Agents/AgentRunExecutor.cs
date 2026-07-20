@@ -908,7 +908,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId), ct), cancellationToken).ConfigureAwait(false);
 
-            return branch is null ? result : result with { ProducedBranch = branch };
+            return branch is null ? result : result with { ProducedBranch = branch, PushedCommitSha = pushHandle.LastPushedCommitSha() };
         }
         catch (WorkspaceException ex)
         {
@@ -974,7 +974,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var (pushed, error) = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
-            updated.Add(repo with { ProducedBranch = pushed, PublishError = error });
+            updated.Add(repo with { ProducedBranch = pushed, PublishError = error, PushedCommitSha = pushed is null ? null : pushHandle.LastPushedCommitSha(repo.Alias) });
 
             if (repo.Alias == workspace.PrimaryAlias) primaryBranch = pushed;
         }
@@ -1049,14 +1049,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (result.RepositoryResults.Count > 0)
             {
                 foreach (var repo in result.RepositoryResults)
-                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
+                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, result.AcceptancePassed, repo.PushedCommitSha), cancellationToken).ConfigureAwait(false);
 
                 return;
             }
 
             if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null) return;   // nothing changed — no artifact to record
 
-            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed), cancellationToken).ConfigureAwait(false);
+            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1065,8 +1065,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: a produced branch means Pushed, its absence means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
-    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed) => new()
+    internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null) => new()
     {
+        CommitSha = pushedCommitSha,
         TeamId = run.TeamId,
         WorkflowRunId = run.WorkflowRunId,
         RepositoryAlias = alias,

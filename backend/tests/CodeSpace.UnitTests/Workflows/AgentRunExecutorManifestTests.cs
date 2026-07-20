@@ -21,9 +21,10 @@ public class AgentRunExecutorManifestTests
     [Fact]
     public void A_produced_branch_resolves_to_Pushed_with_the_branch_name_recorded()
     {
-        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, publishSkipReason: null, acceptancePassed: null);
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, publishSkipReason: null, acceptancePassed: null, pushedCommitSha: "fee1dead");
 
         upsert.PublishStateValue.ShouldBe(PublishState.Pushed);
+        upsert.CommitSha.ShouldBe("fee1dead", "the remote-CONFIRMED tip rides onto the manifest — the delivery receipt's candidate: hash becomes an observed fact");
         upsert.Branch.ShouldBe("codespace/agent/deadbeef");
         upsert.PublishError.ShouldBeNull();
         upsert.Summary.ShouldBeNull();
