@@ -76,13 +76,13 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         if (CompletionPolicy.BasisFor(run.CompletionPolicyVersion) == CompletionBasis.LegacyUnknown)
             return new ComposedAssessment(CompletionReducer.ReduceLegacy(facts), mode, Array.Empty<ReceiptRejection>(), Array.Empty<string>());
 
-        var single = decisions.Count == 0 ? await ProjectSingleAgentAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false) : null;
-        var projection = single is null ? SupervisorAttemptAdapter.Project(decisions, await StampedWorkUnitsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false)) : null;
-        var attempts = single?.Attempts ?? projection!.Attempts;
-        var executableSet = single?.Set ?? SupervisorExecutableSet.Compute(decisions);
+        var lane = decisions.Count == 0 ? await ProjectWorkflowAgentsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false) : null;
+        var projection = lane is null ? SupervisorAttemptAdapter.Project(decisions, await StampedWorkUnitsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false)) : null;
+        var attempts = lane?.Attempts ?? projection!.Attempts;
+        var executableSet = lane?.Set ?? SupervisorExecutableSet.Compute(decisions);
 
-        if (single is not null)
-            await WriteThroughSingleAgentReceiptAsync(workflowRunId, teamId, single, cancellationToken).ConfigureAwait(false);
+        if (lane is not null)
+            await WriteThroughWorkflowAgentReceiptsAsync(workflowRunId, teamId, lane, cancellationToken).ConfigureAwait(false);
         else
             await WriteThroughGradedReceiptsAsync(workflowRunId, teamId, decisions, attempts, cancellationToken).ConfigureAwait(false);
 
@@ -97,63 +97,95 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>());
     }
 
-    /// <summary>One projected single-agent lane: the run's ONE contract-bearing attempt on the synthetic root unit, plus its result for the receipt bridge.</summary>
-    private sealed record SingleAgentLane(IReadOnlyList<AttemptProjection> Attempts, ExecutableSet Set, WorkUnitRef Unit, AgentRunResult? Result);
+    /// <summary>One projected workflow-agents lane: every contract-bearing attempt on its (node, iteration) unit, plus each attempt's result for the receipt bridge.</summary>
+    private sealed record WorkflowAgentLane(IReadOnlyList<AttemptProjection> Attempts, ExecutableSet Set, IReadOnlyList<(AttemptProjection Attempt, AgentRunResult? Result)> Graded);
 
     /// <summary>
-    /// P4-U1: the single-agent lane adapter — a run with NO supervisor tape and EXACTLY ONE contract-bearing,
-    /// non-supervisor-dispatched agent run projects that run as one settled attempt on the synthetic root unit
-    /// (<see cref="ExecutableSet.SyntheticRoot"/>; the run id stands in as the plan id, version 0). The contract
-    /// hash re-derives from the SAME durable TaskJson the staking hashed, so admission's identity checks hold.
-    /// Anything else (no agent runs, several, a supervisor-dispatched task, no contract) returns null — those
+    /// P4-U1/U2: the workflow-agents lane adapter — a run with NO supervisor tape projects its contract-bearing,
+    /// non-supervisor-dispatched agent runs as attempts on their (node, iteration) units (a map's items are
+    /// distinct units; a plain agent node is the degenerate single-unit case; the run id stands in as the plan id,
+    /// version 0). Contract hashes re-derive from the SAME durable TaskJson the staking hashed, so admission's
+    /// identity checks hold. Re-executions of the same coordinate become ordinal attempts on one unit (the
+    /// operational selector picks the latest). A run with no contract-bearing agent runs returns null — those
     /// runs keep today's projection honestly rather than guessing.
     /// </summary>
-    private async Task<SingleAgentLane?> ProjectSingleAgentAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<WorkflowAgentLane?> ProjectWorkflowAgentsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         var rows = await _db.AgentRun.AsNoTracking()
             .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.TaskJson, r.ResultJson })
+            .OrderBy(r => r.CreatedDate)
+            .Select(r => new { r.Id, r.NodeId, r.IterationKey, r.TaskJson, r.ResultJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (rows.Count != 1) return null;
+        var units = new Dictionary<string, string>(StringComparer.Ordinal);
+        var attempts = new List<AttemptProjection>();
+        var graded = new List<(AttemptProjection, AgentRunResult?)>();
+        var ordinalByUnit = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        AgentTask? task;
-        AgentRunResult? result;
-
-        try
+        foreach (var row in rows)
         {
-            task = JsonSerializer.Deserialize<AgentTask>(rows[0].TaskJson, AgentJson.Options);
-            result = rows[0].ResultJson is null ? null : JsonSerializer.Deserialize<AgentRunResult>(rows[0].ResultJson!, AgentJson.Options);
+            AgentTask? task;
+            AgentRunResult? result;
+
+            try
+            {
+                task = JsonSerializer.Deserialize<AgentTask>(row.TaskJson, AgentJson.Options);
+                result = row.ResultJson is null ? null : JsonSerializer.Deserialize<AgentRunResult>(row.ResultJson!, AgentJson.Options);
+            }
+            catch (JsonException) { continue; }
+
+            if (task?.Acceptance is null || task.WorkUnit is not null) continue;
+
+            var unitId = Agents.AgentAcceptanceContract.UnitId(row.NodeId, row.IterationKey ?? "");
+            var contractHash = Agents.AgentAcceptanceContract.Hash(task);
+
+            units.TryAdd(unitId, contractHash);
+
+            var ordinal = ordinalByUnit.GetValueOrDefault(unitId) + 1;
+            ordinalByUnit[unitId] = ordinal;
+
+            var attempt = new AttemptProjection
+            {
+                AttemptId = row.Id,
+                UnitId = unitId,
+                WorkUnit = new WorkUnitRef { WorkPlanId = runId, PlanVersion = 0, UnitId = unitId, ContractHash = units[unitId] },
+                AttemptOrdinal = ordinal,
+                State = AttemptState.Settled,
+            };
+
+            attempts.Add(attempt);
+            graded.Add((attempt, result));
         }
-        catch (JsonException) { return null; }
 
-        if (task?.Acceptance is null || task.WorkUnit is not null) return null;
+        if (attempts.Count == 0) return null;
 
-        var contractHash = Agents.AgentAcceptanceContract.Hash(task);
-        var unit = new WorkUnitRef { WorkPlanId = runId, PlanVersion = 0, UnitId = ExecutableSet.RootUnitId, ContractHash = contractHash };
-        var attempt = new AttemptProjection { AttemptId = rows[0].Id, UnitId = ExecutableSet.RootUnitId, WorkUnit = unit, AttemptOrdinal = 1, State = AttemptState.Settled };
+        var set = ExecutableSet.Create(runId, planVersion: 0,
+            units.Select(u => new ExecutableUnit { UnitId = u.Key, ContractHash = u.Value, Disposition = UnitDisposition.New }).ToList());
 
-        return new SingleAgentLane(new[] { attempt }, ExecutableSet.SyntheticRoot(runId, contractHash), unit, result);
+        return new WorkflowAgentLane(attempts, set, graded);
     }
 
-    /// <summary>The single-agent acceptance bridge — the run's own graded verdict becomes the root unit's durable receipt, exactly-once, same classification and same evaluator funnel as the supervisor lane. An ungraded result (null verdict, crashed run) minted nothing and the staked obligation honestly stays Unknown.</summary>
-    private async Task WriteThroughSingleAgentReceiptAsync(Guid runId, Guid teamId, SingleAgentLane lane, CancellationToken cancellationToken)
+    /// <summary>The workflow-agents acceptance bridge — each attempt's own graded verdict becomes its unit's durable receipt, exactly-once, same classification and same evaluator funnel as the supervisor lane. An ungraded result (null verdict, crashed run) mints nothing and the staked obligation honestly stays Unknown.</summary>
+    private async Task WriteThroughWorkflowAgentReceiptsAsync(Guid runId, Guid teamId, WorkflowAgentLane lane, CancellationToken cancellationToken)
     {
-        if (lane.Result?.AcceptancePassed is not { } passed) return;
-
-        await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+        foreach (var (attempt, result) in lane.Graded)
         {
-            RequirementRef = $"acceptance:{ExecutableSet.RootUnitId}",
-            Kind = ContractKinds.Acceptance,
-            AttemptId = lane.Attempts[0].AttemptId,
-            WorkUnit = lane.Unit,
-            Disposition = VerificationDispositions.Classify(passed, lane.Result.AcceptanceDetail, workPresent: !string.IsNullOrEmpty(lane.Result.ProducedBranch)),
-            Authority = ContractAuthority.ServerPolicy,
-            EvidenceRef = lane.Result.AcceptanceEvidenceId,
-            EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
-            ContentHashes = lane.Result.PushedCommitSha is null ? null : new[] { $"candidate:{lane.Result.PushedCommitSha}" },
-            ObservedAt = DateTimeOffset.UtcNow,
-        }, cancellationToken).ConfigureAwait(false);
+            if (result?.AcceptancePassed is not { } passed) continue;
+
+            await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+            {
+                RequirementRef = $"acceptance:{attempt.UnitId}",
+                Kind = ContractKinds.Acceptance,
+                AttemptId = attempt.AttemptId,
+                WorkUnit = attempt.WorkUnit,
+                Disposition = VerificationDispositions.Classify(passed, result.AcceptanceDetail, workPresent: !string.IsNullOrEmpty(result.ProducedBranch)),
+                Authority = ContractAuthority.ServerPolicy,
+                EvidenceRef = result.AcceptanceEvidenceId,
+                EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
+                ContentHashes = result.PushedCommitSha is null ? null : new[] { $"candidate:{result.PushedCommitSha}" },
+                ObservedAt = DateTimeOffset.UtcNow,
+            }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task<IReadOnlyList<SupervisorPriorDecision>> LoadDecisionsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>

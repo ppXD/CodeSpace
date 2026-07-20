@@ -49,8 +49,8 @@ public sealed class SingleAgentSpineFlowTests
 
         var requirements = await scope.Resolve<ICompletionContractStore>().ListRequirementsAsync(runId, teamId, CancellationToken.None);
 
-        requirements.Count.ShouldBe(3, "acceptance + delivery + output on the synthetic root, exactly like a supervisor unit");
-        requirements.Select(r => r.RequirementRef).ShouldBe(new[] { "acceptance:root", "delivery:root", "output:root" }, ignoreOrder: true);
+        requirements.Count.ShouldBe(3, "acceptance + delivery + output on the run's (node, iteration) unit, exactly like a supervisor unit");
+        requirements.Select(r => r.RequirementRef).ShouldBe(new[] { "acceptance:agent1", "delivery:agent1", "output:agent1" }, ignoreOrder: true);
         requirements.ShouldAllBe(r => r.Requiredness == Requiredness.Required, "the default task expects changes — all three stages owed");
         requirements.ShouldAllBe(r => r.SpecHash!.StartsWith("sha256/canonical-json-v1:"));
     }
@@ -102,6 +102,67 @@ public sealed class SingleAgentSpineFlowTests
         composed.Assessment.Verification.ShouldBe(VerificationDisposition.Passed);
         composed.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered, "the manifest bridge keys on the projected attempt — same machinery as the supervisor lane");
         composed.Assessment.Artifact.ShouldBe(ArtifactDisposition.Captured);
+    }
+
+    [Fact]
+    public async Task A_map_fans_its_items_into_distinct_units_and_the_run_folds_worst_first()
+    {
+        // P4-U2 (L2): each map item is its OWN unit with its own staked obligations — one failed item honestly
+        // fails the RUN's verification, however many siblings passed (the run-level oracle composition).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId, WorkflowRunStatus.Running);
+
+        Guid passId, failId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var service = scope.Resolve<IAgentRunService>();
+            passId = (await service.CreateAsync(Task_(), teamId, runId, nodeId: "map1", iterationKey: "0", cancellationToken: CancellationToken.None)).Id;
+            failId = (await service.CreateAsync(Task_(), teamId, runId, nodeId: "map1", iterationKey: "1", cancellationToken: CancellationToken.None)).Id;
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var store = scope.Resolve<ICompletionContractStore>();
+            var staked = await store.ListRequirementsAsync(runId, teamId, CancellationToken.None);
+            staked.Count.ShouldBe(6, "two items x three stages — distinct units, never overwriting one root");
+            staked.Count(r => r.RequirementRef.EndsWith("map1#0")).ShouldBe(3);
+            staked.Count(r => r.RequirementRef.EndsWith("map1#1")).ShouldBe(3);
+        }
+
+        await GradeAsync(passId, passed: true);
+        await GradeAsync(failId, passed: false);
+        await MarkRunTerminalAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var composed = await verify.Resolve<ICompletionAssessmentComposer>().ComposeAsync(runId, teamId, CancellationToken.None);
+
+        composed!.Assessment.Verification.ShouldBe(VerificationDisposition.Failed, "worst-of across the map's units — 1-of-2 passing can never read verified");
+        composed.Assessment.Outcome.ShouldBe(OutcomeDisposition.Unsolved);
+        (await verify.Resolve<ICompletionContractStore>().ListReceiptsAsync(runId, teamId, CancellationToken.None))
+            .Count(r => r.Kind == ContractKinds.Acceptance).ShouldBe(2, "one receipt per item, each on its own unit");
+    }
+
+    private async Task GradeAsync(Guid agentRunId, bool passed)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+        run.Status = AgentRunStatus.Succeeded;
+        run.ResultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+            AcceptancePassed = passed, AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
+            AcceptanceEvidenceId = Guid.NewGuid(), ProducedBranch = "codespace/agent/x",
+        }, AgentJson.Options);
+        await db.SaveChangesAsync();
+    }
+
+    private async Task MarkRunTerminalAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.SingleAsync(r => r.Id == runId)).Status = WorkflowRunStatus.Success;
+        await db.SaveChangesAsync();
     }
 
     // ── Seeds ──
