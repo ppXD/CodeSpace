@@ -45,6 +45,7 @@ public sealed class CompletionComposerFlowTests
             """{"subtaskIds":["s1"]}""",
             JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", acceptanceEvidenceId = (Guid?)EvidenceId, producedBranch = "codespace/agent/s1" } } }));
         await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+        await SeedManifestAsync(teamId, attemptId, baseSha: "b1", commitSha: "c1");
 
         using var scope = _fixture.BeginScope();
         var store = scope.Resolve<ICompletionContractStore>();
@@ -75,7 +76,27 @@ public sealed class CompletionComposerFlowTests
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "compute + record ONLY — the composer never touches the terminal (Lock Clause 1)");
 
         // P3a-1: the fold's evidence id rode the bridge onto the receipt — EvidenceRef is a fact, not prose.
-        (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Single().EvidenceRef.ShouldBe(EvidenceId);
+        var receipt = (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Single();
+        receipt.EvidenceRef.ShouldBe(EvidenceId);
+
+        // P3a-3: the verdict binds WHICH machinery judged and WHICH bytes it judged — labeled, never guessed.
+        receipt.EvaluatorVersion.ShouldBe(SupervisorAcceptanceGrader.EvaluatorVersion);
+        receipt.ContentHashes.ShouldBe(new[] { "base:b1", "candidate:c1" });
+    }
+
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, string baseSha, string commitSha)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId,
+            RepositoryAlias = "primary", Branch = "codespace/agent/s1", BaseSha = baseSha, CommitSha = commitSha,
+            PublishStateValue = PublishState.Pushed,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private static readonly Guid EvidenceId = Guid.NewGuid();
