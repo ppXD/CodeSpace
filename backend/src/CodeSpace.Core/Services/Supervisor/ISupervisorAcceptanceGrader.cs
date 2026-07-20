@@ -26,6 +26,10 @@ public interface ISupervisorAcceptanceGrader
     /// </summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 
+    /// <summary>P3a-3 (B+V0+): grade with ORACLE RESTORE — when the spec names <c>ProtectedPaths</c> and the attempt's base sha is known, the grader restores those paths from the base before running, voiding any candidate tamper of its own judge (recorded in the evidence). Default forwards to the plain overload (fakes and non-git graders are unaffected).</summary>
+    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken) =>
+        GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
+
     /// <summary>
     /// S2 — the BRANCH-LESS twin of <see cref="GradeAsync"/>: clone <paramref name="repositoryId"/> at
     /// <paramref name="baseSha"/> (team-scoped, agent-independent — the SAME clone-fresh guarantee, just anchored on

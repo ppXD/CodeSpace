@@ -94,6 +94,7 @@ public static class AgentAcceptanceContract
                && (effective.StartsWith("grade-error:", StringComparison.Ordinal)
                    || effective.StartsWith("clone-failed:", StringComparison.Ordinal)
                    || effective.StartsWith("setup-failed:", StringComparison.Ordinal)
+                   || effective.StartsWith("oracle-restore-failed:", StringComparison.Ordinal)
                    || effective is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
                    || (effective == "no-branch-or-repo" && workPresent));
     }

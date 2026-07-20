@@ -87,6 +87,21 @@ public class ContractHashingTests
     }
 
     [Fact]
+    public void Protected_paths_are_contract_content_and_their_absence_is_hash_compatible()
+    {
+        // P3a-3: WHICH bytes the oracle owns is part of WHAT the unit owes — widening or narrowing protection is a
+        // different contract. And a spec that never names them hashes exactly as it did before the field existed
+        // (WhenWritingNull), so pre-P3a-3 receipts keep matching their requirements.
+        var oracle = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } };
+        var withSpec = Planned("do it") with { Acceptance = oracle };
+        var withProtection = Planned("do it") with { Acceptance = oracle with { ProtectedPaths = new[] { "check.sh" } } };
+        var withNullProtection = Planned("do it") with { Acceptance = oracle with { ProtectedPaths = null } };
+
+        SupervisorUnitContract.Hash(withProtection, null, null).ShouldNotBe(SupervisorUnitContract.Hash(withSpec, null, null));
+        SupervisorUnitContract.Hash(withNullProtection, null, null).ShouldBe(SupervisorUnitContract.Hash(withSpec, null, null));
+    }
+
+    [Fact]
     public void A_blank_override_falls_back_to_the_planned_instruction()
     {
         var planned = Planned("do it");
