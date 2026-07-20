@@ -102,6 +102,23 @@ public class ContractHashingTests
     }
 
     [Fact]
+    public void Delivery_evaluator_version_constant_pinned()
+    {
+        // The literal is the wire value on durable delivery receipts — bumping is an explicit decision made in
+        // the same PR as any change to how publish manifests become delivery verdicts.
+        CodeSpace.Core.Services.Completion.CompletionAssessmentComposer.DeliveryEvaluatorVersion.ShouldBe("publish-manifest/v1");
+    }
+
+    [Theory]
+    [InlineData(null, true)]   // omitted -> the default: a change is expected, so its arrival is owed
+    [InlineData(true, true)]
+    [InlineData(false, false)] // an explicitly read-only unit owes nothing to arrive
+    public void Only_an_explicit_no_changes_declaration_waives_the_delivery_stake(bool? expectsChanges, bool owes)
+    {
+        SupervisorUnitContract.OwesDelivery(Planned("do it") with { ExpectsChanges = expectsChanges }).ShouldBe(owes);
+    }
+
+    [Fact]
     public void A_blank_override_falls_back_to_the_planned_instruction()
     {
         var planned = Planned("do it");

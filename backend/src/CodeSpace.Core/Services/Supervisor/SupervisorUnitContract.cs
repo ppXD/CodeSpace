@@ -14,6 +14,13 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public static class SupervisorUnitContract
 {
+    /// <summary>
+    /// P3b-1: whether the unit's contract OWES a delivery (its change must ARRIVE) — the planned subtask's own
+    /// declaration, defaulting to true when omitted (the same convention the fold's vacuous-pass reading uses:
+    /// only an explicit <c>ExpectsChanges=false</c> declares a read-only unit with nothing to arrive).
+    /// </summary>
+    public static bool OwesDelivery(SupervisorPlannedSubtask planned) => planned.ExpectsChanges != false;
+
     public static string Hash(SupervisorPlannedSubtask planned, string? effectiveInstruction, Guid? repositoryOverride) =>
         ContractHashing.Hash(new
         {

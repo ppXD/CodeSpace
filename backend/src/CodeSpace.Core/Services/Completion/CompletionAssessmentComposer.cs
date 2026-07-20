@@ -33,13 +33,18 @@ public interface ICompletionAssessmentComposer
 /// </summary>
 public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer, IScopedDependency
 {
+    /// <summary>The delivery bridge's evaluator identity — the PUBLISH pipeline, not the acceptance grader. Bump in the same PR as any change to how manifests become delivery verdicts. Pinned by test.</summary>
+    public const string DeliveryEvaluatorVersion = "publish-manifest/v1";
+
     private readonly CodeSpaceDbContext _db;
     private readonly ICompletionContractStore _contracts;
+    private readonly Workflows.Artifacts.IArtifactStore _artifacts;
 
-    public CompletionAssessmentComposer(CodeSpaceDbContext db, ICompletionContractStore contracts)
+    public CompletionAssessmentComposer(CodeSpaceDbContext db, ICompletionContractStore contracts, Workflows.Artifacts.IArtifactStore artifacts)
     {
         _db = db;
         _contracts = contracts;
+        _artifacts = artifacts;
     }
 
     public async Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken)
@@ -64,6 +69,9 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         await WriteThroughGradedReceiptsAsync(workflowRunId, teamId, decisions, projection.Attempts, cancellationToken).ConfigureAwait(false);
 
         var requirements = await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        await WriteThroughDeliveryReceiptsAsync(workflowRunId, teamId, requirements, projection.Attempts, cancellationToken).ConfigureAwait(false);
+
         var receipts = await _contracts.ListReceiptsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         var admission = ReceiptAdmission.Admit(receipts, requirements, executableSet, AttemptSelectors.SelectOperationalActive(projection.Attempts));
@@ -157,6 +165,75 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                     EvidenceRef = results[i].AcceptanceEvidenceId,
                     EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
                     ContentHashes = hashesByAttempt.GetValueOrDefault(results[i].AgentRunId),
+                    ObservedAt = DateTimeOffset.UtcNow,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// P3b-1: the manifest→ledger DELIVERY bridge — each staked delivery obligation settles from the attempt's
+    /// recorded publish manifests: <c>Pushed</c> attests arrival (Passed), <c>PatchOnly</c> attests a definite
+    /// non-arrival (Failed — the patch exists but never ARRIVED; policy park and push failure both land here,
+    /// fail-close), an empty-diff <c>None</c> attests nothing (the obligation stays Unknown and blocks Solved —
+    /// an expected change that never materialized is a hole, not a pass). Only staked requirements settle
+    /// (pre-P3b tapes mint nothing); the manifest snapshot goes to CAS as the receipt's evidence; an existing
+    /// (ref, attempt, target) receipt is skipped so a re-compose never re-stores evidence or re-appends.
+    /// </summary>
+    private async Task WriteThroughDeliveryReceiptsAsync(Guid runId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, IReadOnlyList<AttemptProjection> attempts, CancellationToken cancellationToken)
+    {
+        var staked = requirements.Where(r => r.Kind == ContractKinds.Delivery).Select(r => r.RequirementRef).ToHashSet(StringComparer.Ordinal);
+
+        if (staked.Count == 0) return;
+
+        var attemptsWithUnits = attempts.Where(a => a.WorkUnit?.UnitId is { Length: > 0 }).ToList();
+
+        if (attemptsWithUnits.Count == 0) return;
+
+        var ids = attemptsWithUnits.Select(a => a.AttemptId).ToList();
+        var manifests = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId && m.AgentRunId != null && ids.Contains(m.AgentRunId.Value))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var existing = (await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
+            .Where(r => r.Kind == ContractKinds.Delivery)
+            .Select(r => (r.RequirementRef, r.AttemptId, r.TargetRef))
+            .ToHashSet();
+
+        foreach (var attempt in attemptsWithUnits)
+        {
+            var requirementRef = $"delivery:{attempt.WorkUnit!.UnitId}";
+
+            if (!staked.Contains(requirementRef)) continue;
+
+            foreach (var manifest in manifests.Where(m => m.AgentRunId == attempt.AttemptId && m.PublishStateValue != PublishState.None))
+            {
+                var targetRef = manifest.RepositoryId?.ToString() ?? manifest.RepositoryAlias;
+
+                if (existing.Contains((requirementRef, attempt.AttemptId, targetRef))) continue;
+
+                var evidence = JsonSerializer.Serialize(new
+                {
+                    publishState = manifest.PublishStateValue.ToString(),
+                    repositoryAlias = manifest.RepositoryAlias,
+                    branch = manifest.Branch,
+                    commitSha = manifest.CommitSha,
+                    baseSha = manifest.BaseSha,
+                    publishError = manifest.PublishError,
+                }, AgentJson.Options);
+                var evidenceRef = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(evidence), "application/json", cancellationToken).ConfigureAwait(false);
+
+                await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+                {
+                    RequirementRef = requirementRef,
+                    Kind = ContractKinds.Delivery,
+                    AttemptId = attempt.AttemptId,
+                    WorkUnit = attempt.WorkUnit,
+                    TargetRef = targetRef,
+                    Disposition = manifest.PublishStateValue == PublishState.Pushed ? VerificationDisposition.Passed : VerificationDisposition.Failed,
+                    Authority = ContractAuthority.ServerPolicy,
+                    EvidenceRef = evidenceRef,
+                    EvaluatorVersion = DeliveryEvaluatorVersion,
+                    ContentHashes = new[] { manifest.BaseSha is null ? null : $"base:{manifest.BaseSha}", manifest.CommitSha is null ? null : $"candidate:{manifest.CommitSha}" }.Where(h => h is not null).Cast<string>().ToList() is { Count: > 0 } hashes ? hashes : null,
                     ObservedAt = DateTimeOffset.UtcNow,
                 }, cancellationToken).ConfigureAwait(false);
             }

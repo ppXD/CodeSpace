@@ -54,6 +54,7 @@ public sealed partial class RealSupervisorActionExecutor
         var blocked = new List<DependencyBlock>();
 
         var contractHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var deliveryUnits = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var id in spawn.SubtaskIds)
         {
@@ -62,6 +63,8 @@ public sealed partial class RealSupervisorActionExecutor
             var repositoryId = ResolveTargetRepositoryId(spec, context);
 
             if (planned is not null) contractHashes[id] = SupervisorUnitContract.Hash(planned, spec?.GoalOverride, spec?.RepositoryId);
+
+            if (planned is not null && SupervisorUnitContract.OwesDelivery(planned)) deliveryUnits.Add(id);
 
             var staging = await ResolveDependencyStagingAsync(DependsOnFor(planned, spec), repositoryId, context, cancellationToken).ConfigureAwait(false);
 
@@ -77,7 +80,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (blocked.Count > 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(blocked), AgentJson.Options));
 
-        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes, deliveryUnits: deliveryUnits).ConfigureAwait(false);
     }
 
     /// <summary>A subtask's staging dependency: the model-authored <see cref="SupervisorAgentDispatch.BaseSubtaskId"/> override when present (narrows to ONE producer for this specific spawn), else the plan's own <c>DependsOn</c>. Empty when neither names a producer (byte-identical no-override path). Internal + static so the precedence is unit-pinned directly.</summary>
@@ -212,15 +215,17 @@ public sealed partial class RealSupervisorActionExecutor
 
         var builtTask = BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context, staging: effectiveStaging);
 
-        var retryContractHashes = subtasks.GetValueOrDefault(retry.SubtaskId) is { } plannedUnit
+        var plannedUnit = subtasks.GetValueOrDefault(retry.SubtaskId);
+        var retryContractHashes = plannedUnit is not null
             ? new Dictionary<string, string>(StringComparer.Ordinal) { [retry.SubtaskId] = SupervisorUnitContract.Hash(plannedUnit, retry.RevisedInstruction, repositoryOverride: null) }
             : null;
+        var retryDeliveryUnits = plannedUnit is not null && SupervisorUnitContract.OwesDelivery(plannedUnit) ? new HashSet<string>(StringComparer.Ordinal) { retry.SubtaskId } : null;
 
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorAgentRunId, context, cancellationToken).ConfigureAwait(false);
 
         var task = prior is null ? escalatedTask : ApplyResumeRecord(escalatedTask, prior, workspaceHasPriorWork: effectiveStaging.Ref is not null);
 
-        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, retryContractHashes).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new List<(AgentTask, SupervisorAgentDispatch?)> { (task, null) }, context, cancellationToken, escalation, retryContractHashes, retryDeliveryUnits).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -299,7 +304,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null, IReadOnlyCollection<string>? deliveryUnits = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -380,8 +385,9 @@ public sealed partial class RealSupervisorActionExecutor
         // Best-effort: a ledger fault must never strand the staging itself.
         if (planRef is not null && contractHashes is { Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
         {
-            var requirements = tasks
-                .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
+            var contracted = tasks.Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!)).ToList();
+
+            var requirements = contracted
                 .Select(t => new Messages.Contracts.RequirementEnvelope
                 {
                     RequirementRef = $"acceptance:{t.Task.SubtaskId}",
@@ -391,6 +397,22 @@ public sealed partial class RealSupervisorActionExecutor
                     SpecHash = contractHashes[t.Task.SubtaskId!],
                     ContractSchemaVersion = "1",
                 })
+                // P3b-1: a unit that expects to produce a change ALSO owes its arrival — the delivery obligation
+                // is staked at the same authorization, spec-hash-bound to the same effective contract. A unit
+                // that declared ExpectsChanges=false owes nothing to arrive; the reducer reads its absence as
+                // NotRequired, never a hole. Receipts come from the composer's manifest bridge (P3's native
+                // producers take over later).
+                .Concat(contracted
+                    .Where(t => deliveryUnits?.Contains(t.Task.SubtaskId!) == true)
+                    .Select(t => new Messages.Contracts.RequirementEnvelope
+                    {
+                        RequirementRef = $"delivery:{t.Task.SubtaskId}",
+                        Kind = Messages.Contracts.ContractKinds.Delivery,
+                        Requiredness = Messages.Contracts.Requiredness.Required,
+                        Authority = Messages.Contracts.ContractAuthority.ModelProposal,
+                        SpecHash = contractHashes[t.Task.SubtaskId!],
+                        ContractSchemaVersion = "1",
+                    }))
                 .ToList();
 
             if (requirements.Count > 0)
