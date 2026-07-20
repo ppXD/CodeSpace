@@ -146,15 +146,17 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IArtifactOffloader _offloader;
     private readonly IToolCallLedgerService _ledger;
+    private readonly Completion.ICompletionContractStore _contracts;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, Completion.ICompletionContractStore contracts, ILogger<AgentRunService> logger)
     {
         _db = db;
         _admissionController = admissionController;
         _runners = runners;
         _offloader = offloader;
         _ledger = ledger;
+        _contracts = contracts;
         _logger = logger;
     }
 
@@ -183,7 +185,35 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
         _logger.LogInformation("Agent run created. RunId={RunId} Harness={Harness} TeamId={TeamId}", run.Id, run.Harness, teamId);
 
+        await StakeSingleAgentObligationsAsync(task, teamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+
         return run;
+    }
+
+    /// <summary>
+    /// P4-U1 (single-agent lane onto the completion spine): a contract-bearing task dispatched OUTSIDE the
+    /// supervisor (no WorkUnitRef — the supervisor stakes its own units at its own chokepoint) stakes the run's
+    /// synthetic ROOT obligations at authorization, exactly like a supervisor unit: acceptance Required plus
+    /// delivery/output Required-or-authorized-NA per the task's own change expectation. Best-effort — a ledger
+    /// fault never strands the dispatch; the composer reads an incomplete obligation set as Unknown.
+    /// </summary>
+    private async Task StakeSingleAgentObligationsAsync(AgentTask task, Guid teamId, Guid? workflowRunId, CancellationToken cancellationToken)
+    {
+        if (workflowRunId is not { } runId || task.Acceptance is null || task.WorkUnit is not null) return;
+
+        try
+        {
+            var requirements = Supervisor.SupervisorUnitContract.BuildStakedRequirements(new[]
+            {
+                (Messages.Contracts.ExecutableSet.RootUnitId, AgentAcceptanceContract.Hash(task), AgentAcceptanceContract.ExpectsChanges(task)),
+            });
+
+            await _contracts.UpsertRequirementsAsync(runId, teamId, requirements, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Staking single-agent completion obligations failed for run {RunId}; dispatch proceeds", workflowRunId);
+        }
     }
 
     public async Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken)

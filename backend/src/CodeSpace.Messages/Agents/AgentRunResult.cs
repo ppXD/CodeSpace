@@ -103,6 +103,10 @@ public sealed record AgentRunResult
     /// <summary>The task's OBJECTIVE acceptance verdict (S5): true/false when the executor graded <c>AgentTask.Acceptance</c> against the produced branch; null when the task carried no oracle (or the grade was deferred — multi-repo). The run-detail checklist reads this per item.</summary>
     public bool? AcceptancePassed { get; init; }
 
+    /// <summary>P4-U1: CAS reference to the acceptance verdict's evidence (the grader funnel's stored output) — the single-agent lane's receipt binds it, mirroring the supervisor lane's field. Null on pre-P4 results and evidence-less grades.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? AcceptanceEvidenceId { get; init; }
+
     /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
     public string? AcceptanceDetail { get; init; }
 

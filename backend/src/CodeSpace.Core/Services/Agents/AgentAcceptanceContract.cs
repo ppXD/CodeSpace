@@ -21,6 +21,14 @@ public static class AgentAcceptanceContract
     /// <summary>Whether the task is expected to produce a diff/branch at all (S2). Null (the caller didn't say) defaults to <c>true</c> — byte-identical to before this field existed, so an unmarked contract still fails closed on a missing branch/repo.</summary>
     public static bool ExpectsChanges(AgentTask task) => task.ExpectsChanges ?? true;
 
+    /// <summary>
+    /// P4-U1: the single-agent lane's EFFECTIVE contract hash — what this run owes (its goal, its oracle, its
+    /// change expectation), canonically hashed like the supervisor lane's <c>SupervisorUnitContract.Hash</c>.
+    /// Deterministic across staking and compose (both derive it from the SAME durable TaskJson).
+    /// </summary>
+    public static string Hash(AgentTask task) =>
+        Messages.Contracts.ContractHashing.Hash(new { instruction = task.Goal, acceptance = task.Acceptance, expectsChanges = task.ExpectsChanges }, AgentJson.Options);
+
     /// <summary>The <see cref="AgentRunResult.ExitReason"/> a fail-closed acceptance re-grade stamps — the machine-readable marker consumers (the agent.run node's retry verdict) key on to tell a DETERMINISTIC verdict failure from a transient death. Pinned by a unit test (Rule 8) so producer + consumer can't drift.</summary>
     public const string FailClosedExitReason = "acceptance-failed";
 
