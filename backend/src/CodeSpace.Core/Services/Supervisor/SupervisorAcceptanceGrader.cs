@@ -107,7 +107,13 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
                 return Failed($"patch-apply-failed: {applyError}");
             }
 
-            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            // The patch is the candidate's work — its edits to protected oracle bytes are as void here as a
+            // branch's are (the base sha is this path's own anchor, no manifest resolution needed).
+            var (restoreFailure, tamperNote) = await RestoreOracleAsync(directory, spec, baseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            if (restoreFailure is not null) return restoreFailure;
+
+            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken, tamperNote).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -215,7 +221,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         var runner = _runners.Resolve(DefaultRunnerKind);
 
-        var diff = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "diff", "--name-only", oracleBaseSha, "HEAD", "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+        // Working-tree diff (no HEAD) so BOTH grade shapes see the candidate's changes: the branch clone's tree IS
+        // the candidate commit, and the patch path's tree is base + an UNCOMMITTED apply (where base..HEAD is empty).
+        var diff = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "diff", "--name-only", oracleBaseSha, "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
         var tampered = diff.Status == SandboxStatus.Success ? diff.Stdout.Trim() : null;
 
         var restore = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "checkout", oracleBaseSha, "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);

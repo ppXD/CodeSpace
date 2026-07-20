@@ -405,7 +405,7 @@ public class SupervisorAcceptanceGraderTests
 
         runners.Invocations.Count.ShouldBe(2, "one tamper diff + one restore, before the oracle");
         runners.Invocations[0].Command.ShouldBe("git");
-        runners.Invocations[0].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "HEAD", "--", "tests/", "check.sh" });
+        runners.Invocations[0].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "--", "tests/", "check.sh" });
         runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/", "check.sh" });
         runners.Invocations.ShouldAllBe(i => i.WorkingDirectory == "/tmp/clone-xyz", "restore acts on the SAME workspace the check grades");
 
@@ -448,6 +448,35 @@ public class SupervisorAcceptanceGraderTests
         grade.Detail.ShouldContain("did not match", Case.Insensitive, "the git failure is legible to the operator");
         grade.Class.ShouldBe(GradeFailureClass.Environment);
         oracle.Context.ShouldBeNull("the oracle is never reached over an unprotected workspace");
+    }
+
+    [Fact]
+    public async Task A_patch_grades_protected_paths_restored_after_the_apply()
+    {
+        // The patch lane's candidate can rewrite its judge exactly like a branch's can — the restore runs AFTER
+        // the apply (so the patch's oracle edits are void) and BEFORE the oracle, anchored on this path's own
+        // base sha (no manifest resolution).
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var oracle = new FakeGrader(Pass);
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners, artifacts: artifacts);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "check.sh" } };
+        var grade = await grader.GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "base1234base1234", "diff --git a/x b/x", null, spec, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+
+        var git = runners.Invocations.Where(i => i.Command == "git").Select(i => i.Args).ToList();
+        var applyIndex = git.FindIndex(a => a.Contains("apply"));
+        var diffIndex = git.FindIndex(a => a.Contains("diff"));
+        var restoreIndex = git.FindIndex(a => a.SequenceEqual(new[] { "checkout", "base1234base1234", "--", "check.sh" }));
+
+        applyIndex.ShouldBeGreaterThanOrEqualTo(0);
+        diffIndex.ShouldBeGreaterThan(applyIndex, "the tamper diff inspects the APPLIED tree");
+        restoreIndex.ShouldBeGreaterThan(diffIndex, "the restore voids the applied patch's oracle edits (the clone's own detached checkout precedes the apply and is NOT the restore)");
+
+        oracle.Context.ShouldNotBeNull("the oracle runs after the restore");
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("restored from base1234base", Case.Sensitive);
     }
 
     [Fact]
