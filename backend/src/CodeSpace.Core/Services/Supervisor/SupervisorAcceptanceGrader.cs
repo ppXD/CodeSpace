@@ -20,6 +20,14 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IScopedDependency
 {
+    /// <summary>
+    /// The acceptance-evaluation machinery's version, stamped onto every receipt this funnel mints (Q-freeze
+    /// item: a verdict from a superseded evaluator is re-qualification input, not truth). BUMP this constant in
+    /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
+    /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
+    /// </summary>
+    public const string EvaluatorVersion = "supervisor-acceptance/v1";
+
     private const string DefaultRunnerKind = "local";
     private const int CloneTimeoutSeconds = 300;
 

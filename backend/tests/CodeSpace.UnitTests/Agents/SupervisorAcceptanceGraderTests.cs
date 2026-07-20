@@ -497,6 +497,14 @@ public class SupervisorAcceptanceGraderTests
     }
 
     [Fact]
+    public void Evaluator_version_constant_pinned()
+    {
+        // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
+        // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v1");
+    }
+
+    [Fact]
     public void Oracle_restore_failure_is_infra_classified_regardless_of_work_present()
     {
         AgentAcceptanceContract.IsInfraFailure("oracle-restore-failed: pathspec", workPresent: true).ShouldBeTrue();

@@ -129,6 +129,7 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
     private async Task WriteThroughGradedReceiptsAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<AttemptProjection> attempts, CancellationToken cancellationToken)
     {
         var workUnitByAttempt = attempts.Where(a => a.WorkUnit is not null).ToDictionary(a => a.AttemptId, a => a.WorkUnit!);
+        var hashesByAttempt = await ContentHashesByAttemptAsync(attempts.Select(a => a.AttemptId).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
         foreach (var decision in decisions)
         {
@@ -154,9 +155,35 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                     Disposition = VerificationDispositions.Classify(passed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
                     Authority = ContractAuthority.ServerPolicy,
                     EvidenceRef = results[i].AcceptanceEvidenceId,
+                    EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
+                    ContentHashes = hashesByAttempt.GetValueOrDefault(results[i].AgentRunId),
                     ObservedAt = DateTimeOffset.UtcNow,
                 }, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// P3a-3: WHICH bytes each attempt's verdict was minted against — the attempt's recorded manifests give the
+    /// immutable base (<c>base:&lt;sha&gt;</c>) and the candidate commit (<c>candidate:&lt;sha&gt;</c>), labeled so a
+    /// reader never has to guess which is which. One batched read for the whole run; an attempt with no manifest
+    /// (or a manifest with no shas) binds nothing — absence stays honest, never a fabricated hash.
+    /// </summary>
+    private async Task<Dictionary<Guid, IReadOnlyList<string>>> ContentHashesByAttemptAsync(IReadOnlyList<Guid> attemptIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId && m.AgentRunId != null && attemptIds.Contains(m.AgentRunId.Value))
+            .Select(m => new { m.AgentRunId, m.RepositoryAlias, m.BaseSha, m.CommitSha })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return manifests
+            .GroupBy(m => m.AgentRunId!.Value)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<string>)g.OrderBy(m => m.RepositoryAlias, StringComparer.Ordinal)
+                    .SelectMany(m => new[] { m.BaseSha is null ? null : $"base:{m.BaseSha}", m.CommitSha is null ? null : $"candidate:{m.CommitSha}" })
+                    .Where(h => h is not null).Cast<string>().Distinct().ToList())
+            .Where(kv => kv.Value.Count > 0)
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
     }
 }
