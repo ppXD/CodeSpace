@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
@@ -58,6 +59,19 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
         var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(window.Select(r => r.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
+        // P4-U3 (L5 contract carry): each turn's LATEST durable completion assessment rides the digest, so the
+        // continuing planner sees the CONTRACT state — a failed oracle, a parked delivery, an unsettled obligation
+        // — not just the turn's own prose. One batched read; turns with no record (legacy / non-terminal) render
+        // exactly as before.
+        var windowIds = window.Select(r => r.Id).ToList();
+        var assessmentsByRunId = (await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.TeamId == teamId && windowIds.Contains(a.WorkflowRunId))
+            .OrderBy(a => a.CreatedDate)
+            .Select(a => new { a.WorkflowRunId, a.AssessmentJson, a.WouldBeTerminalDecision })
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .GroupBy(a => a.WorkflowRunId)
+            .ToDictionary(g => g.Key, g => g.Last());
+
         // The distilled summary of OLDER turns (those scrolled out of the window), if the thread has grown past it.
         // Null for a short thread / when no model was available to distill ⇒ the digest is just the recent window.
         // TRACKING (not AsNoTracking/projection) so it identity-resolves to the summary the summarizer just STAGED in
@@ -96,8 +110,35 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
             var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id)) ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
             if (branch != null) sb.AppendLine($"Produced branch: {branch}");
+
+            if (assessmentsByRunId.TryGetValue(row.Id, out var recorded) && RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is { } completion)
+                sb.AppendLine(completion);
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>The turn's contract verdict in ONE legible line — dimensions that are fine are omitted, so a clean turn reads clean and an unclean one names exactly what is still owed. Null (no line) when everything is settled positive; a malformed record renders nothing rather than a wrong claim.</summary>
+    internal static string? RenderCompletion(string assessmentJson, string? wouldBeTerminalDecision)
+    {
+        Messages.Contracts.CompletionAssessment? assessment;
+
+        try { assessment = JsonSerializer.Deserialize<Messages.Contracts.CompletionAssessment>(assessmentJson, Agents.AgentJson.Options); }
+        catch (JsonException) { return null; }
+
+        if (assessment is null) return null;
+
+        var concerns = new List<string>();
+
+        if (assessment.Outcome != Messages.Contracts.OutcomeDisposition.Solved) concerns.Add($"outcome={assessment.Outcome}");
+        if (assessment.Verification is not (Messages.Contracts.VerificationDisposition.Passed or Messages.Contracts.VerificationDisposition.NotApplicable)) concerns.Add($"verification={assessment.Verification}");
+        if (assessment.Artifact is not (Messages.Contracts.ArtifactDisposition.Captured or Messages.Contracts.ArtifactDisposition.NothingExpected)) concerns.Add($"artifact={assessment.Artifact}");
+        if (assessment.Delivery is not (Messages.Contracts.DeliveryDisposition.Delivered or Messages.Contracts.DeliveryDisposition.NotRequired)) concerns.Add($"delivery={assessment.Delivery}");
+
+        if (concerns.Count == 0) return null;
+
+        var wouldBe = string.IsNullOrEmpty(wouldBeTerminalDecision) ? "" : $" — would-be terminal: {wouldBeTerminalDecision}";
+
+        return $"UNRESOLVED CONTRACT: {string.Join(", ", concerns)}{wouldBe}. Address this before or alongside the new ask — it is still owed.";
     }
 }

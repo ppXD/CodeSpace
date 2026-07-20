@@ -40,6 +40,48 @@ public class WorkSessionContextFlowTests
     public WorkSessionContextFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
+    public async Task A_turns_unresolved_contract_rides_the_digest()
+    {
+        // P4-U3 (L5 contract carry): the continuing planner must SEE a prior turn's failed oracle / unsettled
+        // delivery — read from the DURABLE assessment record, never re-derived from the turn's own prose.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedCompletedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the parser", summary: "did it", branch: null);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var runId = (await db.WorkflowRun.AsNoTracking().Where(r => r.SessionId == sessionId).Select(r => r.Id).ToListAsync()).Single();
+
+            db.CompletionAssessmentRecord.Add(new CodeSpace.Core.Persistence.Entities.CompletionAssessmentRecord
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId,
+                EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = "Unsolved", Verification = "Failed",
+                AssessmentJson = System.Text.Json.JsonSerializer.Serialize(new CodeSpace.Messages.Contracts.CompletionAssessment
+                {
+                    Basis = CodeSpace.Messages.Contracts.CompletionBasis.ContractDerived,
+                    Execution = CodeSpace.Messages.Contracts.ExecutionDisposition.Completed,
+                    Outcome = CodeSpace.Messages.Contracts.OutcomeDisposition.Unsolved,
+                    Verification = CodeSpace.Messages.Contracts.VerificationDisposition.Failed,
+                    Artifact = CodeSpace.Messages.Contracts.ArtifactDisposition.Captured,
+                    Delivery = CodeSpace.Messages.Contracts.DeliveryDisposition.Unknown,
+                }, CodeSpace.Core.Services.Agents.AgentJson.Options),
+                LegacyIsSolved = true, WouldBeTerminalDecision = "HonestFailure",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var context = await BuildContextAsync(sessionId, teamId);
+
+        context.ShouldNotBeNull();
+        context!.ShouldContain("UNRESOLVED CONTRACT");
+        context.ShouldContain("verification=Failed");
+        context.ShouldContain("delivery=Unknown");
+        context.ShouldContain("would-be terminal: HonestFailure");
+        context.ShouldNotContain("artifact=", customMessage: "settled dimensions stay out of the line");
+    }
+
+    [Fact]
     public async Task Builder_renders_prior_turns_chronologically_with_goal_and_result()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
