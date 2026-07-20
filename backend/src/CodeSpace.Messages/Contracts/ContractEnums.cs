@@ -8,6 +8,12 @@ public enum Requiredness
 {
     Required,
     Optional,
+
+    /// <summary>P2b-2 (Lock Clause 4): this stage is AUTHORIZED not-applicable by the OPERATOR — staked explicitly, never inferred from absence. The kernel folds it NotApplicable only when the requirement's Authority is <c>Operator</c>; any other pairing fails closed to Unknown.</summary>
+    OperatorAuthorizedNotApplicable,
+
+    /// <summary>P2b-2 (Lock Clause 4): this stage is AUTHORIZED not-applicable by SERVER POLICY (e.g. a unit whose contract declared no changes owes no delivery/capture). Folds NotApplicable only under <c>ServerPolicy</c> authority; a model can DECLARE facts the policy reads, but can never author the authorization itself — a ModelProposal-authored NA fails closed to Unknown.</summary>
+    ServerPolicyAuthorizedNotApplicable,
 }
 
 /// <summary>

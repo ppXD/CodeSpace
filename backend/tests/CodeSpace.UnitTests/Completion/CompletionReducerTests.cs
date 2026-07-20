@@ -502,6 +502,53 @@ public class CompletionReducerTests
             .ShouldBe(OutcomeDisposition.Solved, "an oracle that RAN outranks the model's self-assessment in BOTH directions");
     }
 
+    // ── Authorized not-applicable (P2b-2, Lock Clause 4) ───────────────────────────────────────────────────
+
+    [Fact]
+    public void A_server_policy_authorized_NA_output_reads_NothingExpected_with_no_receipt_owed()
+    {
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "output:r", Kind = ContractKinds.Output, Requiredness = Requiredness.ServerPolicyAuthorizedNotApplicable, Authority = ContractAuthority.ServerPolicy, ContractSchemaVersion = "1" } };
+
+        CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success)).Artifact.ShouldBe(ArtifactDisposition.NothingExpected, "the staked authorization IS the answer — no receipt owed");
+    }
+
+    [Fact]
+    public void A_server_policy_authorized_NA_delivery_reads_NotRequired()
+    {
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "delivery:r", Kind = ContractKinds.Delivery, Requiredness = Requiredness.ServerPolicyAuthorizedNotApplicable, Authority = ContractAuthority.ServerPolicy, ContractSchemaVersion = "1" } };
+
+        CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success)).Delivery.ShouldBe(DeliveryDisposition.NotRequired);
+    }
+
+    [Theory]
+    [InlineData(Requiredness.ServerPolicyAuthorizedNotApplicable, ContractAuthority.ModelProposal)]  // a model may declare facts, never author authorization
+    [InlineData(Requiredness.ServerPolicyAuthorizedNotApplicable, ContractAuthority.Operator)]       // strict pairing — the variant names its authorizer
+    [InlineData(Requiredness.OperatorAuthorizedNotApplicable, ContractAuthority.ServerPolicy)]
+    [InlineData(Requiredness.OperatorAuthorizedNotApplicable, ContractAuthority.ModelProposal)]
+    public void A_mispaired_authorized_NA_fails_closed_to_Unknown(Requiredness requiredness, ContractAuthority authority)
+    {
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "output:r", Kind = ContractKinds.Output, Requiredness = requiredness, Authority = authority, ContractSchemaVersion = "1" } };
+
+        CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success)).Artifact.ShouldBe(ArtifactDisposition.Unknown);
+    }
+
+    [Fact]
+    public void An_operator_authorized_NA_pairs_with_operator_authority()
+    {
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "output:r", Kind = ContractKinds.Output, Requiredness = Requiredness.OperatorAuthorizedNotApplicable, Authority = ContractAuthority.Operator, ContractSchemaVersion = "1" } };
+
+        CompletionReducer.Reduce(requirements, NoReceipts, Facts(WorkflowRunStatus.Success)).Artifact.ShouldBe(ArtifactDisposition.NothingExpected);
+    }
+
+    [Fact]
+    public void Receipts_never_unseat_a_staked_authorization()
+    {
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "output:r", Kind = ContractKinds.Output, Requiredness = Requiredness.ServerPolicyAuthorizedNotApplicable, Authority = ContractAuthority.ServerPolicy, ContractSchemaVersion = "1" } };
+        var receipts = new[] { new ReceiptEnvelope { RequirementRef = "output:r", Kind = ContractKinds.Output, AttemptId = Guid.NewGuid(), Disposition = VerificationDisposition.Failed, Authority = ContractAuthority.ServerPolicy, ObservedAt = DateTimeOffset.UtcNow } };
+
+        CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success)).Artifact.ShouldBe(ArtifactDisposition.NothingExpected, "the authorization is the contract — changing it is a new plan version, not a receipt");
+    }
+
     // ── Artifact fold ───────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]

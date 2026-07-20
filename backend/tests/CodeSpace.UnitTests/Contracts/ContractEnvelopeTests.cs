@@ -31,7 +31,7 @@ public sealed class ContractEnvelopeTests
         Enum.GetNames<VerificationDisposition>().ShouldBe(new[] { "Passed", "Failed", "NotApplicable", "InfraUnknown", "HumanReviewRequired", "Waived", "Unknown" });
         Enum.GetNames<ContractAuthority>().ShouldBe(new[] { "Operator", "ServerPolicy", "ModelProposal" });
         Enum.GetNames<OutputExpectation>().ShouldBe(new[] { "GitChange", "TypedArtifact", "NoOutputExpected", "HumanReviewRequired" });
-        Enum.GetNames<Requiredness>().ShouldBe(new[] { "Required", "Optional" });
+        Enum.GetNames<Requiredness>().ShouldBe(new[] { "Required", "Optional", "OperatorAuthorizedNotApplicable", "ServerPolicyAuthorizedNotApplicable" });   // P2b-2 (Lock Clause 4): authorized-NA staking vocabulary
         Enum.GetNames<ExecutionDisposition>().ShouldBe(new[] { "Completed", "ForcedStop", "Crashed", "Cancelled" });
         Enum.GetNames<OutcomeDisposition>().ShouldBe(new[] { "Solved", "Unsolved", "Abstained", "Unknown" });
         Enum.GetNames<ArtifactDisposition>().ShouldBe(new[] { "Captured", "CaptureFailed", "NothingExpected", "Unknown" });

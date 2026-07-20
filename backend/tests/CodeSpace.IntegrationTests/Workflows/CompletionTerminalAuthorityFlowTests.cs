@@ -105,6 +105,26 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Fact]
+    public async Task A_read_only_unit_with_authorized_NA_stakes_reaches_clean_success()
+    {
+        // P2b-2 closes the read-only park hole: the declared no-changes unit stakes delivery/output as
+        // ServerPolicy-AUTHORIZED-NotApplicable — explicitly authorized off, never silently absent — so under
+        // Enforced it terminalizes CleanSuccess instead of parking on an Unknown artifact.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeNaAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeNaAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Decision.ShouldBe(TerminalDecision.CleanSuccess);
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Success);
+    }
+
+    [Fact]
     public void The_engine_chokepoint_arbitrates_before_the_terminal_write()
     {
         // Lock Clause 1's architecture pin: CompleteRunAsync must consult the authority BEFORE any status write —
@@ -218,6 +238,15 @@ public sealed class CompletionTerminalAuthorityFlowTests
         db.Repository.Add(repo);
         await db.SaveChangesAsync();
         return repo.Id;
+    }
+
+    private async Task StakeNaAsync(Guid runId, Guid teamId, string requirementRef, string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.ServerPolicyAuthorizedNotApplicable, Authority = ContractAuthority.ServerPolicy, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
     }
 
     private async Task StakeAsync(Guid runId, Guid teamId, string requirementRef, string kind)
