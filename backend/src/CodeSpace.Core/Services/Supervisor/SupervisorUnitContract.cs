@@ -21,6 +21,38 @@ public static class SupervisorUnitContract
     /// </summary>
     public static bool OwesDelivery(SupervisorPlannedSubtask planned) => planned.ExpectsChanges != false;
 
+    /// <summary>
+    /// P2b-2: the staked obligation set for one authorization wave — every contracted unit stakes its acceptance,
+    /// delivery, and output rows, spec-hash-bound to the same effective contract. A change-expecting unit stakes
+    /// delivery/output REQUIRED; a declared read-only unit stakes them ServerPolicy-AUTHORIZED-NotApplicable
+    /// (Lock Clause 4: the stage is explicitly authorized off, never silently absent — the model DECLARED the
+    /// read-only fact, the SERVER's policy authorizes the exemption, so the rows carry ServerPolicy authority).
+    /// Pure so the whole table pins without a database.
+    /// </summary>
+    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units)
+    {
+        var requirements = new List<Messages.Contracts.RequirementEnvelope>();
+
+        foreach (var (subtaskId, contractHash, owesDelivery) in units)
+        {
+            requirements.Add(Stake($"acceptance:{subtaskId}", Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true));
+            requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery));
+            requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery));
+        }
+
+        return requirements;
+    }
+
+    private static Messages.Contracts.RequirementEnvelope Stake(string requirementRef, string kind, string contractHash, bool required) => new()
+    {
+        RequirementRef = requirementRef,
+        Kind = kind,
+        Requiredness = required ? Messages.Contracts.Requiredness.Required : Messages.Contracts.Requiredness.ServerPolicyAuthorizedNotApplicable,
+        Authority = required ? Messages.Contracts.ContractAuthority.ModelProposal : Messages.Contracts.ContractAuthority.ServerPolicy,
+        SpecHash = contractHash,
+        ContractSchemaVersion = "1",
+    };
+
     public static string Hash(SupervisorPlannedSubtask planned, string? effectiveInstruction, Guid? repositoryOverride) =>
         ContractHashing.Hash(new
         {

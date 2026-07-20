@@ -385,49 +385,9 @@ public sealed partial class RealSupervisorActionExecutor
         // Best-effort: a ledger fault must never strand the staging itself.
         if (planRef is not null && contractHashes is { Count: > 0 } && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
         {
-            var contracted = tasks.Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!)).ToList();
-
-            var requirements = contracted
-                .Select(t => new Messages.Contracts.RequirementEnvelope
-                {
-                    RequirementRef = $"acceptance:{t.Task.SubtaskId}",
-                    Kind = Messages.Contracts.ContractKinds.Acceptance,
-                    Requiredness = Messages.Contracts.Requiredness.Required,
-                    Authority = Messages.Contracts.ContractAuthority.ModelProposal,
-                    SpecHash = contractHashes[t.Task.SubtaskId!],
-                    ContractSchemaVersion = "1",
-                })
-                // P3b-1: a unit that expects to produce a change ALSO owes its arrival — the delivery obligation
-                // is staked at the same authorization, spec-hash-bound to the same effective contract. A unit
-                // that declared ExpectsChanges=false owes nothing to arrive; the reducer reads its absence as
-                // NotRequired, never a hole. Receipts come from the composer's manifest bridge (P3's native
-                // producers take over later).
-                .Concat(contracted
-                    .Where(t => deliveryUnits?.Contains(t.Task.SubtaskId!) == true)
-                    .SelectMany(t => new[]
-                    {
-                        new Messages.Contracts.RequirementEnvelope
-                        {
-                            RequirementRef = $"delivery:{t.Task.SubtaskId}",
-                            Kind = Messages.Contracts.ContractKinds.Delivery,
-                            Requiredness = Messages.Contracts.Requiredness.Required,
-                            Authority = Messages.Contracts.ContractAuthority.ModelProposal,
-                            SpecHash = contractHashes[t.Task.SubtaskId!],
-                            ContractSchemaVersion = "1",
-                        },
-                        // P3b-3: the same change-expecting unit ALSO owes its output's CAPTURE (the artifact
-                        // dimension) — settled only by produced-bytes hashes via the kernel's hash-upgrade hook.
-                        new Messages.Contracts.RequirementEnvelope
-                        {
-                            RequirementRef = $"output:{t.Task.SubtaskId}",
-                            Kind = Messages.Contracts.ContractKinds.Output,
-                            Requiredness = Messages.Contracts.Requiredness.Required,
-                            Authority = Messages.Contracts.ContractAuthority.ModelProposal,
-                            SpecHash = contractHashes[t.Task.SubtaskId!],
-                            ContractSchemaVersion = "1",
-                        },
-                    }))
-                .ToList();
+            var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
+                .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
+                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], deliveryUnits?.Contains(t.Task.SubtaskId!) == true)));
 
             if (requirements.Count > 0)
             {

@@ -119,6 +119,30 @@ public class ContractHashingTests
     }
 
     [Fact]
+    public void The_staked_obligation_table_covers_every_unit_and_every_stage()
+    {
+        // P2b-2 (Lock Clause 4): every contracted unit stakes ALL THREE stages — a change-expecting unit stakes
+        // them Required; a declared read-only unit stakes delivery/output ServerPolicy-AUTHORIZED-NotApplicable
+        // (explicitly authorized off, never silently absent).
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true), ("r", "h2", false) });
+
+        rows.Count.ShouldBe(6);
+        rows.ShouldAllBe(r => r.SpecHash == (r.RequirementRef.EndsWith(":w") ? "h1" : "h2"));
+
+        rows.Single(r => r.RequirementRef == "acceptance:w").Requiredness.ShouldBe(Requiredness.Required);
+        rows.Single(r => r.RequirementRef == "delivery:w").Requiredness.ShouldBe(Requiredness.Required);
+        rows.Single(r => r.RequirementRef == "output:w").Requiredness.ShouldBe(Requiredness.Required);
+
+        rows.Single(r => r.RequirementRef == "acceptance:r").Requiredness.ShouldBe(Requiredness.Required, "read-only work still owes its acceptance oracle");
+
+        foreach (var na in new[] { rows.Single(r => r.RequirementRef == "delivery:r"), rows.Single(r => r.RequirementRef == "output:r") })
+        {
+            na.Requiredness.ShouldBe(Requiredness.ServerPolicyAuthorizedNotApplicable);
+            na.Authority.ShouldBe(ContractAuthority.ServerPolicy, "the model DECLARED read-only; the SERVER's policy authorizes the exemption — a model can never author NA itself");
+        }
+    }
+
+    [Fact]
     public void A_blank_override_falls_back_to_the_planned_instruction()
     {
         var planned = Planned("do it");

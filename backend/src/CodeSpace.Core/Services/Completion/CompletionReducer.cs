@@ -165,6 +165,17 @@ public static class CompletionReducer
 
         foreach (var requirement in kindRequirements)
         {
+            // P2b-2 (Lock Clause 4): an AUTHORIZED not-applicable stage folds NotApplicable from the staked
+            // authorization itself — no receipt owed, and receipts that arrive anyway don't unseat it (the
+            // authorization is the contract; changing it is a new plan version). The pairing is STRICT: the
+            // requiredness variant must match the staking authority, and a ModelProposal-authored NA (a model
+            // may declare facts, never author authorization) fails CLOSED to Unknown.
+            if (requirement.Requiredness is Requiredness.OperatorAuthorizedNotApplicable or Requiredness.ServerPolicyAuthorizedNotApplicable)
+            {
+                observed.Add(IsAuthorizedNa(requirement) ? VerificationDisposition.NotApplicable : VerificationDisposition.Unknown);
+                continue;
+            }
+
             if (receiptsByRef.TryGetValue(requirement.RequirementRef, out var matched))
                 observed.Add(FoldRequirement(requirement, matched, normalize));
             else if (requirement.Requiredness == Requiredness.Required)
@@ -175,6 +186,9 @@ public static class CompletionReducer
 
         return WorstOf(observed);
     }
+
+    private static bool IsAuthorizedNa(RequirementEnvelope requirement) =>
+        (requirement.Requiredness, requirement.Authority) is (Requiredness.OperatorAuthorizedNotApplicable, ContractAuthority.Operator) or (Requiredness.ServerPolicyAuthorizedNotApplicable, ContractAuthority.ServerPolicy);
 
     /// <summary>
     /// One requirement's own fold: its receipts — each SANITIZED first (a disposition outside the known severity
