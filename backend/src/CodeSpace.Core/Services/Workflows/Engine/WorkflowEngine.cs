@@ -57,6 +57,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly ILoggerFactory _loggerFactory;
     private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
     private readonly ISubworkflowService _subworkflowService;
+    private readonly Completion.ICompletionTerminalAuthority _terminalAuthority;
     private readonly IWorkflowResumeService _resumeService;
     private readonly IAgentRunService _agentRunService;
     private readonly IAgentDefinitionResolver _agentDefinitionResolver;
@@ -76,8 +77,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope, Completion.ICompletionTerminalAuthority terminalAuthority)
     {
+        _terminalAuthority = terminalAuthority;
         _db = db;
         _nodeRegistry = nodeRegistry;
         _variableService = variableService;
@@ -869,6 +871,26 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
     {
+        // P2b-1 (Lock Clause 1): the terminal SUCCESS claim has ONE production owner — the completion authority.
+        // Legacy/Shadow runs (and every non-Success claim) pass through verbatim; an Enforced run's Success is
+        // arbitrated against its own contract ledger, and a non-clean decision parks or honestly fails it here.
+        var arbitration = await _terminalAuthority.ArbitrateAsync(run.Id, run.TeamId, run.CompletionEnforcementMode, status, cancellationToken).ConfigureAwait(false);
+
+        if (arbitration.Status != status)
+            _logger.LogWarning("Terminal authority arbitrated run {RunId}: engine {EngineStatus} -> {Status} ({Reason})", run.Id, status, arbitration.Status, arbitration.Reason);
+
+        if (arbitration.Status == WorkflowRunStatus.Suspended)
+        {
+            // Parked, not completed: no CompletedAt, no completion ceremonies, no parent resume — a human (or an
+            // amended contract) resumes it; the replayed walk re-arbitrates against the then-current facts.
+            run.Status = WorkflowRunStatus.Suspended;
+            run.Error = arbitration.Reason;
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        (status, error) = (arbitration.Status, arbitration.Reason ?? error);
+
         run.Status = status;
         run.Error = error;
         run.CompletedAt = DateTimeOffset.UtcNow;
