@@ -61,9 +61,9 @@ public class ReceiptAdmissionTests
         var attempt = Guid.NewGuid();
         var receipts = new[]
         {
-            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-A" },
-            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-A" },   // duplicate
-            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-B" },
+            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-A", EvidenceRef = Guid.NewGuid() },
+            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-A", EvidenceRef = Guid.NewGuid() },   // duplicate
+            Receipt("del:run", attempt, Unit("s1"), ContractKinds.Delivery) with { TargetRef = "repo-B", EvidenceRef = Guid.NewGuid() },
         };
 
         var result = ReceiptAdmission.Admit(receipts, new[] { Requirement("del:run", ContractKinds.Delivery) }, Set(("s1", null)), null);
@@ -85,7 +85,7 @@ public class ReceiptAdmissionTests
     [Fact]
     public void An_identity_less_receipt_is_flagged_not_dropped()
     {
-        var result = ReceiptAdmission.Admit(new[] { Receipt("acc:s1", Guid.NewGuid(), workUnit: null) }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null);
+        var result = ReceiptAdmission.Admit(new[] { Receipt("acc:s1", Guid.NewGuid(), workUnit: null) with { EvidenceRef = Guid.NewGuid() } }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null);
 
         result.Admitted.Count.ShouldBe(1, "Legacy/Shadow tolerate identity-less receipts — Enforced refuses downstream (Lock Clause 3)");
         var flag = result.Rejections.ShouldHaveSingleItem();
@@ -102,9 +102,53 @@ public class ReceiptAdmissionTests
     }
 
     [Fact]
+    public void An_unevidenced_required_pass_is_capped_at_InfraUnknown()
+    {
+        // Admission batch 2: an unauditable pass can never mint Solved — the check may have run, its output
+        // cannot be examined. Only the POSITIVE claim is capped.
+        var requirements = new[] { Requirement("acc:s1") };
+        var receipts = new[] { Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) };   // Passed, no EvidenceRef
+
+        var result = ReceiptAdmission.Admit(receipts, requirements, Set(("s1", null)), null);
+
+        result.Admitted.ShouldHaveSingleItem().Disposition.ShouldBe(VerificationDisposition.InfraUnknown);
+        var flag = result.Rejections.ShouldHaveSingleItem();
+        flag.Code.ShouldBe(ReceiptRejectionCodes.MissingEvidence);
+        flag.Warning.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void An_evidenced_pass_and_an_unevidenced_failure_are_untouched()
+    {
+        var requirements = new[] { Requirement("acc:s1"), Requirement("acc:s2") };
+        var receipts = new[]
+        {
+            Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) with { EvidenceRef = Guid.NewGuid() },
+            Receipt("acc:s2", Guid.NewGuid(), Unit("s2")) with { Disposition = VerificationDisposition.Failed },
+        };
+
+        var result = ReceiptAdmission.Admit(receipts, requirements, Set(("s1", null), ("s2", null)), null);
+
+        result.Admitted.Count.ShouldBe(2);
+        result.Admitted[0].Disposition.ShouldBe(VerificationDisposition.Passed, "evidence present — the pass stands");
+        result.Admitted[1].Disposition.ShouldBe(VerificationDisposition.Failed, "an unevidenced FAILURE is the safe direction — it can never inflate");
+        result.Rejections.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void An_optional_requirements_unevidenced_pass_is_not_capped()
+    {
+        var requirements = new[] { Requirement("acc:opt") with { Requiredness = Requiredness.Optional } };
+        var receipts = new[] { Receipt("acc:opt", Guid.NewGuid(), Unit("s1")) };
+
+        ReceiptAdmission.Admit(receipts, requirements, null, null)
+            .Admitted.ShouldHaveSingleItem().Disposition.ShouldBe(VerificationDisposition.Passed, "the evidence law binds REQUIRED contracts");
+    }
+
+    [Fact]
     public void Admitted_receipts_pass_through_byte_untouched()
     {
-        var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) with { TargetRef = "repo-A", ContentHashes = new[] { "abc" } };
+        var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) with { TargetRef = "repo-A", ContentHashes = new[] { "abc" }, EvidenceRef = Guid.NewGuid() };
 
         var result = ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null);
 

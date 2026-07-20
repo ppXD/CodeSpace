@@ -12,6 +12,7 @@ public static class ReceiptRejectionCodes
     public const string SupersededAttempt = "superseded-attempt";
     public const string DuplicateTarget = "duplicate-target";
     public const string MissingIdentity = "missing-identity";
+    public const string MissingEvidence = "missing-evidence";
 }
 
 public sealed record ReceiptRejection(ReceiptEnvelope Receipt, string Code, string Reason, bool Warning = false);
@@ -27,7 +28,7 @@ public sealed record ReceiptAdmissionResult(IReadOnlyList<ReceiptEnvelope> Admit
 /// deliberately a pure fold — identity, lineage and cardinality integrity are enforced HERE, once, for every
 /// consumer: a receipt must answer a KNOWN requirement (ref + kind), belong to a unit of the CURRENT executable
 /// set at the CURRENT plan version, carry the unit's contract hash when both sides have one, come from the
-/// OPERATIONAL ACTIVE attempt (a superseded attempt's receipt never reaches a fold — Lock Clause 3), and attest a
+/// OPERATIONAL ACTIVE attempt (a superseded attempt's receipt never reaches a fold — Lock Clause 3), attest a
 /// DISTINCT target (duplicate receipts for one target collapse to the first, so ExpectedCardinality can never be
 /// faked by repetition). An identity-less receipt (no <see cref="ReceiptEnvelope.WorkUnit"/>) is admitted with a
 /// WARNING — tolerable under Legacy/Shadow, fatal under Enforced, decided by the composer, never here. Batch 2
@@ -91,6 +92,20 @@ public static class ReceiptAdmission
             if (!seenTargets.Add((receipt.RequirementRef, targetKey)))
             {
                 rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.DuplicateTarget, $"requirement '{receipt.RequirementRef}': a receipt for target '{targetKey}' was already admitted — cardinality counts DISTINCT targets"));
+                continue;
+            }
+
+            // P3a-2 (admission batch 2 — admission only ever TIGHTENS): a REQUIRED contract's PASS without
+            // evidence is unauditable, so its disposition is CAPPED at InfraUnknown ("the check may have run,
+            // its output cannot be examined"). Only the positive claim is capped: an unevidenced FAILURE is the
+            // safe direction (it can never inflate), a Waiver's evidence is its human co-sign, and an authorized
+            // exemption's is its authority — neither is oracle output. Pre-evidence tapes cap honestly too: an
+            // unauditable pass is unauditable regardless of when it was recorded.
+            if (receipt.EvidenceRef is null && receipt.Disposition == VerificationDisposition.Passed
+                && requirements.Any(r => r.RequirementRef == receipt.RequirementRef && r.Kind == receipt.Kind && r.Requiredness == Requiredness.Required))
+            {
+                rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.MissingEvidence, $"requirement '{receipt.RequirementRef}': a REQUIRED contract's pass carries no evidence — disposition capped at InfraUnknown", Warning: true));
+                admitted.Add(receipt with { Disposition = VerificationDisposition.InfraUnknown });
                 continue;
             }
 
