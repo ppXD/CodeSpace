@@ -22,6 +22,16 @@ public static class AgentAcceptanceContract
     public static bool ExpectsChanges(AgentTask task) => task.ExpectsChanges ?? true;
 
     /// <summary>
+    /// P4-U2: a workflow-dispatched agent run's UNIT identity — its (node, iteration) coordinate, so a map's
+    /// items are DISTINCT units (each with its own staked obligations) and a plain agent node is the degenerate
+    /// single-unit case. Null node (no workflow coordinate) falls back to the synthetic root.
+    /// </summary>
+    public static string UnitId(string? nodeId, string iterationKey) =>
+        string.IsNullOrEmpty(nodeId) ? Messages.Contracts.ExecutableSet.RootUnitId
+        : string.IsNullOrEmpty(iterationKey) ? nodeId!
+        : $"{nodeId}#{iterationKey}";
+
+    /// <summary>
     /// P4-U1: the single-agent lane's EFFECTIVE contract hash — what this run owes (its goal, its oracle, its
     /// change expectation), canonically hashed like the supervisor lane's <c>SupervisorUnitContract.Hash</c>.
     /// Deterministic across staking and compose (both derive it from the SAME durable TaskJson).
