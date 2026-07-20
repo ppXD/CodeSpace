@@ -52,6 +52,7 @@ public sealed class CompletionComposerFlowTests
         await store.UpsertRequirementsAsync(runId, teamId, new[]
         {
             new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            new RequirementEnvelope { RequirementRef = "delivery:s1", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
         }, CancellationToken.None);
 
         var composer = scope.Resolve<ICompletionAssessmentComposer>();
@@ -67,24 +68,69 @@ public sealed class CompletionComposerFlowTests
         first.Rejections.ShouldBeEmpty();
         first.ContractErrors.ShouldBeEmpty();
 
+        // P3b-1: the staked delivery settled from the attempt's Pushed manifest — arrival is a fact, not prose.
+        first.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered);
+
         var second = await composer.ComposeAsync(runId, teamId, CancellationToken.None);
         second!.Assessment.ShouldBe(first.Assessment, "same contract + same facts ⇒ same assessment");
 
         (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
-            .ShouldBe(1, "the write-through bridge is exactly-once — a re-compose lands on the first row");
+            .ShouldBe(2, "one acceptance + one delivery receipt, exactly-once — a re-compose lands on the first rows");
 
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "compute + record ONLY — the composer never touches the terminal (Lock Clause 1)");
 
         // P3a-1: the fold's evidence id rode the bridge onto the receipt — EvidenceRef is a fact, not prose.
-        var receipt = (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Single();
-        receipt.EvidenceRef.ShouldBe(EvidenceId);
+        var receipts = await store.ListReceiptsAsync(runId, teamId, CancellationToken.None);
+        var acceptance = receipts.Single(r => r.Kind == ContractKinds.Acceptance);
+        acceptance.EvidenceRef.ShouldBe(EvidenceId);
 
         // P3a-3: the verdict binds WHICH machinery judged and WHICH bytes it judged — labeled, never guessed.
-        receipt.EvaluatorVersion.ShouldBe(SupervisorAcceptanceGrader.EvaluatorVersion);
-        receipt.ContentHashes.ShouldBe(new[] { "base:b1", "candidate:c1" });
+        acceptance.EvaluatorVersion.ShouldBe(SupervisorAcceptanceGrader.EvaluatorVersion);
+        acceptance.ContentHashes.ShouldBe(new[] { "base:b1", "candidate:c1" });
+
+        // P3b-1: the delivery receipt names its evaluator (the publish pipeline), its target, and CAS evidence.
+        var delivery = receipts.Single(r => r.Kind == ContractKinds.Delivery);
+        delivery.EvaluatorVersion.ShouldBe(CompletionAssessmentComposer.DeliveryEvaluatorVersion);
+        delivery.TargetRef.ShouldBe("primary");
+        delivery.EvidenceRef.ShouldNotBeNull("the manifest snapshot is CAS evidence — a required delivery Passed without evidence would be capped at admission");
     }
 
-    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, string baseSha, string commitSha)
+    [Fact]
+    public async Task A_patch_only_manifest_settles_the_staked_delivery_as_policy_blocked()
+    {
+        // The patch exists but never ARRIVED — a definite non-arrival, never Delivered and never a silent hole.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+        var planId = Guid.NewGuid();
+        var attemptId = Guid.NewGuid();
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""",
+            $$"""{"planned":[],"count":1,"workPlanId":"{{planId}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = true, acceptanceDetail = (string?)null, acceptanceEvidenceId = (Guid?)Guid.NewGuid(), producedBranch = (string?)null } } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+        await SeedManifestAsync(teamId, attemptId, baseSha: "b1", commitSha: null, state: PublishState.PatchOnly);
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = "delivery:s1", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeAsync(runId, teamId, CancellationToken.None);
+
+        composed.ShouldNotBeNull();
+        composed!.Assessment.Delivery.ShouldBe(DeliveryDisposition.PolicyBlocked, "PatchOnly is a definite non-arrival — fail-close, whatever the acceptance verdict said");
+
+        // Outcome and Delivery are SEPARATE dimensions by design: this is the honest "solved but parked"
+        // encoding (publish-or-park) — the clean-success predicate (Lock Clause 5) excludes PolicyBlocked
+        // from VDS at the terminal, so a parked run counts as parked, never as a clean success.
+        composed.Assessment.Outcome.ShouldBe(OutcomeDisposition.Solved);
+    }
+
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, string baseSha, string? commitSha, PublishState state = PublishState.Pushed)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -92,8 +138,9 @@ public sealed class CompletionComposerFlowTests
         db.PublishManifest.Add(new PublishManifest
         {
             Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId,
-            RepositoryAlias = "primary", Branch = "codespace/agent/s1", BaseSha = baseSha, CommitSha = commitSha,
-            PublishStateValue = PublishState.Pushed,
+            RepositoryAlias = "primary", Branch = state == PublishState.Pushed ? "codespace/agent/s1" : null,
+            BaseSha = baseSha, CommitSha = commitSha, PatchArtifactId = state == PublishState.PatchOnly ? Guid.NewGuid() : null,
+            PublishStateValue = state,
         });
 
         await db.SaveChangesAsync();
