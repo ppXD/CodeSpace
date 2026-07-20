@@ -59,6 +59,10 @@ public sealed record AgentRunResult
     /// <summary>Branch the sandbox pushed, when the run produced one (the output handoff for opening a PR).</summary>
     public string? ProducedBranch { get; init; }
 
+    /// <summary>P3b-2 (provider readback): the remote-CONFIRMED tip of the pushed branch — the local tip re-read from the remote after the push. Null = no push or the readback could not confirm; absence is honest, never fabricated. Rides onto the publish manifest's <c>CommitSha</c>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PushedCommitSha { get; init; }
+
     /// <summary>
     /// The cloned base revision the <see cref="Patch"/> is rooted at — the exact commit this agent saw. The integrity
     /// anchor for on-disk branch integration (SOTA #3): the integrator checks out THIS SHA before <c>git apply --3way</c>
@@ -184,6 +188,10 @@ public sealed record RepositoryRunResult
 
     /// <summary>The branch this repo's changes were pushed to (the per-repo PR-open handoff), or null when nothing was pushed / it had no changes.</summary>
     public string? ProducedBranch { get; init; }
+
+    /// <summary>P3b-2 (provider readback): the remote-CONFIRMED tip of the pushed branch — the local tip re-read from the remote after the push. Null = no push or the readback could not confirm; absence is honest, never fabricated. Rides onto the publish manifest's <c>CommitSha</c>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PushedCommitSha { get; init; }
 
     /// <summary>The cloned base revision this repo's work is rooted at (the SOTA #3 integrity anchor, per repo).</summary>
     public string? BaseSha { get; init; }

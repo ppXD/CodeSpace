@@ -41,6 +41,25 @@ public sealed class AgentWorkspacePushFlowTests
         branch.ShouldBe(ctx.BranchName);
         (await ctx.RemoteHasBranchAsync(ctx.BranchName)).ShouldBeTrue("the bare remote now carries the pushed branch");
         (await ctx.RemoteBranchContainsFileAsync(ctx.BranchName, "agent-change.txt")).ShouldBeTrue("the pushed branch tip contains the agent's file");
+
+        // P3b-2 provider readback: arrival is an OBSERVED remote fact — the handle's confirmed sha IS the
+        // remote's actual branch tip, re-read from the remote after the push, never a self-report.
+        Push(handle).LastPushedCommitSha().ShouldBe(await ctx.RemoteTipAsync(ctx.BranchName));
+    }
+
+    [Fact]
+    public async Task A_no_change_run_confirms_no_sha()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        using var ctx = new PushTestContext();
+        await ctx.SeedBareRemoteWithOneCommitAsync();
+
+        await using var handle = await ctx.CloneWithTokenAsync();
+
+        (await Push(handle).PushChangesAsync(ctx.BranchName, CancellationToken.None)).ShouldBeNull("nothing changed, nothing pushed");
+        Push(handle).LastPushedCommitSha().ShouldBeNull("no push ⇒ no confirmed arrival — absence stays honest");
     }
 
     [Fact]
@@ -247,6 +266,9 @@ public sealed class AgentWorkspacePushFlowTests
             await RunGitAsync(cloneDir, "add", ".");
             await RunGitAsync(cloneDir, "-c", "user.email=agent@codespace.dev", "-c", "user.name=Agent", "-c", "commit.gpgsign=false", "commit", "-m", "agent commit");
         }
+
+        public async Task<string> RemoteTipAsync(string branch) =>
+            (await RunGitAsync(_root, "--git-dir", _bareRemote, "rev-parse", branch)).Trim();
 
         public async Task<bool> RemoteHasBranchAsync(string branch) =>
             (await RunGitAsync(_root, "--git-dir", _bareRemote, "branch", "--list", branch)).Trim().Length > 0;

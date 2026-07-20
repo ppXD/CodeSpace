@@ -180,7 +180,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     }
 
     /// <summary>One cloned repo's runtime state (Rule 18-adjacent — a private provider noun): alias, on-disk dir, access, the in-memory clone credential carried forward for a later push, the cloned base SHA, and the base ref (the ref the clone was performed at — usually a branch, but a tag when one was authored) the produced branch should target.</summary>
-    private sealed record MaterializedRepo(string Alias, string Directory, WorkspaceAccess Access, string RepositoryUrl, string? TokenUsername, string? Token, string BaseSha, string? BaseBranch);
+    private sealed record MaterializedRepo(string Alias, string Directory, WorkspaceAccess Access, string RepositoryUrl, string? TokenUsername, string? Token, string BaseSha, string? BaseBranch)
+    {
+        /// <summary>P3b-2: the remote-CONFIRMED tip of the last successful push (readback matched the local tip); null = unconfirmed/no push.</summary>
+        public string? PushedCommitSha { get; set; }
+    }
 
     /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
     private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
@@ -526,6 +530,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             return PushRepoChangesAsync(repo, branchName, cancellationToken);
         }
 
+        public string? LastPushedCommitSha(string? alias = null) => (alias is null ? _primary : RepoByAlias(alias)).PushedCommitSha;
+
         private async Task<string?> PushRepoChangesAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
         {
             // An anonymous clone carries no push credential — short-circuit WITHOUT invoking git (no remote to
@@ -556,7 +562,35 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             await RunGitOrThrowAsync(repo, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
+            repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, authedUrl, branchName, cancellationToken).ConfigureAwait(false);
+
             return branchName;
+        }
+
+        /// <summary>
+        /// P3b-2 provider readback: re-read the just-pushed branch FROM THE REMOTE (<c>ls-remote</c>) and confirm it
+        /// equals the local tip — "arrival" becomes an observed remote fact instead of a push self-report. Best-effort
+        /// by design: an unreadable remote or a mismatched tip (raced) returns null with a warning — the push itself
+        /// already succeeded, so the branch stands; only the CONFIRMATION is withheld, never fabricated.
+        /// </summary>
+        private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string authedUrl, string branchName, CancellationToken cancellationToken)
+        {
+            var localTip = (await RunGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
+
+            var readback = await RunGitAsync(repo, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+
+            if (readback.Status != SandboxStatus.Success || readback.ExitCode != 0)
+            {
+                _logger.LogWarning("Push readback for '{Branch}' could not query the remote (exit {ExitCode}); arrival stays unconfirmed", branchName, readback.ExitCode);
+                return null;
+            }
+
+            var remoteTip = readback.Stdout.Split('\t', '\n')[0].Trim();
+
+            if (remoteTip == localTip && localTip.Length > 0) return localTip;
+
+            _logger.LogWarning("Push readback for '{Branch}' saw remote tip '{Remote}' != local tip '{Local}'; arrival stays unconfirmed", branchName, remoteTip, localTip);
+            return null;
         }
 
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
