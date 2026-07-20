@@ -182,9 +182,10 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
     /// </summary>
     private async Task WriteThroughDeliveryReceiptsAsync(Guid runId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, IReadOnlyList<AttemptProjection> attempts, CancellationToken cancellationToken)
     {
-        var staked = requirements.Where(r => r.Kind == ContractKinds.Delivery).Select(r => r.RequirementRef).ToHashSet(StringComparer.Ordinal);
+        var stakedDelivery = requirements.Where(r => r.Kind == ContractKinds.Delivery).Select(r => r.RequirementRef).ToHashSet(StringComparer.Ordinal);
+        var stakedOutput = requirements.Where(r => r.Kind == ContractKinds.Output).Select(r => r.RequirementRef).ToHashSet(StringComparer.Ordinal);
 
-        if (staked.Count == 0) return;
+        if (stakedDelivery.Count == 0 && stakedOutput.Count == 0) return;
 
         var attemptsWithUnits = attempts.Where(a => a.WorkUnit?.UnitId is { Length: > 0 }).ToList();
 
@@ -195,21 +196,33 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
             .Where(m => m.TeamId == teamId && m.AgentRunId != null && ids.Contains(m.AgentRunId.Value))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var existing = (await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
-            .Where(r => r.Kind == ContractKinds.Delivery)
-            .Select(r => (r.RequirementRef, r.AttemptId, r.TargetRef))
+            .Where(r => r.Kind is ContractKinds.Delivery or ContractKinds.Output)
+            .Select(r => (r.Kind, r.RequirementRef, r.AttemptId, r.TargetRef))
             .ToHashSet();
 
         foreach (var attempt in attemptsWithUnits)
         {
-            var requirementRef = $"delivery:{attempt.WorkUnit!.UnitId}";
-
-            if (!staked.Contains(requirementRef)) continue;
+            var deliveryRef = $"delivery:{attempt.WorkUnit!.UnitId}";
+            var outputRef = $"output:{attempt.WorkUnit!.UnitId}";
 
             foreach (var manifest in manifests.Where(m => m.AgentRunId == attempt.AttemptId && m.PublishStateValue != PublishState.None))
             {
                 var targetRef = manifest.RepositoryId?.ToString() ?? manifest.RepositoryAlias;
 
-                if (existing.Contains((requirementRef, attempt.AttemptId, targetRef))) continue;
+                var mintDelivery = stakedDelivery.Contains(deliveryRef) && !existing.Contains((ContractKinds.Delivery, deliveryRef, attempt.AttemptId, targetRef));
+
+                // P3b-3: the output receipt attests CAPTURED BYTES only — the produced content's own hashes (the
+                // recorded patch artifact, the remote-confirmed candidate sha). A manifest with neither proves no
+                // capture, so it mints nothing and the obligation honestly stays Unknown; the kernel's
+                // hash-upgrade hook (verdict-less Unknown + ContentHashes → Captured) is the ONLY lift.
+                var capturedHashes = new[]
+                {
+                    manifest.PatchArtifactId is null ? null : $"patch:{manifest.PatchArtifactId}",
+                    manifest.CommitSha is null ? null : $"candidate:{manifest.CommitSha}",
+                }.Where(h => h is not null).Cast<string>().ToList();
+                var mintOutput = stakedOutput.Contains(outputRef) && capturedHashes.Count > 0 && !existing.Contains((ContractKinds.Output, outputRef, attempt.AttemptId, targetRef));
+
+                if (!mintDelivery && !mintOutput) continue;
 
                 var evidence = JsonSerializer.Serialize(new
                 {
@@ -218,24 +231,42 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                     branch = manifest.Branch,
                     commitSha = manifest.CommitSha,
                     baseSha = manifest.BaseSha,
+                    patchArtifactId = manifest.PatchArtifactId,
                     publishError = manifest.PublishError,
                 }, AgentJson.Options);
                 var evidenceRef = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(evidence), "application/json", cancellationToken).ConfigureAwait(false);
 
-                await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
-                {
-                    RequirementRef = requirementRef,
-                    Kind = ContractKinds.Delivery,
-                    AttemptId = attempt.AttemptId,
-                    WorkUnit = attempt.WorkUnit,
-                    TargetRef = targetRef,
-                    Disposition = manifest.PublishStateValue == PublishState.Pushed ? VerificationDisposition.Passed : VerificationDisposition.Failed,
-                    Authority = ContractAuthority.ServerPolicy,
-                    EvidenceRef = evidenceRef,
-                    EvaluatorVersion = DeliveryEvaluatorVersion,
-                    ContentHashes = new[] { manifest.BaseSha is null ? null : $"base:{manifest.BaseSha}", manifest.CommitSha is null ? null : $"candidate:{manifest.CommitSha}" }.Where(h => h is not null).Cast<string>().ToList() is { Count: > 0 } hashes ? hashes : null,
-                    ObservedAt = DateTimeOffset.UtcNow,
-                }, cancellationToken).ConfigureAwait(false);
+                if (mintDelivery)
+                    await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+                    {
+                        RequirementRef = deliveryRef,
+                        Kind = ContractKinds.Delivery,
+                        AttemptId = attempt.AttemptId,
+                        WorkUnit = attempt.WorkUnit,
+                        TargetRef = targetRef,
+                        Disposition = manifest.PublishStateValue == PublishState.Pushed ? VerificationDisposition.Passed : VerificationDisposition.Failed,
+                        Authority = ContractAuthority.ServerPolicy,
+                        EvidenceRef = evidenceRef,
+                        EvaluatorVersion = DeliveryEvaluatorVersion,
+                        ContentHashes = new[] { manifest.BaseSha is null ? null : $"base:{manifest.BaseSha}", manifest.CommitSha is null ? null : $"candidate:{manifest.CommitSha}" }.Where(h => h is not null).Cast<string>().ToList() is { Count: > 0 } hashes ? hashes : null,
+                        ObservedAt = DateTimeOffset.UtcNow,
+                    }, cancellationToken).ConfigureAwait(false);
+
+                if (mintOutput)
+                    await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+                    {
+                        RequirementRef = outputRef,
+                        Kind = ContractKinds.Output,
+                        AttemptId = attempt.AttemptId,
+                        WorkUnit = attempt.WorkUnit,
+                        TargetRef = targetRef,
+                        Disposition = VerificationDisposition.Unknown,
+                        Authority = ContractAuthority.ServerPolicy,
+                        EvidenceRef = evidenceRef,
+                        EvaluatorVersion = DeliveryEvaluatorVersion,
+                        ContentHashes = capturedHashes,
+                        ObservedAt = DateTimeOffset.UtcNow,
+                    }, cancellationToken).ConfigureAwait(false);
             }
         }
     }

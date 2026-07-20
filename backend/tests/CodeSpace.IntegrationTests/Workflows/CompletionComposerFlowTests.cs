@@ -53,6 +53,7 @@ public sealed class CompletionComposerFlowTests
         {
             new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
             new RequirementEnvelope { RequirementRef = "delivery:s1", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            new RequirementEnvelope { RequirementRef = "output:s1", Kind = ContractKinds.Output, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
         }, CancellationToken.None);
 
         var composer = scope.Resolve<ICompletionAssessmentComposer>();
@@ -71,11 +72,15 @@ public sealed class CompletionComposerFlowTests
         // P3b-1: the staked delivery settled from the attempt's Pushed manifest — arrival is a fact, not prose.
         first.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered);
 
+        // P3b-3: the staked output settled from the manifest's produced-bytes hashes via the kernel's
+        // hash-upgrade hook (verdict-less Unknown + ContentHashes -> Captured) — capture is a fact too.
+        first.Assessment.Artifact.ShouldBe(ArtifactDisposition.Captured);
+
         var second = await composer.ComposeAsync(runId, teamId, CancellationToken.None);
         second!.Assessment.ShouldBe(first.Assessment, "same contract + same facts ⇒ same assessment");
 
         (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
-            .ShouldBe(2, "one acceptance + one delivery receipt, exactly-once — a re-compose lands on the first rows");
+            .ShouldBe(3, "one acceptance + one delivery + one output receipt, exactly-once — a re-compose lands on the first rows");
 
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "compute + record ONLY — the composer never touches the terminal (Lock Clause 1)");
 
@@ -117,12 +122,17 @@ public sealed class CompletionComposerFlowTests
         await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
         {
             new RequirementEnvelope { RequirementRef = "delivery:s1", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            new RequirementEnvelope { RequirementRef = "output:s1", Kind = ContractKinds.Output, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
         }, CancellationToken.None);
 
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeAsync(runId, teamId, CancellationToken.None);
 
         composed.ShouldNotBeNull();
         composed!.Assessment.Delivery.ShouldBe(DeliveryDisposition.PolicyBlocked, "PatchOnly is a definite non-arrival — fail-close, whatever the acceptance verdict said");
+
+        // P3b-3: the SAME manifest settles the two dimensions differently — the patch WAS captured (the work is
+        // recoverable, nothing lost) even though it never arrived. Captured-but-parked, each fact on its own axis.
+        composed.Assessment.Artifact.ShouldBe(ArtifactDisposition.Captured);
 
         // Outcome and Delivery are SEPARATE dimensions by design: this is the honest "solved but parked"
         // encoding (publish-or-park) — the clean-success predicate (Lock Clause 5) excludes PolicyBlocked

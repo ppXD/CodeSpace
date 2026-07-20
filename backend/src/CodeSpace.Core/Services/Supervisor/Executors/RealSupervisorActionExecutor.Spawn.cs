@@ -404,14 +404,28 @@ public sealed partial class RealSupervisorActionExecutor
                 // producers take over later).
                 .Concat(contracted
                     .Where(t => deliveryUnits?.Contains(t.Task.SubtaskId!) == true)
-                    .Select(t => new Messages.Contracts.RequirementEnvelope
+                    .SelectMany(t => new[]
                     {
-                        RequirementRef = $"delivery:{t.Task.SubtaskId}",
-                        Kind = Messages.Contracts.ContractKinds.Delivery,
-                        Requiredness = Messages.Contracts.Requiredness.Required,
-                        Authority = Messages.Contracts.ContractAuthority.ModelProposal,
-                        SpecHash = contractHashes[t.Task.SubtaskId!],
-                        ContractSchemaVersion = "1",
+                        new Messages.Contracts.RequirementEnvelope
+                        {
+                            RequirementRef = $"delivery:{t.Task.SubtaskId}",
+                            Kind = Messages.Contracts.ContractKinds.Delivery,
+                            Requiredness = Messages.Contracts.Requiredness.Required,
+                            Authority = Messages.Contracts.ContractAuthority.ModelProposal,
+                            SpecHash = contractHashes[t.Task.SubtaskId!],
+                            ContractSchemaVersion = "1",
+                        },
+                        // P3b-3: the same change-expecting unit ALSO owes its output's CAPTURE (the artifact
+                        // dimension) — settled only by produced-bytes hashes via the kernel's hash-upgrade hook.
+                        new Messages.Contracts.RequirementEnvelope
+                        {
+                            RequirementRef = $"output:{t.Task.SubtaskId}",
+                            Kind = Messages.Contracts.ContractKinds.Output,
+                            Requiredness = Messages.Contracts.Requiredness.Required,
+                            Authority = Messages.Contracts.ContractAuthority.ModelProposal,
+                            SpecHash = contractHashes[t.Task.SubtaskId!],
+                            ContractSchemaVersion = "1",
+                        },
                     }))
                 .ToList();
 
