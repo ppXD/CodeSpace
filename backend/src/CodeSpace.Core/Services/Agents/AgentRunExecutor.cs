@@ -1271,12 +1271,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogInformation("Agent run {RunId}: the acceptance check passed ({Detail})", run.Id, grade.Detail);
 
-            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail };
+            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId };
         }
 
         _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
 
-        return AcceptanceFailed(result, grade.Detail);
+        return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
     }
 
     /// <summary>
