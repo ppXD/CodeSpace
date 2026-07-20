@@ -31,13 +31,15 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
     private readonly ICompletionAssessmentComposer _composer;
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
+    private readonly ICompletionCapabilityRegistry _capabilities;
     private readonly ILogger<CompletionTerminalAuthority> _logger;
 
-    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ILogger<CompletionTerminalAuthority> logger)
+    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ICompletionCapabilityRegistry capabilities, ILogger<CompletionTerminalAuthority> logger)
     {
         _composer = composer;
         _contracts = contracts;
         _handoff = handoff;
+        _capabilities = capabilities;
         _logger = logger;
     }
 
@@ -45,6 +47,14 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
     {
         if (CompletionPolicy.ModeFor(enforcementMode) != CompletionEnforcementMode.Enforced || engineStatus != WorkflowRunStatus.Success)
             return new TerminalArbitration(engineStatus, Reason: null, Decision: null);
+
+        // P2b-3 (Lock Clause 4): WHAT this run was asked for must be a REGISTERED capability — an ask outside the
+        // closed vocabulary parks honestly as Unsupported, never a silent attempt at terminalizing Success.
+        var requirements = await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var capabilityKey = CompletionCapability.Derive(requirements);
+
+        if (_capabilities.Resolve(capabilityKey) is null)
+            return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — capability '{capabilityKey}' is not registered", TerminalDecision.Unsupported);
 
         var composed = await _composer.ComposeAsync(workflowRunId, teamId, assumeTerminalStatus: WorkflowRunStatus.Success, cancellationToken).ConfigureAwait(false);
 
