@@ -42,7 +42,10 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         _logger = logger;
     }
 
-    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+        GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, oracleBaseSha: null, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken)
     {
         try
         {
@@ -51,7 +54,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await using var workspace = await _providers.Resolve(DefaultRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
 
-            return await GradeWorkspaceAsync(workspace.Directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var (restoreFailure, tamperNote) = await RestoreOracleAsync(workspace.Directory, spec, oracleBaseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+            if (restoreFailure is not null) return restoreFailure;
+
+            return await GradeWorkspaceAsync(workspace.Directory, spec, teamId, timeoutSeconds, cancellationToken, tamperNote).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -195,7 +202,46 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
-    private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
+    /// <summary>
+    /// P3a-3 (B+V0+): the ORACLE's bytes are not the candidate's to edit. When the spec names ProtectedPaths and
+    /// the base sha is known: (1) any candidate change under those paths is recorded as a TAMPER note for the
+    /// evidence (visibility — the restore makes it void, the note makes it seen); (2) the paths are restored from
+    /// the base, so the check runs the BASE's judge against the CANDIDATE's code. A restore that cannot complete
+    /// fails CLOSED (Environment): an unprotectable oracle cannot verify anything.
+    /// </summary>
+    private async Task<(BenchmarkGrade? Failure, string? TamperNote)> RestoreOracleAsync(string directory, SupervisorAcceptanceSpec spec, string? oracleBaseSha, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (spec.ProtectedPaths is not { Count: > 0 } paths || string.IsNullOrEmpty(oracleBaseSha)) return (null, null);
+
+        var runner = _runners.Resolve(DefaultRunnerKind);
+
+        var diff = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "diff", "--name-only", oracleBaseSha, "HEAD", "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+        var tampered = diff.Status == SandboxStatus.Success ? diff.Stdout.Trim() : null;
+
+        var restore = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "checkout", oracleBaseSha, "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+
+        if (restore.Status != SandboxStatus.Success || restore.ExitCode != 0)
+        {
+            _logger.LogWarning("Oracle restore from {BaseSha} failed in {Directory}: {Stderr}", oracleBaseSha, directory, Summarize(restore.Stderr));
+            return (Failed($"oracle-restore-failed: {Summarize(restore.Stderr)}", GradeFailureClass.Environment), null);
+        }
+
+        var note = string.IsNullOrEmpty(tampered)
+            ? $"oracle: {paths.Count} protected path(s) restored from {oracleBaseSha[..Math.Min(12, oracleBaseSha.Length)]} (no candidate changes)"
+            : $"ORACLE TAMPER VOIDED — candidate changed protected path(s), restored from base:\n{tampered}";
+
+        return (null, note);
+    }
+
+    private static SandboxSpec GitSpec(string directory, int timeoutSeconds, IEnumerable<string> args) => new()
+    {
+        Command = "git",
+        Args = args.ToList(),
+        WorkingDirectory = directory,
+        TimeoutSeconds = timeoutSeconds,
+    };
+
+    private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken, string? tamperNote = null)
     {
         if (spec.SetupCommand is { Count: > 0 } setupCommand)
         {
@@ -206,6 +252,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
 
         var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+
+        if (tamperNote is not null)
+            grade = grade with { EvidenceText = $"{tamperNote}\n{grade.EvidenceText}" };
 
         return await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
     }

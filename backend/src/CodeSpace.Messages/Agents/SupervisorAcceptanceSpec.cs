@@ -23,6 +23,16 @@ namespace CodeSpace.Messages.Agents;
 public sealed record SupervisorAcceptanceSpec
 {
     /// <summary>
+    /// P3a-3 (B+V0+): repo paths whose bytes belong to the ORACLE, not the candidate — the grader restores them
+    /// from the graded base before running, so a candidate's edits to its own judge (a rewritten check script, a
+    /// deleted test) are VOID at verification, and any attempted tamper is recorded in the evidence. Paths are
+    /// git pathspecs relative to the repo root. Null/empty = no protection (pre-P3a behavior). Part of the
+    /// contract content — changing them changes the ContractHash.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ProtectedPaths { get; init; }
+
+    /// <summary>
     /// The acceptance check payload. Its meaning is the <see cref="Kind"/>'s: for <c>TestsPass</c> (the default) it is an
     /// ARGV the server runs against the produced workspace (non-zero exit fails); for <c>ArtifactPresent</c> it is the
     /// list of repo-relative PATHS that must exist on the produced branch. Either way, authoring it is what makes the

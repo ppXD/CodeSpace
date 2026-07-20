@@ -626,7 +626,11 @@ public sealed partial class SupervisorTurnService
             var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
 
             if (!string.IsNullOrEmpty(result.ProducedBranch))
-                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            {
+                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, repositoryId.Value, spec, teamId, cancellationToken).ConfigureAwait(false);
+
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, oracleBaseSha, cancellationToken).ConfigureAwait(false);
+            }
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -721,7 +725,9 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             try
             {
-                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, target.RepositoryId!.Value, spec, teamId, cancellationToken).ConfigureAwait(false);
+
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseSha, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -785,6 +791,22 @@ public sealed partial class SupervisorTurnService
             : new BenchmarkGrade { Passed = true, Detail = "not-applicable: no changes were expected and none were produced" };
 
     /// <summary>The unit's manifest row for THIS repository (I2 — the single source of truth; never re-derived from the decision's own outcome snapshot), or null when none exists (the unit made no changes here, or hasn't been recorded yet). Mirrors <c>RealSupervisorActionExecutor.DependencyStaging.cs</c>'s per-repo manifest lookup.</summary>
+    /// <summary>
+    /// P3a-3 (B+V0+): the base sha the grader restores the spec's ProtectedPaths from — the unit's recorded
+    /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec actually
+    /// protects paths (no extra read on the common unprotected path); null = grader grades exactly as before.
+    /// A protected spec whose unit has no manifest grades with no restore — the tamper door stays closed at
+    /// admission (unevidenced/unrestorable protection surfaces in the evidence text, never a silent pass).
+    /// </summary>
+    private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (spec.ProtectedPaths is not { Count: > 0 }) return null;
+
+        var manifest = await ResolveUnitManifestAsync(agentRunId, repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return manifest?.BaseSha;
+    }
+
     private async Task<Core.Persistence.Entities.PublishManifest?> ResolveUnitManifestAsync(Guid agentRunId, Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForAgentRunAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);

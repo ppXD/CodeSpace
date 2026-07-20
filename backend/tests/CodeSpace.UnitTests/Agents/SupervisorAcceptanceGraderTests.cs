@@ -391,6 +391,110 @@ public class SupervisorAcceptanceGraderTests
     }
 
     [Fact]
+    public async Task Protected_paths_are_restored_from_the_base_before_the_oracle_runs()
+    {
+        var runners = new RecordingRunnerRegistry();
+        var oracle = new FakeGrader(Pass);
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: "/tmp/clone-xyz", runners: runners, artifacts: artifacts);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/", "check.sh" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("restore succeeded, so the grade proceeds to the oracle's own verdict");
+
+        runners.Invocations.Count.ShouldBe(2, "one tamper diff + one restore, before the oracle");
+        runners.Invocations[0].Command.ShouldBe("git");
+        runners.Invocations[0].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "HEAD", "--", "tests/", "check.sh" });
+        runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/", "check.sh" });
+        runners.Invocations.ShouldAllBe(i => i.WorkingDirectory == "/tmp/clone-xyz", "restore acts on the SAME workspace the check grades");
+
+        oracle.Context.ShouldNotBeNull("the oracle runs AFTER the restore — it grades the base's judge against the candidate's code");
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("restored from abc123def456", Case.Sensitive, "the restore is legible in the evidence");
+    }
+
+    [Fact]
+    public async Task Candidate_tamper_of_protected_paths_is_voided_and_recorded_in_the_evidence()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "check.sh" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("the restore VOIDS the tamper — the verdict is the base judge's, so it can stand");
+
+        var evidence = artifacts.Puts.ShouldHaveSingleItem().Text;
+        evidence.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive, "a worker that rewrote its own judge must be SEEN, not just neutralized");
+        evidence.ShouldContain("check.sh");
+    }
+
+    [Fact]
+    public async Task A_failed_oracle_restore_fails_closed_as_environment_without_reaching_the_oracle()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+        runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "error: pathspec 'tests/' did not match" });
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse("an oracle that cannot be protected cannot verify anything — never a silent pass");
+        grade.Detail.ShouldStartWith("oracle-restore-failed:");
+        grade.Detail.ShouldContain("did not match", Case.Insensitive, "the git failure is legible to the operator");
+        grade.Class.ShouldBe(GradeFailureClass.Environment);
+        oracle.Context.ShouldBeNull("the oracle is never reached over an unprotected workspace");
+    }
+
+    [Fact]
+    public async Task Protected_paths_without_a_base_sha_grade_with_no_restore_calls()
+    {
+        // The plain overload (no base sha — a pre-manifest tape, a lane with no recorded base) grades exactly as
+        // before this field existed: no git calls, the oracle's verdict verbatim.
+        var runners = new RecordingRunnerRegistry();
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "check.sh" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue();
+        runners.Invocations.ShouldBeEmpty();
+        oracle.Context.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void Oracle_restore_failure_is_infra_classified_regardless_of_work_present()
+    {
+        AgentAcceptanceContract.IsInfraFailure("oracle-restore-failed: pathspec", workPresent: true).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("oracle-restore-failed: pathspec", workPresent: false).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("repo 'web': oracle-restore-failed: pathspec", workPresent: false).ShouldBeTrue();
+    }
+
+    private sealed class RecordingRunnerRegistry : ISandboxRunnerRegistry, ISandboxRunner
+    {
+        private readonly Queue<SandboxResult> _scripted = new();
+        public List<SandboxSpec> Invocations { get; } = new();
+
+        /// <summary>Queue the result for the NEXT invocation; unqueued invocations succeed with empty output.</summary>
+        public void Script(SandboxResult result) => _scripted.Enqueue(result);
+
+        public ISandboxRunner Resolve(string kind) => this;
+        public IReadOnlyList<ISandboxRunner> All => new ISandboxRunner[] { this };
+        public string Kind => "local";
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocations.Add(spec);
+            return Task.FromResult(_scripted.Count > 0 ? _scripted.Dequeue() : new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+        }
+    }
+
+    [Fact]
     public async Task Oracle_evidence_is_stored_to_CAS_and_the_grade_carries_the_id()
     {
         var oracle = new FakeGrader(Pass with { EvidenceText = "$ sh check.sh\nexit=0" });
