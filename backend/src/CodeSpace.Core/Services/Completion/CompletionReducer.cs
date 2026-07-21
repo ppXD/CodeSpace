@@ -250,6 +250,11 @@ public static class CompletionReducer
         VerificationDisposition.Passed => OutcomeDisposition.Solved,
         VerificationDisposition.Failed => OutcomeDisposition.Unsolved,
         VerificationDisposition.Waived => OutcomeDisposition.Abstained,
+        // P5-1: an honest abstention (the model asked instead of attempting) makes no objective claim in EITHER
+        // direction — never Solved (cannot inflate a metric), never Unsolved (asking is not failing). A
+        // verification VERDICT above still wins: partial work that FAILED its oracle reads Unsolved even if the
+        // model then asked.
+        VerificationDisposition.NotApplicable when facts.SelfReportedAbstention => OutcomeDisposition.Abstained,
         VerificationDisposition.NotApplicable => execution == ExecutionDisposition.Completed && facts.TerminalStatus == WorkflowRunStatus.Success && !facts.SelfReportedGiveUp
             ? OutcomeDisposition.Solved
             : OutcomeDisposition.Unsolved,

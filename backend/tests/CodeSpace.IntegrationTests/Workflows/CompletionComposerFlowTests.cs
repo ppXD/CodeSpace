@@ -228,6 +228,31 @@ public sealed class CompletionComposerFlowTests
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "Shadow NEVER mutates a terminal (Lock Clause 1)");
     }
 
+    [Fact]
+    public async Task An_abstaining_stop_composes_Abstained_and_would_be_NeedsClarification()
+    {
+        // P5-1 end-to-end: the model stopped WITH A QUESTION → the ledger reads Abstained (no objective claim in
+        // either direction) and the sealed would-be terminal reads NeedsClarification — the ask returns to the
+        // human, never a fake attempt and never a punished failure.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Failure);
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Stop, "{}",
+            """{"outcome":"needs_clarification","summary":"Which auth provider should the login use?"}""");
+
+        using var scope = _fixture.BeginScope();
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeAsync(runId, teamId, CancellationToken.None);
+
+        composed.ShouldNotBeNull();
+        composed!.Assessment.Outcome.ShouldBe(OutcomeDisposition.Abstained);
+
+        (await scope.Resolve<ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
+
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId))
+            .WouldBeTerminalDecision.ShouldBe("NeedsClarification");
+    }
+
     // ── Seeds ──
 
     private async Task<Guid> SeedTerminalRunAsync(Guid teamId, Guid userId, bool stampPolicy, WorkflowRunStatus status)

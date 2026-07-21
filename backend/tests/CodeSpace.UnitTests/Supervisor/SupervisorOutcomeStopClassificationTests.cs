@@ -81,4 +81,24 @@ public class SupervisorOutcomeStopClassificationTests
     {
         SupervisorOutcome.ReadStopReason(payloadJson).ShouldBe(expected);
     }
+
+    [Theory]
+    [InlineData("needs_clarification")]
+    [InlineData("needs-clarification")]
+    [InlineData("NEEDS_CLARIFICATION")]
+    public void A_clarification_outcome_classifies_as_needs_clarification_with_the_question(string outcome)
+    {
+        // P5-1: the honest ask — never a success, never a give-up; the summary carries the question verbatim.
+        var classification = SupervisorOutcome.ClassifyStop("{}", $$"""{"outcome":"{{outcome}}","summary":"Which auth provider should the login use?"}""");
+
+        classification.Kind.ShouldBe(SupervisorStopKind.NeedsClarification);
+        classification.Summary.ShouldBe("Which auth provider should the login use?");
+    }
+
+    [Fact]
+    public void An_unknown_label_still_fail_closes_to_give_up_never_to_abstention()
+    {
+        SupervisorOutcome.ClassifyStop("{}", """{"outcome":"clarify-ish","summary":"?"}""")
+            .Kind.ShouldBe(SupervisorStopKind.GaveUp, "the recognizer is exact — a fuzzy label can never buy the un-punished state");
+    }
 }

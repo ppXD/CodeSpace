@@ -120,6 +120,7 @@ public static class SupervisorDecisionTimelineMap
     private static string StopTitle(SupervisorDecisionRecord d) => SupervisorOutcome.ClassifyStop(d.PayloadJson, d.OutcomeJson) switch
     {
         { Kind: SupervisorStopKind.Forced, Reason: { } reason } => $"Supervisor stopped — {reason}",
+        { Kind: SupervisorStopKind.NeedsClarification } => "Supervisor needs clarification",
         { Kind: SupervisorStopKind.GaveUp } => "Supervisor stopped early",
         _ => "Supervisor stopped",
     };

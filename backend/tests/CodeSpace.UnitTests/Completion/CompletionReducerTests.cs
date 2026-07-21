@@ -502,6 +502,28 @@ public class CompletionReducerTests
             .ShouldBe(OutcomeDisposition.Solved, "an oracle that RAN outranks the model's self-assessment in BOTH directions");
     }
 
+    // ── Calibrated abstention (P5-1) ───────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void An_honest_abstention_reads_Abstained_never_Solved_and_never_Unsolved()
+    {
+        var facts = Facts(WorkflowRunStatus.Failure) with { SelfReportedAbstention = true };
+
+        CompletionReducer.Reduce(None, NoReceipts, facts).Outcome.ShouldBe(OutcomeDisposition.Abstained, "asking is not failing, and it can never inflate a metric either");
+    }
+
+    [Fact]
+    public void A_verification_verdict_beats_an_abstention()
+    {
+        // Partial work that FAILED its oracle reads Unsolved even if the model then asked — the verdict is
+        // authoritative; abstention only fills the no-verdict arm.
+        var requirements = new[] { new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" } };
+        var receipts = new[] { new ReceiptEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, AttemptId = Guid.NewGuid(), Disposition = VerificationDisposition.Failed, Authority = ContractAuthority.ServerPolicy, EvidenceRef = Guid.NewGuid(), ObservedAt = DateTimeOffset.UtcNow } };
+        var facts = Facts(WorkflowRunStatus.Failure) with { SelfReportedAbstention = true };
+
+        CompletionReducer.Reduce(requirements, receipts, facts).Outcome.ShouldBe(OutcomeDisposition.Unsolved);
+    }
+
     // ── Authorized not-applicable (P2b-2, Lock Clause 4) ───────────────────────────────────────────────────
 
     [Fact]

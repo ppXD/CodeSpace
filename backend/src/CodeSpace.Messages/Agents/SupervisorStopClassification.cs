@@ -11,6 +11,9 @@ public enum SupervisorStopKind
 
     /// <summary>The SERVER forced the stop — a fail-closed bound / budget / governance trip; <see cref="SupervisorStopClassification.Reason"/> names which.</summary>
     Forced,
+
+    /// <summary>P5-1 (calibrated abstention): the model stopped WITH A QUESTION only the user can answer — an honest ask instead of a doomed attempt. <see cref="SupervisorStopClassification.Summary"/> carries the question. Never a success and never a give-up: the completion outcome reads Abstained and the sealed terminal reads NeedsClarification.</summary>
+    NeedsClarification,
 }
 
 /// <summary>
