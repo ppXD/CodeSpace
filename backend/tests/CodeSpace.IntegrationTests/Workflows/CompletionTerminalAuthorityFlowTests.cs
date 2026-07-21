@@ -125,6 +125,47 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Fact]
+    public async Task Watermarks_bind_the_arbitration_to_the_ledgers_it_read()
+    {
+        // Lock Clause 2: the Enforced arbitration carries the ledgers' watermarks; a fact landing AFTER it
+        // (a late receipt) flips the verify to false, so the engine recomposes or parks — never a stale stamp.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        await SeedGradedTapeAsync(runId, teamId, acceptancePassed: false);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+
+        using var scope = _fixture.BeginScope();
+        var authority = scope.Resolve<ICompletionTerminalAuthority>();
+
+        var arbitration = await authority.ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Watermarks.ShouldNotBeNull("an Enforced arbitration binds what it read");
+        (await authority.VerifyWatermarksAsync(runId, teamId, arbitration.Watermarks!, CancellationToken.None))
+            .ShouldBeTrue("nothing moved — the terminal may stamp");
+
+        await scope.Resolve<ICompletionContractStore>().AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+        {
+            RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, AttemptId = Guid.NewGuid(),
+            Disposition = VerificationDisposition.Passed, Authority = ContractAuthority.ServerPolicy, ObservedAt = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        (await authority.VerifyWatermarksAsync(runId, teamId, arbitration.Watermarks!, CancellationToken.None))
+            .ShouldBeFalse("a late fact landed — the assessment no longer describes the ledgers");
+    }
+
+    [Fact]
+    public async Task A_pass_through_arbitration_binds_no_watermarks()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Shadow");
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Shadow", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Watermarks.ShouldBeNull("pass-through claims nothing, so it binds nothing");
+    }
+
+    [Fact]
     public void The_engine_chokepoint_arbitrates_before_the_terminal_write()
     {
         // Lock Clause 1's architecture pin: CompleteRunAsync must consult the authority BEFORE any status write —
@@ -134,6 +175,8 @@ public sealed class CompletionTerminalAuthorityFlowTests
 
         body.IndexOf("ArbitrateAsync", StringComparison.Ordinal).ShouldBeGreaterThan(0);
         body.IndexOf("ArbitrateAsync", StringComparison.Ordinal).ShouldBeLessThan(body.IndexOf("run.Status =", StringComparison.Ordinal), "arbitration precedes the terminal write");
+        body.IndexOf("VerifyWatermarksAsync", StringComparison.Ordinal).ShouldBeGreaterThan(0, "Lock Clause 2's re-verify is wired");
+        body.IndexOf("VerifyWatermarksAsync", StringComparison.Ordinal).ShouldBeLessThan(body.IndexOf("run.Status =", StringComparison.Ordinal), "the watermark re-verify precedes the terminal write");
     }
 
     private static string FindRepoRoot()

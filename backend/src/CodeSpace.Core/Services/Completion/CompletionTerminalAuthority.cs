@@ -5,13 +5,16 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Completion;
 
-/// <summary>The authority's verdict at the terminal boundary: the status the run row gets, the parked/failed reason when the authority changed it, and the decision it derived (null when the authority passed through).</summary>
-public sealed record TerminalArbitration(WorkflowRunStatus Status, string? Reason, TerminalDecision? Decision);
+/// <summary>The authority's verdict at the terminal boundary: the status the run row gets, the parked/failed reason when the authority changed it, the decision it derived (null when the authority passed through), and the ledger watermarks the backing assessment READ (Lock Clause 2 — null on pass-through).</summary>
+public sealed record TerminalArbitration(WorkflowRunStatus Status, string? Reason, TerminalDecision? Decision, CompletionLedgerWatermarks? Watermarks = null);
 
 public interface ICompletionTerminalAuthority
 {
     /// <summary>Arbitrate the engine's would-be terminal for this run. Anything but an Enforced-mode SUCCESS claim passes through verbatim.</summary>
     Task<TerminalArbitration> ArbitrateAsync(Guid workflowRunId, Guid teamId, string? enforcementMode, WorkflowRunStatus engineStatus, CancellationToken cancellationToken);
+
+    /// <summary>P2b-4 (Lock Clause 2): whether the run's ledgers still match the watermarks the arbitration's assessment read — false means a late fact landed and the terminal must recompose or park, never stamp a stale claim.</summary>
+    Task<bool> VerifyWatermarksAsync(Guid workflowRunId, Guid teamId, CompletionLedgerWatermarks captured, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -32,16 +35,21 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
     private readonly ICompletionCapabilityRegistry _capabilities;
+    private readonly Persistence.Db.CodeSpaceDbContext _db;
     private readonly ILogger<CompletionTerminalAuthority> _logger;
 
-    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ICompletionCapabilityRegistry capabilities, ILogger<CompletionTerminalAuthority> logger)
+    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ICompletionCapabilityRegistry capabilities, Persistence.Db.CodeSpaceDbContext db, ILogger<CompletionTerminalAuthority> logger)
     {
         _composer = composer;
         _contracts = contracts;
         _handoff = handoff;
         _capabilities = capabilities;
+        _db = db;
         _logger = logger;
     }
+
+    public async Task<bool> VerifyWatermarksAsync(Guid workflowRunId, Guid teamId, CompletionLedgerWatermarks captured, CancellationToken cancellationToken) =>
+        captured == await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
     public async Task<TerminalArbitration> ArbitrateAsync(Guid workflowRunId, Guid teamId, string? enforcementMode, WorkflowRunStatus engineStatus, CancellationToken cancellationToken)
     {
@@ -56,6 +64,10 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         if (_capabilities.Resolve(capabilityKey) is null)
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — capability '{capabilityKey}' is not registered", TerminalDecision.Unsupported);
 
+        // Lock Clause 2: capture the ledgers' watermarks BEFORE composing — conservative direction: a fact that
+        // lands mid-compose reads as moved at the terminal boundary and forces a recompose, never a stale stamp.
+        var watermarks = await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
         var composed = await _composer.ComposeAsync(workflowRunId, teamId, assumeTerminalStatus: WorkflowRunStatus.Success, cancellationToken).ConfigureAwait(false);
 
         if (composed is null)
@@ -68,11 +80,15 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         var handoffReachable = await _handoff.IsHandoffReachableAsync(workflowRunId, teamId, receipts, cancellationToken).ConfigureAwait(false);
         var decision = TerminalDecider.Decide(composed.Assessment, handoffReachable);
 
+        // Re-capture AFTER compose: the composer's own write-through bridges legitimately append receipts, and the
+        // terminal verify must compare against the ledgers the DECISION was actually derived over.
+        watermarks = await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
         return decision switch
         {
-            TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision),
-            TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"completion-authority: honest failure (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision),
-            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (delivery={composed.Assessment.Delivery}, handoffReachable={handoffReachable})", decision),
+            TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
+            TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"completion-authority: honest failure (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision, watermarks),
+            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (delivery={composed.Assessment.Delivery}, handoffReachable={handoffReachable})", decision, watermarks),
         };
     }
 }
