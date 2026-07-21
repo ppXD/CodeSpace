@@ -876,6 +876,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // arbitrated against its own contract ledger, and a non-clean decision parks or honestly fails it here.
         var arbitration = await _terminalAuthority.ArbitrateAsync(run.Id, run.TeamId, run.CompletionEnforcementMode, status, cancellationToken).ConfigureAwait(false);
 
+        // P2b-4 (Lock Clause 2): before the terminal write, re-verify the ledgers still match the watermarks the
+        // arbitration's assessment read. A moved ledger (a late receipt, a fresh manifest) forces ONE recompose on
+        // the current facts; still moving ⇒ park — a terminal is never stamped on a stale claim, and an unstable
+        // ledger is a human's to look at, not a race to win.
+        if (arbitration.Watermarks is { } captured && !await _terminalAuthority.VerifyWatermarksAsync(run.Id, run.TeamId, captured, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogWarning("Terminal ledgers moved after arbitration for run {RunId}; recomposing once", run.Id);
+            arbitration = await _terminalAuthority.ArbitrateAsync(run.Id, run.TeamId, run.CompletionEnforcementMode, status, cancellationToken).ConfigureAwait(false);
+
+            if (arbitration.Watermarks is { } recaptured && !await _terminalAuthority.VerifyWatermarksAsync(run.Id, run.TeamId, recaptured, cancellationToken).ConfigureAwait(false))
+                arbitration = new Completion.TerminalArbitration(WorkflowRunStatus.Suspended, "completion-authority: ledgers moved during terminalization — parked for review", arbitration.Decision, arbitration.Watermarks);
+        }
+
         if (arbitration.Status != status)
             _logger.LogWarning("Terminal authority arbitrated run {RunId}: engine {EngineStatus} -> {Status} ({Reason})", run.Id, status, arbitration.Status, arbitration.Reason);
 
