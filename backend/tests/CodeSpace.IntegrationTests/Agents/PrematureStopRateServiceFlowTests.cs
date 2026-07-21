@@ -28,6 +28,22 @@ namespace CodeSpace.IntegrationTests.Agents;
 [Trait("Category", "Integration")]
 public class PrematureStopRateServiceFlowTests
 {
+    [Fact]
+    public async Task An_abstaining_stop_lands_in_its_own_bucket_not_the_degraded_numerator()
+    {
+        // P5-1b: the honest ask is measurable on its own — the degraded numerator stays a pure stability signal,
+        // and over-asking can never hide inside either success or failure.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, WorkflowRunStatus.Failure, TaskProjectionKinds.Supervisor);
+        await SeedStopDecisionAsync(teamId, runId, payloadJson: "{}", outcomeJson: """{"outcome":"needs_clarification","summary":"Which env?"}""");
+
+        var report = await ComputeAsync(teamId);
+
+        report.NeedsClarificationRuns.ShouldBe(1);
+        report.DegradedRuns.ShouldBe(0, "asking is not a stability failure");
+        report.SucceededRuns.ShouldBe(0, "asking is not a success either");
+    }
+
     private readonly PostgresFixture _fixture;
 
     public PrematureStopRateServiceFlowTests(PostgresFixture fixture) => _fixture = fixture;
