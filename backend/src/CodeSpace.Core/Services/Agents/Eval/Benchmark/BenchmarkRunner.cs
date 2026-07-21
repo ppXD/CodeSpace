@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
@@ -35,12 +36,17 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     /// <summary>Runner used when the task pins none — the in-process local runner, matching the executor's own default.</summary>
     private const string DefaultRunnerKind = "local";
 
-    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders)
+    private readonly Workflows.Artifacts.IArtifactStore _artifacts;
+    private readonly Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> _logger;
+
+    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
     {
         _runs = runs;
         _executor = executor;
         _runners = runners;
         _graders = graders;
+        _artifacts = artifacts;
+        _logger = logger;
     }
 
     public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
@@ -61,6 +67,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         var completed = await _runs.GetAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
+
+        grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
         return BuildResult(task, mode, completed, grade, mcpEnabled);
     }
@@ -100,6 +108,28 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             ReviewerModelId = selection?.ReviewerModelId,
             MaxReviseRounds = selection?.MaxReviseRounds,
         };
+    }
+
+    /// <summary>
+    /// P4-U5 (L6 — the benchmark joins the spine's EVIDENCE LAW): the oracle's bounded output goes to CAS and
+    /// the grade carries the id, exactly like the acceptance funnel — a benchmark verdict is auditable bytes,
+    /// never just a boolean. A store fault degrades loudly to evidence-less (the verdict stands; the transient
+    /// text is dropped either way, mirroring the acceptance funnel's posture).
+    /// </summary>
+    private async Task<BenchmarkGrade> CaptureEvidenceAsync(BenchmarkGrade grade, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (grade.EvidenceText is not { Length: > 0 } text) return grade;
+
+        try
+        {
+            var id = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(text), "text/plain", cancellationToken).ConfigureAwait(false);
+            return grade with { EvidenceText = null, EvidenceArtifactId = id };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Benchmark evidence store failed; the verdict stands evidence-less");
+            return grade with { EvidenceText = null };
+        }
     }
 
     /// <summary>Grade the finished run with the task's oracle, against the post-run workspace, on the same runner kind the agent ran on. The grader is independent of the agent (it re-runs the repo's tests).</summary>

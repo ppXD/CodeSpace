@@ -50,6 +50,10 @@ public sealed class BenchmarkRunnerFlowTests
 
         result.RunStatus.ShouldBe(AgentRunStatus.Succeeded, "the fake CLI exits 0, so the run completes");
         result.Grade.Passed.ShouldBeTrue("the post-run check exits 0 → the objective oracle grades it solved");
+
+        // P4-U5 (L6 — the benchmark joins the spine's evidence law): the verdict is auditable bytes in CAS.
+        result.Grade.EvidenceArtifactId.ShouldNotBeNull("a benchmark verdict without evidence is prose, not a fact");
+        result.Grade.EvidenceText.ShouldBeNull("the transient text never persists past capture — same posture as the acceptance funnel");
         result.Grade.Detail.ShouldBe("tests-passed");
 
         await AssertRealRunRecordedAsync(result, teamId);
