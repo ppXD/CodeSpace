@@ -209,6 +209,7 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
             HadOrderlyTerminal = decisions.Count == 0 || lastStop is not null,
             ForcedStopReason = classification?.Kind == SupervisorStopKind.Forced ? classification.Reason ?? "forced stop" : null,
             SelfReportedGiveUp = classification?.Kind == SupervisorStopKind.GaveUp,
+            SelfReportedAbstention = classification?.Kind == SupervisorStopKind.NeedsClarification,
         };
     }
 

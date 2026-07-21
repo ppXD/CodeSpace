@@ -187,7 +187,7 @@ public static class SupervisorDecisionSchema
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "outcome": { "type": "string", "description": "Terminal outcome label (e.g. 'completed', 'failed', 'abandoned')." },
+                "outcome": { "type": "string", "description": "Terminal outcome label (e.g. 'completed', 'failed', 'abandoned'). Use 'needs_clarification' when ONLY THE USER can unblock you (an ambiguous goal, a missing credential/decision) — state the exact question in summary. An honest ask is never punished as a failure; a guessed attempt that fails IS. Never use it to dodge work you could verify yourself." },
                 "summary": { "type": "string", "description": "Short summary of what the supervisor accomplished." },
                 "acceptance": {
                   "type": "object",

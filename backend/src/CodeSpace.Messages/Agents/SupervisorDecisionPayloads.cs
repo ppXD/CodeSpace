@@ -205,6 +205,10 @@ public sealed record SupervisorStopPayload
     public static bool IsSuccessOutcome(string? outcome) =>
         outcome?.Trim().ToLowerInvariant() is "completed" or "complete" or "success" or "succeeded" or "done" or "ok";
 
+    /// <summary>P5-1: the model's honest ABSTENTION label — it stopped with a question only the user can answer. Recognized exactly (never fuzzy) so an unknown label still fail-closes to give-up.</summary>
+    public static bool IsClarificationOutcome(string? outcome) =>
+        outcome?.Trim().ToLowerInvariant() is "needs_clarification" or "needs-clarification" or "needsclarification";
+
     public required string Outcome { get; init; }
 
     public string Summary { get; init; } = "";

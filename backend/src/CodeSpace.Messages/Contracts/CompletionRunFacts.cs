@@ -30,4 +30,7 @@ public sealed record CompletionRunFacts
     /// (believing "I failed" can never inflate a metric).
     /// </summary>
     public bool SelfReportedGiveUp { get; init; }
+
+    /// <summary>P5-1: the model stopped WITH A QUESTION only the user can answer — the honest abstention; the outcome reads Abstained (no objective claim in either direction), never Solved and never a punished Unsolved.</summary>
+    public bool SelfReportedAbstention { get; init; }
 }

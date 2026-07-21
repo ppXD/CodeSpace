@@ -157,9 +157,14 @@ public static class SupervisorOutcome
         var summary = ReadStopSummary(outcomeJson);
 
         if (!string.IsNullOrWhiteSpace(outcome))
+        {
+            if (SupervisorStopPayload.IsClarificationOutcome(outcome))
+                return new SupervisorStopClassification { Kind = SupervisorStopKind.NeedsClarification, Summary = summary, Reason = outcome };
+
             return SupervisorStopPayload.IsSuccessOutcome(outcome)
                 ? new SupervisorStopClassification { Kind = SupervisorStopKind.Succeeded, Summary = summary }
                 : new SupervisorStopClassification { Kind = SupervisorStopKind.GaveUp, Summary = summary, Reason = outcome };
+        }
 
         var reason = ReadStopReason(payloadJson);
 
