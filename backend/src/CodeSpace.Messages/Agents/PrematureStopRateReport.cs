@@ -21,6 +21,9 @@ public enum RunOutcomeBucket
 
     /// <summary>The run has not yet reached any terminal state (Pending/Enqueued/Running/Suspended) — reported separately, never silently excluded nor folded into either the numerator or the settled denominator.</summary>
     StillInProgress,
+
+    /// <summary>P5-1b: the model stopped WITH A QUESTION (an honest abstention) — not a stability failure and not a success; its own bucket so the ABSTENTION RATE is measurable (the calibration metric: too high = under-confident/dodging, creeping up = regression).</summary>
+    NeedsClarification,
 }
 
 /// <summary>
@@ -39,11 +42,14 @@ public sealed record PrematureStopRateReport
     public int CancelledRuns { get; init; }
     public int StillInProgressRuns { get; init; }
 
+    /// <summary>P5-1b: honest abstentions (the model asked instead of attempting) — excluded from the degraded numerator, visible so over-asking can never hide.</summary>
+    public int NeedsClarificationRuns { get; init; }
+
     /// <summary>The subset of <see cref="StillInProgressRuns"/> that has been active longer than the stuck threshold (<c>PrematureStopRateService.StuckThresholdHoursEnvVar</c>) — surfaced LOUDLY rather than left invisible inside "still in progress".</summary>
     public int StuckRuns { get; init; }
 
     /// <summary>Succeeded + Degraded + Cancelled — INFORMATIONAL: how many runs reached SOME conclusion (of any kind) vs. are still in flight. NOT the rate's own denominator (see <see cref="PrematureStopRate"/>) — a deliberate operator Cancel settles the run but is not a stability outcome.</summary>
-    public int SettledRuns => SucceededRuns + DegradedRuns + CancelledRuns;
+    public int SettledRuns => SucceededRuns + DegradedRuns + CancelledRuns + NeedsClarificationRuns;
 
     /// <summary>Degraded / (Succeeded + Degraded) — the north-star figure. A deliberate operator Cancel is excluded from BOTH halves: it measures user behavior, not system stability, and folding it in would dilute the rate with noise unrelated to "did the system keep the run alive." Null when there is nothing settled yet to divide over (never a misleading 0%).</summary>
     public double? PrematureStopRate => SucceededRuns + DegradedRuns == 0 ? null : (double)DegradedRuns / (SucceededRuns + DegradedRuns);

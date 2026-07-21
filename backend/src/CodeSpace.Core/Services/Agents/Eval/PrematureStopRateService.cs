@@ -83,6 +83,7 @@ public sealed class PrematureStopRateService : IPrematureStopRateService, IScope
             SucceededRuns = buckets.Count(b => b == RunOutcomeBucket.Succeeded),
             DegradedRuns = buckets.Count(b => b == RunOutcomeBucket.Degraded),
             CancelledRuns = buckets.Count(b => b == RunOutcomeBucket.Cancelled),
+            NeedsClarificationRuns = buckets.Count(b => b == RunOutcomeBucket.NeedsClarification),
             StillInProgressRuns = stillInProgress.Count,
             StuckRuns = stuck,
         };
@@ -100,6 +101,11 @@ public sealed class PrematureStopRateService : IPrematureStopRateService, IScope
             if (lastStopByRun.TryGetValue(run.Id, out var stop))
             {
                 var kind = SupervisorOutcome.ClassifyStop(stop.PayloadJson, stop.OutcomeJson).Kind;
+
+                // P5-1b: an honest ask is neither a success nor a stability failure — its own bucket, so the
+                // abstention rate is measurable and the degraded numerator stays a pure stability signal.
+                if (kind == SupervisorStopKind.NeedsClarification) return RunOutcomeBucket.NeedsClarification;
+
                 return kind == SupervisorStopKind.Succeeded ? RunOutcomeBucket.Succeeded : RunOutcomeBucket.Degraded;
             }
 
