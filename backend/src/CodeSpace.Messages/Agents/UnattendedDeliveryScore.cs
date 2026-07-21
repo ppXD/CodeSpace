@@ -79,6 +79,15 @@ public sealed record UnattendedDeliveryRollup
 
     /// <summary>Currently-SUSPENDED runs created in the window — the parked population the terminal denominator cannot see. Surfaced so a park-heavy period can never silently flatter the rates.</summary>
     public int SuspendedRuns { get; init; }
+
+    /// <summary>P4-U4 (dual-read parity dashboard): contract-era runs in the window that HAVE a durable shadow assessment row — the population the two columns below are over.</summary>
+    public int AssessedRuns { get; init; }
+
+    /// <summary>Assessed runs whose LATEST assessment reads Outcome=Solved — the assessment-based solve count BESIDE the legacy ladder's <see cref="SolvedRuns"/>. The standing consumer-switch delta is the difference between the two over the same window; the primary rates above still read the LEGACY ladder until the P2b switch is argued on this very evidence.</summary>
+    public int AssessmentSolvedRuns { get; init; }
+
+    /// <summary>Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock Clause 5). The Enforced-era north-star numerator, visible while nothing is enforced yet.</summary>
+    public int WouldBeCleanSuccessRuns { get; init; }
 }
 
 /// <summary>The team's unattended-delivery scorecard — the cross-run north-star roll-up plus recent per-run scores. The north-star-metric analogue of <see cref="SupervisorScorecard"/> / <see cref="AgentRunScorecard"/>.</summary>

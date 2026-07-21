@@ -53,6 +53,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         if (runs.Count == 0) return Empty() with { Rollup = Empty().Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns } };
 
         var runIds = runs.Select(r => r.Id).ToList();
+        var (assessedRuns, assessmentSolvedRuns, wouldBeCleanSuccessRuns) = await AssessmentColumnsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
 
         var manifestsByRun = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var touchesByRun = await _humanTouches.CountByWorkflowRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
@@ -65,7 +66,28 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
 
         var card = UnattendedDeliveryScorer.Compute(outcomes);
 
-        return card with { Rollup = card.Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns } };
+        return card with { Rollup = card.Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns, AssessedRuns = assessedRuns, AssessmentSolvedRuns = assessmentSolvedRuns, WouldBeCleanSuccessRuns = wouldBeCleanSuccessRuns } };
+    }
+
+    /// <summary>
+    /// P4-U4 (dual-read parity dashboard): the assessment-based columns BESIDE the legacy ladder — each windowed
+    /// run's LATEST shadow assessment row gives Outcome and the would-be terminal. Report-only: nothing here
+    /// touches the primary rates, so the consumer switch stays an explicit P2b decision argued on exactly this
+    /// standing evidence (never an invisible metric shift).
+    /// </summary>
+    private async Task<(int Assessed, int AssessmentSolved, int WouldBeCleanSuccess)> AssessmentColumnsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
+    {
+        var rows = await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.TeamId == teamId && runIds.Contains(a.WorkflowRunId))
+            .OrderBy(a => a.CreatedDate)
+            .Select(a => new { a.WorkflowRunId, a.Outcome, a.WouldBeTerminalDecision, a.CreatedDate })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var latest = rows.GroupBy(a => a.WorkflowRunId).Select(g => g.Last()).ToList();
+
+        return (latest.Count,
+            latest.Count(a => a.Outcome == nameof(Messages.Contracts.OutcomeDisposition.Solved)),
+            latest.Count(a => a.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess)));
     }
 
     /// <summary>

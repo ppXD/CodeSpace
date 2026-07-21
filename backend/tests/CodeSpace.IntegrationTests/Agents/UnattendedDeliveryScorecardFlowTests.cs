@@ -183,6 +183,43 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
+    public async Task The_assessment_columns_ride_beside_the_legacy_ladder_without_touching_it()
+    {
+        // P4-U4 dual-read parity dashboard: the assessment-based counts sit BESIDE the legacy rates — the
+        // standing consumer-switch evidence. Three contract-era runs: one assessed Solved+CleanSuccess, one
+        // assessed Unsolved (the legacy ladder still reads it Solved — THE delta, visible), one not yet swept.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var clean = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var inflated = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var unswept = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        await SeedManifestAsync(teamId, clean, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedManifestAsync(teamId, inflated, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedManifestAsync(teamId, unswept, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedAssessmentAsync(teamId, clean, outcome: "Solved", wouldBe: "CleanSuccess");
+        await SeedAssessmentAsync(teamId, inflated, outcome: "Unsolved", wouldBe: "HonestFailure");
+
+        var card = await ComputeAsync(teamId);
+
+        card.Rollup.AssessedRuns.ShouldBe(2, "only runs with a durable shadow row are in the assessment columns");
+        card.Rollup.AssessmentSolvedRuns.ShouldBe(1);
+        card.Rollup.WouldBeCleanSuccessRuns.ShouldBe(1);
+        card.Rollup.SolvedRuns.ShouldBe(3, "the LEGACY ladder is untouched — the delta between the columns IS the consumer-switch evidence, never an invisible metric shift");
+    }
+
+    private async Task SeedAssessmentAsync(Guid teamId, Guid runId, string outcome, string wouldBe)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.CompletionAssessmentRecord.Add(new CodeSpace.Core.Persistence.Entities.CompletionAssessmentRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId,
+            EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = outcome, Verification = "Passed",
+            AssessmentJson = "{}", LegacyIsSolved = true, WouldBeTerminalDecision = wouldBe,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
     public async Task The_parked_population_is_surfaced_beside_the_terminal_denominator()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
