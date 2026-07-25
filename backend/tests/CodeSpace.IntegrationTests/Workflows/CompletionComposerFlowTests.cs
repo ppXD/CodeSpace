@@ -100,6 +100,78 @@ public sealed class CompletionComposerFlowTests
         delivery.EvidenceRef.ShouldNotBeNull("the manifest snapshot is CAS evidence — a required delivery Passed without evidence would be capped at admission");
     }
 
+    // ── P5-6: the MID-RUN "if you stopped now" hypothetical ───────────────────────────
+
+    [Fact]
+    public async Task A_running_run_composes_the_stopped_now_verdict_without_touching_anything_terminal()
+    {
+        // The same graded tape as the terminal test, but the run is still RUNNING and no stop decision exists —
+        // the hypothetical synthesizes the clean-stop world (orderly terminal, no forced/give-up) and reads the
+        // reducer's verdict on the facts so far. Write-throughs land the same exactly-once receipt rows a
+        // terminal compose would, just earlier; the run row itself is never touched.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+        var attemptId = Guid.NewGuid();
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""",
+            $$"""{"planned":[],"count":1,"workPlanId":"{{Guid.NewGuid()}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", producedBranch = "codespace/agent/s1" } } }));
+        await SeedManifestAsync(teamId, attemptId, baseSha: "b1", commitSha: "c1");
+
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<ICompletionContractStore>();
+        await store.UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            new RequirementEnvelope { RequirementRef = "delivery:s1", Kind = ContractKinds.Delivery, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+
+        var composer = scope.Resolve<ICompletionAssessmentComposer>();
+
+        var whatIf = await composer.ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+
+        whatIf.ShouldNotBeNull("a contract-bearing post-F0 run has a reducer verdict to recite mid-run");
+        whatIf!.Assessment.Verification.ShouldBe(VerificationDisposition.Failed, "the folded FAILED grade reaches the hypothetical through the full chain");
+        whatIf.Assessment.Outcome.ShouldBe(OutcomeDisposition.Unsolved, "stopping now cannot read Solved over a failing oracle");
+        whatIf.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered, "the Pushed manifest already settled the staked delivery");
+        whatIf.Assessment.Execution.ShouldBe(ExecutionDisposition.Completed, "the hypothetical IS a clean stop — the missing-stop degradation must not leak into the what-if");
+
+        (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Running, "the hypothetical composes and records receipts, never a terminal (Lock Clause 1)");
+
+        // The bridge is exactly-once across hypothetical AND terminal composes — the mid-run rows are the rows.
+        var receiptsAfterWhatIf = (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count;
+        await composer.ComposeAsync(runId, teamId, WorkflowRunStatus.Success, CancellationToken.None);
+        (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
+            .ShouldBe(receiptsAfterWhatIf, "a later terminal-boundary compose lands on the SAME rows the hypothetical wrote");
+    }
+
+    [Fact]
+    public async Task A_contract_less_run_composes_no_stopped_now_verdict()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+
+        using var scope = _fixture.BeginScope();
+
+        (await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None))
+            .ShouldBeNull("no staked requirements → nothing to recite, and the common contract-less run pays one indexed read");
+    }
+
+    [Fact]
+    public async Task A_pre_protocol_run_composes_no_stopped_now_verdict()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: false, WorkflowRunStatus.Running);
+
+        using var scope = _fixture.BeginScope();
+
+        (await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None))
+            .ShouldBeNull("a LegacyUnknown run has no contract-derived verdict — the recital never fabricates one");
+    }
+
     [Fact]
     public async Task A_patch_only_manifest_settles_the_staked_delivery_as_policy_blocked()
     {

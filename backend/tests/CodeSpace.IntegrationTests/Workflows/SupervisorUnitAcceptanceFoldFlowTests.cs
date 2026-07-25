@@ -101,6 +101,59 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedTail, "the tail is PERSISTED on the durable spawn row — replay renders the same diagnosis without re-grading");
     }
 
+    // ── P5-6: the rehydrated context carries the "if you stopped now" recital ─────────────────────────
+
+    [Fact]
+    public async Task A_contract_bearing_run_rehydrates_with_the_stopped_now_recital()
+    {
+        // The full mid-run chain over real Postgres: staked requirement + a fold that grades FAILED → the
+        // rehydrated context's prerendered recital says a stop now cannot read Solved. The compose runs AFTER
+        // the fold persisted its verdict, so the recital always reflects THIS turn's freshest facts.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        using (var stamp = _fixture.BeginScope())
+        {
+            var db = stamp.Resolve<CodeSpaceDbContext>();
+            var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+            run.CompletionPolicyVersion = Core.Services.Completion.CompletionPolicy.CurrentVersion;
+            run.CompletionEnforcementMode = Core.Services.Completion.CompletionPolicy.CurrentMode.ToString();
+            await db.SaveChangesAsync();
+
+            await stamp.Resolve<Core.Services.Completion.ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+            {
+                new Messages.Contracts.RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = Messages.Contracts.ContractKinds.Acceptance, Requiredness = Messages.Contracts.Requiredness.Required, Authority = Messages.Contracts.ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            }, CancellationToken.None);
+        }
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        ctx.CompletionRecital.ShouldNotBeNull("a contract-bearing post-F0 run recites the reducer's what-if to the decider");
+        ctx.CompletionRecital!.ShouldContain("IF YOU STOPPED NOW", Case.Sensitive);
+        ctx.CompletionRecital.ShouldContain("verification=Failed", Case.Sensitive, "the just-folded FAILED grade reached the recital in the same rehydrate");
+        ctx.CompletionRecital.ShouldContain("cannot read Solved", Case.Sensitive);
+    }
+
+    [Fact]
+    public async Task A_run_without_a_stamped_policy_rehydrates_without_a_recital()
+    {
+        // The chassis's default run has no CompletionPolicyVersion (pre-F0 shape) — the recital must stay null
+        // and every pre-existing rehydrate in this file stays byte-identical.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1" }));
+
+        ctx.CompletionRecital.ShouldBeNull("LegacyUnknown runs recite nothing — the recital never fabricates a contract verdict");
+    }
+
     // ── P4-1: the per-unit fold's contradiction classification (both directions + agreement) ──────────
 
     [Fact]
@@ -787,7 +840,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
+        scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }

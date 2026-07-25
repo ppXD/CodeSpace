@@ -198,6 +198,9 @@ public sealed record SupervisorTurnContext
     /// <summary>S2 (G1) — the repository's top-level grounding summary, listed at this run's immutable base pin (S1), fetched by the decider once per turn and folded into its prompt so the brain plans over the SAME tree every spawned agent materializes. Null = no repo / grounding unavailable (fail-soft — the prompt simply omits the section).</summary>
     public string? RepoGrounding { get; init; }
 
+    /// <summary>P5-6 — the PRERENDERED "if you stopped now" contract recital: the completion reducer's own verdict on the facts so far, composed at rehydrate (the DB-reading step) so the prompt build stays pure. Null = contract-less / pre-F0 run, or the compose degraded (fail-soft — the prompt simply omits the block).</summary>
+    public string? CompletionRecital { get; init; }
+
     /// <summary>
     /// The PENDING decisions this run's CHILD agent runs raised and are blocked on (Decision substrate D4c-2), read off
     /// the cross-grain queue on rehydrate (soonest-deadline first). The arbiter drains these BEFORE the decider each turn:

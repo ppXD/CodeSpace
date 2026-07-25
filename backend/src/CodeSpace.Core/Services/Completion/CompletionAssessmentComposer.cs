@@ -20,6 +20,17 @@ public interface ICompletionAssessmentComposer
 
     /// <summary>P2b-1: compose AT THE TERMINAL BOUNDARY — the engine has decided <paramref name="assumeTerminalStatus"/> but not yet written it, so the run row still reads Running. Same chain, the assumed status standing in for the not-yet-written fact.</summary>
     Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus assumeTerminalStatus, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// P5-6: compose the assessment the reducer WOULD reach if the model stopped CLEANLY right now — the same
+    /// chain with the facts synthesized as an orderly clean stop (Success + orderly terminal, no forced/give-up/
+    /// abstention), so a MID-RUN decider can see its contract through the reducer's own eyes before choosing
+    /// stop/merge/retry. Null for an absent/foreign run, a pre-F0 (LegacyUnknown) run, or a run with NO staked
+    /// requirements — the recital exists only where a contract does. The write-through receipt bridges fire
+    /// exactly as at terminal (facts-derived, exactly-once — a mid-run compose lands the same rows a terminal
+    /// re-compose would, just earlier; P3's native producers make that timing the norm).
+    /// </summary>
+    Task<ComposedAssessment?> ComposeIfStoppedNowAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -51,12 +62,15 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
     }
 
     public Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
-        ComposeAsync(workflowRunId, teamId, assumeTerminalStatus: null, cancellationToken);
+        ComposeAsync(workflowRunId, teamId, assumeTerminalStatus: null, hypotheticalCleanStop: false, cancellationToken);
 
     public Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus assumeTerminalStatus, CancellationToken cancellationToken) =>
-        ComposeAsync(workflowRunId, teamId, (WorkflowRunStatus?)assumeTerminalStatus, cancellationToken);
+        ComposeAsync(workflowRunId, teamId, (WorkflowRunStatus?)assumeTerminalStatus, hypotheticalCleanStop: false, cancellationToken);
 
-    private async Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus? assumeTerminalStatus, CancellationToken cancellationToken)
+    public Task<ComposedAssessment?> ComposeIfStoppedNowAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
+        ComposeAsync(workflowRunId, teamId, WorkflowRunStatus.Success, hypotheticalCleanStop: true, cancellationToken);
+
+    private async Task<ComposedAssessment?> ComposeAsync(Guid workflowRunId, Guid teamId, WorkflowRunStatus? assumeTerminalStatus, bool hypotheticalCleanStop, CancellationToken cancellationToken)
     {
         var run = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == workflowRunId && r.TeamId == teamId)
@@ -69,12 +83,33 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         if (status is not (WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)) return null;
 
+        // P5-6: the hypothetical exists only where a contract does — a pre-F0 run has no reducer content to
+        // recite, and the mid-run caller must stay cheap for the common contract-less run (one indexed read,
+        // no projections and no bridges).
+        if (hypotheticalCleanStop && CompletionPolicy.BasisFor(run.CompletionPolicyVersion) == CompletionBasis.LegacyUnknown) return null;
+
         var mode = CompletionPolicy.ModeFor(run.CompletionEnforcementMode);
+
+        // The hypothetical gates on the contract EXISTING before paying for projections and bridges (the common
+        // contract-less run costs one indexed read); every other path loads requirements at its original point,
+        // AFTER the legacy branch, so a LegacyUnknown terminal compose pays exactly what it always paid.
+        var requirements = hypotheticalCleanStop ? await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false) : null;
+
+        if (hypotheticalCleanStop && requirements!.Count == 0) return null;
+
         var decisions = await LoadDecisionsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
-        var facts = BuildFacts(status, decisions);
+
+        // The hypothetical's facts are the CLEAN-STOP-NOW world: had the model chosen an orderly stop this turn,
+        // the tape WOULD carry a terminal stop decision — so the missing-stop degradation (and any stale forced/
+        // give-up classification) must not leak into the what-if verdict. Everything else reads the real tape.
+        var facts = hypotheticalCleanStop
+            ? BuildFacts(WorkflowRunStatus.Success, decisions) with { HadOrderlyTerminal = true, ForcedStopReason = null, SelfReportedGiveUp = false, SelfReportedAbstention = false }
+            : BuildFacts(status, decisions);
 
         if (CompletionPolicy.BasisFor(run.CompletionPolicyVersion) == CompletionBasis.LegacyUnknown)
             return new ComposedAssessment(CompletionReducer.ReduceLegacy(facts), mode, Array.Empty<ReceiptRejection>(), Array.Empty<string>());
+
+        requirements ??= await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         var lane = decisions.Count == 0 ? await ProjectWorkflowAgentsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false) : null;
         var projection = lane is null ? SupervisorAttemptAdapter.Project(decisions, await StampedWorkUnitsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false)) : null;
@@ -85,8 +120,6 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
             await WriteThroughWorkflowAgentReceiptsAsync(workflowRunId, teamId, lane, cancellationToken).ConfigureAwait(false);
         else
             await WriteThroughGradedReceiptsAsync(workflowRunId, teamId, decisions, attempts, cancellationToken).ConfigureAwait(false);
-
-        var requirements = await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         await WriteThroughDeliveryReceiptsAsync(workflowRunId, teamId, requirements, attempts, cancellationToken).ConfigureAwait(false);
 
