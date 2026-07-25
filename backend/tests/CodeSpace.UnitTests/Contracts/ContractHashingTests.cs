@@ -118,13 +118,17 @@ public class ContractHashingTests
         SupervisorUnitContract.OwesDelivery(Planned("do it") with { ExpectsChanges = expectsChanges }).ShouldBe(owes);
     }
 
-    [Fact]
-    public void The_staked_obligation_table_covers_every_unit_and_every_stage()
+    [Theory]
+    [InlineData(ContractAuthority.ModelProposal)]   // supervisor lane: the plan-author model wrote the spec
+    [InlineData(ContractAuthority.Operator)]        // quick tier (P5-4): the operator's launch argv floor
+    public void The_staked_obligation_table_covers_every_unit_and_every_stage(ContractAuthority requiredAuthority)
     {
         // P2b-2 (Lock Clause 4): every contracted unit stakes ALL THREE stages — a change-expecting unit stakes
         // them Required; a declared read-only unit stakes delivery/output ServerPolicy-AUTHORIZED-NotApplicable
-        // (explicitly authorized off, never silently absent).
-        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true), ("r", "h2", false) });
+        // (explicitly authorized off, never silently absent). P5-4: the REQUIRED rows record the caller-declared
+        // provenance; the NA rows stay ServerPolicy REGARDLESS — the exemption is the server's policy whoever
+        // authored the contract.
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true), ("r", "h2", false) }, requiredAuthority);
 
         rows.Count.ShouldBe(6);
         rows.ShouldAllBe(r => r.SpecHash == (r.RequirementRef.EndsWith(":w") ? "h1" : "h2"));
@@ -134,6 +138,9 @@ public class ContractHashingTests
         rows.Single(r => r.RequirementRef == "output:w").Requiredness.ShouldBe(Requiredness.Required);
 
         rows.Single(r => r.RequirementRef == "acceptance:r").Requiredness.ShouldBe(Requiredness.Required, "read-only work still owes its acceptance oracle");
+
+        rows.Where(r => r.Requiredness == Requiredness.Required)
+            .ShouldAllBe(r => r.Authority == requiredAuthority, "the Required rows record WHO authored the contract — the lane the caller knows");
 
         foreach (var na in new[] { rows.Single(r => r.RequirementRef == "delivery:r"), rows.Single(r => r.RequirementRef == "output:r") })
         {

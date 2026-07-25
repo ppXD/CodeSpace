@@ -41,7 +41,10 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
         new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
 
         new() { Id = "agent", TypeKey = "agent.run", Label = "Run the task", Retry = AgentNodeMapping.DefaultRetry,
-                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                // P5-4: the quick tier's acceptance IS the operator's launch argv floor — stamp its provenance so
+                // the staked requirement rows record Operator authority, not the ModelProposal default.
+                Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria,
+                                                           acceptanceAuthority: QuickAcceptance(context) is null ? null : nameof(Messages.Contracts.ContractAuthority.Operator)), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
                 Inputs = TerminalInputs(IsMultiRepo(context)) },

@@ -27,28 +27,33 @@ public static class SupervisorUnitContract
     /// delivery/output REQUIRED; a declared read-only unit stakes them ServerPolicy-AUTHORIZED-NotApplicable
     /// (Lock Clause 4: the stage is explicitly authorized off, never silently absent — the model DECLARED the
     /// read-only fact, the SERVER's policy authorizes the exemption, so the rows carry ServerPolicy authority).
+    /// P5-4: the REQUIRED rows record WHO authored the contract — <paramref name="requiredAuthority"/> from the
+    /// caller that knows the lane (a supervisor plan subtask's spec is the model's → ModelProposal; the quick
+    /// tier's spec is the operator's launch argv floor → Operator). Provenance only today (no reducer/admission
+    /// rule keys on a Required row's authority), but the spec-compiler arc builds on it recording honestly. The
+    /// NA rows stay ServerPolicy regardless — the EXEMPTION is the server's policy whoever authored the contract.
     /// Pure so the whole table pins without a database.
     /// </summary>
-    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units)
+    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units, Messages.Contracts.ContractAuthority requiredAuthority)
     {
         var requirements = new List<Messages.Contracts.RequirementEnvelope>();
 
         foreach (var (subtaskId, contractHash, owesDelivery) in units)
         {
-            requirements.Add(Stake($"acceptance:{subtaskId}", Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true));
-            requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery));
-            requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery));
+            requirements.Add(Stake($"acceptance:{subtaskId}", Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true, requiredAuthority));
+            requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery, requiredAuthority));
+            requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery, requiredAuthority));
         }
 
         return requirements;
     }
 
-    private static Messages.Contracts.RequirementEnvelope Stake(string requirementRef, string kind, string contractHash, bool required) => new()
+    private static Messages.Contracts.RequirementEnvelope Stake(string requirementRef, string kind, string contractHash, bool required, Messages.Contracts.ContractAuthority requiredAuthority) => new()
     {
         RequirementRef = requirementRef,
         Kind = kind,
         Requiredness = required ? Messages.Contracts.Requiredness.Required : Messages.Contracts.Requiredness.ServerPolicyAuthorizedNotApplicable,
-        Authority = required ? Messages.Contracts.ContractAuthority.ModelProposal : Messages.Contracts.ContractAuthority.ServerPolicy,
+        Authority = required ? requiredAuthority : Messages.Contracts.ContractAuthority.ServerPolicy,
         SpecHash = contractHash,
         ContractSchemaVersion = "1",
     };
