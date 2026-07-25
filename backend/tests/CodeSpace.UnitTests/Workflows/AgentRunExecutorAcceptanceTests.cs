@@ -85,8 +85,9 @@ public class AgentRunExecutorAcceptanceTests
     [Fact]
     public async Task A_multi_repo_result_fails_closed_when_any_one_repo_fails_its_check()
     {
+        var evidenceId = Guid.NewGuid();
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
-        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = false, Detail = "exit 1" };
+        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = false, Detail = "exit 1", EvidenceArtifactId = evidenceId };
 
         var multi = Succeeded() with
         {
@@ -103,6 +104,7 @@ public class AgentRunExecutorAcceptanceTests
         result.ExitReason.ShouldBe("acceptance-failed");
         result.AcceptancePassed.ShouldBe(false);
         result.AcceptanceDetail.ShouldBe("repo 'api': exit 1", "the failing repo's alias is named so the failure is diagnosable");
+        result.AcceptanceEvidenceId.ShouldBe(evidenceId, "P5-2: the failing repo's evidence binding survives the aggregate (mirroring the single-repo fail path and the supervisor twin)");
     }
 
     [Fact]

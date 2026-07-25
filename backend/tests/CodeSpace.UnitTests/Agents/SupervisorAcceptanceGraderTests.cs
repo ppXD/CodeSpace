@@ -501,7 +501,8 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v1");
+        // v2 (P5-2): evidence capture emits the inline tail + multi-repo failure receipts gain EvidenceRef.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v2");
     }
 
     [Fact]

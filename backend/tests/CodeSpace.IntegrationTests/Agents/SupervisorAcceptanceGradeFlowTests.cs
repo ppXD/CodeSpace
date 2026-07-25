@@ -51,6 +51,14 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         var fail = await GradeAsync(repoId, teamId, "acc/fail");
         fail.Passed.ShouldBeFalse("the cloned branch's check exits 1 → not accepted, by the branch's own tests not any self-report");
         fail.Detail.ShouldBe("tests-failed-exit-1");
+
+        // P5-2 (diagnosis-driven repair), the REAL-bytes chain: TestsPassGrader's evidence → the capture funnel
+        // clips the inline tail AND offloads the full text to CAS — the tail is what the decider's render and the
+        // retry handoff show, so it must carry the actual oracle output, not a reconstruction.
+        fail.EvidenceTail.ShouldNotBeNull("a failing check's bounded output stays inline for the repair loop");
+        fail.EvidenceTail!.ShouldContain("exit=1", customMessage: "the tail is the oracle run's own output (command header + exit + stream tails)");
+        fail.EvidenceArtifactId.ShouldNotBeNull("the FULL text still offloads to CAS for the receipt's evidence binding");
+        fail.EvidenceText.ShouldBeNull("the transient text never leaks past capture — only the bounded tail rides inline");
     }
 
     [Fact]

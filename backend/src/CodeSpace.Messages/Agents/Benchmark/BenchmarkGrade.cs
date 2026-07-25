@@ -44,4 +44,15 @@ public sealed record BenchmarkGrade
     /// <summary>The CAS id of the oracle run's captured output — what a receipt's <c>EvidenceRef</c> binds to (a required contract's verdict without evidence is at most InfraUnknown once admission batch 2 lands).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? EvidenceArtifactId { get; init; }
+
+    /// <summary>
+    /// P5-2: the BOUNDED trailing slice of <see cref="EvidenceText"/>, kept INLINE when the full text offloads to
+    /// CAS — the diagnosis a repair consumer (the decider's verdict render, a retried agent's handoff) can show
+    /// without an artifact-store resolve. Clipped at capture by the funnel that offloads (the failure lives at the
+    /// END of oracle output, same convention as the grader's own tails); survives even when the CAS store faults
+    /// (the receipt degrades to evidence-less, the diagnosis does not). Null on a pass-through arm that never
+    /// captured, and on every pre-P5-2 grade.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EvidenceTail { get; init; }
 }

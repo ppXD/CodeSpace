@@ -1332,7 +1332,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (!grade.Passed)
             {
                 _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED for repo '{Alias}' ({Detail}) — re-grading the run to Failed", run.Id, target.Alias, grade.Detail);
-                return AcceptanceFailed(result, $"repo '{target.Alias}': {grade.Detail}");
+                // P5-2: carry the failing repo's evidence binding, mirroring the single-repo fail path above and the
+                // supervisor twin's aggregate — without it this lane's multi-repo failure receipts stay evidence-less.
+                return AcceptanceFailed(result, $"repo '{target.Alias}': {grade.Detail}") with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
             }
         }
 

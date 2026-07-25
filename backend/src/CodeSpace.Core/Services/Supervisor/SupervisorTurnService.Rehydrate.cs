@@ -570,6 +570,9 @@ public sealed partial class SupervisorTurnService
                 AcceptancePassed = grade.Passed,
                 AcceptanceDetail = grade.Detail,
                 AcceptanceEvidenceId = grade.EvidenceArtifactId,
+                // P5-2: the diagnosis rides the tape ONLY on failure — a pass has nothing to repair, and the
+                // common green wave must not pay the tail's tape/prompt cost.
+                AcceptanceEvidenceTail = grade.Passed ? null : grade.EvidenceTail,
                 BaselinePassed = baseline?.Passed,
                 BaselineDetail = baseline?.Detail,
                 // P4-1: unlike the single-agent lane (which only ever grades a would-be Succeeded result), THIS fold
@@ -735,9 +738,17 @@ public sealed partial class SupervisorTurnService
                 return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
             }
 
-            if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': {grade.Detail}" };
+            // P5-2: re-emit the failing repo's grade via `with` (only the detail gains the repo tag) so its Class,
+            // EvidenceArtifactId, and EvidenceTail survive the aggregate — previously rebuilt from scratch, which
+            // dropped the typed class AND left every multi-repo failure's receipt evidence-less. Classification
+            // sees through the tag (AgentAcceptanceContract.StripRepoTag).
+            if (!grade.Passed) return grade with { Detail = $"repo '{target.Alias}': {grade.Detail}" };
         }
 
+        // KNOWN scope trim (P5-2): the PASS aggregate spans N repos' grades and a single grade carries ONE evidence
+        // id, so a multi-repo PASS still emits evidence-less — which admission caps at InfraUnknown on a Required
+        // contract. Per-target receipts (P3's native producer) are the structural fix; do not fake one repo's
+        // evidence as the aggregate's.
         return new BenchmarkGrade { Passed = true, Detail = "accepted" };
     }
 

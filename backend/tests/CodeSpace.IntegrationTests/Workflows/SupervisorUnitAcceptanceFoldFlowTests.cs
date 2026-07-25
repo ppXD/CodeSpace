@@ -74,6 +74,33 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
     }
 
+    // ── P5-2 (diagnosis-driven repair): the failed check's OUTPUT TAIL rides the tape ─────────────────
+
+    [Theory]
+    [InlineData(false, "exit=1\nFAILED Foo.Bar: expected 42")]  // failed → the diagnosis folds onto the unit + persists
+    [InlineData(true, null)]                                    // passed → nothing to repair, the tail is dropped (lean tape)
+    public async Task A_failed_grades_evidence_tail_rides_the_tape_and_a_pass_stamps_none(bool gradePasses, string? expectedTail)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade
+        {
+            Passed = gradePasses, Detail = gradePasses ? "tests-passed" : "tests-failed-exit-1",
+            EvidenceTail = "exit=1\nFAILED Foo.Bar: expected 42",
+        });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        var folded = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        folded.AcceptanceEvidenceTail.ShouldBe(expectedTail, "the diagnosis rides the tape ONLY on failure — the decider's render and the retry handoff both read it from here");
+
+        SupervisorOutcome.ReadAgentResults(await LedgerSpawnOutcomeAsync(runId, teamId)).Single().AcceptanceEvidenceTail
+            .ShouldBe(expectedTail, "the tail is PERSISTED on the durable spawn row — replay renders the same diagnosis without re-grading");
+    }
+
     // ── P4-1: the per-unit fold's contradiction classification (both directions + agreement) ──────────
 
     [Fact]
@@ -561,6 +588,42 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         grader.CallCount.ShouldBe(1, "the FIRST repo's failure short-circuits — api is never even cloned");
         SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson)
             .Single().AcceptancePassed.ShouldBe(false, "ANY repo failing rejects the whole unit — a multi-repo change is all-or-nothing");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_failure_keeps_the_failing_repos_class_evidence_and_tail_under_the_repo_tag()
+    {
+        // P5-2: the failing repo's grade re-emits via `with` — before this, the aggregate REBUILT the grade and
+        // silently dropped the typed Class, the CAS evidence id, AND the tail, leaving every multi-repo failure's
+        // receipt evidence-less and its repair loop blind.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var evidenceId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var multiRepoUnit = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "web/x",
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+                new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), ProducedBranch = "api/x", BaseBranch = "main", Access = WorkspaceAccess.Write },
+            },
+        };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(multiRepoUnit));
+
+        var grader = new RecordingGrader(branch => new BenchmarkGrade
+        {
+            Passed = false, Detail = "tests-failed-exit-1", Class = GradeFailureClass.Genuine,
+            EvidenceArtifactId = evidenceId, EvidenceTail = "exit=1\nFAILED Web.Smoke",
+        });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(Guid.NewGuid()), grader);
+
+        var folded = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+
+        folded.AcceptanceDetail.ShouldBe("repo 'web': tests-failed-exit-1", "the repo tag still names the failing repo (classification sees through it)");
+        folded.AcceptanceEvidenceId.ShouldBe(evidenceId, "the failing repo's CAS evidence binding survives the aggregate");
+        folded.AcceptanceEvidenceTail.ShouldBe("exit=1\nFAILED Web.Smoke", "the failing repo's diagnosis survives the aggregate");
     }
 
     [Fact]
