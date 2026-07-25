@@ -26,7 +26,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v1";
+    public const string EvaluatorVersion = "supervisor-acceptance/v2";   // v2 (P5-2): evidence capture emits the inline EvidenceTail; multi-repo failure aggregates keep Class/EvidenceArtifactId (receipts gain EvidenceRef where v1 never bound one)
 
     private const string DefaultRunnerKind = "local";
     private const int CloneTimeoutSeconds = 300;
@@ -280,14 +280,18 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// to. ALWAYS stored (never inline-thresholded: an id is the contract, not a display optimization); the
     /// transient text is dropped either way. Best-effort with a loud log — a store fault degrades the receipt to
     /// evidence-less (admission batch 2 will read that as at-most-InfraUnknown), it never fails the grade itself.
+    /// P5-2: the clipped <c>EvidenceTail</c> is folded BEFORE the store attempt, so the repair loop's diagnosis
+    /// survives a store fault that the receipt's evidence binding does not.
     /// </summary>
     private async Task<BenchmarkGrade> CaptureEvidenceAsync(BenchmarkGrade grade, Guid teamId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(grade.EvidenceText)) return grade;
 
+        grade = WithClippedEvidenceTail(grade);
+
         try
         {
-            var id = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(grade.EvidenceText), "text/plain", cancellationToken).ConfigureAwait(false);
+            var id = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(grade.EvidenceText!), "text/plain", cancellationToken).ConfigureAwait(false);
 
             return grade with { EvidenceArtifactId = id, EvidenceText = null };
         }
@@ -297,6 +301,15 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             return grade with { EvidenceText = null };
         }
     }
+
+    /// <summary>The inline diagnosis budget (P5-2): the trailing slice of the oracle's output kept on the grade for prompt/repair consumers. Small enough to ride the tape and the decider prompt per failed unit; the FULL text is always behind the CAS id.</summary>
+    public const int EvidenceTailMaxChars = 2_048;
+
+    /// <summary>Pure fold (P5-2): stamp the bounded TRAILING slice of <see cref="BenchmarkGrade.EvidenceText"/> onto <see cref="BenchmarkGrade.EvidenceTail"/> — the failure lives at the end of oracle output (the same convention the grader's own stdout/stderr tails use). No text → unchanged.</summary>
+    internal static BenchmarkGrade WithClippedEvidenceTail(BenchmarkGrade grade) =>
+        string.IsNullOrEmpty(grade.EvidenceText)
+            ? grade
+            : grade with { EvidenceTail = grade.EvidenceText!.Length <= EvidenceTailMaxChars ? grade.EvidenceText : grade.EvidenceText[^EvidenceTailMaxChars..] };
 
     /// <summary>
     /// P3.1 part 2: run the contract's OPTIONAL setup step in the SAME workspace before the check — a failure here

@@ -26,6 +26,19 @@ public sealed record SupervisorAgentResult
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Guid? AcceptanceEvidenceId { get; init; }
 
+    /// <summary>
+    /// P5-2 (diagnosis-driven repair): the BOUNDED tail of the acceptance oracle's output, stamped by the fold ONLY
+    /// on a FAILED grade — the diagnosis the decider reads under the verdict line (what actually failed, not just
+    /// "tests-failed-exit-1") and the retry arm hands to the retried agent as its first move. Deliberately inline
+    /// despite this record's no-unbounded-fields rule: it is CLIPPED at capture (<c>BenchmarkGrade.EvidenceTail</c>,
+    /// ~2KB) and only failed contract-bearing units carry it, so the tape and prompt stay token-cheap while the
+    /// repair loop stops being blind. A PASSED unit stamps null (nothing to repair); the full text stays CAS-only
+    /// behind <see cref="AcceptanceEvidenceId"/>. Null-omitted — an ungraded/passed/pre-P5-2 row serializes
+    /// byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AcceptanceEvidenceTail { get; init; }
+
     /// <summary>The agent's final summary message (null when it produced none).</summary>
     public string? Summary { get; init; }
 

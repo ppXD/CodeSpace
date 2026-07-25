@@ -120,6 +120,35 @@ public sealed class SupervisorRetryEscalationFlowTests
     }
 
     [Fact]
+    public async Task An_over_cap_retry_still_receives_the_failure_diagnosis_only_escalation_is_suppressed()
+    {
+        // P5-2 × A2: the cost-cap guard exists to stop escalated-model SPEND; the diagnosis handoff costs nothing
+        // and the retry proceeds regardless — an over-cap retry must not also be a blind one.
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(teamId);
+        var agentRunId = Guid.NewGuid();
+
+        var gradedResult = new SupervisorAgentResult
+        {
+            AgentRunId = agentRunId, Status = "Succeeded", ProducedBranch = "codespace/agent/s1",
+            AcceptancePassed = false, AcceptanceDetail = "tests-failed-exit-1", AcceptanceEvidenceTail = "exit=1\nFAILED Foo.Bar",
+        };
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { "s1" } }, AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { gradedResult } }, AgentJson.Options),
+        };
+
+        var context = Context(runId, teamId, Plan("s1"), spawn) with { MaxCostUsd = 5m, RunSpendUsd = 5.01m };
+
+        var (task, outcomeJson) = await ExecuteRetryAsync(context, "s1");
+
+        task.Goal.ShouldContain("| FAILED Foo.Bar", customMessage: "the diagnosis folds even over the cap");
+        SupervisorOutcome.ReadEscalation(outcomeJson).ShouldBeNull("escalation stays suppressed over the cap");
+    }
+
+    [Fact]
     public async Task An_operators_isdefault_pin_wins_over_a_higher_tier_candidate_even_while_escalating()
     {
         var teamId = await SeedTeamAsync();
@@ -202,6 +231,37 @@ public sealed class SupervisorRetryEscalationFlowTests
     }
 
     // ─── Drive the real executor ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task A_retry_after_a_failed_grade_hands_the_oracle_output_to_the_retried_agent()
+    {
+        // P5-2 (diagnosis-driven repair), proven through the REAL ExecuteRetryAsync over real Postgres: the prior
+        // attempt's folded WORK-classed failure (verdict + bounded oracle tail on the tape) lands in the retried
+        // agent's GOAL — the worker starts from what the check NAMED, not a re-discovery run. The lookup keys off
+        // the same tape row the escalation trigger reads (one prior-result resolve, same attempt).
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(teamId);
+        var agentRunId = Guid.NewGuid();
+
+        var gradedResult = new SupervisorAgentResult
+        {
+            AgentRunId = agentRunId, Status = "Succeeded", ProducedBranch = "codespace/agent/s1",
+            AcceptancePassed = false, AcceptanceDetail = "tests-failed-exit-1",
+            AcceptanceEvidenceTail = "exit=1\nFAILED FooServiceTests.Bar_returns_42: expected 42 but was 41",
+        };
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { "s1" } }, AgentJson.Options),
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { gradedResult } }, AgentJson.Options),
+        };
+
+        var (task, _) = await ExecuteRetryAsync(Context(runId, teamId, Plan("s1"), spawn), "s1");
+
+        task.Goal.ShouldContain("Your prior attempt FAILED its acceptance check (tests-failed-exit-1)", customMessage: "the verdict reaches the worker");
+        task.Goal.ShouldContain("| FAILED FooServiceTests.Bar_returns_42: expected 42 but was 41", customMessage: "the oracle's own output reaches the worker, line-fenced as evidence");
+        task.DisplayTitle.ShouldNotContain("FAILED FooServiceTests", customMessage: "the diagnosis folds into the GOAL only — the card title stays the subtask's own work");
+    }
 
     private async Task<(AgentTask Task, string OutcomeJson)> ExecuteRetryAsync(SupervisorTurnContext context, string subtaskId)
     {
