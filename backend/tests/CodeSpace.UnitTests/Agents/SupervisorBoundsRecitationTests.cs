@@ -62,6 +62,35 @@ public class SupervisorBoundsRecitationTests
             .ShouldContain($"5 of {SupervisorLane.DefaultMaxTotalSpawns} total-spawn cap", Case.Sensitive, "readers fall back to the lane default — the recitation mirrors them");
     }
 
+    // ── P5-5: the resolver runway ───────────────────────────────────────────────────
+
+    [Fact]
+    public void The_resolve_line_names_the_count_the_cap_and_the_human_fallback()
+    {
+        var block = SupervisorBoundsRecitation.Render(0, 8, 0, 50, resolveAttempts: 1, maxResolveAttempts: 2);
+
+        block.ShouldNotBeNull("a spent resolve attempt alone warrants the block — the next one past the cap kills the run");
+        block!.ShouldContain("resolve attempts: 1 of 2 resolve cap", Case.Sensitive);
+        block.ShouldContain("a resolve past the cap force-stops this run", Case.Sensitive, "unlike a spawn wave, an over-cap resolve is not refused — it is the run's death; the model must know which");
+        block.ShouldContain("stop and leave the conflict to a human", Case.Sensitive, "the fail-safe exit is named, mirroring the resolution-verdict copy");
+        block.ShouldNotContain("no-progress decisions", Case.Sensitive);
+        block.ShouldNotContain("agents spawned", Case.Sensitive);
+    }
+
+    [Fact]
+    public void A_legacy_context_without_a_resolve_cap_falls_back_to_the_lane_default()
+    {
+        SupervisorBoundsRecitation.Render(0, 8, 0, 50, resolveAttempts: 1, maxResolveAttempts: null)!
+            .ShouldContain($"resolve attempts: 1 of {SupervisorLane.DefaultMaxResolveAttempts} resolve cap", Case.Sensitive);
+    }
+
+    [Fact]
+    public void Zero_resolve_attempts_render_no_resolve_line()
+    {
+        SupervisorBoundsRecitation.Render(6, 8, 0, 50)!
+            .ShouldNotContain("resolve attempts", Case.Sensitive, "no resolve on the tape → no resolver line, the default params keep every P5-3 caller byte-identical");
+    }
+
     [Fact]
     public void The_header_is_pinned()
     {
@@ -90,5 +119,24 @@ public class SupervisorBoundsRecitationTests
     {
         LlmSupervisorDecider.BuildUserPromptForTest(new SupervisorTurnContext { Goal = "ship it", TurnNumber = 0, PriorDecisions = Array.Empty<SupervisorPriorDecision>() })
             .ShouldNotContain("RUN BOUNDS", Case.Sensitive, "byte-identical prompt while nothing is at risk");
+    }
+
+    [Fact]
+    public void The_user_prompt_counts_resolves_off_the_tape_exactly_like_the_bound_does()
+    {
+        // The prompt's count mirrors SupervisorBounds.PostDecision's own tape count (prior Resolve decisions) —
+        // producer and recitation can't drift because both read the same rows the same way.
+        var resolve = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = "{}", OutcomeJson = """{"agentRunIds":[],"agentCount":0}""",
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(new SupervisorTurnContext
+        {
+            Goal = "ship it", TurnNumber = 4, PriorDecisions = new[] { resolve }, MaxResolveAttempts = 2,
+        });
+
+        prompt.ShouldContain("resolve attempts: 1 of 2 resolve cap", Case.Sensitive);
     }
 }

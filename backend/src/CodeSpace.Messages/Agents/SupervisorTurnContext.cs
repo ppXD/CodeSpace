@@ -86,6 +86,9 @@ public sealed record SupervisorTurnContext
     /// <summary>W-hard — the run's total-spawn cap (carried from <c>SupervisorGoalPlan.MaxTotalSpawns</c>, same plumbing as <see cref="MaxCostUsd"/>): the budget ledger's per-attempt estimate divisor (cap ÷ spawns = the natural reservation slice). Null on legacy contexts; readers fall back to the lane default.</summary>
     public int? MaxTotalSpawns { get; init; }
 
+    /// <summary>P5-5 — the run's resolve-attempt cap (carried from <c>SupervisorGoalPlan.MaxResolveAttempts</c>, same plumbing as <see cref="MaxTotalSpawns"/>) so the RUN BOUNDS recitation can show the resolver runway — a resolve past the cap force-stops the run. Null on legacy contexts; readers fall back to the lane default.</summary>
+    public int? MaxResolveAttempts { get; init; }
+
     private static readonly IReadOnlyDictionary<string, decimal> EmptySpendByKind = new Dictionary<string, decimal>();
 
     /// <summary>

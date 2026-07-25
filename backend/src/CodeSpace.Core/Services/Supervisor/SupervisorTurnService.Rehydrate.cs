@@ -132,6 +132,7 @@ public sealed partial class SupervisorTurnService
             BrainPlaneSpendByKind = brainPlaneSpend.ByKind,
             MaxCostUsd = plan.MaxCostUsd,
             MaxTotalSpawns = plan.MaxTotalSpawns,
+            MaxResolveAttempts = plan.MaxResolveAttempts,
             NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
             MaxNoProgressDecisions = plan.MaxNoProgressDecisions,
             ApprovalPolicy = plan.ApprovalPolicy,
