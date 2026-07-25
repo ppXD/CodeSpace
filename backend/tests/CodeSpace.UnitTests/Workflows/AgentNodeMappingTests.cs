@@ -25,6 +25,47 @@ public class AgentNodeMappingTests
         config.TryGetProperty("mode", out _).ShouldBeFalse("an absent mode must not emit the key — the existing callers' JSON stays byte-identical");
     }
 
+    // ── P5-4 (staking provenance): the acceptanceAuthority SIBLING key + its allowlist read ──
+
+    [Fact]
+    public void BuildAgentConfig_omits_the_acceptance_authority_key_when_null()
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("go", new ResolvedAgentProfile { Harness = "codex-cli" }, acceptance: new { command = new[] { "sh", "c.sh" } });
+
+        config.TryGetProperty("acceptanceAuthority", out _).ShouldBeFalse("plan-map / legacy callers pass none — the key is omitted and staking defaults to ModelProposal");
+    }
+
+    [Fact]
+    public void BuildAgentConfig_writes_the_acceptance_authority_as_a_sibling_of_the_spec()
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("go", new ResolvedAgentProfile { Harness = "codex-cli" }, acceptance: new { command = new[] { "sh", "c.sh" } }, acceptanceAuthority: "Operator");
+
+        config.GetProperty("acceptanceAuthority").GetString().ShouldBe("Operator");
+        config.GetProperty("acceptance").TryGetProperty("acceptanceAuthority", out _).ShouldBeFalse("authority NEVER rides inside the (potentially model-authored) acceptance object");
+    }
+
+    [Theory]
+    [InlineData("\"Operator\"", true)]        // the one accepted literal
+    [InlineData("\"operator\"", false)]       // case-exact — a typo'd config under-claims, never inflates
+    [InlineData("\"ServerPolicy\"", false)]   // no builder writes it; a hand-authored claim is not honored
+    [InlineData("\"ModelProposal\"", false)]  // explicit ModelProposal folds to the same null → default
+    [InlineData("42", false)]                 // non-string garbage
+    public void The_node_reads_the_authority_through_the_C2_allowlist(string jsonValue, bool expectOperator)
+    {
+        var config = new Dictionary<string, JsonElement> { ["acceptanceAuthority"] = JsonDocument.Parse(jsonValue).RootElement };
+
+        var read = CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentCodeNode.ReadAcceptanceAuthority(config);
+
+        if (expectOperator) read.ShouldBe(CodeSpace.Messages.Contracts.ContractAuthority.Operator);
+        else read.ShouldBeNull("anything but the exact Operator literal stakes at the ModelProposal default — authority is only ever under-claimed");
+    }
+
+    [Fact]
+    public void A_config_without_the_key_reads_null_authority()
+    {
+        CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentCodeNode.ReadAcceptanceAuthority(new Dictionary<string, JsonElement>()).ShouldBeNull();
+    }
+
     [Theory]
     [InlineData("")]      // a blank mode is treated as absent
     [InlineData("   ")]   // whitespace folds to absent (NullIfBlank)

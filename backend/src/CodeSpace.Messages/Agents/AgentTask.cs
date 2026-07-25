@@ -222,6 +222,17 @@ public sealed record AgentTask
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public bool? ExpectsChanges { get; init; }
 
+    /// <summary>
+    /// P5-4 (staking provenance): WHO authored <see cref="Acceptance"/> — the authority the staked Required
+    /// requirement rows record. Stamped by the projection builder that KNOWS the source (the quick tier's spec is
+    /// the OPERATOR's launch argv floor → Operator; a plan-map item's spec is the planner model's → omitted), and
+    /// carried as a SIBLING of the spec, never a field inside it — a model-authored acceptance payload must have
+    /// no way to mint its own authority (the C2 allowlist posture). Null defaults to ModelProposal at staking:
+    /// authority is only ever UNDER-claimed, never inflated.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Contracts.ContractAuthority? AcceptanceAuthority { get; init; }
+
     /// <summary>The credentialed-model ROW the output critic runs on. Null ⇒ the critic auto-picks the team's strongest structured-eligible model. Only consulted when <see cref="OutputReviewMode"/> is not None. <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? ReviewerModelId { get; init; }

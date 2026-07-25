@@ -53,6 +53,29 @@ public sealed class SingleAgentSpineFlowTests
         requirements.Select(r => r.RequirementRef).ShouldBe(new[] { "acceptance:agent1", "delivery:agent1", "output:agent1" }, ignoreOrder: true);
         requirements.ShouldAllBe(r => r.Requiredness == Requiredness.Required, "the default task expects changes — all three stages owed");
         requirements.ShouldAllBe(r => r.SpecHash!.StartsWith("sha256/canonical-json-v1:"));
+        requirements.ShouldAllBe(r => r.Authority == ContractAuthority.ModelProposal, "P5-4: a task carrying no provenance stakes at the ModelProposal default — authority is never inflated");
+    }
+
+    [Fact]
+    public async Task An_operator_authored_contract_stakes_operator_authority_on_the_required_rows()
+    {
+        // P5-4 (staking provenance): the quick tier stamps AcceptanceAuthority=Operator on the task (its spec IS
+        // the operator's launch argv floor) — the staked Required rows record it, and a read-only declaration's
+        // NA rows STILL carry ServerPolicy (the exemption is the server's policy whoever authored the contract).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId, WorkflowRunStatus.Running);
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentRunService>().CreateAsync(
+            Task_() with { AcceptanceAuthority = ContractAuthority.Operator, ExpectsChanges = false },
+            teamId, runId, nodeId: "agent1", cancellationToken: CancellationToken.None);
+
+        var requirements = await scope.Resolve<ICompletionContractStore>().ListRequirementsAsync(runId, teamId, CancellationToken.None);
+
+        requirements.Single(r => r.RequirementRef == "acceptance:agent1").Authority
+            .ShouldBe(ContractAuthority.Operator, "the operator's own floor is recorded as the operator's, not the ModelProposal default");
+        requirements.Where(r => r.Requiredness == Requiredness.ServerPolicyAuthorizedNotApplicable)
+            .ShouldAllBe(r => r.Authority == ContractAuthority.ServerPolicy, "the NA exemption authority never follows the contract author");
     }
 
     [Fact]

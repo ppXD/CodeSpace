@@ -422,7 +422,8 @@ public sealed partial class RealSupervisorActionExecutor
         {
             var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
                 .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
-                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], deliveryUnits?.Contains(t.Task.SubtaskId!) == true)));
+                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
+                Messages.Contracts.ContractAuthority.ModelProposal);
 
             if (requirements.Count > 0)
             {

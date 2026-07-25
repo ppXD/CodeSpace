@@ -41,7 +41,7 @@ internal static class AgentNodeMapping
     /// when present it is PREPENDED to the goal (the agent's prompt) so a follow-up builds on earlier turns. Null
     /// (a fresh launch) leaves the goal byte-identical.</para>
     /// </summary>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null)
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null, object? acceptance = null, IReadOnlyList<string>? criteria = null, string? acceptanceAuthority = null)
     {
         var config = new Dictionary<string, object?>
         {
@@ -56,6 +56,11 @@ internal static class AgentNodeMapping
         // ("{{item.acceptance}}" — resolves per branch, null items omit at run time); the quick tier passes the
         // operator's checks floor as a literal spec. Null ⇒ omitted ⇒ no oracle ⇒ byte-identical.
         AddIfPresent(config, "acceptance", acceptance);
+
+        // P5-4 (staking provenance): the spec's AUTHOR, as a SIBLING key the builder writes — never a field inside
+        // the acceptance object, so a model-authored item spec can't mint its own authority. Omitted (plan-map,
+        // legacy) ⇒ staked as ModelProposal (under-claim, never inflate).
+        AddIfPresent(config, "acceptanceAuthority", acceptanceAuthority);
 
         AddIfPresent(config, "model", NullIfBlank(profile?.Model));
         AddIfPresent(config, "agentDefinitionId", profile?.AgentDefinitionId?.ToString());

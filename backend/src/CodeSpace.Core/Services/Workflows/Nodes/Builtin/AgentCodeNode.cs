@@ -204,6 +204,7 @@ public sealed class AgentCodeNode : INodeRuntime
             // so this can only widen). Without it, a stock deployment (push flag off) would fail every contract
             // "no-branch-or-repo" even when the work and the check are both perfect.
             Acceptance = acceptance,
+            AcceptanceAuthority = ReadAcceptanceAuthority(context.Config),
         };
 
         task = ApplyRespawnResumeHint(task, context.PriorAttemptPayload);
@@ -214,6 +215,18 @@ public sealed class AgentCodeNode : INodeRuntime
             Payload = JsonSerializer.SerializeToElement(task, AgentJson.Options),
         }));
     }
+
+    /// <summary>
+    /// P5-4 (staking provenance): the acceptance spec's AUTHOR, read from the SIBLING config key the projection
+    /// builder writes — deliberately never a field inside the acceptance object, so a model-authored item spec
+    /// can't mint its own authority. Allowlist parse in the C2 posture: EXACTLY "Operator" reads Operator;
+    /// anything else — missing, garbage, even "ServerPolicy" (no builder writes it) — reads null, which stakes as
+    /// ModelProposal. Authority is only ever under-claimed, never inflated by a config typo.
+    /// </summary>
+    internal static Messages.Contracts.ContractAuthority? ReadAcceptanceAuthority(IReadOnlyDictionary<string, JsonElement> config) =>
+        config.TryGetValue("acceptanceAuthority", out var v) && v.ValueKind == JsonValueKind.String && v.GetString() == nameof(Messages.Contracts.ContractAuthority.Operator)
+            ? Messages.Contracts.ContractAuthority.Operator
+            : null;
 
     /// <summary>
     /// The task's objective acceptance spec. A MISSING key or a JSON null (an item without a contract in a
