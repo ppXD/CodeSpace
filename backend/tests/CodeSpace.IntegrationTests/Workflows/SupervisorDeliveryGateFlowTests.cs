@@ -385,6 +385,7 @@ public sealed class SupervisorDeliveryGateFlowTests
         scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
         scope.Resolve<IPublishManifestStore>(),
         scope.Resolve<ISupervisorPublishedBranchResolver>(),
+        scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     [Fact]

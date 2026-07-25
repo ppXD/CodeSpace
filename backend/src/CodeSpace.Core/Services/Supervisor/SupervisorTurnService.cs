@@ -33,9 +33,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly Workflows.Artifacts.IArtifactOffloader _offloader;
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
+    private readonly Completion.ICompletionAssessmentComposer _completion;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
@@ -50,6 +51,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _offloader = offloader;
         _manifests = manifests;
         _publishedBranches = publishedBranches;
+        _completion = completion;
         _logger = logger;
     }
 

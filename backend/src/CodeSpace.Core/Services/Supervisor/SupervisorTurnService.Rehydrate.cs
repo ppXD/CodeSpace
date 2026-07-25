@@ -121,6 +121,7 @@ public sealed partial class SupervisorTurnService
             Goal = goal,
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
+            CompletionRecital = await BuildCompletionRecitalAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false),
             NodeId = nodeId,
             TurnNumber = priorDecisions.Count,
             PriorDecisions = priorDecisions,
@@ -220,6 +221,28 @@ public sealed partial class SupervisorTurnService
     /// (<see cref="AgentCostPricing"/>), grouped by kind for the recitation/stop-detail breakdown. Only called when a
     /// cost cap is actually set (the caller gates this) — an uncapped run never pays the extra query.
     /// </summary>
+    /// <summary>
+    /// P5-6: prerender the "if you stopped now" contract recital — the completion reducer's own verdict on the
+    /// facts so far (Deciders.SupervisorStopNowRecital over ComposeIfStoppedNowAsync). Composed HERE, the
+    /// DB-reading rehydrate step, so the decider's prompt build stays pure over its context. Null (prompt omits
+    /// the block) for a contract-less or pre-F0 run — and BEST-EFFORT: a recital fault must never strand the
+    /// turn; the decider simply decides without it, exactly as before the slice.
+    /// </summary>
+    private async Task<string?> BuildCompletionRecitalAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var composed = await _completion.ComposeIfStoppedNowAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+            return Deciders.SupervisorStopNowRecital.Render(composed?.Assessment);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "The stopped-now contract recital failed to compose for run {RunId}; the prompt omits it", supervisorRunId);
+            return null;
+        }
+    }
+
     private async Task<BrainPlaneSpendSummary> FoldBrainPlaneSpendAsync(Guid supervisorRunId, CancellationToken cancellationToken)
     {
         var records = await _db.WorkflowRunRecord.AsNoTracking()

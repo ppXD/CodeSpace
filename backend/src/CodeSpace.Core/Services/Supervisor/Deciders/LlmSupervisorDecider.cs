@@ -572,6 +572,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(bounds);
         }
 
+        // P5-6 — the reducer's own "if you stopped now" verdict, prerendered at rehydrate (the prompt build stays
+        // pure). Null for contract-less / pre-F0 runs ⇒ byte-identical prompt.
+        if (!string.IsNullOrEmpty(context.CompletionRecital))
+        {
+            builder.AppendLine();
+            builder.AppendLine(context.CompletionRecital);
+        }
+
         builder.AppendLine();
         builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 
