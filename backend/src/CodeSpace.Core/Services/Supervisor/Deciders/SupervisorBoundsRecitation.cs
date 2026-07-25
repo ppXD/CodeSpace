@@ -16,10 +16,10 @@ public static class SupervisorBoundsRecitation
     /// <summary>The block's pinned header — a stable prompt landmark (tests + the model key on it), mirroring <see cref="SupervisorBudgetRecitation.Header"/>.</summary>
     public const string Header = "RUN BOUNDS (recite before deciding — hitting a bound force-stops the run):";
 
-    /// <summary>Render the bounds block for the decider's prompt, or null when both counters are zero (nothing is at risk yet).</summary>
-    public static string? Render(int noProgressDecisions, int maxNoProgressDecisions, int totalSpawnedAgents, int? maxTotalSpawns)
+    /// <summary>Render the bounds block for the decider's prompt, or null when every counter is zero (nothing is at risk yet).</summary>
+    public static string? Render(int noProgressDecisions, int maxNoProgressDecisions, int totalSpawnedAgents, int? maxTotalSpawns, int resolveAttempts = 0, int? maxResolveAttempts = null)
     {
-        if (noProgressDecisions <= 0 && totalSpawnedAgents <= 0) return null;
+        if (noProgressDecisions <= 0 && totalSpawnedAgents <= 0 && resolveAttempts <= 0) return null;
 
         var builder = new StringBuilder(Header);
 
@@ -33,6 +33,11 @@ public static class SupervisorBoundsRecitation
 
         if (totalSpawnedAgents > 0)
             builder.AppendLine().Append($"- agents spawned: {totalSpawnedAgents} of {maxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns} total-spawn cap (every spawn fan-out member and every retry counts one; a wave that would exceed the cap is refused).");
+
+        // P5-5: the resolver runway — a resolve PAST the cap doesn't get refused, it force-stops the whole run
+        // (ResolveAttemptsExceeded), so the model must know the count before spending the run's life on one more.
+        if (resolveAttempts > 0)
+            builder.AppendLine().Append($"- resolve attempts: {resolveAttempts} of {maxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts} resolve cap — a resolve past the cap force-stops this run. If the reconciliation still is not VERIFIED within the cap, stop and leave the conflict to a human.");
 
         return builder.ToString();
     }
