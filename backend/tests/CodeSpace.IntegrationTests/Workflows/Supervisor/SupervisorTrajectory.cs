@@ -115,7 +115,8 @@ public static class SupervisorTrajectoryEnvironments
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
-            var k when k == SupervisorDecisionKinds.Spawn || k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CleanMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
@@ -128,7 +129,8 @@ public static class SupervisorTrajectoryEnvironments
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
-            var k when k == SupervisorDecisionKinds.Spawn || k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             // The first integration CONFLICTS; a re-merge becomes CLEAN only once a VERIFIED resolve exists — so the brain
             // must resolve+verify to ship, and the scorer's ledger ship-check (ReadFinalIntegratedBranch) enforces it.
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasVerifiedResolve(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.ConflictedMerge(d, seq),
@@ -146,7 +148,7 @@ public static class SupervisorTrajectoryEnvironments
             // The first spawn fails one subtask; a RETRY re-runs it and succeeds — so the brain must inspect the failure
             // and retry to ship.
             var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.OneFailed(d, seq),
-            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             // Integration is CLEAN only once the failure has been retried; a premature merge is INCOMPLETE (no branch),
             // so the ledger ship-check fails until the brain retries.
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
@@ -164,7 +166,8 @@ public static class SupervisorTrajectoryEnvironments
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
-            var k when k == SupervisorDecisionKinds.Spawn || k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasVerifiedResolve(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.ConflictedMerge(d, seq),
             // The FIRST resolve fails verification (its reconciliation didn't pass the build/tests); a competent brain must
             // NOT accept it and must resolve AGAIN — the SECOND resolve is verified. So the only way to ship is to persist
@@ -186,7 +189,7 @@ public static class SupervisorTrajectoryEnvironments
             // real model looping spawn-recovery into a fabricated fail-loop until the turn cap (M0). The BAR is
             // unchanged: both units must be actively recovered, and a premature merge stays INCOMPLETE.
             var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.CountSpawns(priors) == 0 ? TrajectoryOutcomes.BothFailed(d, seq) : TrajectoryOutcomes.AllSucceeded(d, seq),
-            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.RetrySucceeded(d, seq),
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 || TrajectoryOutcomes.CountSpawns(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
@@ -198,8 +201,33 @@ public static class SupervisorTrajectoryEnvironments
 /// <summary>The durable-shape outcome builders the environments fold — the SAME <c>SupervisorOutcome</c> shapes the executor writes, so the decider's rendered context is faithful to production.</summary>
 internal static class TrajectoryOutcomes
 {
-    public static SupervisorPriorDecision Plan(SupervisorDecision d, long seq) =>
-        Prior(d, seq, JsonSerializer.Serialize(new { planned = new[] { "s1", "s2" } }, AgentJson.Options));
+    /// <summary>
+    /// Echo the model's OWN plan, the way production does. It used to hardcode <c>planned = ["s1","s2"]</c>, so every
+    /// turn after the model planned showed an outcome naming two ids that appear nowhere in the payload the model had
+    /// just authored — a prompt contradicting itself on the run's most basic fact.
+    /// </summary>
+    public static SupervisorPriorDecision Plan(SupervisorDecision d, long seq)
+    {
+        var subtasks = SupervisorOutcome.ReadPlanSubtasks(d.PayloadJson);
+
+        return Prior(d, seq, JsonSerializer.Serialize(new { planned = subtasks, count = subtasks.Count }, AgentJson.Options));
+    }
+
+    /// <summary>
+    /// A retry re-runs exactly ONE subtask — production stages K=1 for it. Folding the two-agent spawn shape here made
+    /// the prompt assert that a second subtask had succeeded on a branch, while the plan recitation in the SAME prompt
+    /// listed that subtask as unfinished. A model that believed the results block (which is tagged "act on THESE
+    /// results") merged, got an incomplete integration, and was scored down for it.
+    /// </summary>
+    public static SupervisorPriorDecision RetrySucceeded(SupervisorDecision d, long seq)
+    {
+        var id = Guid.NewGuid();
+        var subtaskId = SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) ?? "s1";
+        var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
+        var result = new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"retried {subtaskId}; unit tests green", ProducedBranch = $"agent/{subtaskId}" };
+
+        return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { result }));
+    }
 
     public static SupervisorPriorDecision AllSucceeded(SupervisorDecision d, long seq)
     {

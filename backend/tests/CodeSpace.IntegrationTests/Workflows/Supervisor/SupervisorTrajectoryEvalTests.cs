@@ -56,6 +56,37 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     [Fact]
+    public async Task A_retry_reports_the_one_subtask_it_re_ran_and_not_a_second_one()
+    {
+        // Production stages K=1 for a retry. The harness folded the two-agent SPAWN shape, so the prompt asserted a
+        // second subtask had succeeded on a branch while the plan recitation in the SAME prompt listed it as
+        // unfinished. A model that believed the results block — the one tagged "act on THESE results" — merged early
+        // and was scored down for it. The gate was failing models for reading the prompt correctly.
+        var spy = new PromptCapturingDecider { RetryAfterSpawn = true };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 5, CancellationToken.None);
+
+        var afterRetry = spy.Prompts[^1];
+
+        afterRetry.ShouldContain("retried s2", Case.Insensitive, "the retry must report the subtask the model actually named");
+        afterRetry.ShouldNotContain("agent 2:", Case.Sensitive, "a retry re-runs ONE unit — a second agent result is a claim production never makes");
+    }
+
+    [Fact]
+    public async Task A_plan_outcome_echoes_the_subtasks_the_model_actually_authored()
+    {
+        // The outcome used to be a hardcoded ["s1","s2"], so every turn after the model planned showed an outcome
+        // naming ids absent from the payload the model had just written — the prompt contradicting itself on the
+        // run's most basic fact.
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "validate-email" };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 3, CancellationToken.None);
+
+        spy.Prompts[^1].ShouldContain("validate-email", Case.Sensitive, "the plan outcome must echo the model's own subtask id");
+        spy.Prompts[^1].ShouldNotContain("\"planned\":[\"s1\",\"s2\"]", Case.Sensitive, "a fixed echo names units the model never planned");
+    }
+
+    [Fact]
     public async Task A_re_planning_brain_is_shown_the_no_progress_streak()
     {
         // The other half of the same block, and the one with teeth for a loop: re-planning lands no settled evidence,
@@ -283,17 +314,30 @@ public sealed class SupervisorTrajectoryEvalTests
         /// <summary>Re-plan every turn instead of spawning — the no-evidence loop that climbs the no-progress streak.</summary>
         public bool PlanForever { get; init; }
 
+        /// <summary>Plan → spawn → retry s2, the recovery path the 'failure' arc requires.</summary>
+        public bool RetryAfterSpawn { get; init; }
+
+        /// <summary>Author a real subtask under this id, so the plan echo can be checked against what the model wrote.</summary>
+        public string? PlanWithSubtaskId { get; init; }
+
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
         {
             Prompts.Add(LlmSupervisorDecider.BuildUserPromptForTest(context));
 
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+
             // Plan once, then spawn forever — the exact shape the live gate keeps recording (plan→spawn×7).
             var kind = PlanForever ? SupervisorDecisionKinds.Plan
-                : context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan)
-                ? SupervisorDecisionKinds.Spawn
-                : SupervisorDecisionKinds.Plan;
+                : !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Spawn) && !kinds.Contains(SupervisorDecisionKinds.Retry) ? SupervisorDecisionKinds.Retry
+                : SupervisorDecisionKinds.Spawn;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            var payload =
+                kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
+                : kind == SupervisorDecisionKinds.Plan && PlanWithSubtaskId is { } id ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
+                : "{}";
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
         }
     }
 
