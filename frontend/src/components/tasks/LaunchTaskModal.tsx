@@ -138,18 +138,20 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const spec = useSpecPreview(taskText, (workspace.find(r => r.isPrimary) ?? workspace[0])?.repositoryId);
   const specKey = spec.suggestion ? JSON.stringify(spec.suggestion) : "";
   const [specDismissedKey, setSpecDismissedKey] = useState("");
-  const [specApplied, setSpecApplied] = useState<{ checks: boolean; criteria: boolean }>({ checks: false, criteria: false });
-  useEffect(() => setSpecApplied({ checks: false, criteria: false }), [specKey]);
+  // Applied state is KEYED to the suggestion's content and derived at render (never reset via an effect — the
+  // lint-enforced no-sync-setState-in-effect rule): a NEW suggestion reads un-applied automatically.
+  const [specAppliedFor, setSpecAppliedFor] = useState<{ key: string; checks: boolean; criteria: boolean }>({ key: "", checks: false, criteria: false });
+  const specApplied = specAppliedFor.key === specKey ? specAppliedFor : { checks: false, criteria: false };
   const showSpecCard = !!spec.suggestion && specKey !== specDismissedKey;
   const applySpecChecks = () => {
     if (!spec.suggestion?.acceptanceChecks.length) return;
     setC({ acceptanceChecks: [...spec.suggestion.acceptanceChecks] });
-    setSpecApplied(p => ({ ...p, checks: true }));
+    setSpecAppliedFor(p => ({ key: specKey, checks: true, criteria: p.key === specKey && p.criteria }));
   };
   const applySpecCriteria = () => {
     if (!spec.suggestion?.acceptanceCriteria.length) return;
     setC({ acceptance: [...new Set([...cfg.acceptance, ...spec.suggestion.acceptanceCriteria])] });
-    setSpecApplied(p => ({ ...p, criteria: true }));
+    setSpecAppliedFor(p => ({ key: specKey, checks: p.key === specKey && p.checks, criteria: true }));
   };
 
   const closeMenu = () => { setMenu(null); setEffortOpen(false); };
