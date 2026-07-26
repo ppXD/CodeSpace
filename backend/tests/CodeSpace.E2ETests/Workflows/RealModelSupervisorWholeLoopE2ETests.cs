@@ -1050,6 +1050,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
               + "The headline fake agent ALWAYS writes a file on success, so a succeeded fan-out with no captured patch is a workspace-capture/execution infra fault on this runner (a fork-starved file write or git-diff capture), NOT a model miss.");
 
         var trail = string.Join("→", kinds);
+
+        // The honest OUTCOME word, on whatever terminal this attempt actually reached. Checked on a MISS as well as a
+        // drive, and deliberately so: the degraded words (a give-up, a forced cut, an abstention) are only ever EARNED
+        // on an arc the model did not finish, so gating this on Drove alone would test the one ending that never
+        // exercises them. A break here is a code fault regardless of how the model did — the run's own tape and its
+        // persisted word disagree.
+        if (await HonestOutcomeProbe.FaultAsync(_fixture, runId, teamId) is { } outcomeFault)
+            return (RealModelOutcome.CodeFault, $"{outcomeFault} (status={run.Status}, trajectory={trail})");
+
         var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
         return (Classify(run.Status, drove), $"status={run.Status}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }

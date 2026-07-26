@@ -191,8 +191,18 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             if (final.LastDecisionKind != SupervisorDecisionKinds.Stop || final.LastStopForcedReason is not null)
                 return (RealModelOutcome.CapabilityMiss, $"the terminal was not a model-authored stop (last={final.LastDecisionKind}, forcedReason={final.LastStopForcedReason ?? "(none)"}) — reported, not gating");
 
+            // ── The word the operator is owed: derived, persisted and projected (the wire no scripted stop reaches).
+            if (await HonestOutcomeProbe.FaultAsync(_fixture, runId, teamId) is { } outcomeFault)
+                return (RealModelOutcome.CodeFault, $"{outcomeFault} (decisions=[{final.KindTrail}])");
+
+            // Arc-specific and NOT derivable from the tape shape: this terminal was asserted above to be a
+            // model-authored, human-adjudicated stop, so the word must not be a degraded one. If a clean finish like
+            // this started rendering as "Gave up" or "Cut short", every honest run in the index would read as failed.
+            if (final.Outcome != nameof(SupervisorStopKind.Succeeded))
+                return (RealModelOutcome.CodeFault, $"a model-authored, human-adjudicated stop rendered '{final.Outcome ?? "(null)"}' rather than a plain success — the index would report this honest finish as a degraded one");
+
             var verdict = $"{Provider} '{model}': the live brain drove real work to an integrated head; the delivery gate parked the required-PR × patch-only conflict on a human card, "
-                        + $"the answer bought exactly one re-attempt (publishes={final.PublishCount}, all policy-skipped), and the adjudicated stop terminalized honestly with ZERO pull requests.";
+                        + $"the answer bought exactly one re-attempt (publishes={final.PublishCount}, all policy-skipped), and the adjudicated stop terminalized honestly with ZERO pull requests as outcome '{final.Outcome}'.";
             Console.WriteLine($"[delivery-gate-e2e] {verdict}");
             return (RealModelOutcome.Drove, verdict);
         });
@@ -202,7 +212,8 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
 
     private sealed record Snapshot(WorkflowRunStatus RunStatus, string? RunError, string? PendingActionToken, string? PendingQuestion,
         int PublishCount, int GateCardCount, bool AnyPublishSatisfied, bool IntegrationManifestWithPr, int AgentManifestCount,
-        bool AnyAgentShowsWork, string? LastDecisionKind, string? LastStopForcedReason, string KindTrail);
+        bool AnyAgentShowsWork, string? LastDecisionKind, string? LastStopForcedReason, string KindTrail,
+        string? Outcome);
 
     private async Task<Snapshot> SnapshotAsync(Guid runId, Guid teamId)
     {
@@ -242,6 +253,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         var last = decisions.LastOrDefault();
         var lastStopReason = last?.DecisionKind == SupervisorDecisionKinds.Stop ? SupervisorOutcome.ReadStopReason(last.PayloadJson) : null;
 
+
         return new Snapshot(run.Status, run.Error, pendingWait?.Token,
             pendingQuestion,
             publishes.Count,
@@ -249,7 +261,8 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             anySatisfied, prOnManifest, manifests.Count,
             anyAgentShowsWork,
             last?.DecisionKind, lastStopReason,
-            string.Join("→", decisions.Select(d => d.DecisionKind)));
+            string.Join("→", decisions.Select(d => d.DecisionKind)),
+            run.Outcome);
     }
 
     private static string? ReadQuestion(string? payloadJson)
