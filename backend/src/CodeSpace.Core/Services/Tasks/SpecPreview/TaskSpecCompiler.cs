@@ -107,11 +107,22 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
         Model = pick.ModelId,
         Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
-        UserPrompt = grounding is null ? $"Goal to compile:\n{goal}" : $"Repository layout (ground truth — suggest a check ONLY if this shows its toolchain):\n{grounding}\n\nGoal to compile:\n{goal}",
+        UserPrompt = grounding is null ? $"{NoRepositoryPreamble}\n\nGoal to compile:\n{goal}" : $"Repository layout (ground truth — suggest a check ONLY if this shows its toolchain):\n{grounding}\n\nGoal to compile:\n{goal}",
         JsonSchema = TaskSpecCompilerSchema.ResponseSchema,
         MaxOutputTokens = 1024,
         Temperature = 0.0,
     };
+
+    /// <summary>
+    /// The ungrounded turn said nothing about the missing repository, so the model met a system prompt that talks
+    /// about "the repository layout" with no layout in sight — and generalised the check abstention across the whole
+    /// reply, returning everything empty. An entirely empty reply maps to null, so the operator watched the spinner
+    /// finish and no card appear. Criteria and a delivery opinion need no repository at all; only the executable
+    /// check does. Naming the absence keeps the check floor exactly as strict while letting the rest through.
+    /// </summary>
+    private const string NoRepositoryPreamble =
+        "No repository is bound to this task, so you cannot see any toolchain: leave acceptanceChecks EMPTY — naming a command you cannot confirm is worse than naming none. " +
+        "Criteria and a delivery opinion do not need a repository; still give them, and say in the rationale that the checks are absent because nothing was there to confirm them against.";
 
     private const string SystemPrompt =
         "You compile a free-text engineering goal into launch-contract suggestions an operator will review and edit. " +
