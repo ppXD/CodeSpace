@@ -345,6 +345,14 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .SingleInstance();
 
+        // A2: the model-plane OUTAGE fake, under its own tag ("TestFaulting"). Root-registered rather than
+        // scope-overridden because the node holds ILLMClientRegistry from the root container — a scope override
+        // would never reach it. Inert until a test dials its script, so sibling flows are unaffected.
+        builder.RegisterType<Workflows.Infrastructure.LlmFaultScript>().AsSelf().SingleInstance();
+        builder.RegisterType<Workflows.Infrastructure.FaultingLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .SingleInstance();
+
         // Contract-authoring structured fake for the plan.author node flows (triad S1): under its OWN provider
         // tag (DeterministicWorkPlanLlmClient.ProviderTag = "TestWorkPlanner"). The node's production
         // LlmWorkflowPlanner resolves it by the test's pinned pool row; the fixture-singleton WorkPlanPlanScript
