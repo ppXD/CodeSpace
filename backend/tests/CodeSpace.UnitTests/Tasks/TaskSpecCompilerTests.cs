@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Tasks;
@@ -101,7 +102,7 @@ public class TaskSpecCompilerTests
     [Fact]
     public async Task No_structured_provider_degrades_to_a_null_suggestion()
     {
-        var compiler = new TaskSpecCompiler(new EmptyRegistry(), new NoPoolSelector(), new NullGrounding());
+        var compiler = new TaskSpecCompiler(new EmptyRegistry(), new NoPoolSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
 
         var result = await compiler.CompileAsync(Guid.NewGuid(), "fix the bug", repositoryId: null, CancellationToken.None);
 
@@ -113,7 +114,7 @@ public class TaskSpecCompilerTests
     public async Task The_goal_and_grounding_reach_the_model_and_the_reply_reaches_the_caller()
     {
         var client = new RecordingStructuredClient("""{"acceptanceChecks":["dotnet","test"],"acceptanceCriteria":["tests pass"],"hasDeliveryOpinion":true,"openPullRequest":true,"targetBranch":"","confidence":0.7,"rationale":"repo has a test project"}""");
-        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new FixedGrounding("Repository top-level layout: src/, tests/"));
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new FixedGrounding("Repository top-level layout: src/, tests/"), NullLogger<TaskSpecCompiler>.Instance);
 
         var result = await compiler.CompileAsync(Guid.NewGuid(), "fix the parser bug", Guid.NewGuid(), CancellationToken.None);
 
@@ -132,7 +133,7 @@ public class TaskSpecCompilerTests
     public async Task A_grounding_fault_degrades_to_an_ungrounded_compile_never_a_failed_preview()
     {
         var client = new RecordingStructuredClient("""{"acceptanceChecks":[],"acceptanceCriteria":["done"],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.4,"rationale":"r"}""");
-        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new ThrowingGrounding());
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new ThrowingGrounding(), NullLogger<TaskSpecCompiler>.Instance);
 
         var result = await compiler.CompileAsync(Guid.NewGuid(), "write the report", Guid.NewGuid(), CancellationToken.None);
 
@@ -144,7 +145,7 @@ public class TaskSpecCompilerTests
     [Fact]
     public async Task A_client_fault_degrades_to_a_null_suggestion()
     {
-        var compiler = new TaskSpecCompiler(new SingleRegistry(new ThrowingStructuredClient()), new OnePickSelector(), new NullGrounding());
+        var compiler = new TaskSpecCompiler(new SingleRegistry(new ThrowingStructuredClient()), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
 
         (await compiler.CompileAsync(Guid.NewGuid(), "fix it", null, CancellationToken.None)).Suggestion.ShouldBeNull();
     }

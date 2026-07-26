@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.Messages.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Tasks.SpecPreview;
 
@@ -36,12 +37,14 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
     private readonly ILLMClientRegistry _clients;
     private readonly IModelPoolSelector _models;
     private readonly IRepoGroundingProvider _grounding;
+    private readonly ILogger<TaskSpecCompiler> _logger;
 
-    public TaskSpecCompiler(ILLMClientRegistry clients, IModelPoolSelector models, IRepoGroundingProvider grounding)
+    public TaskSpecCompiler(ILLMClientRegistry clients, IModelPoolSelector models, IRepoGroundingProvider grounding, ILogger<TaskSpecCompiler> logger)
     {
         _clients = clients;
         _models = models;
         _grounding = grounding;
+        _logger = logger;
     }
 
     public async Task<CompileTaskSpecResult> CompileAsync(Guid teamId, string goal, Guid? repositoryId, CancellationToken cancellationToken)
@@ -49,8 +52,17 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
         var grounding = await BuildGroundingAsync(teamId, repositoryId, cancellationToken).ConfigureAwait(false);
 
         var compilation = await TryCompileWithModelAsync(teamId, goal, grounding, cancellationToken).ConfigureAwait(false);
+        var suggestion = compilation is null ? null : ToSuggestion(compilation);
 
-        return new CompileTaskSpecResult { Suggestion = compilation is null ? null : ToSuggestion(compilation), Grounded = grounding is not null };
+        // The degrade is BY DESIGN indistinguishable from "nothing to suggest" on the wire — so the log must be
+        // the place an operator can tell WHICH arm fired (no model, model fault, model replied empty, or a real
+        // suggestion). One line per compile, never per-token.
+        if (suggestion is null)
+            _logger.LogInformation("Spec preview compiled NOTHING for team {TeamId}: {Reason} (grounded={Grounded})", teamId, compilation is null ? "model path missed (see preceding warning)" : "the model replied but mapped empty (no checks, no criteria, no delivery opinion)", grounding is not null);
+        else
+            _logger.LogInformation("Spec preview compiled for team {TeamId}: checks={Checks}, criteria={Criteria}, delivery={Delivery}, confidence={Confidence:0.00}, grounded={Grounded}", teamId, suggestion.AcceptanceChecks.Count, suggestion.AcceptanceCriteria.Count, suggestion.OpenPullRequest?.ToString() ?? "none", suggestion.Confidence, grounding is not null);
+
+        return new CompileTaskSpecResult { Suggestion = suggestion, Grounded = grounding is not null };
     }
 
     /// <summary>Grounding is itself best-effort — a grounding fault degrades to an ungrounded compile, never a failed preview.</summary>
@@ -64,7 +76,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _ = ex;
+            _logger.LogWarning(ex, "Spec preview grounding failed for team {TeamId}; compiling ungrounded", teamId);
             return null;
         }
     }
@@ -85,7 +97,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _ = ex;
+            _logger.LogWarning(ex, "Spec preview model path missed for team {TeamId}; the preview degrades to no suggestion", teamId);
             return null;
         }
     }
