@@ -58,7 +58,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
         // the place an operator can tell WHICH arm fired (no model, model fault, model replied empty, or a real
         // suggestion). One line per compile, never per-token.
         if (suggestion is null)
-            _logger.LogInformation("Spec preview compiled NOTHING for team {TeamId}: {Reason} (grounded={Grounded})", teamId, compilation is null ? "model path missed (see preceding warning)" : "the model replied but mapped empty (no checks, no criteria, no delivery opinion)", grounding is not null);
+            _logger.LogInformation("Spec preview compiled NOTHING for team {TeamId}: {Reason} (grounded={Grounded})", teamId, compilation is null ? "model path missed (see preceding warning)" : $"the model replied but mapped empty — its own words: confidence={compilation.Confidence:0.00}, rationale='{compilation.Rationale}'", grounding is not null);
         else
             _logger.LogInformation("Spec preview compiled for team {TeamId}: checks={Checks}, criteria={Criteria}, delivery={Delivery}, confidence={Confidence:0.00}, grounded={Grounded}", teamId, suggestion.AcceptanceChecks.Count, suggestion.AcceptanceCriteria.Count, suggestion.OpenPullRequest?.ToString() ?? "none", suggestion.Confidence, grounding is not null);
 
