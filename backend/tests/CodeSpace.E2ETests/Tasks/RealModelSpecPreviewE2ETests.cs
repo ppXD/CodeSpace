@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.E2ETests.Tasks;
@@ -48,8 +49,7 @@ public sealed class RealModelSpecPreviewE2ETests
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        await SeedBrainModelAsync(teamId, live.BaseUrl, live.ApiKey, live.Model);
+        var teamId = await SeedTeamWithOnlyTheLiveModelAsync(live);
 
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
@@ -59,8 +59,12 @@ public sealed class RealModelSpecPreviewE2ETests
 
             result.Grounded.ShouldBeFalse("no repository was bound, so nothing could have been read");
 
+            // A null suggestion must NEVER pass here. It is indistinguishable from the model never being called at
+            // all — which is exactly what happened when the team's pool still carried the fixture's fake structured
+            // providers: the compiler resolved a fake, the reply mapped empty, and this test went green having
+            // proven nothing.
             if (result.Suggestion is not { } suggestion)
-                return (true, $"{Provider} '{live.Model}': the compiler returned NO suggestion for an ungrounded goal — the safest possible answer, and the card renders nothing");
+                return (false, $"{Provider} '{live.Model}': the compiler returned NO suggestion at all, so nothing about abstention was observed — check that the live model is the team's only structured option");
 
             // THE gating assertion. Criteria and rationale are prose the operator reads and edits; a check is argv the
             // launch EXECUTES, so it is the one field where a confident guess does damage.
@@ -80,8 +84,7 @@ public sealed class RealModelSpecPreviewE2ETests
     {
         if (ReadLiveSecretsOrSkip() is not { } live) return;
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        await SeedBrainModelAsync(teamId, live.BaseUrl, live.ApiKey, live.Model);
+        var teamId = await SeedTeamWithOnlyTheLiveModelAsync(live);
 
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
@@ -106,6 +109,35 @@ public sealed class RealModelSpecPreviewE2ETests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<ITaskSpecCompiler>().CompileAsync(teamId, goal, repositoryId, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// A team whose ONLY structured model is the live one. <see cref="WorkflowsTestSeed.SeedTeamAsync"/> seeds a
+    /// keyless credential + enabled model for every in-process fake provider tag, several of which implement
+    /// <c>IStructuredLLMClient</c> — and <c>InProcessStructuredModel.ResolveAsync</c> takes the FIRST structured
+    /// client that has any pool pick. So a plain seeded team resolves a FAKE here and the live model is never
+    /// called; the first version of this file did exactly that and reported live verdicts about a fake's reply.
+    /// Clearing the fake pool rows is what makes the resolution deterministic AND actually live.
+    /// </summary>
+    private async Task<Guid> SeedTeamWithOnlyTheLiveModelAsync(LiveSecrets live)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+
+            var fakeCreds = await db.ModelCredential.Where(c => c.TeamId == teamId).ToListAsync();
+            var fakeCredIds = fakeCreds.Select(c => c.Id).ToList();
+
+            db.ModelCredentialModel.RemoveRange(await db.ModelCredentialModel.Where(m => fakeCredIds.Contains(m.ModelCredentialId)).ToListAsync());
+            db.ModelCredential.RemoveRange(fakeCreds);
+
+            await db.SaveChangesAsync();
+        }
+
+        await SeedBrainModelAsync(teamId, live.BaseUrl, live.ApiKey, live.Model);
+        return teamId;
     }
 
     private async Task SeedBrainModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
