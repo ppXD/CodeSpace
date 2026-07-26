@@ -39,7 +39,21 @@ public static class SupervisorTrajectory
         {
             if (cancellationToken.IsCancellationRequested) break;
 
-            var context = new SupervisorTurnContext { Goal = SupervisorDecisionGoldenScenarios.FixtureGoal, TurnNumber = turn, PriorDecisions = priors.ToList(), SupervisorModelId = Brain, MaxResolveAttempts = environment.MaxResolveAttempts };
+            // The bound counters production folds off this very tape. Taken from the PRODUCTION folds, not recomputed:
+            // SupervisorBoundsRecitation renders NOTHING while both are zero, so leaving them unset silently deleted
+            // the "no-progress decisions: N of 8" / "agents spawned: N" block from every trajectory prompt — and the
+            // gate then failed the model for looping without ever telling it that it was looping. A second
+            // implementation here would drift straight back into that.
+            var context = new SupervisorTurnContext
+            {
+                Goal = SupervisorDecisionGoldenScenarios.FixtureGoal,
+                TurnNumber = turn,
+                PriorDecisions = priors.ToList(),
+                SupervisorModelId = Brain,
+                MaxResolveAttempts = environment.MaxResolveAttempts,
+                TotalSpawnedAgents = SupervisorTurnService.FoldTotalSpawnedAgents(priors),
+                NoProgressDecisions = SupervisorTurnService.FoldNoProgressDecisions(priors),
+            };
 
             SupervisorDecision decision;
             try

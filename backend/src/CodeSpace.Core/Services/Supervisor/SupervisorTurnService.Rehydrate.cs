@@ -196,7 +196,7 @@ public sealed partial class SupervisorTurnService
     /// + can't be reset by re-entering the node: a re-entry re-reads the same settled spawn outcomes and re-derives
     /// the same total, so the cap can't be sidestepped by restarting.
     /// </summary>
-    private static int FoldTotalSpawnedAgents(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+    internal static int FoldTotalSpawnedAgents(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         priorDecisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .Sum(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson));
