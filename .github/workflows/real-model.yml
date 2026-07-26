@@ -363,6 +363,10 @@ jobs:
         #   ~RealModelPlanner → the live-model PLANNER gate (RealModelPlannerWholeLoopE2ETests): a real model authors the
         #     plan-map-synth decomposition (pool-driven against the gateway) and the real engine fans out over it. Closes
         #     the orphaned planner-authorship gap (the native-key RealModelPhaseAuthorshipFlowTests ran on no lane).
+        #   ~RealModelSpecPreview → spec preview's abstention floor (RealModelSpecPreviewE2ETests): a live model asked to
+        #     compile a goal with NO repository bound must NOT invent an executable acceptance check. Cheap (two model
+        #     calls, no git, no CLI) and it belongs on a Postgres lane because the compiler resolves its model from the
+        #     team's credentialed pool.
         #   ~RealModelDeliveryGate → H1's adjudication arc (RealModelDeliveryGateE2ETests): a live brain under a
         #     patch-only repo × required-PR contract must park on the gate's card, buy ONE re-attempt with the human's
         #     answer, and terminalize honestly — vacuous Success / re-park-after-adjudication red as CodeFault.
@@ -378,23 +382,29 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate"
+          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate|FullyQualifiedName~RealModelSpecPreview"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model-wholeloop-aux.trx"
           --results-directory backend/TestResults
 
-      - name: Assert the whole-loop gates actually ran (no silent skip)
-        # Same fail-closed guard as the component job: `dotnet test --filter` exits 0 on zero matches, so an FQN/trait
-        # drift that de-selects the supervisor OR session whole-loop must RED this lane, not pass green at zero cost.
+      - name: Assert every whole-loop gate actually ran (no silent skip)
+        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects a lane must RED here
+        # rather than pass green at zero cost. Checked PER CLAUSE, not as a total: a count-based floor of one is
+        # satisfied by any single surviving class, so it would wave through exactly the de-selection it exists to
+        # catch the moment a lane carries more than one. Add a clause to the filter above and add it here.
         run: |
           trx=backend/TestResults/real-model-wholeloop-aux.trx
           test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected RealModel whole-loop gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          missing=0
+          for clause in RealModelSession RealModelPlanner RealModelDeliveryGate RealModelSpecPreview; do
+            count=$(grep -oE "testName=\"[^\"]*${clause}[^\"]*\"" "$trx" | wc -l | tr -d ' ')
+            echo "${clause}: ${count} selected"
+            if [ "${count:-0}" -lt 1 ]; then
+              echo "::error::No ${clause} test was selected — the filter no longer matches it, so that gate ran on NO lane."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
 
   real-model-benchmark:
     name: real model (benchmark corpus solve-rate)
