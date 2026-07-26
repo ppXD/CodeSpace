@@ -177,6 +177,34 @@ public class SupervisorResolverTests
         prompt.ShouldContain("do NOT accept", Case.Insensitive);
     }
 
+    [Fact]
+    public void An_unverified_resolution_past_the_cap_stops_offering_a_resolve_it_would_die_on()
+    {
+        // The contradiction this pins actually shipped: the action mask told the model a further resolve would
+        // FORCE-STOP the run while this verdict, in the same prompt, told it to issue one. In production the cap
+        // defaults to ONE, so that state is the COMMON one after a single failed reconciliation — not an edge case.
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = ResolveOutcome("Succeeded", "tests still red") };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve) with { MaxResolveAttempts = 1 });
+
+        prompt.ShouldContain("NOT verified", Case.Insensitive, "the safety floor is unchanged — an unverified reconciliation is still never acceptable");
+        prompt.ShouldContain("resolve cap is SPENT", Case.Insensitive, "the verdict must say WHY another resolve is not on the table");
+        prompt.ShouldNotContain("Issue another 'resolve'", Case.Sensitive, "offering a move the same prompt says would end the run is the defect");
+        prompt.ShouldContain("never 'retry'", Case.Insensitive, "the M0 wrong-verb guard survives the rewrite");
+    }
+
+    [Fact]
+    public void An_unverified_resolution_with_budget_left_still_offers_another_resolve()
+    {
+        // The scope fence: the cap-aware arm must not swallow the case it was carved out of.
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = ResolveOutcome("Succeeded", "tests still red") };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve) with { MaxResolveAttempts = 2 });
+
+        prompt.ShouldContain("Issue another 'resolve'", Case.Sensitive);
+        prompt.ShouldNotContain("resolve cap is SPENT", Case.Insensitive);
+    }
+
     // ── S5: the run's final integrated branch (the open_pr output surface) ──────────
 
     /// <summary>A resolve outcome whose folded resolver agent pushed <paramref name="producedBranch"/> (S5 reads ProducedBranch off the first folded result) and ended with the given status/summary.</summary>

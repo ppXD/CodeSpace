@@ -50,6 +50,12 @@ public static class SupervisorDecisionGoldenScenarios
         // S3 plan-confirmation gate — the answered confirmation card is in the tape; the brain must REACT to it.
         ConfirmationApproved(),           // plan + card answered "approve"  → spawn (release, don't re-plan)
         ConfirmationFeedback(),           // plan + revision feedback        → plan (a REVISED version, never spawn)
+        // A1.5 resolve NEGATIVE controls — the corpus proved resolve-WHEN-conflicted and nothing else. Naming the
+        // verb in the rails (#1271) created the opposite risk, and the action mask (#1274) exists to cover it; only
+        // a live model can settle whether it obeys a server fact over conflict-flavoured prose.
+        ResolveBaitCleanIntegration(),    // clean merge, overlap prose      → stop, NEVER resolve
+        AgentReportedConflictNoRecord(),  // agents SAY conflict, no record  → retry/spawn, NEVER resolve
+        ResolveCapSpent(),                // conflict, but the cap is spent  → stop/ask, NEVER resolve (it would KILL the run)
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -162,7 +168,9 @@ public static class SupervisorDecisionGoldenScenarios
     private static SupervisorGoldenScenario UnverifiedResolution() => new()
     {
         Name = "unverified-resolution",
-        Context = Context(turn: 4, new[]
+        // The cap is EXPLICIT and > the one resolve already spent: this scenario's teeth are "re-resolve rather
+        // than accept an unverified reconciliation", which only means anything while another resolve is available.
+        Context = Context(turn: 4, maxResolveAttempts: 2, new[]
         {
             Plan("s1", "s2"),
             Spawn(new[] { "s1", "s2" },
@@ -350,8 +358,75 @@ public static class SupervisorDecisionGoldenScenarios
         return PriorDecision(SupervisorDecisionKinds.AskHuman, 1, card.PayloadJson, outcome);
     }
 
+    /// <summary>
+    /// A1.5 NEGATIVE CONTROL — the integration is CLEAN, but its prose says both agents edited the same file. The
+    /// only correct move is to finish; a resolve here reconciles nothing and costs a turn. This is the M0 failure
+    /// class in its purest form: does the model act on the server's recorded FACT or on the surrounding words?
+    /// </summary>
+    private static SupervisorGoldenScenario ResolveBaitCleanIntegration() => new()
+    {
+        Name = "resolve-bait-clean-integration",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "reworked the signup validation in src/Signup.cs", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "added the signup telemetry hook in src/Signup.cs", branch: "agent/s2")),
+            CleanMergeWithOverlap(),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Stop },
+    };
+
+    /// <summary>
+    /// A1.5 NEGATIVE CONTROL, the sharpest one — the AGENTS report a merge conflict in their own summaries, but no
+    /// integration was ever recorded, so the server knows of no conflict and a resolve would no-op. The work still
+    /// needs recovering, so the honest moves are retry/spawn.
+    /// </summary>
+    private static SupervisorGoldenScenario AgentReportedConflictNoRecord() => new()
+    {
+        Name = "agent-reported-conflict-no-integration",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "landed the auth refactor", branch: "agent/s1"),
+                Agent(Agent2, "Failed", error: "merge conflict in src/Auth.cs — this needs reconciling against agent/s1 before it can land")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Spawn },
+    };
+
+    /// <summary>
+    /// A1.5 NEGATIVE CONTROL whose miss ENDS THE RUN — a real conflict, a resolve already spent, and the cap at
+    /// one. Unlike an over-cap spawn wave, which is merely refused, a further resolve force-stops the whole run, so
+    /// the only honest moves are to stop or hand the conflict to a human. The cap is EXPLICIT here: this scenario
+    /// is about the boundary, so it must not depend on a fallback.
+    /// </summary>
+    private static SupervisorGoldenScenario ResolveCapSpent() => new()
+    {
+        Name = "resolve-cap-spent",
+        Context = Context(turn: 4, maxResolveAttempts: 1, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
+            ConflictedMerge(),
+            Resolve(Agent(Resolver, "Succeeded", summary: "attempted to reconcile the conflict, but the build still fails and the tests do not pass", branch: "resolve/head")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Stop, SupervisorDecisionKinds.AskHuman },
+    };
+
     private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors) =>
         new() { Goal = FixtureGoal, TurnNumber = turn, PriorDecisions = priors, SupervisorModelId = BrainModelRowId };
+
+    /// <summary>
+    /// A context whose resolve budget is EXPLICIT. A scenario that intends another resolve to be available must say
+    /// so: an unset cap falls back to the lane default of ONE, under which the action mask correctly reports that a
+    /// further resolve would force-stop the run — so a scenario asking the model to resolve again while silently
+    /// leaving the cap at 1 is measuring disobedience to the prompt, not judgement.
+    /// </summary>
+    private static SupervisorTurnContext Context(int turn, int maxResolveAttempts, IReadOnlyList<SupervisorPriorDecision> priors) =>
+        Context(turn, priors) with { MaxResolveAttempts = maxResolveAttempts };
 
     private static SupervisorAgentResult Agent(Guid id, string status, string? summary = null, string? error = null, string? branch = null) =>
         new() { AgentRunId = id, Status = status, Summary = summary, Error = error, ProducedBranch = branch };
@@ -401,6 +476,18 @@ public static class SupervisorDecisionGoldenScenarios
 
         return PriorDecision(SupervisorDecisionKinds.Retry, 2, JsonSerializer.Serialize(new { subtaskId }, AgentJson.Options), SupervisorOutcome.FoldAgentResults(staged, new[] { result }));
     }
+
+    /// <summary>A CLEAN integration whose PROSE is conflict-flavoured — both agents touched the same file and the reason says so. The server fact is "Clean"; only the surface text tempts a resolve.</summary>
+    private static SupervisorPriorDecision CleanMergeWithOverlap() =>
+        PriorDecision(SupervisorDecisionKinds.Merge, 2, "{}", JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Clean",
+                integratedBranch = "codespace/integration/head",
+                reason = "both agents edited src/Signup.cs; the changes combined without a conflict",
+            },
+        }, AgentJson.Options));
 
     private static SupervisorPriorDecision CleanMerge() =>
         PriorDecision(SupervisorDecisionKinds.Merge, 2, "{}", JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch = "codespace/integration/head" } }, AgentJson.Options));

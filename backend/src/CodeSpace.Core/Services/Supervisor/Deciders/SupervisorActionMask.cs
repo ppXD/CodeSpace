@@ -46,11 +46,27 @@ public static class SupervisorActionMask
         if (SupervisorOutcome.FindConflictDecision(context.PriorDecisions) is null)
             return "no conflicted integration is recorded, so there is nothing to reconcile — a resolve would be a no-op and cost this turn";
 
-        var spent = context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
-        var cap = context.MaxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts;
+        var (spent, cap) = ResolveBudget(context);
 
         return spent >= cap
             ? $"the resolve cap is spent ({spent} of {cap}) — a further resolve does not get refused, it FORCE-STOPS this run. Stop and leave the conflict to a human, or ask one to rule"
             : null;
     }
+
+    /// <summary>
+    /// Whether another resolve would FORCE-STOP the run rather than reconcile. The ONE answer both this mask and
+    /// the resolution-verdict copy read: the two sit in the same prompt, so a disagreement would tell the model to
+    /// issue a resolve and forbid it in the same breath — which is exactly what shipped before this was shared.
+    /// </summary>
+    public static bool IsResolveCapSpent(SupervisorTurnContext context)
+    {
+        var (spent, cap) = ResolveBudget(context);
+
+        return spent >= cap;
+    }
+
+    /// <summary>Resolves spent-vs-cap the way <c>SupervisorBounds.PostDecision</c> counts it — off the tape, with the lane default standing in for a context that carries no cap.</summary>
+    private static (int Spent, int Cap) ResolveBudget(SupervisorTurnContext context) =>
+        (context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve),
+         context.MaxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts);
 }
