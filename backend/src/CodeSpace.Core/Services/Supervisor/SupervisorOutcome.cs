@@ -618,6 +618,31 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// The MOST RECENT prior <c>merge</c> OR <c>spawn</c> decision whose recorded integration CONFLICTED (the
+    /// freshest conflict a resolve should act on), or null when none conflicted. Walks newest-first. A <c>spawn</c>
+    /// conflicts when its S1 dependency staging could not auto-integrate its producers onto one branch — recorded in
+    /// the SAME <c>integration</c> shape a <c>merge</c> records, so this ONE reader routes both without a second
+    /// escalation mechanism.
+    ///
+    /// <para>Lives here, beside <see cref="ReadIntegration"/>, because it now has TWO consumers — the resolve
+    /// executor (which acts on it) and the decider's action mask (which tells the model whether resolve is even
+    /// available). A second walk would be a second answer to "is there a conflict", and the two would drift.</para>
+    /// </summary>
+    public static SupervisorPriorDecision? FindConflictDecision(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            var prior = priorDecisions[i];
+
+            if (prior.DecisionKind != SupervisorDecisionKinds.Merge && prior.DecisionKind != SupervisorDecisionKinds.Spawn) continue;
+
+            if (ReadIntegration(prior.OutcomeJson) is { IsConflicted: true }) return prior;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Read the on-disk INTEGRATION block a <c>merge</c> outcome records (SOTA #3 / resolver loop #379) into the
     /// compact, decider-visible <see cref="SupervisorIntegrationOutcome"/> — null when the outcome carries no
     /// <c>integration</c> object (the gate was off, or the verb wasn't a merge) or it's malformed. Aggregates the
