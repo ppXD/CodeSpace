@@ -123,7 +123,8 @@ export interface ExecutionMapStep {
   id: string;
   label: string;
   status: ExecutionStepStatus;
-  /// A short per-step detail under the label — "8s" / "3 agents" / "passed" / "1 of 2" / "skipped". Null when none.
+  /// A short per-step detail under the label — "8s" / "3 agents" / "passed" / "not verified" (succeeded but no
+  /// oracle ran) / "1 of 2" / "skipped". Null when none.
   detail?: string | null;
 }
 
