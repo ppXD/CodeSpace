@@ -1026,6 +1026,18 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             "the supervisor reports the objective definition-of-done was NOT met — not a self-reported Completed");
         terminal.GetProperty("integratedBranch").GetString().ShouldBe("",
             "the reviewable branch is WITHHELD — a head that fails the operator floor must never be handed to a downstream PR-open");
+
+        // The word the operator reads. The node output above is an internal surface; the runs index reads the RUN, and
+        // a supervisor run that fails its own floor still terminalizes Success — so without this column the index
+        // renders a withheld, broken head exactly like a clean solve. This is the only place in the suite with a REAL
+        // failed acceptance floor, which makes it the only place the AcceptanceFailed branch of the derivation is
+        // exercised end to end; everywhere else the grade is authored by a fixture.
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.Status.ShouldBe(WorkflowRunStatus.Success, "the graph finished — which is exactly why the status alone cannot be trusted here");
+        run.Outcome.ShouldBe(SupervisorOutcome.AcceptanceFailedOutcome, "a run whose objective floor rejected the head must not read as a clean success in the index");
+
+        (await HonestOutcomeProbe.FaultAsync(_fixture, runId, teamId)).ShouldBeNull("the word must also survive derivation and reach the runs-index projection");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
