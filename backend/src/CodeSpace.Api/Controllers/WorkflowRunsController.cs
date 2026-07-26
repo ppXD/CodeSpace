@@ -61,6 +61,18 @@ public class WorkflowRunsController : ControllerBase
     }
 
     /// <summary>
+    /// P5-7: compile a free-text goal into launch-contract SUGGESTIONS (acceptance argv / criteria / delivery
+    /// preference) the composer pre-fills as editable fields. Read-only — nothing persisted, nothing staked;
+    /// <c>{ suggestion: null }</c> when no structured model is available (the composer shows nothing).
+    /// </summary>
+    [HttpPost("spec-preview")]
+    public async Task<IActionResult> SpecPreview([FromBody] CompileTaskSpecCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// One run's detail — status, per-node cells, version-pinned definition snapshot, outputs, pending wait.
     /// Addressed by a URL ref: the team-scoped run number (canonical clean URL, e.g. <c>runs/1042</c>) or a
     /// GUID (legacy link). The response carries <c>RunNumber</c> so the router can canonicalise a legacy-GUID
