@@ -37,6 +37,40 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     [Fact]
+    public async Task A_spawning_brain_is_shown_the_spawn_bound_it_is_being_measured_against()
+    {
+        // The live 'failure' arc goes plan→spawn×7 into the turn cap on every sampled run, and RUN BOUNDS is the
+        // block that exists to head that off. It was absent from EVERY trajectory prompt: the harness built its own
+        // turn context and never folded the counters, SupervisorBoundsRecitation returns null while they are all
+        // zero, and the gate then scored the model against bounds production would have recited to it.
+        var spy = new PromptCapturingDecider();
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 5, CancellationToken.None);
+
+        spy.Prompts.Count.ShouldBeGreaterThan(3, "the spy must actually reach the later turns, or this proves nothing");
+
+        spy.Prompts[0].ShouldNotContain("RUN BOUNDS", Case.Sensitive, "turn 0 has an empty tape — nothing is at risk yet, and a fresh run's prompt must stay byte-identical");
+
+        spy.Prompts[^1].ShouldContain("agents spawned", Case.Insensitive,
+            "after several spawn waves the model must SEE its spawn count against the cap — production folds this off the same tape, so its absence here means the gate measures a prompt production never renders");
+    }
+
+    [Fact]
+    public async Task A_re_planning_brain_is_shown_the_no_progress_streak()
+    {
+        // The other half of the same block, and the one with teeth for a loop: re-planning lands no settled evidence,
+        // so the streak climbs. Deliberately a SEPARATE arc from the spawn case above — a spawn that yields a
+        // succeeded agent resets the streak by design, so asserting both on one trajectory would be asserting
+        // something false about how progress is counted.
+        var spy = new PromptCapturingDecider { PlanForever = true };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 5, CancellationToken.None);
+
+        spy.Prompts[^1].ShouldContain("no-progress decisions", Case.Insensitive,
+            "a brain that has re-planned four times running has produced nothing, which is exactly the state the recitation names — and the state the live gate keeps failing runs for reaching");
+    }
+
+    [Fact]
     public async Task A_brain_that_stops_immediately_without_shipping_fails()
     {
         var result = await SupervisorTrajectory.RunAsync(new StopImmediatelyDecider(), maxTurns: 6, CancellationToken.None);
@@ -238,6 +272,28 @@ public sealed class SupervisorTrajectoryEvalTests
                 : SupervisorDecisionKinds.Stop;
 
             return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = kind == SupervisorDecisionKinds.Stop ? "{\"outcome\":\"completed\"}" : "{}" });
+        }
+    }
+
+    /// <summary>Spawns forever (the looping shape the gate keeps observing live) and records the USER PROMPT it was handed each turn — the only way to assert on what the model actually saw.</summary>
+    private sealed class PromptCapturingDecider : ISupervisorDecider
+    {
+        public List<string> Prompts { get; } = new();
+
+        /// <summary>Re-plan every turn instead of spawning — the no-evidence loop that climbs the no-progress streak.</summary>
+        public bool PlanForever { get; init; }
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            Prompts.Add(LlmSupervisorDecider.BuildUserPromptForTest(context));
+
+            // Plan once, then spawn forever — the exact shape the live gate keeps recording (plan→spawn×7).
+            var kind = PlanForever ? SupervisorDecisionKinds.Plan
+                : context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan)
+                ? SupervisorDecisionKinds.Spawn
+                : SupervisorDecisionKinds.Plan;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
         }
     }
 
