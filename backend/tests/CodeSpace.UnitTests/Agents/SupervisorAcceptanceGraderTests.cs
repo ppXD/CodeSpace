@@ -403,10 +403,15 @@ public class SupervisorAcceptanceGraderTests
 
         grade.Passed.ShouldBeTrue("restore succeeded, so the grade proceeds to the oracle's own verdict");
 
-        runners.Invocations.Count.ShouldBe(2, "one tamper diff + one restore, before the oracle");
+        // The full restore, in order. `checkout` alone leaves candidate ADDITIONS in place, which is how a candidate
+        // slips an auto-discovered hook in beside an untouched oracle — so the additions sweep is part of the
+        // sequence, not an optimisation, and its absence must red here.
+        runners.Invocations.Count.ShouldBe(4, "tamper diff, restore, addition scan, untracked clean — all before the oracle");
         runners.Invocations[0].Command.ShouldBe("git");
         runners.Invocations[0].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "--", "tests/", "check.sh" });
         runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/", "check.sh" });
+        runners.Invocations[2].Args.ShouldBe(new[] { "diff", "--name-only", "--diff-filter=A", "abc123def4567890", "--", "tests/", "check.sh" });
+        runners.Invocations[3].Args.ShouldBe(new[] { "clean", "-fdq", "--", "tests/", "check.sh" }, "scoped to the protected paths, so it can never delete the candidate's real work");
         runners.Invocations.ShouldAllBe(i => i.WorkingDirectory == "/tmp/clone-xyz", "restore acts on the SAME workspace the check grades");
 
         oracle.Context.ShouldNotBeNull("the oracle runs AFTER the restore — it grades the base's judge against the candidate's code");
