@@ -82,7 +82,7 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at) — the automated twin of the operator reissue verb. 0 when no timer wake is overdue.</summary>
     public int RecoveredStrandedTimerWait { get; init; }
 
-    /// <summary>Stranded SupervisorInfraPark waits re-fired because their scheduled deadline resume was dropped (P4.3) — the model-plane-outage park ladder's own backstop, closing the last un-backstopped bounded wait. 0 when no infra-park deadline is overdue.</summary>
+    /// <summary>Stranded SupervisorInfraPark waits re-fired because their scheduled deadline resume was dropped (P4.3) — the model-plane-outage park ladder's own backstop, closing the last un-backstopped bounded wait. The sweep is node-agnostic (it filters on wait kind alone), so A2's planner / synthesizer parks inherit it with no new code. 0 when no infra-park deadline is overdue.</summary>
     public int RecoveredStrandedSupervisorInfraParkWait { get; init; }
 
     /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost (a crash between the child's terminal commit and the resume). 0 when no parent is parked on a terminal child.</summary>

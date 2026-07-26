@@ -71,10 +71,12 @@ public static class WorkflowWaitKinds
     public const string Decision = "Decision";
 
     /// <summary>
-    /// The supervisor's MODEL-PLANE OUTAGE park (P1.1): the brain call exhausted its in-call retry on a
-    /// transient/rate-limit fault, so instead of terminalizing an hours-long run the node parks on this wait with a
-    /// <c>DeadlineAt</c> along an exponential schedule — the deadline IS the wake (nothing else resolves it), and its
-    /// <c>TimeoutPayload</c> carries the park count + window start so the re-entry continues the ladder durably.
+    /// ANY node's MODEL-PLANE OUTAGE park (P1.1 for the supervisor's brain call; A2 widened it to the planner and
+    /// synthesizer nodes): a transient/rate-limit fault parks the node on this wait with a <c>DeadlineAt</c> along an
+    /// exponential schedule instead of terminalizing an hours-long run — the deadline IS the wake (nothing else
+    /// resolves it), and its <c>TimeoutPayload</c> carries the park count + window start so the re-entry continues the
+    /// ladder durably. The NAME is kept for its durable value: it is written into <c>workflow_run_wait.wait_kind</c>
+    /// rows and constrained by migration 0094, so renaming it would be a data migration, not a refactor.
     /// </summary>
     public const string SupervisorInfraPark = "SupervisorInfraPark";
 
