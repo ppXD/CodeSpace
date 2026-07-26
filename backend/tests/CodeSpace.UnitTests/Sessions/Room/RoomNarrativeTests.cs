@@ -34,7 +34,8 @@ public class RoomNarrativeTests
         n.Map!.Steps.Select(s => s.Label).ShouldBe(new[] { "Start", "Plan", "Work", "Review", "Deliver" }, "the DYNAMIC map — a Start head, Plan, the work (a flat plan collapses to one Work step), Review, Deliver");
         n.Map!.Steps.Select(s => s.Status).ShouldBe(new[] { ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done, ExecutionStepStatus.Done });
         n.Map!.Steps.Single(s => s.Label == "Work").Detail.ShouldBe("3 agents");
-        n.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("passed");
+        // This fixture stakes NO acceptance oracle, so Review must not claim "passed" — nothing checked this work.
+        n.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe(RoomNarrative.NotVerifiedWord);
 
         n.Summary.ShouldBe("Shipped the login flow.", "the stop summary is the turn headline");
     }
@@ -76,6 +77,22 @@ public class RoomNarrativeTests
         // failed grade overrides it to Failed — isolating the override (not the run status).
         var rejected = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1) }, WorkflowRunStatus.Running, facts: new RoomTurnFacts { AcceptancePassed = false });
         rejected.Map!.Steps.Single(s => s.Label == "Review").Status.ShouldBe(ExecutionStepStatus.Failed);
+    }
+
+    [Fact]
+    public void An_ungraded_success_reports_not_verified_never_passed()
+    {
+        // The honesty fence: "passed" is a verdict, and a run that staked no oracle has none. Review still reads
+        // Done (nothing is pending) — only the CLAIM changes, so the map keeps reading as complete.
+        var ungraded = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1), Tape("stop", 3, summary: "Answered.", label: "Stop") }, WorkflowRunStatus.Success);
+        var review = ungraded.Map!.Steps.Single(s => s.Label == "Review");
+
+        review.Detail.ShouldBe(RoomNarrative.NotVerifiedWord, "no oracle ran — the UI must not claim a verdict nothing produced");
+        review.Status.ShouldBe(ExecutionStepStatus.Done, "the step is complete; it is the claim, not the state, that was wrong");
+
+        // The scope fence: a REAL graded pass is untouched, so the change cannot silently downgrade verified work.
+        var graded = Build(new[] { Tape("plan", 1), Tape("spawn", 2, agentCount: 1), Tape("stop", 3, summary: "Shipped.", label: "Stop") }, WorkflowRunStatus.Success, facts: new RoomTurnFacts { AcceptancePassed = true });
+        graded.Map!.Steps.Single(s => s.Label == "Review").Detail.ShouldBe("passed", "an oracle verdict still reports as passed");
     }
 
     [Fact]

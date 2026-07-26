@@ -19,6 +19,13 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public static class RoomNarrative
 {
+    /// <summary>
+    /// The Review step's detail for a run that SUCCEEDED but staked no oracle — a contract-less task or an inline
+    /// answer, i.e. work outside the verification envelope. Pinned (Rule 8): it is the one place the UI states that
+    /// a result carries no objective verdict, and the alternative ("passed") is a claim no check ever made.
+    /// </summary>
+    public const string NotVerifiedWord = "not verified";
+
     /// <summary>The map + summary + inner blocks for one turn — everything <see cref="AssistantTurnBlock"/> needs below its header.</summary>
     public sealed record TurnNarrative(string? Summary, ExecutionMapBlock? Map, IReadOnlyList<RoomBlock> Blocks);
 
@@ -121,7 +128,13 @@ public static class RoomNarrative
         return (ExecutionStepStatus.Done, AgentWord(agents.Count));
     }
 
-    /// <summary>Review folds from the objective acceptance verdict when graded, else from the run outcome: a DEGRADED stop (a fail-closed give-up) → stopped (never a green "passed" for a run that gave up); success → passed; failed-at-work → skipped; failed-at-review → failed; else queued / running once work is done.</summary>
+    /// <summary>
+    /// Review folds from the objective acceptance verdict when graded, else from the run outcome: a DEGRADED stop (a
+    /// fail-closed give-up) → stopped (never a green "passed" for a run that gave up); a graded pass → passed; a
+    /// graded failure → failed; an UNGRADED success → <see cref="NotVerifiedWord"/> (no oracle ever ran, so there is
+    /// no verdict to report); failed-at-work → skipped; failed-at-review → failed; else queued / running once work
+    /// is done.
+    /// </summary>
     private static (ExecutionStepStatus, string?) ReviewStage(bool succeeded, bool failed, ExecutionStepStatus work, bool? acceptancePassed, bool degraded)
     {
         if (degraded) return (ExecutionStepStatus.Skipped, "stopped");
@@ -129,7 +142,10 @@ public static class RoomNarrative
         if (acceptancePassed is true) return (ExecutionStepStatus.Done, "passed");
         if (acceptancePassed is false) return (ExecutionStepStatus.Failed, "failed");
 
-        if (succeeded) return (ExecutionStepStatus.Done, "passed");
+        // An ungraded run has NO verdict — the review step is Done (nothing is pending) but the claim must not be
+        // "passed": nothing checked this work. A null AcceptancePassed means the run staked no oracle at all (a
+        // contract-less task, an inline answer), which is precisely the population outside the verification envelope.
+        if (succeeded) return (ExecutionStepStatus.Done, NotVerifiedWord);
         if (failed) return work == ExecutionStepStatus.Failed ? (ExecutionStepStatus.Skipped, "skipped") : (ExecutionStepStatus.Failed, "failed");
         return work == ExecutionStepStatus.Done ? (ExecutionStepStatus.Running, null) : (ExecutionStepStatus.Queued, "queued");
     }
