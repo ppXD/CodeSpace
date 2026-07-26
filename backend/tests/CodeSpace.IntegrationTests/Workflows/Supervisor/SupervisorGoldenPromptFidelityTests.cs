@@ -1,4 +1,6 @@
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -80,6 +82,55 @@ public class SupervisorGoldenPromptFidelityTests
 
             prompt.ShouldNotContain("Issue another 'resolve'", Case.Sensitive,
                 $"'{scenario.Name}' offers a resolve the same prompt says would force-stop the run");
+        }
+    }
+
+    [Fact]
+    public void Every_planned_scenario_recites_its_plan_state_the_way_production_does()
+    {
+        // The block that names which subtask is done, which failed, and which is still unfinished. It was absent from
+        // EVERY golden prompt because the fixture serialized subtask IDs as bare strings where the production payload
+        // holds objects — the read threw, was swallowed, and returned empty. The scenarios graded on naming the failed
+        // subtask were therefore measuring positional inference off a raw payload dump. Nothing failed, because a
+        // missing block cannot fail; it can only quietly make the gate easier than production.
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var planned = scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan).ToList();
+
+            if (planned.Count == 0) continue;   // 'first-turn' has an empty tape by design
+
+            SupervisorOutcome.ReadPlanSubtasks(planned[^1].PayloadJson).Count
+                .ShouldBeGreaterThan(0, $"'{scenario.Name}' has a plan on its tape whose payload does not parse into subtasks — every downstream recitation silently renders nothing");
+
+            LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context)
+                .ShouldContain("CURRENT PLAN STATE", Case.Sensitive, $"'{scenario.Name}' must show the model the same plan state production would");
+        }
+    }
+
+    [Fact]
+    public void A_scenario_graded_on_naming_a_subtask_shows_the_model_that_subtask_by_id()
+    {
+        // The sharpest case: three scenarios are scored on whether the model targets the RIGHT failed subtask, and
+        // one of them ('mixed-results') came back from a live run as "retry targeted ''". A model cannot name what
+        // the prompt never states.
+        // The target lives inside each scenario's PayloadCheck closure, so it is restated here. Kept deliberately
+        // small: if a fourth retry-graded scenario is added and not listed, the sibling fact above still requires it
+        // to recite a plan state at all.
+        var graded = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["mixed-results"] = "s2",
+            ["three-subtask-partial-failure"] = "s2",
+            ["five-subtask-middle-failed"] = "s3",
+        };
+
+        foreach (var (name, target) in graded)
+        {
+            var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+            prompt.ShouldContain($"[{target}]", Case.Sensitive,
+                $"'{name}' is graded on targeting '{target}', so the plan-state recitation must name it — otherwise the gate measures inference off a raw payload dump, not reading");
+            prompt.ShouldContain("Unfinished:", Case.Sensitive, $"'{name}' has unfinished work and the recitation must say so plainly");
         }
     }
 

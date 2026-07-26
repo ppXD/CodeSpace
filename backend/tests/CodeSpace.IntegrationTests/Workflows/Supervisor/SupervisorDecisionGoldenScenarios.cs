@@ -431,8 +431,26 @@ public static class SupervisorDecisionGoldenScenarios
     private static SupervisorAgentResult Agent(Guid id, string status, string? summary = null, string? error = null, string? branch = null) =>
         new() { AgentRunId = id, Status = status, Summary = summary, Error = error, ProducedBranch = branch };
 
-    private static SupervisorPriorDecision Plan(params string[] subtaskIds) =>
-        PriorDecision(SupervisorDecisionKinds.Plan, 0, JsonSerializer.Serialize(new { subtasks = subtaskIds }, AgentJson.Options), JsonSerializer.Serialize(new { planned = subtaskIds }, AgentJson.Options));
+    /// <summary>
+    /// A plan prior carrying the PRODUCTION payload shape. It used to serialize an anonymous <c>{ subtasks: ["s1"] }</c>
+    /// — a string array where <see cref="SupervisorPlanPayload"/> holds objects with required Id/Title/Instruction.
+    /// <see cref="SupervisorOutcome.ReadPlanSubtasks"/> threw, was caught, and returned empty, so
+    /// <c>SupervisorRecitation</c> rendered nothing: the CURRENT PLAN STATE block — the one that names which subtask
+    /// is done, which failed and which is still unfinished — was absent from EVERY golden prompt ever scored, while
+    /// production emits it on every turn after a plan. The scenarios graded on naming the failed subtask id were
+    /// measuring positional inference off a raw payload dump, not the recited list production actually shows.
+    /// Built from the real record rather than another anonymous type, so the shape cannot drift away again.
+    /// </summary>
+    private static SupervisorPriorDecision Plan(params string[] subtaskIds)
+    {
+        var subtasks = subtaskIds
+            .Select(id => new SupervisorPlannedSubtask { Id = id, Title = $"subtask {id}", Instruction = $"implement {id}" })
+            .ToList();
+
+        return PriorDecision(SupervisorDecisionKinds.Plan, 0,
+            JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = FixtureGoal, Subtasks = subtasks }, AgentJson.Options),
+            JsonSerializer.Serialize(new { planned = subtaskIds }, AgentJson.Options));
+    }
 
     private static SupervisorPriorDecision Spawn(string[] subtaskIds, params SupervisorAgentResult[] results)
     {
