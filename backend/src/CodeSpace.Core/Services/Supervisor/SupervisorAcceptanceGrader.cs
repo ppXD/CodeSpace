@@ -60,6 +60,15 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             var clone = await _workspaceResolver.ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken, @ref: branch).ConfigureAwait(false)
                 ?? throw new WorkspaceException($"Repository {repositoryId} resolved to no clone request for acceptance grading.");
 
+            // The oracle restore reads the BASE commit's bytes, and a workspace request defaults to the agents'
+            // Depth=1 clone, which holds only the candidate tip. `git checkout <base> -- <paths>` then dies with
+            // "reference is not a tree" and the grade fails closed as oracle-restore-failed (Environment) — so a
+            // contract that named protected paths did not merely go unprotected, it stopped being gradeable at all,
+            // and read as infrastructure noise while doing it. IntegrationRequest.Depth records the same lesson for
+            // its 3-way apply: an operation that reaches back to the base needs the base history.
+            if (spec.ProtectedPaths is { Count: > 0 } && !string.IsNullOrEmpty(oracleBaseSha))
+                clone = clone with { Depth = 0 };
+
             await using var workspace = await _providers.Resolve(DefaultRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
 
             var (restoreFailure, tamperNote) = await RestoreOracleAsync(workspace.Directory, spec, oracleBaseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
@@ -242,11 +251,59 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             return (Failed($"oracle-restore-failed: {Summarize(restore.Stderr)}", GradeFailureClass.Environment), null);
         }
 
+        // `git checkout` restores what EXISTS at base; it cannot remove what the candidate ADDED. Leaving additions
+        // in place is a hole, not a rounding error: a protected directory is exactly where an auto-discovered hook
+        // lives (pytest loads any conftest.py it finds), so a candidate could leave every oracle byte pristine, drop
+        // one file beside them, and bend the verdict while the evidence announced the tamper VOIDED. Protected means
+        // byte-identical to base, which includes absence.
+        var removeFailure = await RemoveAddedPathsAsync(runner, directory, oracleBaseSha, paths, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+        if (removeFailure is not null) return (removeFailure, null);
+
         var note = string.IsNullOrEmpty(tampered)
             ? $"oracle: {paths.Count} protected path(s) restored from {oracleBaseSha[..Math.Min(12, oracleBaseSha.Length)]} (no candidate changes)"
             : $"ORACLE TAMPER VOIDED — candidate changed protected path(s), restored from base:\n{tampered}";
 
         return (null, note);
+    }
+
+    /// <summary>
+    /// Deletes everything under the protected paths that the candidate ADDED relative to base — the half
+    /// <c>git checkout</c> cannot do. Tracked additions come from the diff; untracked ones (the patch path applies
+    /// into the working tree without committing) come from <c>git clean</c>, which is scoped to the same pathspecs
+    /// so it can never touch the candidate's real work.
+    /// </summary>
+    private async Task<BenchmarkGrade?> RemoveAddedPathsAsync(ISandboxRunner runner, string directory, string oracleBaseSha, IReadOnlyList<string> paths, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        var added = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "diff", "--name-only", "--diff-filter=A", oracleBaseSha, "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+
+        if (added.Status != SandboxStatus.Success || added.ExitCode != 0)
+        {
+            _logger.LogWarning("Oracle addition scan from {BaseSha} failed in {Directory}: {Stderr}", oracleBaseSha, directory, Summarize(added.Stderr));
+            return Failed($"oracle-restore-failed: {Summarize(added.Stderr)}", GradeFailureClass.Environment);
+        }
+
+        var files = added.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (files.Length > 0)
+        {
+            // -f because the paths are tracked in the candidate's tree; --ignore-unmatch keeps a race (a path already
+            // gone) from failing a grade that is otherwise fine.
+            var rm = await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "rm", "-rf", "--quiet", "--ignore-unmatch", "--" }.Concat(files)), cancellationToken).ConfigureAwait(false);
+
+            if (rm.Status != SandboxStatus.Success || rm.ExitCode != 0)
+            {
+                _logger.LogWarning("Removing {Count} candidate-added protected path(s) failed in {Directory}: {Stderr}", files.Length, directory, Summarize(rm.Stderr));
+                return Failed($"oracle-restore-failed: {Summarize(rm.Stderr)}", GradeFailureClass.Environment);
+            }
+        }
+
+        // Untracked additions under the protected paths — the patch path's uncommitted apply. Best-effort: a clean
+        // that cannot run is not worth failing an otherwise gradeable candidate over, and the tracked sweep above has
+        // already closed the committed case.
+        await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "clean", "-fdq", "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+
+        return null;
     }
 
     private static SandboxSpec GitSpec(string directory, int timeoutSeconds, IEnumerable<string> args) => new()
