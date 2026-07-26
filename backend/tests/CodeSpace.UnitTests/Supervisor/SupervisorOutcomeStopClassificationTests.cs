@@ -101,4 +101,70 @@ public class SupervisorOutcomeStopClassificationTests
         SupervisorOutcome.ClassifyStop("{}", """{"outcome":"clarify-ish","summary":"?"}""")
             .Kind.ShouldBe(SupervisorStopKind.GaveUp, "the recognizer is exact — a fuzzy label can never buy the un-punished state");
     }
+
+    // ── A1: HonestOutcome — the ONE terminal word both the node output and the run row derive from ──
+
+    [Theory]
+    [InlineData("""{"stopped":true,"outcome":"completed","summary":"Shipped."}""", "Succeeded")]
+    [InlineData("""{"stopped":true,"outcome":"gave-up","summary":"stuck"}""", "GaveUp")]
+    [InlineData("""{"stopped":true,"outcome":"needs-clarification","summary":"which repo?"}""", "NeedsClarification")]
+    public void The_honest_outcome_reports_the_stop_kind(string outcomeJson, string expected)
+    {
+        SupervisorOutcome.HonestOutcome(payloadJson: "{}", outcomeJson).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_server_forced_stop_reports_Forced()
+    {
+        // No authored outcome + a payload reason = the server ended it, not the model.
+        SupervisorOutcome.HonestOutcome("""{"reason":"no-progress"}""", """{"stopped":true}""").ShouldBe("Forced");
+    }
+
+    [Fact]
+    public void A_failed_objective_grade_outranks_an_orderly_success_stop()
+    {
+        // The crown-jewel honesty case: the model stopped gracefully claiming completion, but the run's own
+        // definition-of-done FAILED. The work missed its contract however gracefully the loop ended.
+        var graded = """{"stopped":true,"outcome":"completed","summary":"Shipped.","acceptanceGrade":{"passed":false,"detail":"tests-failed-exit-1"}}""";
+
+        SupervisorOutcome.HonestOutcome("{}", graded).ShouldBe(SupervisorOutcome.AcceptanceFailedOutcome);
+    }
+
+    [Fact]
+    public void A_passing_grade_leaves_the_stop_kind_intact()
+    {
+        var graded = """{"stopped":true,"outcome":"completed","summary":"Shipped.","acceptanceGrade":{"passed":true,"detail":"tests-passed"}}""";
+
+        SupervisorOutcome.HonestOutcome("{}", graded).ShouldBe("Succeeded");
+    }
+
+    [Fact]
+    public void An_unclassifiable_stop_never_false_alarms_as_degraded()
+    {
+        // Defensive floor, matching ClassifyStop's own: neither signal present reads as a bare success rather than
+        // inventing a degradation the tape never recorded.
+        SupervisorOutcome.HonestOutcome("{}", "{}").ShouldBe("Succeeded");
+        SupervisorOutcome.HonestOutcome(null, null).ShouldBe("Succeeded");
+    }
+
+    [Fact]
+    public void The_classified_overload_agrees_with_the_tape_overload()
+    {
+        // The two overloads are ONE authority with two entry points — the node holds a folded result, the engine
+        // holds raw tape bytes, and they must never drift into two vocabularies.
+        var outcomeJson = """{"stopped":true,"outcome":"gave-up","summary":"stuck"}""";
+
+        SupervisorOutcome.HonestOutcomeOf(acceptancePassed: null, SupervisorOutcome.ClassifyStop("{}", outcomeJson))
+            .ShouldBe(SupervisorOutcome.HonestOutcome("{}", outcomeJson));
+
+        SupervisorOutcome.HonestOutcomeOf(acceptancePassed: false, SupervisorOutcome.ClassifyStop("{}", outcomeJson))
+            .ShouldBe(SupervisorOutcome.AcceptanceFailedOutcome, "a failed grade outranks the kind through either entry point");
+    }
+
+    [Fact]
+    public void The_acceptance_failed_word_is_pinned()
+    {
+        // A durable column value AND a node output word — a rename is a data migration, not a refactor.
+        SupervisorOutcome.AcceptanceFailedOutcome.ShouldBe("AcceptanceFailed");
+    }
 }

@@ -118,6 +118,22 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public string? CompletionEnforcementMode { get; set; }
 
     /// <summary>
+    /// A1 (wire honesty): how the work actually ENDED, re-derived at the terminal write from the supervisor tape's
+    /// last stop decision — <c>SupervisorOutcome.HonestOutcome</c>, whose vocabulary is <c>SupervisorStopKind</c>
+    /// plus <c>AcceptanceFailed</c>. <see cref="Status"/> answers "did the graph finish"; this answers "did the
+    /// work get done", a question a bound-forced stop, a give-up, an abstention and a failed check all currently
+    /// answer as Success.
+    ///
+    /// <para>NULL for a non-supervisor run (no stop decision to classify), for a terminal landed outside
+    /// <c>CompleteRunAsync</c> (bootstrap failure, operator cancel, reconciler abandon — already-honest statuses),
+    /// and for every pre-deploy run. Every reader MUST treat NULL as "fall back to the status word".</para>
+    ///
+    /// <para>Never a <see cref="WorkflowRunStatus"/> member and never read by the engine: keeping it a sibling
+    /// preserves every status filter and the cockpit's zone partitioning.</para>
+    /// </summary>
+    public string? Outcome { get; set; }
+
+    /// <summary>
     /// Phase 3.0 — set by <see cref="Services.Workflows.Dispatch.WorkflowRunDispatcher"/>
     /// when CAS Pending → Enqueued succeeds. NULL while in Pending or after a reconciler
     /// reverts to Pending. The stuck-Enqueued reconciler sweep reads THIS column rather than
