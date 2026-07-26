@@ -317,9 +317,14 @@ public sealed class AgentSupervisorNode : INodeRuntime
     /// <c>Completed</c>; only a genuine model-authored success stop reports <c>Completed</c>.
     /// </summary>
     private static string TerminalStatus(SupervisorTurnResult result) =>
-        result.AcceptancePassed == false ? "AcceptanceFailed"
-        : result.StopClassification?.Degraded == true ? "Stopped"
-        : "Completed";
+        SupervisorOutcome.HonestOutcomeOf(result.AcceptancePassed, result.StopClassification) switch
+        {
+            SupervisorOutcome.AcceptanceFailedOutcome => "AcceptanceFailed",
+            nameof(SupervisorStopKind.Succeeded) => "Completed",
+            // GaveUp / Forced / NeedsClarification collapse to the bag's one degraded word — this output's shape is
+            // byte-pinned, so the finer axis rides the run row's own Outcome column instead of widening it here.
+            _ => "Stopped",
+        };
 
     /// <summary>
     /// SYNCHRONOUS non-terminal turn (plan / merge) → park on a SupervisorDecision wait that self-advances to

@@ -1398,6 +1398,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         RepositoryIds = r.ScopeRepositoryIds,
         WasSuspended = _db.WorkflowRunWait.Any(w => w.RunId == r.Id),
         Status = r.Status,
+        Outcome = r.Outcome,
         Error = r.Error,
         StartedAt = r.StartedAt,
         CompletedAt = r.CompletedAt,

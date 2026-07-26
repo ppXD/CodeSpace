@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Workflows;
@@ -47,6 +48,18 @@ public sealed record WorkflowRunSummary
     public IReadOnlyList<Guid> RepositoryIds { get; init; } = [];
 
     public required WorkflowRunStatus Status { get; init; }
+
+    /// <summary>
+    /// A1 (wire honesty): how the work ENDED, when the status alone would mislead — <c>Succeeded</c> | <c>GaveUp</c> |
+    /// <c>Forced</c> | <c>NeedsClarification</c> | <c>AcceptanceFailed</c>. <see cref="Status"/> says the graph
+    /// finished; a give-up, a bound-forced stop, an abstention and a failed objective check all finish as Success and
+    /// would otherwise render as a clean solve. Null-omitted: absent for every non-supervisor run and every run that
+    /// terminalized before this existed, so a reader MUST fall back to the status word rather than treat absence as a
+    /// verdict.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Outcome { get; init; }
+
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }

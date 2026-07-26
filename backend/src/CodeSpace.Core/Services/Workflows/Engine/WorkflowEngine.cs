@@ -869,6 +869,34 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         await Task.CompletedTask;
     }
 
+    /// <summary>
+    /// A1 (wire honesty): the run's honest terminal WORD, re-derived from the LAST terminal stop decision on the
+    /// supervisor tape. <see cref="WorkflowRun.Status"/> answers "did the graph finish"; a bound-forced stop, a
+    /// model give-up, an abstention and a failed objective check all answer that with Success, so the word the
+    /// user is owed lives here. Null for a run with no supervisor tape (its status is already honest) and
+    /// best-effort by construction — a fault here must never strand a terminal that is otherwise ready to write.
+    /// </summary>
+    private async Task<string?> HonestOutcomeAsync(WorkflowRun run, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var stop = await _db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == run.Id && d.TeamId == run.TeamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+                .OrderByDescending(d => d.Sequence)
+                .Select(d => new { d.Status, d.PayloadJson, d.OutcomeJson })
+                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            return stop is not null && Supervisor.SupervisorDecisionStateMachine.IsTerminal(stop.Status)
+                ? Supervisor.SupervisorOutcome.HonestOutcome(stop.PayloadJson, stop.OutcomeJson)
+                : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Deriving the honest outcome for run {RunId} failed; the run terminalizes with no outcome word", run.Id);
+            return null;
+        }
+    }
+
     private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
     {
         // P2b-1 (Lock Clause 1): the terminal SUCCESS claim has ONE production owner — the completion authority.
@@ -906,6 +934,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         run.Status = status;
         run.Error = error;
+        run.Outcome = await HonestOutcomeAsync(run, cancellationToken).ConfigureAwait(false);
         run.CompletedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 

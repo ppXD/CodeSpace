@@ -175,6 +175,28 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// A1 (wire honesty): the ONE honest terminal WORD for a supervisor stop, in verdict-strength order — a FAILED
+    /// objective acceptance grade outranks the stop's own classification (the work missed its own definition of done,
+    /// however gracefully the model stopped), then <see cref="ClassifyStop"/>'s kind. The single authority for both
+    /// consumers: the supervisor node's terminal <c>status</c> output and the run row's durable <c>Outcome</c>, so
+    /// the two can never drift into two classification vocabularies.
+    ///
+    /// <para>Pure over the two jsonb columns the stop decision already persisted — the terminal-time stamp is a
+    /// re-derivation of durable bytes, never a new fact, so a replay reaches the identical word.</para>
+    /// </summary>
+    public static string HonestOutcome(string? payloadJson, string? outcomeJson) =>
+        HonestOutcomeOf(ReadAcceptanceGradePassed(outcomeJson), ClassifyStop(payloadJson, outcomeJson));
+
+    /// <summary>The already-classified entry point — for a caller holding a folded turn result rather than the raw tape bytes (deliberately NOT an overload: both parameter pairs are nullable, so an overload would make a null-null call ambiguous at the call site). A null classification is an unclassifiable stop, treated as a bare success (never a false degraded alarm), matching <see cref="ClassifyStop"/>'s own defensive floor.</summary>
+    public static string HonestOutcomeOf(bool? acceptancePassed, SupervisorStopClassification? classification) =>
+        acceptancePassed == false
+            ? AcceptanceFailedOutcome
+            : (classification?.Kind ?? SupervisorStopKind.Succeeded).ToString();
+
+    /// <summary>The one word outside the <c>SupervisorStopKind</c> axis: the stop was orderly but its objective check FAILED. Pinned (Rule 8) — it is a durable column value and a node output.</summary>
+    public const string AcceptanceFailedOutcome = "AcceptanceFailed";
+
+    /// <summary>
     /// Fold the authoring model call (model + tokens) into a decision's OUTCOME under a <c>modelUsage</c> key — a
     /// NON-hashed enrichment (only the payload is hashed into the idempotency key), so it can never drift replay identity.
     /// A null usage (a stub / no-model decision) returns the outcome unchanged (byte-identical), and a malformed outcome

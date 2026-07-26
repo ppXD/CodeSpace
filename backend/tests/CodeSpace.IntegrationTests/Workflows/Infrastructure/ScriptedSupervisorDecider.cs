@@ -48,6 +48,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.AskHumanRepeatedlyThenStop => AskHumanRepeatedlyThenStop(context, _script.AskHumanRounds),
             SupervisorScriptMode.PlanConfirmReactive => PlanConfirmReactive(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
+            SupervisorScriptMode.PlanThenGiveUp => PlanThenGiveUp(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
             SupervisorScriptMode.PlanSpawnBadRepoStop => PlanSpawnBadRepoStop(context),
             SupervisorScriptMode.PlanSpawnBadModelStop => PlanSpawnBadModelStop(context),
@@ -94,6 +95,12 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
     private static SupervisorDecision PlanThenStop(SupervisorTurnContext context) => context.TurnNumber == 0
         ? Plan(context.Goal)
         : Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "plan complete" });
+
+    // A1 arc: turn 0 plan → every later turn a GIVE-UP stop (a non-success authored outcome). The engine terminal
+    // is still Success — that is precisely the dishonesty the run's own outcome word exists to correct.
+    private static SupervisorDecision PlanThenGiveUp(SupervisorTurnContext context) => context.TurnNumber == 0
+        ? Plan(context.Goal)
+        : Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "gave-up", Summary = "could not make progress" });
 
     // E3 arc: turn 0 plan(2) → turn 1 spawn(both) → turn 2 stop. The spawn references the plan's subtask ids.
     private static SupervisorDecision PlanSpawnStop(SupervisorTurnContext context) => context.TurnNumber switch
@@ -341,6 +348,9 @@ public sealed class SupervisorDecisionScript
 
     public void PlanThenStop() => Mode = SupervisorScriptMode.PlanThenStop;
 
+    /// <summary>A1: the DEGRADED arc — the model plans, then gives up with a non-success outcome. The engine still lands Success (the graph finished); only the honest outcome word distinguishes it from a clean solve.</summary>
+    public void PlanThenGiveUp() => Mode = SupervisorScriptMode.PlanThenGiveUp;
+
     public void PlanSpawnStop() => Mode = SupervisorScriptMode.PlanSpawnStop;
 
     public void PlanSpawnMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeStop;
@@ -417,4 +427,5 @@ public enum SupervisorScriptMode
     AskHumanStop,
     AskHumanRepeatedlyThenStop,
     PlanThenSpawnForever,
+    PlanThenGiveUp,
 }

@@ -1,0 +1,15 @@
+-- A1 (wire honesty): the run's honest terminal WORD, stamped at the engine's single terminal write from the
+-- supervisor tape's last stop decision. WorkflowRunStatus answers "did the graph finish"; this answers "how did
+-- the work actually end" — a bound-forced stop, a model give-up, an abstention, or a failed objective check all
+-- land Success today and read identically to a clean solve on every list.
+-- Vocabulary = SupervisorStopKind (Succeeded | GaveUp | Forced | NeedsClarification) plus 'AcceptanceFailed',
+-- exactly the precedence AgentSupervisorNode.TerminalStatus already applies to its node output.
+-- NULL for every non-supervisor run (no stop decision to classify) and for every terminal landed outside
+-- CompleteRunAsync (bootstrap failure, operator cancel, reconciler abandon) — those statuses are already honest,
+-- and readers fall back to the status word. NULL therefore also covers every pre-deploy run: ClassifyStop is C#
+-- JSON logic, so historical rows cannot be backfilled by SQL and are deliberately left unstamped rather than
+-- half-stamped.
+-- This is NOT a WorkflowRunStatus member and the engine never reads it: status filters, cockpit zone
+-- partitioning, and every terminal predicate are untouched.
+-- Rollback: ALTER TABLE workflow_run DROP COLUMN outcome;
+ALTER TABLE workflow_run ADD COLUMN outcome text NULL;
