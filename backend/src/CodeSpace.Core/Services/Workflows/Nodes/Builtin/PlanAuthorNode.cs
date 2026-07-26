@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Workflows.Planning;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 using CodeSpace.Messages.Enums;
@@ -153,6 +154,12 @@ public sealed class PlanAuthorNode : INodeRuntime
             // The planner's clean refusals (no structured-eligible model / a non-conformant empty plan) — a
             // legible node failure, not a crash.
             return NodeResult.Fail(ex.Message);
+        }
+        catch (LlmApiException fault) when (InfraPark.IsParkable(fault))
+        {
+            // A2: a provider outage is not a planning failure. Park on the shared ladder and re-plan on the wake;
+            // the run only fails once the whole outage window is spent.
+            return InfraPark.Park(context, fault, DateTimeOffset.UtcNow);
         }
 
         // A flat-plan consumer (a parallel flow.map) cannot honor ordering — the prompt already forbade

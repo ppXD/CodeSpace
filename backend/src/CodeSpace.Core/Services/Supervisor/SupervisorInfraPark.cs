@@ -4,15 +4,17 @@ using CodeSpace.Core.Services.Workflows.Llm;
 namespace CodeSpace.Core.Services.Supervisor;
 
 /// <summary>
-/// The pure schedule + marker logic behind the supervisor's MODEL-PLANE OUTAGE park (P1.1). When the brain call
+/// The pure schedule + marker logic behind ANY node's MODEL-PLANE OUTAGE park (P1.1 for the supervisor; A2
+/// widened it to the planner and synthesizer nodes through <c>Services.Workflows.Nodes.InfraPark</c>). When a model call
 /// exhausts its bounded in-call retry on a transient/rate-limit fault, the node no longer terminalizes the durable
 /// run — it parks on a <c>SupervisorInfraPark</c> wait whose <c>DeadlineAt</c> walks this exponential ladder
 /// (1m → 5m → 15m → 60m, ±20% jitter so a fleet of parked runs never re-storms a recovering provider in lockstep),
 /// and whose <c>TimeoutPayload</c> carries <c>{ infraPark, parks, firstParkedAtUtc }</c> so the wake RE-ENTERS the
 /// SAME turn with the ladder position intact. A wake that decides successfully simply continues the run (the marker
 /// is naturally forgotten); a wake that faults again advances the ladder. Once the whole <see cref="MaxParkWindow"/>
-/// has elapsed the run stops honestly (<c>SupervisorStopReasons.ModelPlaneUnavailable</c> — a degraded
-/// <c>Stopped</c>, never a fake success). Pure statics — no clock, no DB — so every branch is unit-pinned.
+/// has elapsed the caller ends honestly — the supervisor writes <c>SupervisorStopReasons.ModelPlaneUnavailable</c>
+/// (a degraded <c>Stopped</c>, never a fake success); a generic node fails plainly. Pure statics — no clock, no DB,
+/// no supervisor types — which is exactly what let a second lane adopt the ladder rather than fork it.
 /// </summary>
 public static class SupervisorInfraPark
 {

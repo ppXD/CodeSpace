@@ -92,7 +92,25 @@ public sealed class LlmCompleteNode : INodeRuntime
             """)
     };
 
+    /// <summary>
+    /// A2: a model-plane outage PARKS the node on the shared exponential ladder instead of killing the run. One
+    /// catch covers all three dispatch shapes (structured, streamed, buffered) because every one of them faults out
+    /// of <see cref="RunCoreAsync"/>. A non-parkable class (auth, a model-side miss) rethrows and fails as before —
+    /// those are actionable now, and parking would only hide them.
+    /// </summary>
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunCoreAsync(context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException fault) when (InfraPark.IsParkable(fault))
+        {
+            return InfraPark.Park(context, fault, DateTimeOffset.UtcNow);
+        }
+    }
+
+    private async Task<NodeResult> RunCoreAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         var provider = ReadString(context.Config, "provider", "Anthropic");
         var modelPin = ReadStringOrNull(context.Config, "model");   // optional pin; null = let the pool pick its recommended model
