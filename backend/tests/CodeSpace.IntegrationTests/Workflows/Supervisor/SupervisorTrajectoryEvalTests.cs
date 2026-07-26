@@ -56,6 +56,23 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     [Fact]
+    public async Task The_agent_results_name_the_units_the_model_itself_planned()
+    {
+        // The coherence the whole tape rests on. The fan-out folds hardcoded s1/s2, which was survivable only while
+        // the plan echo was hardcoded to match. Once the plan echoed the model's REAL ids, the results referenced
+        // units it had never planned, its own units stayed permanently unfinished, and the observed answer to that
+        // was to spawn again — every failing live arc was the identical plan→spawn×7 shape.
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "validate-email" };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+
+        var afterSpawn = spy.Prompts[^1];
+
+        afterSpawn.ShouldContain("agent/validate-email", Case.Sensitive, "the produced branch must belong to a unit the model actually planned");
+        afterSpawn.ShouldNotContain("agent/s1", Case.Sensitive, "a result for a unit absent from the model's own plan leaves that plan looking permanently unfinished");
+    }
+
+    [Fact]
     public async Task A_retry_reports_the_one_subtask_it_re_ran_and_not_a_second_one()
     {
         // Production stages K=1 for a retry. The harness folded the two-agent SPAWN shape, so the prompt asserted a
@@ -334,8 +351,9 @@ public sealed class SupervisorTrajectoryEvalTests
 
             var payload =
                 kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
-                : kind == SupervisorDecisionKinds.Plan && PlanWithSubtaskId is { } id ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
-                : "{}";
+                : PlanWithSubtaskId is not { } id ? "{}"
+                : kind == SupervisorDecisionKinds.Plan ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
+                : $$"""{"subtaskIds":["{{id}}"]}""";   // a spawn names the units it dispatches, as a real one does
 
             return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = payload });
         }

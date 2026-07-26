@@ -229,23 +229,40 @@ internal static class TrajectoryOutcomes
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { result }));
     }
 
+    /// <summary>
+    /// The subtask ids the model's own spawn named, so a fan-out fold answers the units the model actually
+    /// dispatched. Hardcoding <c>s1</c>/<c>s2</c> here was survivable only while the plan echo was hardcoded to
+    /// match; once the plan echoes the model's real ids, results referencing units it never planned leave its own
+    /// units looking permanently unfinished — and the observed answer to that was to spawn again, forever.
+    /// Falls back to the historic pair for a payload that names nothing, so an ill-formed spawn still folds.
+    /// </summary>
+    private static IReadOnlyList<string> SpawnedSubtaskIds(SupervisorDecision d)
+    {
+        var ids = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
+
+        return ids.Count > 0 ? ids : new[] { "s1", "s2" };
+    }
+
     public static SupervisorPriorDecision AllSucceeded(SupervisorDecision d, long seq)
     {
-        var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var subtaskIds = SpawnedSubtaskIds(d);
+        var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
-        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"implemented subtask {i + 1}; unit tests green", ProducedBranch = $"agent/s{i + 1}" }).ToArray();
+        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"implemented {subtaskIds[i]}; unit tests green", ProducedBranch = $"agent/{subtaskIds[i]}" }).ToArray();
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
+    /// <summary>Every unit succeeds except the LAST, which the brain must retry — named by the model's own ids so its plan and its results agree.</summary>
     public static SupervisorPriorDecision OneFailed(SupervisorDecision d, long seq)
     {
-        var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var subtaskIds = SpawnedSubtaskIds(d);
+        var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
-        var results = new[]
-        {
-            new SupervisorAgentResult { AgentRunId = ids[0], Status = "Succeeded", Summary = "implemented subtask 1; unit tests green", ProducedBranch = "agent/s1" },
-            new SupervisorAgentResult { AgentRunId = ids[1], Status = "Failed", Error = "build failed: missing symbol referenced by subtask 2" },
-        };
+        var last = subtaskIds.Count - 1;
+        var results = ids.Select((id, i) => i == last
+            ? new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"build failed: missing symbol referenced by {subtaskIds[i]}" }
+            : new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"implemented {subtaskIds[i]}; unit tests green", ProducedBranch = $"agent/{subtaskIds[i]}" }).ToArray();
+
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
@@ -275,9 +292,10 @@ internal static class TrajectoryOutcomes
 
     public static SupervisorPriorDecision BothFailed(SupervisorDecision d, long seq)
     {
-        var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var subtaskIds = SpawnedSubtaskIds(d);
+        var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
-        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"subtask {i + 1} failed: build error" }).ToArray();
+        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"{subtaskIds[i]} failed: build error" }).ToArray();
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
