@@ -15,6 +15,14 @@ vi.mock("@/hooks/use-agents", () => ({
 vi.mock("@/hooks/use-model-credentials", () => ({
   useCredentialedModels: () => ({ data: [{ rowId: "m1", modelId: "gpt-5-codex", credentialId: "c1", credentialName: "Team OpenAI", provider: "openai" }] }),
 }));
+type SpecState = {
+  suggestion: { acceptanceChecks: string[]; acceptanceCriteria: string[]; rationale: string; confidence: number } | null;
+  grounded: boolean;
+  loading: boolean;
+};
+let specState: SpecState = { suggestion: null, grounded: false, loading: false };
+vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }));
+
 vi.mock("@/hooks/use-tasks", () => ({
   useLaunchTask: () => ({
     mutate: (input: Record<string, unknown>, opts: { onSuccess?: (r: { runId: string }) => void }) => {
@@ -42,7 +50,7 @@ function renderBox(over: Partial<Parameters<typeof LaunchTaskModal>[0]> = {}) {
 
 const typeTask = (v: string) => fireEvent.change(screen.getByPlaceholderText(/Describe a task/), { target: { value: v } });
 
-beforeEach(() => { launchSpy.mockClear(); lastInput = null; });
+beforeEach(() => { launchSpy.mockClear(); lastInput = null; specState = { suggestion: null, grounded: false, loading: false }; });
 
 describe("LaunchTaskModal (minimal box)", () => {
   it("shows the prefilled repo in the Repositories control and gates Send on a task", () => {
@@ -219,5 +227,87 @@ describe("LaunchTaskModal — quality tier (P3.2)", () => {
     typeTask("Ship it");
 
     expect(screen.getByLabelText("Launch task")).toBeDisabled();
+  });
+});
+
+describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
+  const SUGGESTION = {
+    acceptanceChecks: ["dotnet", "test"],
+    acceptanceCriteria: ["Blank-line input no longer throws", "All 174 existing tests pass"],
+    rationale: "tests/OrderService.Tests exists",
+    confidence: 0.8,
+  };
+
+  it("renders no card when the compiler suggests nothing", () => {
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    expect(screen.queryByTestId("spec-suggestion-card")).toBeNull();
+  });
+
+  it("applies suggested checks into the launch payload", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+
+    expect(screen.getByTestId("spec-suggestion-card")).toBeInTheDocument();
+    expect(screen.getByText("Grounded in repo layout")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByText("Apply")[0]);
+    fireEvent.click(screen.getByLabelText("Launch task"));
+
+    expect(lastInput?.acceptanceChecks).toEqual(["dotnet", "test"]);
+  });
+
+  it("applies suggested criteria merged into the defaults", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+
+    fireEvent.click(screen.getAllByText("Apply")[1]);
+    fireEvent.click(screen.getByLabelText("Launch task"));
+
+    expect(lastInput?.acceptanceCriteria).toEqual(expect.arrayContaining(["Blank-line input no longer throws", "All 174 existing tests pass"]));
+  });
+
+  it("apply all fills both and the buttons settle to applied", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+
+    fireEvent.click(screen.getByText("Apply all"));
+    expect(screen.getAllByText("Applied")).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toEqual(["dotnet", "test"]);
+    expect(lastInput?.acceptanceCriteria).toEqual(expect.arrayContaining(["All 174 existing tests pass"]));
+  });
+
+  it("dismiss hides the card and leaves the launch payload untouched", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+
+    fireEvent.click(screen.getByLabelText("Dismiss suggestion"));
+    expect(screen.queryByTestId("spec-suggestion-card")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+  });
+
+  it("an ungrounded suggestion carries the verify caveat", () => {
+    specState = { suggestion: SUGGESTION, grounded: false, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    expect(screen.getByText("Repo not read — verify the check")).toBeInTheDocument();
+  });
+
+  it("standard effort hides the checks row (that tier never sends the argv floor)", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox({ autofill: { repositoryId: "r1", repositoryLabel: "acme/api", effort: "standard" } });
+    typeTask("Fix the parser crash on blank lines");
+
+    expect(screen.getByTestId("spec-suggestion-card")).toBeInTheDocument();
+    expect(screen.queryByText("Checks")).toBeNull();
+    expect(screen.getByText("Criteria")).toBeInTheDocument();
   });
 });
