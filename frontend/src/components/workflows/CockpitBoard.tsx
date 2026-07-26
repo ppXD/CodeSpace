@@ -1,7 +1,7 @@
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 import { relativeTime } from "@/lib/codeTree";
-import { statusWord } from "@/lib/runStatus";
+import { isDegradedOutcome, outcomeWord } from "@/lib/runStatus";
 
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
@@ -197,7 +197,7 @@ function CompactList({ runs, nowMs, onOpen, repoName, empty }: { runs: WorkflowR
  */
 function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; nowMs: number; onOpen: (run: WorkflowRunSummary) => void; repoName?: (id: string) => string | undefined }) {
   const title = lineageTitle(run);
-  const tone = runStatusTone(run.status);
+  const tone = runStatusTone(run.status, run.outcome);
   const version = run.workflowVersion != null ? `v${run.workflowVersion}` : null;
   const duration = runDuration(run, nowMs);
   // A parked-then-terminal run shows a lifespan ("open 5d"), not a runtime — so it drops the clock glyph (which would imply work).
@@ -209,7 +209,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
 
   return (
     <li className="run-row2" onClick={() => onOpen(run)}>
-      <span className="run-row2-tile" data-tone={tone} aria-hidden="true"><RunGlyph status={run.status} /></span>
+      <span className="run-row2-tile" data-tone={tone} aria-hidden="true"><RunGlyph status={run.status} outcome={run.outcome} /></span>
       <div className="run-row2-body">
         <div className="run-row2-l1">
           <span className="run-row2-title" title={title}>{shortRunTitle(title)}</span>
@@ -224,7 +224,7 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
           <span className="run-row2-when">{relativeTime(when)}</span>
         </div>
         <div className="run-row2-l2">
-          <span className="run-row2-sw" data-tone={tone}>{statusWord(run.status)}</span>
+          <span className="run-row2-sw" data-tone={tone}>{outcomeWord(run.status, run.outcome)}</span>
           {repos.length > 0 && (
             <span className="run-row2-repo" title={repos.join(", ")}>
               <Ic.Repo size={11} aria-hidden="true" />
@@ -245,8 +245,11 @@ function RunRow({ run, nowMs, onOpen, repoName }: { run: WorkflowRunSummary; now
   );
 }
 
-/** The run's status glyph — Running is a spinner, Suspended a pause, everything else a tone-coloured mark. */
-function RunGlyph({ status }: { status: WorkflowRunStatus }) {
+/** The run's status glyph — Running is a spinner, Suspended a pause, everything else a tone-coloured mark. A run
+ *  that finished WITHOUT cleanly achieving its goal never gets the check: an abstention shows the question it
+ *  asked, everything else degraded shows an alert. */
+function RunGlyph({ status, outcome }: { status: WorkflowRunStatus; outcome?: string | null }) {
+  if (status === "Success" && isDegradedOutcome(outcome)) return outcome === "NeedsClarification" ? <Ic.Help size={13} /> : <Ic.Triangle size={13} />;
   if (status === "Success") return <Ic.Check size={13} />;
   if (status === "Failure") return <Ic.X size={13} />;
   if (status === "Cancelled") return <Ic.Dot size={15} />;

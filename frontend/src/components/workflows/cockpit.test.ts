@@ -122,3 +122,24 @@ describe("humanizeRunError", () => {
     expect(humanizeRunError("The build didn't compile.")).toBe("The build didn't compile.");
   });
 });
+
+describe("runStatusTone — a degraded run never wears the success tone", () => {
+  it("reads degraded for every non-clean outcome on a Success run", () => {
+    for (const outcome of ["GaveUp", "Forced", "NeedsClarification", "AcceptanceFailed"]) {
+      expect(runStatusTone("Success", outcome)).toBe("degraded");
+    }
+  });
+
+  it("keeps ok for a clean run, an absent outcome and an unknown future value", () => {
+    expect(runStatusTone("Success", "Succeeded")).toBe("ok");
+    expect(runStatusTone("Success", null)).toBe("ok");
+    expect(runStatusTone("Success")).toBe("ok");
+    expect(runStatusTone("Success", "SomeFutureKind")).toBe("ok");
+  });
+
+  it("leaves every non-Success status untouched — the outcome only qualifies a Success", () => {
+    expect(runStatusTone("Failure", "GaveUp")).toBe("err");
+    expect(runStatusTone("Cancelled", "GaveUp")).toBe("cancelled");
+    expect(runStatusTone("Suspended", "GaveUp")).toBe("suspended");
+  });
+});

@@ -1,4 +1,5 @@
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
+import { isDegradedOutcome } from "@/lib/runStatus";
 
 /**
  * The Runs cockpit metrics — pure derivations behind the four status cards. Everything here comes from data that
@@ -36,9 +37,15 @@ export function formatDuration(startISO: string | null, endISO: string | null): 
 }
 
 /** The status tone shared by the row's tinted status tile + its status word. */
-export type RunStatusTone = "ok" | "err" | "running" | "suspended" | "cancelled" | "queued";
+export type RunStatusTone = "ok" | "err" | "degraded" | "running" | "suspended" | "cancelled" | "queued";
 
-export function runStatusTone(status: WorkflowRunStatus): RunStatusTone {
+/**
+ * A1: a run whose WORK did not cleanly finish reads `degraded`, never `ok` — a green check on a give-up is the
+ * exact claim the outcome column exists to retract. It is deliberately its own tone rather than `err` (the run
+ * did not fail) or `cancelled` (nobody stopped it).
+ */
+export function runStatusTone(status: WorkflowRunStatus, outcome?: string | null): RunStatusTone {
+  if (status === "Success" && isDegradedOutcome(outcome)) return "degraded";
   if (status === "Success") return "ok";
   if (status === "Failure") return "err";
   if (status === "Running") return "running";

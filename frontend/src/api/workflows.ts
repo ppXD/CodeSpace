@@ -172,6 +172,12 @@ export interface WorkflowRunSummary {
   /** Sourced from upstream run_request.source_type. */
   sourceType: WorkflowRunSourceType;
   status: WorkflowRunStatus;
+  /** A1: how the WORK ended, when the status alone would mislead — "Succeeded" | "GaveUp" | "Forced" |
+   *  "NeedsClarification" | "AcceptanceFailed". `status` says the graph finished; a give-up, a bound-forced stop,
+   *  an abstention and a failed objective check all finish as Success. ABSENT for a non-supervisor run and for
+   *  every run that terminalized before the column existed — absence means "the status word is the whole truth",
+   *  never a verdict, so every reader falls back rather than treating it as a degradation. */
+  outcome?: string | null;
   error: string | null;
   startedAt: string | null;
   completedAt: string | null;
