@@ -301,6 +301,17 @@ describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
     expect(screen.getByText("Repo not read — verify the check")).toBeInTheDocument();
   });
 
+  it("a suggestion without checks shows the absence as its own row (the decision-relevant fact)", () => {
+    specState = { suggestion: { ...SUGGESTION, acceptanceChecks: [] }, grounded: true, loading: false };
+    renderBox();
+    typeTask("Remove unused using directives everywhere");
+
+    expect(screen.getByText("Checks")).toBeInTheDocument();
+    expect(screen.getByText(/None suggested — the model's note below says why/)).toBeInTheDocument();
+    expect(screen.getByText(SUGGESTION.rationale)).toBeInTheDocument();
+    expect(screen.getAllByText("Apply")).toHaveLength(1);
+  });
+
   it("standard effort hides the checks row (that tier never sends the argv floor)", () => {
     specState = { suggestion: SUGGESTION, grounded: true, loading: false };
     renderBox({ autofill: { repositoryId: "r1", repositoryLabel: "acme/api", effort: "standard" } });
