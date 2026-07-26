@@ -828,7 +828,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {integration.Reason}");
         if (integration.PreservedBranches.Count > 0) builder.AppendLine($"    the agents' work is PRESERVED on branches: {string.Join(", ", integration.PreservedBranches)}");
 
-        builder.AppendLine("    To resolve: spawn ONE agent to reconcile these branches, build, and run the tests, then merge again. Or stop to leave the conflict for a human.");
+        // The verb is named EXPLICITLY here (M0, 2026-07-11): the live golden eval proved a model picks its verb off
+        // this copy, and the reconciling agent is the SERVER's to spawn — a model that reads "spawn ONE agent" emits
+        // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation.
+        builder.AppendLine("    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, then you merge again. Or stop to leave the conflict for a human.");
     }
 
     /// <summary>The index of the LAST element matching the predicate, or -1 — used to tag the most-recent spawn/retry.</summary>
@@ -871,11 +874,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "You are a software-delivery supervisor driving a bounded loop of decisions toward a goal. " +
         "On each turn you emit ONE action from a fixed vocabulary: 'plan' (decompose the goal into subtasks), " +
         "'spawn' (fan out coding agents over planned subtask ids), 'retry' (re-run one subtask), " +
-        "'merge' (synthesize the agents' results), 'ask_human' (ask a question), 'stop' (finish). " +
+        "'merge' (synthesize the agents' results), 'resolve' (reconcile a CONFLICTED integration — the server spawns " +
+        "ONE reconciling agent from the recorded conflict; you name no subtask and author no branches), " +
+        "'ask_human' (ask a question), 'stop' (finish). " +
         "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
-        "succeeded. Stop when the goal is met or a bound forces it. " +
+        "succeeded — and when an integration reports CONFLICTED, 'resolve' it before merging again. " +
+        "Stop when the goal is met or a bound forces it. " +
         "When you spawn, you MAY optionally author a per-agent 'agents[]' override (one entry per subtask id) to give " +
         "each agent a DISTINCT role, goal, repo subset, harness, model, persona, or a LOWER autonomy — use it when the " +
         "subtasks need different specialisations (e.g. a backend implementer and a separate reviewer); omit 'agents[]' to " +
@@ -896,9 +902,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +
         "work is wanted. A follow-up that asks for NEW or ADDITIONAL work — even building on prior turns, or touching the " +
         "same file/endpoint/area as prior work — is NOT redundant; plan it. " +
-        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; you may spawn ONE agent " +
-        "to reconcile the preserved branches, build, and run the tests (then merge again), or stop to leave the conflict " +
-        "for a human — never accept an unverified resolution. " +
+        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; choose 'resolve' — the " +
+        "server spawns ONE agent that reconciles the preserved branches, builds, and runs the tests (then merge again) — " +
+        "or stop to leave the conflict for a human — never accept an unverified resolution. " +
         "If the context shows a PLAN-CONFIRMATION question (it asks the human to confirm a plan version) that was just " +
         "answered: an approving answer means the plan is confirmed — proceed to 'spawn' its subtasks; ANY other answer " +
         "is the operator's revision feedback — author a REVISED 'plan' that incorporates it (keep what they liked, " +

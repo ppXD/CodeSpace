@@ -798,7 +798,11 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("src/Foo.cs", Case.Insensitive);
         prompt.ShouldContain("src/Bar.cs", Case.Insensitive, "the conflicted files are named so a resolver knows what to reconcile");
         prompt.ShouldContain("codespace/agent/bbb", Case.Insensitive, "the preserved branches are named — the resolver's inputs");
-        prompt.ShouldContain("spawn ONE agent", Case.Insensitive, "the resolve move is spelled out");
+        // The conflict block must name the VERB, not describe the server's mechanics in another verb's words: the
+        // M0 golden eval (2026-07-11) proved a model picks its verb off this copy, and a model that emits 'spawn'
+        // here needs a plan-local subtask id it does not have for a reconciliation.
+        prompt.ShouldContain("choose 'resolve'", Case.Insensitive, "the reconciliation move is named by its own verb");
+        prompt.ShouldNotContain("To resolve: spawn ONE agent", Case.Insensitive, "the verb collision is gone — 'spawn' must not be the word offered for the resolve move");
         prompt.ShouldContain("stop to leave the conflict for a human", Case.Insensitive, "the fail-safe move is offered too");
     }
 
@@ -868,6 +872,20 @@ public class SupervisorDeciderTests
 
         system.ShouldContain("INTEGRATION CONFLICTED", Case.Insensitive);
         system.ShouldContain("never accept an unverified resolution", Case.Insensitive, "the safety floor is in the rails — no blind accept");
+        system.ShouldContain("choose 'resolve'", Case.Insensitive, "the conflict rail names the verb the schema actually accepts");
+        system.ShouldNotContain("you may spawn ONE agent", Case.Insensitive, "the rail must not offer 'spawn' as the word for the resolve move");
+    }
+
+    [Fact]
+    public void The_system_prompt_vocabulary_names_every_verb_the_schema_accepts()
+    {
+        // The sentence self-describes as "a fixed vocabulary" — a verb missing from it reads to the model as a verb
+        // that does not exist. 'resolve' was omitted while the schema accepted it, so the only guidance pointing at
+        // a conflicted integration named a DIFFERENT verb (the M0 verb-off-the-copy failure class).
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        foreach (var verb in new[] { "'plan'", "'spawn'", "'retry'", "'merge'", "'resolve'", "'ask_human'", "'stop'" })
+            system.ShouldContain(verb, Case.Sensitive, $"the fixed-vocabulary sentence must name {verb} — the schema accepts it");
     }
 
     [Fact]
