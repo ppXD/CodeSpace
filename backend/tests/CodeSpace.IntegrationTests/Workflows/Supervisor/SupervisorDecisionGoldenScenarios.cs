@@ -443,9 +443,37 @@ public static class SupervisorDecisionGoldenScenarios
     /// </summary>
     private static SupervisorPriorDecision Plan(params string[] subtaskIds)
     {
-        var subtasks = subtaskIds
-            .Select(id => new SupervisorPlannedSubtask { Id = id, Title = $"subtask {id}", Instruction = $"implement {id}" })
-            .ToList();
+        // Plan-item copy that decomposes FixtureGoal for real. The first version synthesised "subtask s1" /
+        // "implement s1", and the live gate answered immediately: three scenarios that had been passing started
+        // choosing 'plan' — the model, now finally SHOWN a plan, read a contentless one against a concrete goal and
+        // quite reasonably decided to write a better one. Production plan items carry the model's own titles and
+        // instructions, so placeholder copy is not a neutral stand-in; it is an active invitation to re-plan.
+        // Locals, not static fields: these are consumed by All's own initializer, so a field would have to be
+        // declared above it and would break again the moment someone reordered the file.
+        string[] titles =
+        {
+            "Validate the email format on the signup endpoint",
+            "Return HTTP 400 with a clear error message",
+            "Cover the validation with unit tests",
+            "Reject addresses missing a domain part",
+            "Document the new 400 response",
+        };
+
+        string[] instructions =
+        {
+            "Add server-side email-format validation to the signup endpoint handler.",
+            "Reject a malformed address with HTTP 400 and a message naming what was wrong.",
+            "Add unit tests covering valid, malformed, and empty addresses.",
+            "Extend the validator to reject addresses with no domain part.",
+            "Update the endpoint's API documentation with the new 400 response.",
+        };
+
+        var subtasks = subtaskIds.Select((id, i) => new SupervisorPlannedSubtask
+        {
+            Id = id,
+            Title = titles[i % titles.Length],
+            Instruction = instructions[i % instructions.Length],
+        }).ToList();
 
         return PriorDecision(SupervisorDecisionKinds.Plan, 0,
             JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = FixtureGoal, Subtasks = subtasks }, AgentJson.Options),
