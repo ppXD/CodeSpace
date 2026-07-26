@@ -105,9 +105,31 @@ export interface LaunchTaskResult {
   surfaceKind: string;
 }
 
+/** One compiled suggestion set from the spec-preview lane (P5-7) — mirrors the backend `TaskSpecSuggestion`.
+ *  Every field maps onto an EXISTING launch field; these are editable proposals, never stakes. `openPullRequest` /
+ *  `targetBranch` ride along for when the modal wires DeliverySpec — the card ignores them until then. */
+export interface TaskSpecSuggestion {
+  acceptanceChecks: string[];
+  acceptanceCriteria: string[];
+  openPullRequest?: boolean | null;
+  targetBranch?: string | null;
+  rationale: string;
+  confidence: number;
+}
+
+/** Mirror of the backend `CompileTaskSpecResult`. A null/absent `suggestion` is the documented degrade
+ *  (no structured model / model-path miss) — the composer renders nothing, never an empty scaffold. */
+export interface CompileTaskSpecResult {
+  suggestion?: TaskSpecSuggestion | null;
+  grounded: boolean;
+}
+
 export const tasksApi = {
   // Launch a run from a task spec — the run resource is rooted at api/workflows/runs (the substrate is the
   // workflow engine), so launching a task is creating a run.
   launch: (input: LaunchTaskInput) =>
     fetchJson<LaunchTaskResult>("/api/workflows/runs", { method: "POST", body: JSON.stringify(input) }),
+  // Compile a free-text goal into launch-contract suggestions (read-only; nothing persisted, nothing staked).
+  specPreview: (input: { goal: string; repositoryId?: string }) =>
+    fetchJson<CompileTaskSpecResult>("/api/workflows/runs/spec-preview", { method: "POST", body: JSON.stringify(input) }),
 };

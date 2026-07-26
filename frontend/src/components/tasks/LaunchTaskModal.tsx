@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { TaskSurfaceKind } from "@/api/tasks";
+import type { TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, DEFAULT_ACCEPTANCE } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
@@ -11,6 +11,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
 import { useRepositories, useRepositoryBranches } from "@/hooks/use-repositories";
+import { useSpecPreview } from "@/hooks/use-spec-preview";
 import { useLaunchTask } from "@/hooks/use-tasks";
 
 /** Caller-supplied prefill. The component shape is INVARIANT across surfaces (Repository / PR / Issue /
@@ -129,6 +130,27 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const credModels = useCredentialedModels();
   const personas = useAgentDefinitions();
   const launch = useLaunchTask();
+
+  // P5-7 spec preview: once the goal settles, the backend compiles it into contract suggestions the card below
+  // the box pre-fills. Everything here is display state — applying writes into the SAME cfg fields the
+  // Evaluation tab edits (no parallel state), dismissal is keyed to the suggestion's content so an edited goal
+  // that produces a NEW suggestion un-dismisses, and a null suggestion renders nothing at all.
+  const spec = useSpecPreview(taskText, (workspace.find(r => r.isPrimary) ?? workspace[0])?.repositoryId);
+  const specKey = spec.suggestion ? JSON.stringify(spec.suggestion) : "";
+  const [specDismissedKey, setSpecDismissedKey] = useState("");
+  const [specApplied, setSpecApplied] = useState<{ checks: boolean; criteria: boolean }>({ checks: false, criteria: false });
+  useEffect(() => setSpecApplied({ checks: false, criteria: false }), [specKey]);
+  const showSpecCard = !!spec.suggestion && specKey !== specDismissedKey;
+  const applySpecChecks = () => {
+    if (!spec.suggestion?.acceptanceChecks.length) return;
+    setC({ acceptanceChecks: [...spec.suggestion.acceptanceChecks] });
+    setSpecApplied(p => ({ ...p, checks: true }));
+  };
+  const applySpecCriteria = () => {
+    if (!spec.suggestion?.acceptanceCriteria.length) return;
+    setC({ acceptance: [...new Set([...cfg.acceptance, ...spec.suggestion.acceptanceCriteria])] });
+    setSpecApplied(p => ({ ...p, criteria: true }));
+  };
 
   const closeMenu = () => { setMenu(null); setEffortOpen(false); };
 
@@ -394,6 +416,19 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
             </button>
           </div>
         </div>
+
+        {spec.loading && !showSpecCard && <div className="lt3-spec-load">Compiling contract suggestions…</div>}
+        {showSpecCard && spec.suggestion && (
+          <SpecSuggestionCard
+            suggestion={spec.suggestion}
+            grounded={spec.grounded}
+            applied={specApplied}
+            checksApplicable={effort !== "standard"}
+            onApplyChecks={applySpecChecks}
+            onApplyCriteria={applySpecCriteria}
+            onDismiss={() => setSpecDismissedKey(specKey)}
+          />
+        )}
 
         {expanded && (
           <div className="lt3-cust">
@@ -662,5 +697,55 @@ function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolea
       <span className="lt3-srow-l">{label}</span>
       <span className="lt3-tog" data-on={on}><span /></span>
     </button>
+  );
+}
+
+/** P5-7 — the spec-preview suggestion card: editable PROPOSALS between the box and Customize. Applying writes
+ *  the SAME cfg fields the Evaluation tab edits (no parallel state); dismissing is keyed to the suggestion's
+ *  content upstream, so it leaves no trace; a null suggestion never mounts this at all. Checks hide on
+ *  Standard (that tier verifies per plan item and never sends the argv floor — an Apply there would be a lie). */
+function SpecSuggestionCard({ suggestion, grounded, applied, checksApplicable, onApplyChecks, onApplyCriteria, onDismiss }: {
+  suggestion: TaskSpecSuggestion;
+  grounded: boolean;
+  applied: { checks: boolean; criteria: boolean };
+  checksApplicable: boolean;
+  onApplyChecks: () => void;
+  onApplyCriteria: () => void;
+  onDismiss: () => void;
+}) {
+  const hasChecks = checksApplicable && suggestion.acceptanceChecks.length > 0;
+  const hasCriteria = suggestion.acceptanceCriteria.length > 0;
+  const allApplied = (!hasChecks || applied.checks) && (!hasCriteria || applied.criteria);
+  if (!hasChecks && !hasCriteria) return null;
+  return (
+    <div className="lt3-spec" data-testid="spec-suggestion-card">
+      <div className="lt3-spec-h">
+        <Ic.Zap size={13} />
+        <span>Suggested contract</span>
+        <span className="lt3-spec-badge">{Math.round(suggestion.confidence * 100)}% confident</span>
+        {grounded
+          ? <span className="lt3-spec-badge">Grounded in repo layout</span>
+          : <span className="lt3-spec-badge" data-warn="true">Repo not read — verify the check</span>}
+        <button type="button" className="lt3-spec-x" aria-label="Dismiss suggestion" onClick={onDismiss}><Ic.X size={13} /></button>
+      </div>
+      {hasChecks && (
+        <div className="lt3-spec-row">
+          <span className="lt3-spec-l">Checks</span>
+          <span className="lt3-spec-v">{suggestion.acceptanceChecks.map((t, i) => <code key={i} className="lt3-spec-chip">{t}</code>)}</span>
+          <button type="button" className="lt3-spec-apply" disabled={applied.checks} onClick={onApplyChecks}>{applied.checks ? "Applied" : "Apply"}</button>
+        </div>
+      )}
+      {hasCriteria && (
+        <div className="lt3-spec-row">
+          <span className="lt3-spec-l">Criteria</span>
+          <span className="lt3-spec-v lt3-spec-crit">{suggestion.acceptanceCriteria.map((c, i) => <span key={i}>{c}</span>)}</span>
+          <button type="button" className="lt3-spec-apply" disabled={applied.criteria} onClick={onApplyCriteria}>{applied.criteria ? "Applied" : "Apply"}</button>
+        </div>
+      )}
+      <div className="lt3-spec-f">
+        <span className="lt3-spec-r">{suggestion.rationale} · kept suggestions launch under your authority; dismissing leaves no trace</span>
+        <button type="button" className="lt3-spec-all" disabled={allApplied} onClick={() => { if (hasChecks) onApplyChecks(); if (hasCriteria) onApplyCriteria(); }}>Apply all</button>
+      </div>
+    </div>
   );
 }
