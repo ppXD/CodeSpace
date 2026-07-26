@@ -39,7 +39,7 @@ public static class SupervisorTrajectory
         {
             if (cancellationToken.IsCancellationRequested) break;
 
-            var context = new SupervisorTurnContext { Goal = SupervisorDecisionGoldenScenarios.FixtureGoal, TurnNumber = turn, PriorDecisions = priors.ToList(), SupervisorModelId = Brain };
+            var context = new SupervisorTurnContext { Goal = SupervisorDecisionGoldenScenarios.FixtureGoal, TurnNumber = turn, PriorDecisions = priors.ToList(), SupervisorModelId = Brain, MaxResolveAttempts = environment.MaxResolveAttempts };
 
             SupervisorDecision decision;
             try
@@ -68,6 +68,14 @@ public static class SupervisorTrajectory
 public interface ISupervisorTrajectoryEnvironment
 {
     SupervisorPriorDecision Fold(SupervisorDecision decision, long sequence, IReadOnlyList<SupervisorPriorDecision> priorsSoFar);
+
+    /// <summary>
+    /// The resolve budget this environment's arc REQUIRES. An environment that can only ship via a second
+    /// reconciliation must say so: the lane default is ONE, under which the decider's action mask correctly tells
+    /// the model a further resolve would force-stop the run — so an arc silently needing two would be scoring the
+    /// model on disobeying its own prompt, and a brain that obeyed would be marked wrong.
+    /// </summary>
+    int MaxResolveAttempts => SupervisorLane.DefaultMaxResolveAttempts;
 }
 
 /// <summary>The trajectory environments: the SUCCESS path + the two RECOVERY paths (a merge conflict the brain must resolve, an agent failure the brain must retry). Stateless singletons — each reads only the ledger passed to <see cref="ISupervisorTrajectoryEnvironment.Fold"/>.</summary>
@@ -136,6 +144,9 @@ public static class SupervisorTrajectoryEnvironments
 
     private sealed class ConflictThenUnverifiedThenVerifiedEnvironment : ISupervisorTrajectoryEnvironment
     {
+        /// <summary>This arc can ONLY ship via a second reconciliation, so it must grant a budget for two — otherwise the prompt forbids the very move the score demands.</summary>
+        public int MaxResolveAttempts => 2;
+
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
         {
             var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),

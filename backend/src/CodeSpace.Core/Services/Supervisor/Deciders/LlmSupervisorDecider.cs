@@ -314,7 +314,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // LIVE-prompt concern only. Evidence tails are the OPPOSITE: the foldable head excludes the newest
             // CompactTailKeep decisions, so any tail here is stale by construction (P5-2) — never bake one into the
             // persisted rolling digest; the one-line verdicts alone carry the state the digest needs.
-            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: false, includeEvidenceTails: false);
+            AppendPriorDecision(builder, foldable[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: false, includeEvidenceTails: false, resolveExhausted: false);
 
         try
         {
@@ -537,7 +537,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
             for (var i = 0; i < rendered.Count; i++)
-                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex, includeEvidenceTails: true);
+                AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex, includeEvidenceTails: true, resolveExhausted: SupervisorActionMask.IsResolveCapSpent(context));
 
             AppendDependencyFrontier(builder, context);
         }
@@ -654,7 +654,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"      produced — {string.Join("; ", parts)}");
     }
 
-    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn, bool isSupersededPlan, bool includeEvidenceTails)
+    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn, bool isSupersededPlan, bool includeEvidenceTails, bool resolveExhausted)
     {
         // P1e ladder: a plan REPLACED by a later re-plan collapses to a one-line digest — its full subtask payload is
         // dead weight (the live plan is recited at the tail; its frontier is shown). Keep the subtask ids so the model
@@ -695,7 +695,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 AppendUnitAcceptanceVerdict(builder, r, includeEvidenceTail: isLatestSpawn && includeEvidenceTails);
             }
 
-            if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior);
+            if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior, resolveExhausted);
 
             return;
         }
@@ -750,14 +750,27 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
     }
 
-    /// <summary>Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted — issue another 'resolve' (within the cap) or 'stop'. The copy deliberately names the RESOLVE verb: an earlier draft said "Retry the resolution", and the live golden eval proved a model obediently picks the 'retry' VERB off that word — re-running a source subtask instead of the reconciliation (M0, 2026-07-11).</summary>
-    private static void AppendResolutionVerdict(StringBuilder builder, SupervisorPriorDecision prior)
+    /// <summary>
+    /// Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be
+    /// accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted.
+    ///
+    /// <para>The unverified branch is CAP-AWARE (A1.5): with attempts left it offers another 'resolve', but once
+    /// the cap is spent a further resolve does not get refused — it FORCE-STOPS the run — so offering it there
+    /// would be false guidance, and it would contradict the action mask printed in the same prompt. The two must
+    /// agree: whichever text the model reads last, the advice has to be the same advice.</para>
+    ///
+    /// <para>The copy deliberately names the RESOLVE verb: an earlier draft said "Retry the resolution", and the
+    /// live golden eval proved a model obediently picks the 'retry' VERB off that word — re-running a source
+    /// subtask instead of the reconciliation (M0, 2026-07-11).</para>
+    /// </summary>
+    private static void AppendResolutionVerdict(StringBuilder builder, SupervisorPriorDecision prior, bool resolveExhausted)
     {
         var verdict = SupervisorOutcome.ReadResolutionVerdict(prior.OutcomeJson);
 
         builder.AppendLine(verdict switch
         {
             SupervisorResolutionVerdict.Verified => "    resolution VERIFIED — the reconciliation built and passed the tests; it is safe to accept (merge again / open a PR).",
+            SupervisorResolutionVerdict.Unverified when resolveExhausted => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. The resolve cap is SPENT, so another 'resolve' would force-stop this run rather than reconcile: 'stop' and leave the conflict for a human, or 'ask_human' to rule — never 'retry' (that re-runs a source subtask, not the reconciliation).",
             SupervisorResolutionVerdict.Unverified => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. Issue another 'resolve' (a fresh reconciliation attempt, within the resolve cap), or 'stop' and leave the conflict for a human — never 'retry' (that re-runs a source subtask, not the reconciliation).",
             _ => "    resolution verdict unknown — the resolver has not produced a verified result.",
         });
