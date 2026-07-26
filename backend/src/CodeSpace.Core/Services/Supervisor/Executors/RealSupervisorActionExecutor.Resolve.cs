@@ -127,29 +127,9 @@ public sealed partial class RealSupervisorActionExecutor
         return null;
     }
 
-    /// <summary>
-    /// The MOST RECENT prior <c>merge</c> OR <c>spawn</c> DECISION whose recorded integration CONFLICTED (the freshest
-    /// conflict the resolver should act on), or null when none conflicted. Walks newest-first. A <c>spawn</c> conflicts
-    /// when its S1 dependency staging could not auto-integrate its producers onto one branch (<c>.DependencyStaging.cs</c>
-    /// / <c>.Spawn.cs</c>'s <c>BuildBlockedSpawnOutcome</c>) — recorded in the SAME <c>integration</c> shape a <c>merge</c>
-    /// records, so this ONE reader routes both without a second escalation mechanism. Returns the decision (not just the
-    /// parsed outcome) so the caller can both read its <see cref="SupervisorIntegrationOutcome"/> AND inspect its raw
-    /// shape (single- vs multi-repo) to route resolution. Internal + static so the widened Merge-OR-Spawn kind check is
-    /// unit-pinned directly — no other decision kind may ever be misread as a conflict source.
-    /// </summary>
-    internal static SupervisorPriorDecision? FindMostRecentConflictDecision(SupervisorTurnContext context)
-    {
-        for (var i = context.PriorDecisions.Count - 1; i >= 0; i--)
-        {
-            var prior = context.PriorDecisions[i];
-
-            if (prior.DecisionKind != SupervisorDecisionKinds.Merge && prior.DecisionKind != SupervisorDecisionKinds.Spawn) continue;
-
-            if (SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true }) return prior;
-        }
-
-        return null;
-    }
+    /// <summary>Delegates to <see cref="SupervisorOutcome.FindConflictDecision"/> — the ONE conflict-presence answer the executor and the decider's action mask both read, so "is there a conflict" can never have two implementations. Kept as a named seam here because the widened Merge-OR-Spawn source is unit-pinned through this call.</summary>
+    internal static SupervisorPriorDecision? FindMostRecentConflictDecision(SupervisorTurnContext context) =>
+        SupervisorOutcome.FindConflictDecision(context.PriorDecisions);
 
     /// <summary>
     /// EVERY produced branch the prior spawn/retry agents pushed, in spawn order, deduped — the FULL set the resolver

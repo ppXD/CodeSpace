@@ -572,6 +572,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(bounds);
         }
 
+        // A1.5 — the action mask: name what CANNOT advance the run this turn, so a futile verb is refused before
+        // the model spends a turn on it. Null when everything is available ⇒ byte-identical prompt for a healthy run.
+        if (SupervisorActionMask.Render(context) is { } mask)
+        {
+            builder.AppendLine();
+            builder.AppendLine(mask);
+        }
+
         // P5-6 — the reducer's own "if you stopped now" verdict, prerendered at rehydrate (the prompt build stays
         // pure). Null for contract-less / pre-F0 runs ⇒ byte-identical prompt.
         if (!string.IsNullOrEmpty(context.CompletionRecital))
