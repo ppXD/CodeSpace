@@ -705,7 +705,9 @@ function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolea
 /** P5-7 — the spec-preview suggestion card: editable PROPOSALS between the box and Customize. Applying writes
  *  the SAME cfg fields the Evaluation tab edits (no parallel state); dismissing is keyed to the suggestion's
  *  content upstream, so it leaves no trace; a null suggestion never mounts this at all. Checks hide on
- *  Standard (that tier verifies per plan item and never sends the argv floor — an Apply there would be a lie). */
+ *  Standard (that tier verifies per plan item and never sends the argv floor — an Apply there would be a lie).
+ *  When the model suggested NO check, that absence is shown as its own row (the most decision-relevant fact on
+ *  the card) and the model's note below carries its own why. */
 function SpecSuggestionCard({ suggestion, grounded, applied, checksApplicable, onApplyChecks, onApplyCriteria, onDismiss }: {
   suggestion: TaskSpecSuggestion;
   grounded: boolean;
@@ -716,36 +718,54 @@ function SpecSuggestionCard({ suggestion, grounded, applied, checksApplicable, o
   onDismiss: () => void;
 }) {
   const hasChecks = checksApplicable && suggestion.acceptanceChecks.length > 0;
+  const noChecks = checksApplicable && suggestion.acceptanceChecks.length === 0;
   const hasCriteria = suggestion.acceptanceCriteria.length > 0;
   const allApplied = (!hasChecks || applied.checks) && (!hasCriteria || applied.criteria);
+  const band = suggestion.confidence >= 0.75 ? "high" : suggestion.confidence >= 0.5 ? "mid" : "low";
   if (!hasChecks && !hasCriteria) return null;
   return (
     <div className="lt3-spec" data-testid="spec-suggestion-card">
       <div className="lt3-spec-h">
-        <Ic.Zap size={13} />
+        <Ic.Sparkles size={14} />
         <span>Suggested contract</span>
-        <span className="lt3-spec-badge">{Math.round(suggestion.confidence * 100)}% confident</span>
+        <span className="lt3-spec-badge" data-band={band}>{Math.round(suggestion.confidence * 100)}% confident</span>
         {grounded
           ? <span className="lt3-spec-badge">Grounded in repo layout</span>
           : <span className="lt3-spec-badge" data-warn="true">Repo not read — verify the check</span>}
         <button type="button" className="lt3-spec-x" aria-label="Dismiss suggestion" onClick={onDismiss}><Ic.X size={13} /></button>
       </div>
+
       {hasChecks && (
         <div className="lt3-spec-row">
           <span className="lt3-spec-l">Checks</span>
-          <span className="lt3-spec-v">{suggestion.acceptanceChecks.map((t, i) => <code key={i} className="lt3-spec-chip">{t}</code>)}</span>
-          <button type="button" className="lt3-spec-apply" disabled={applied.checks} onClick={onApplyChecks}>{applied.checks ? "Applied" : "Apply"}</button>
+          <span className="lt3-spec-v">
+            <span className="lt3-spec-cmd">{suggestion.acceptanceChecks.map((t, i) => <code key={i} className="lt3-spec-chip">{t}</code>)}</span>
+            <span className="lt3-spec-sub">Runs after the work — exit 0 or the result fails{applied.checks && <span className="lt3-spec-went"> · filled into Evaluation → Acceptance checks</span>}</span>
+          </span>
+          <button type="button" className="lt3-spec-apply" disabled={applied.checks} title="Fills Evaluation → Acceptance checks (editable there)" onClick={onApplyChecks}>{applied.checks ? <><Ic.Check size={11} /> Applied</> : "Apply"}</button>
+        </div>
+      )}
+      {noChecks && (
+        <div className="lt3-spec-row">
+          <span className="lt3-spec-l">Checks</span>
+          <span className="lt3-spec-v lt3-spec-none">None suggested — the model's note below says why. Add your own under Evaluation if you know the command.</span>
         </div>
       )}
       {hasCriteria && (
         <div className="lt3-spec-row">
           <span className="lt3-spec-l">Criteria</span>
-          <span className="lt3-spec-v lt3-spec-crit">{suggestion.acceptanceCriteria.map((c, i) => <span key={i}>{c}</span>)}</span>
-          <button type="button" className="lt3-spec-apply" disabled={applied.criteria} onClick={onApplyCriteria}>{applied.criteria ? "Applied" : "Apply"}</button>
+          <span className="lt3-spec-v">
+            <ul className="lt3-spec-list">{suggestion.acceptanceCriteria.map((crit, i) => <li key={i}>{crit}</li>)}</ul>
+            <span className="lt3-spec-sub">Steers the work — rendered into the agent's brief{applied.criteria && <span className="lt3-spec-went"> · filled into Evaluation → Acceptance criteria</span>}</span>
+          </span>
+          <button type="button" className="lt3-spec-apply" disabled={applied.criteria} title="Fills Evaluation → Acceptance criteria (editable there)" onClick={onApplyCriteria}>{applied.criteria ? <><Ic.Check size={11} /> Applied</> : "Apply"}</button>
         </div>
       )}
+
+      {suggestion.rationale && <div className="lt3-spec-note">{suggestion.rationale}</div>}
+
       <div className="lt3-spec-f">
-        <span className="lt3-spec-r">{suggestion.rationale} · kept suggestions launch under your authority; dismissing leaves no trace</span>
+        <span className="lt3-spec-r">Kept suggestions launch as your own fields · dismissing leaves no trace</span>
         <button type="button" className="lt3-spec-all" disabled={allApplied} onClick={() => { if (hasChecks) onApplyChecks(); if (hasCriteria) onApplyCriteria(); }}>Apply all</button>
       </div>
     </div>
