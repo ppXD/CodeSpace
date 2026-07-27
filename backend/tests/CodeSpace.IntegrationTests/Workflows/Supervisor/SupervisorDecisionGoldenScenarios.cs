@@ -441,8 +441,30 @@ public static class SupervisorDecisionGoldenScenarios
     private static SupervisorTurnContext Context(int turn, int maxResolveAttempts, IReadOnlyList<SupervisorPriorDecision> priors) =>
         Context(turn, priors) with { MaxResolveAttempts = maxResolveAttempts };
 
-    private static SupervisorAgentResult Agent(Guid id, string status, string? summary = null, string? error = null, string? branch = null) =>
-        new() { AgentRunId = id, Status = status, Summary = summary, Error = error, ProducedBranch = branch };
+    /// <summary>
+    /// One folded agent result. These tapes STAKE an acceptance obligation per unit, so production would also fold
+    /// the grader's VERDICT for that unit — a staked obligation that is never answered is the shape of a run whose
+    /// every grading failed, not of a run that worked. Leaving it unanswered kept every completion dimension at
+    /// Unknown forever, which made the stopped-now recital an obligation no action could ever discharge.
+    /// The evidence id rides along because admission caps an unevidenced PASS on a required obligation at
+    /// InfraUnknown — a pass asserted without it would silently not count.
+    /// </summary>
+    private static SupervisorAgentResult Agent(Guid id, string status, string? summary = null, string? error = null, string? branch = null)
+    {
+        var passed = status == "Succeeded";
+
+        return new()
+        {
+            AgentRunId = id,
+            Status = status,
+            Summary = summary,
+            Error = error,
+            ProducedBranch = branch,
+            AcceptancePassed = passed,
+            AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
+            AcceptanceEvidenceId = passed ? Guid.NewGuid() : null,
+        };
+    }
 
     /// <summary>
     /// A plan prior carrying the PRODUCTION payload shape. It used to serialize an anonymous <c>{ subtasks: ["s1"] }</c>
