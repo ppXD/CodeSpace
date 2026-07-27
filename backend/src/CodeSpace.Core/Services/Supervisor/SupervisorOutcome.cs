@@ -1234,6 +1234,41 @@ public static class SupervisorOutcome
 
     private static readonly IReadOnlyDictionary<string, string> EmptyRoles = new Dictionary<string, string>();
 
+    /// <summary>The per-unit CONTRACT-BEARING dispatch overrides off a <c>spawn</c> decision's PAYLOAD <c>agents[]</c> — the two leaves the unit contract hashes over (<c>goalOverride</c>, <c>repositoryId</c>), keyed by subtask id. Entries naming neither are omitted, so a homogeneous spawn yields nothing and a unit hashes over its planned spec alone, exactly as the executor computes it. NARROW like <see cref="ReadSpawnAgentRoles"/>: it never touches the raw-JsonElement <c>targetRepos</c> leaf. Pure + best-effort.</summary>
+    public static IReadOnlyDictionary<string, (string? GoalOverride, Guid? RepositoryId)> ReadSpawnContractOverrides(string? spawnPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(spawnPayloadJson)) return EmptyOverrides;
+
+        try
+        {
+            var root = JsonDocument.Parse(spawnPayloadJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("agents", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return EmptyOverrides;
+
+            var map = new Dictionary<string, (string?, Guid?)>(StringComparer.Ordinal);
+
+            foreach (var e in arr.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                if (!e.TryGetProperty("subtaskId", out var sid) || sid.ValueKind != JsonValueKind.String) continue;
+
+                var goal = e.TryGetProperty("goalOverride", out var g) && g.ValueKind == JsonValueKind.String ? g.GetString() : null;
+                var repo = e.TryGetProperty("repositoryId", out var r) && r.ValueKind == JsonValueKind.String && Guid.TryParse(r.GetString(), out var parsed) ? parsed : (Guid?)null;
+
+                if (goal is not null || repo is not null) map[sid.GetString()!] = (goal, repo);
+            }
+
+            return map;
+        }
+        catch (JsonException)
+        {
+            return EmptyOverrides;
+        }
+    }
+
+    private static readonly IReadOnlyDictionary<string, (string? GoalOverride, Guid? RepositoryId)> EmptyOverrides = new Dictionary<string, (string?, Guid?)>();
+
     /// <summary>Read the single plan-local subtask id off a <c>retry</c> decision's PAYLOAD — null when absent/malformed. A retry re-runs ONE subtask as a fresh agent; the phase projection appends that fresh agent to the subtask's attempt list (after the failed original), so the room renders BOTH the failure and its recovery.</summary>
     public static string? ReadRetrySubtaskId(string? retryPayloadJson)
     {

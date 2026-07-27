@@ -135,6 +135,40 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     [Fact]
+    public void A_scenario_with_an_authorized_wave_recites_the_stopped_now_verdict()
+    {
+        // Production composes this block on every turn once a wave has staked an obligation, so a corpus without it
+        // was asking the model to choose a stop while withholding the reducer's verdict on what a stop would read as
+        // — the exact perception gap behind stopping as-if-done. It was absent from all 23 prompts.
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+            var staked = SupervisorTapeCompletion.ProjectIfStoppedNow(scenario.Context.PriorDecisions) is not null;
+
+            if (staked)
+                prompt.ShouldContain(SupervisorStopNowRecital.Header, Case.Sensitive, $"'{scenario.Name}' has staked obligations, so production would recite the stopped-now verdict here");
+            else
+                prompt.ShouldNotContain(SupervisorStopNowRecital.Header, Case.Sensitive, $"'{scenario.Name}' has staked nothing yet — production omits the block, and over-rendering it would invent a contract the run does not have");
+        }
+    }
+
+    [Fact]
+    public void The_recital_appears_exactly_when_a_wave_has_been_authorized()
+    {
+        // The gate itself, stated as data rather than derived — so a fixture that stops staking (or starts staking
+        // early) is caught here instead of silently changing what every scenario's prompt says.
+        var silent = new HashSet<string>(StringComparer.Ordinal) { "first-turn", "planned-not-spawned", "confirmation-approved", "confirmation-feedback" };
+
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var recited = SupervisorTapeCompletion.ProjectIfStoppedNow(scenario.Context.PriorDecisions) is not null;
+
+            recited.ShouldBe(!silent.Contains(scenario.Name),
+                $"'{scenario.Name}': a tape recites the stopped-now verdict once — and only once — some spawn has staked an obligation against a planned unit");
+        }
+    }
+
+    [Fact]
     public void The_negative_controls_exclude_resolve_from_their_accepted_set()
     {
         // Cheap structural guard: a negative control that accidentally accepted Resolve would look green while

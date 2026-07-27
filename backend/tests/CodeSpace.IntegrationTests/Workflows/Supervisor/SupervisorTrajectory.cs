@@ -53,6 +53,9 @@ public static class SupervisorTrajectory
                 MaxResolveAttempts = environment.MaxResolveAttempts,
                 TotalSpawnedAgents = SupervisorTurnService.FoldTotalSpawnedAgents(priors),
                 NoProgressDecisions = SupervisorTurnService.FoldNoProgressDecisions(priors),
+                // The stopped-now recital, through the SAME projection production's composer reduces to — null until
+                // an authorized wave has staked an obligation, exactly as production omits the block until then.
+                CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)),
             };
 
             SupervisorDecision decision;

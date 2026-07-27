@@ -56,6 +56,37 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     [Fact]
+    public async Task The_stopped_now_verdict_appears_once_a_wave_is_authorized_and_not_before()
+    {
+        // The trajectory gate scores whether a brain drives to a STOP, and production always tells it what a stop
+        // would read as. The gate never did — so it was measuring stop discipline while withholding the one block
+        // that informs it. Both directions matter: silent while nothing is staked, present afterwards.
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "validate-email" };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+
+        spy.Prompts[0].ShouldNotContain(SupervisorStopNowRecital.Header, Case.Sensitive, "turn 0 has an empty tape — there is no contract to recite and inventing one would be a lie about the run");
+        spy.Prompts[1].ShouldNotContain(SupervisorStopNowRecital.Header, Case.Sensitive, "a plan alone stakes nothing; production stakes at AUTHORIZATION, not at planning");
+
+        spy.Prompts[^1].ShouldContain(SupervisorStopNowRecital.Header, Case.Sensitive,
+            "once a spawn has staked its units the reducer has a verdict, and production recites it every turn from then on");
+    }
+
+    [Fact]
+    public async Task The_stopped_now_verdict_over_an_ungraded_tape_reads_unresolved()
+    {
+        // Faithfulness, not decoration: these fixtures fold no acceptance verdicts, so nothing ANSWERS the staked
+        // obligations and every dimension reads Unknown — which is exactly what production's reducer returns for the
+        // same tape. The steer that matters is still delivered: a stop right now cannot read Solved.
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "validate-email" };
+
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+
+        spy.Prompts[^1].ShouldContain("UNRESOLVED", Case.Sensitive);
+        spy.Prompts[^1].ShouldContain("never stop as if done", Case.Insensitive, "the block's whole purpose is to refuse a fake-done stop before it is chosen");
+    }
+
+    [Fact]
     public async Task The_agent_results_name_the_units_the_model_itself_planned()
     {
         // The coherence the whole tape rests on. The fan-out folds hardcoded s1/s2, which was survivable only while

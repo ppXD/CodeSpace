@@ -231,20 +231,9 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         .ToList();
 
     /// <summary>The supervisor lane's facts come from its tape; a lane with no tape reads an orderly completion (the engine deliberately conflates crash/completed at <c>WorkflowRunStatus</c> — the P4 lane adapters refine this).</summary>
-    private static CompletionRunFacts BuildFacts(WorkflowRunStatus status, IReadOnlyList<SupervisorPriorDecision> decisions)
-    {
-        var lastStop = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop && SupervisorDecisionStateMachine.IsTerminal(d.Status));
-        var classification = lastStop is null ? null : SupervisorOutcome.ClassifyStop(lastStop.PayloadJson, lastStop.OutcomeJson);
-
-        return new CompletionRunFacts
-        {
-            TerminalStatus = status,
-            HadOrderlyTerminal = decisions.Count == 0 || lastStop is not null,
-            ForcedStopReason = classification?.Kind == SupervisorStopKind.Forced ? classification.Reason ?? "forced stop" : null,
-            SelfReportedGiveUp = classification?.Kind == SupervisorStopKind.GaveUp,
-            SelfReportedAbstention = classification?.Kind == SupervisorStopKind.NeedsClarification,
-        };
-    }
+    /// <summary>Delegates to <see cref="Supervisor.SupervisorCompletionFacts.FromTape"/> — the shared reading the tape-only projection uses too, so the DB compose and the stopped-now recital can never disagree about the run's terminal facts.</summary>
+    private static CompletionRunFacts BuildFacts(WorkflowRunStatus status, IReadOnlyList<SupervisorPriorDecision> decisions) =>
+        Supervisor.SupervisorCompletionFacts.FromTape(status, decisions);
 
     /// <summary>The dispatch-time WorkUnitRef stamps off the staged task rows — including ContractHash, which the tape alone cannot reconstruct.</summary>
     private async Task<IReadOnlyDictionary<Guid, WorkUnitRef>?> StampedWorkUnitsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -282,36 +271,11 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
         var workUnitByAttempt = attempts.Where(a => a.WorkUnit is not null).ToDictionary(a => a.AttemptId, a => a.WorkUnit!);
         var hashesByAttempt = await ContentHashesByAttemptAsync(attempts.Select(a => a.AttemptId).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
-        foreach (var decision in decisions)
-        {
-            if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) continue;
-
-            if (!SupervisorDecisionStateMachine.IsTerminal(decision.Status)) continue;
-
-            var unitIds = decision.DecisionKind == SupervisorDecisionKinds.Spawn
-                ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
-                : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();
-            var results = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
-
-            for (var i = 0; i < results.Count && i < unitIds.Count; i++)
-            {
-                if (string.IsNullOrEmpty(unitIds[i]) || results[i].AcceptancePassed is not { } passed) continue;
-
-                await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
-                {
-                    RequirementRef = $"acceptance:{unitIds[i]}",
-                    Kind = ContractKinds.Acceptance,
-                    AttemptId = results[i].AgentRunId,
-                    WorkUnit = workUnitByAttempt.GetValueOrDefault(results[i].AgentRunId),
-                    Disposition = VerificationDispositions.Classify(passed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
-                    Authority = ContractAuthority.ServerPolicy,
-                    EvidenceRef = results[i].AcceptanceEvidenceId,
-                    EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
-                    ContentHashes = hashesByAttempt.GetValueOrDefault(results[i].AgentRunId),
-                    ObservedAt = DateTimeOffset.UtcNow,
-                }, cancellationToken).ConfigureAwait(false);
-            }
-        }
+        // The receipt SHAPE lives in Supervisor.SupervisorGradedReceipts so the tape-only projection behind the
+        // decider's stopped-now recital builds byte-comparable receipts through the same path. Here we add the
+        // row-sourced identity stamps and persist; there they are simply absent.
+        foreach (var receipt in Supervisor.SupervisorGradedReceipts.FromTape(decisions, workUnitByAttempt, hashesByAttempt.ToDictionary(kv => kv.Key, kv => kv.Value)))
+            await _contracts.AppendReceiptAsync(runId, teamId, receipt, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
