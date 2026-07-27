@@ -18,19 +18,27 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// Nothing here re-implements a rule; the only thing it supplies is the tape-side reading of inputs the composer
 /// reads from rows.</para>
 ///
-/// <para><b>Faithfulness boundary — read before trusting this for anything but a prompt block.</b> Two inputs the
-/// composer takes from durable rows are absent here, and both are absent in the CONSERVATIVE direction:</para>
+/// <para><b>Faithfulness boundary — read before trusting this for anything but a prompt block.</b> Three inputs the
+/// composer takes from durable rows are absent here. One is provably inert; the other two are absent in the
+/// CONSERVATIVE direction:</para>
 /// <list type="bullet">
-/// <item>Receipts carry no <c>WorkUnitRef</c> (the dispatch-time stamp, whose ContractHash the tape cannot
-/// reconstruct). Admission flags that as a warning and still admits — so the superseded-attempt filter is inactive.
-/// A stale FAILING receipt admitted beside a fresh passing one aggregates to Failed, i.e. MORE unresolved, never a
-/// false all-clear.</item>
-/// <item>Receipts carry no content hashes (they come from the publish-manifest ledger). Those feed auditability
-/// caps, which only ever TIGHTEN a disposition.</item>
+/// <item><b>Inert:</b> acceptance receipts carry no content hashes. <c>CompletionReducer</c>'s hash-upgrade hook is
+/// reached only through the <c>Output</c> kind, and its fold filters by kind first — an Acceptance receipt never
+/// meets it. Omitting them cannot move a disposition at all.</item>
+/// <item><b>Conservative:</b> receipts carry no <c>WorkUnitRef</c> (the dispatch-time stamp, whose ContractHash the
+/// tape cannot reconstruct). Admission flags that as a warning and still admits, so the superseded-attempt filter is
+/// inactive. A stale FAILING receipt admitted beside a fresh passing one aggregates to Failed — MORE unresolved,
+/// never a false all-clear.</item>
+/// <item><b>Conservative:</b> no delivery receipts are minted at all. Production derives them from publish-manifest
+/// rows; a supervisor result carries a produced branch but not the commit sha or patch artifact a single-repo
+/// manifest records, so a partial mint would attest less than it appears to. An unminted delivery obligation reads
+/// Unknown, which is owed rather than settled.</item>
 /// </list>
 /// <para>So this can read more unresolved than production, and cannot read settled where production reads
-/// unresolved. For a block whose whole job is to stop a model stopping as-if-done, that is the safe direction. A
-/// drift-detector test seeds a real run and asserts the real composer renders the identical recital.</para>
+/// unresolved. For a block whose whole job is to stop a model stopping as-if-done, that is the safe direction — and
+/// it is asserted, not assumed: one drift detector seeds a real run and requires the real composer to render the
+/// IDENTICAL recital, a second requires the projection to err toward owed where a manifest is invisible to it, and a
+/// third requires BOTH to stay silent over a plan that was never authorized.</para>
 /// </summary>
 public static class SupervisorTapeCompletion
 {
@@ -72,6 +80,12 @@ public static class SupervisorTapeCompletion
     /// </summary>
     private static IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> StakedUnits(IReadOnlyList<SupervisorPriorDecision> decisions)
     {
+        // Production stakes only under an AUTHORIZED plan: the executor reads the last ref-bearing plan decision's
+        // own recorded workPlanId off its OUTCOME and stakes nothing without one. A tape whose plans carry no ref
+        // (a pre-P1a run) therefore has no obligations at all, and reciting a verdict over one would invent a
+        // contract the run does not have — the opposite error from the missing block, and a worse one.
+        if (!decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Plan && SupervisorOutcome.ReadPlanRef(d.OutcomeJson) is not null)) yield break;
+
         var planned = PlannedSubtasks(decisions);
 
         if (planned.Count == 0) yield break;

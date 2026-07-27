@@ -332,6 +332,9 @@ public static class SupervisorDecisionGoldenScenarios
     public static readonly Guid BrainModelRowId = Guid.Parse("44444444-4444-4444-4444-444444444444");
 
     /// <summary>The canonical real-model fixture goal — deliberately SPECIFIC and unambiguous (clear deliverable + acceptance) so the only correct first move is to PLAN, never to ask a clarifying question. Shared with the trajectory eval so both gates score the same well-specified task.</summary>
+    /// <summary>The fixture's authorized plan ref. Production's plan executor records <c>workPlanId</c>/<c>workPlanVersion</c> on every plan outcome, and the spawn executor stakes NOTHING without one — so a fixture omitting it describes a pre-protocol run whose obligations, and therefore whose stopped-now verdict, do not exist.</summary>
+    private static readonly Guid FixtureWorkPlanId = Guid.Parse("9f2c7d10-3c1e-4a5b-9f8a-6d2b41e07c55");
+
     public const string FixtureGoal = "Add server-side email-format validation to the signup endpoint: reject malformed addresses with HTTP 400 and a clear error message, and cover it with unit tests.";
 
     /// <summary>The operator APPROVED the plan on the confirmation card → the gate released; the ONLY sensible move is to spawn the confirmed subtasks (re-planning ignores the approval; stopping abandons the goal).</summary>
@@ -487,7 +490,7 @@ public static class SupervisorDecisionGoldenScenarios
 
         return PriorDecision(SupervisorDecisionKinds.Plan, 0,
             JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = FixtureGoal, Subtasks = subtasks }, AgentJson.Options),
-            JsonSerializer.Serialize(new { planned = subtaskIds }, AgentJson.Options));
+            JsonSerializer.Serialize(new { planned = subtaskIds, count = subtasks.Count, workPlanId = FixtureWorkPlanId, workPlanVersion = 1 }, AgentJson.Options));
     }
 
     private static SupervisorPriorDecision Spawn(string[] subtaskIds, params SupervisorAgentResult[] results)
