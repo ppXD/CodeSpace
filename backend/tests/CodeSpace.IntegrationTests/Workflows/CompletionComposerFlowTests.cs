@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Completion;
+using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -146,6 +147,94 @@ public sealed class CompletionComposerFlowTests
         await composer.ComposeAsync(runId, teamId, WorkflowRunStatus.Success, CancellationToken.None);
         (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
             .ShouldBe(receiptsAfterWhatIf, "a later terminal-boundary compose lands on the SAME rows the hypothetical wrote");
+    }
+
+    // ── The drift detector: the tape-only projection vs. the real DB-backed compose ────
+
+    /// <summary>
+    /// The bond behind <see cref="SupervisorTapeCompletion"/>. The two live-model gates have no database, so the
+    /// decider's stopped-now block is composed there from the tape alone — and a projection that quietly disagrees
+    /// with production would put the gates right back to scoring a prompt that does not ship, which is the defect it
+    /// was built to remove. Same tape, same staking call, both paths, one recital string.
+    /// </summary>
+    [Fact]
+    public async Task The_tape_only_projection_recites_exactly_what_the_real_composer_recites()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+        var attemptId = Guid.NewGuid();
+
+        var planPayload = """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""";
+        var spawnPayload = """{"subtaskIds":["s1"]}""";
+        var spawnOutcome = JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", producedBranch = "codespace/agent/s1" } } });
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan, planPayload, $$"""{"planned":[],"count":1,"workPlanId":"{{Guid.NewGuid()}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn, spawnPayload, spawnOutcome);
+
+        // The tape the gates would hold, in the shape they hold it.
+        var tape = await LoadTapeAsync(runId, teamId);
+
+        // Stake the way PRODUCTION stakes — the same helper the spawn executor calls over the same planned spec —
+        // so the comparison is about the CHAIN, never about two people inventing different obligations.
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<ICompletionContractStore>();
+        var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
+        await store.UpsertRequirementsAsync(runId, teamId,
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            CancellationToken.None);
+
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+
+        var fromRows = SupervisorStopNowRecital.Render(composed?.Assessment);
+        var fromTape = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape));
+
+        fromRows.ShouldNotBeNull("the seeded run is contract-bearing, so production has a verdict to recite");
+        fromTape.ShouldBe(fromRows, "the tape-only projection must recite the SAME block production recites — a divergence here is the live gates scoring a prompt that does not ship");
+    }
+
+    /// <summary>
+    /// The documented boundary, asserted rather than trusted. A pushed manifest settles delivery for the DB compose
+    /// and is invisible to the tape, so the two MAY differ here — but only in the conservative direction. A projection
+    /// that read settled where production reads unresolved would tell a model its contract is met when it is not.
+    /// </summary>
+    [Fact]
+    public async Task Where_the_projection_cannot_see_a_manifest_it_errs_toward_unresolved_never_toward_done()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+        var attemptId = Guid.NewGuid();
+
+        var planPayload = """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""";
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan, planPayload, $$"""{"planned":[],"count":1,"workPlanId":"{{Guid.NewGuid()}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = true, acceptanceDetail = "tests-passed", producedBranch = "codespace/agent/s1" } } }));
+        await SeedManifestAsync(teamId, attemptId, baseSha: "b1", commitSha: "c1");
+
+        var tape = await LoadTapeAsync(runId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId,
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            CancellationToken.None);
+
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+        var projected = SupervisorTapeCompletion.ProjectIfStoppedNow(tape);
+
+        composed!.Assessment.Delivery.ShouldBe(DeliveryDisposition.Delivered, "the pushed manifest settles delivery for the row-reading compose");
+        projected!.Delivery.ShouldNotBe(DeliveryDisposition.Delivered, "the tape carries no manifest, so the projection cannot claim delivery — and must not");
+
+        SupervisorStopNowRecital.Render(projected).ShouldContain("UNRESOLVED", Case.Sensitive,
+            "the safe direction: unseen evidence reads as owed, never as settled. A projection that recited an all-clear here would tell a model its contract is met when the tape cannot show it.");
+    }
+
+    /// <summary>The run's tape in the shape a decider holds it — the same read <c>SupervisorTurnService</c> rehydrates.</summary>
+    private async Task<IReadOnlyList<SupervisorPriorDecision>> LoadTapeAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<ISupervisorDecisionLog>().GetTerminalDecisionsAsync(runId, teamId, CancellationToken.None);
     }
 
     [Fact]

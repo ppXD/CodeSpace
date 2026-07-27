@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -417,7 +418,16 @@ public static class SupervisorDecisionGoldenScenarios
     };
 
     private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors) =>
-        new() { Goal = FixtureGoal, TurnNumber = turn, PriorDecisions = priors, SupervisorModelId = BrainModelRowId };
+        new()
+        {
+            Goal = FixtureGoal,
+            TurnNumber = turn,
+            PriorDecisions = priors,
+            SupervisorModelId = BrainModelRowId,
+            // The stopped-now recital, through the SAME projection production's composer reduces to. Null before any
+            // wave has staked an obligation, so a plan-only tape stays silent exactly as production is silent.
+            CompletionRecital = SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(priors)),
+        };
 
     /// <summary>
     /// A context whose resolve budget is EXPLICIT. A scenario that intends another resolve to be available must say
