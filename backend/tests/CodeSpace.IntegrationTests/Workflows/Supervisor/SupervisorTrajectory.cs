@@ -232,7 +232,7 @@ internal static class TrajectoryOutcomes
         var id = Guid.NewGuid();
         var subtaskId = SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) ?? "s1";
         var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
-        var result = new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"retried {subtaskId}; unit tests green", ProducedBranch = $"agent/{subtaskId}" };
+        var result = Graded(id, "Succeeded", summary: $"retried {subtaskId}; unit tests green", branch: $"agent/{subtaskId}");
 
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { result }));
     }
@@ -244,6 +244,29 @@ internal static class TrajectoryOutcomes
     /// units looking permanently unfinished — and the observed answer to that was to spawn again, forever.
     /// Falls back to the historic pair for a payload that names nothing, so an ill-formed spawn still folds.
     /// </summary>
+    /// <summary>
+    /// One folded agent result carrying the server's VERDICT for its unit, as production folds it. These tapes stake
+    /// an acceptance obligation per unit, so a result that never answers one describes a run whose every grading
+    /// failed — and it left every completion dimension at Unknown forever, turning the stopped-now recital into an
+    /// obligation no action could discharge. The evidence id rides along because admission caps an unevidenced PASS
+    /// on a required obligation at InfraUnknown, so a pass asserted without it would silently not count.
+    /// </summary>
+    private static SupervisorAgentResult Graded(Guid id, string status, string? summary = null, string? error = null, string? branch = null, bool? accepted = null)
+    {
+        // The agent's STATUS and the server's VERDICT are different facts, and the gap between them is a state the
+        // supervisor has to reason about: an agent can finish cleanly and still fail its checks. Default them to
+        // agreeing, and let a caller that means to separate them say so.
+        var passed = accepted ?? status == "Succeeded";
+
+        return new()
+        {
+            AgentRunId = id, Status = status, Summary = summary, Error = error, ProducedBranch = branch,
+            AcceptancePassed = passed,
+            AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
+            AcceptanceEvidenceId = passed ? Guid.NewGuid() : null,
+        };
+    }
+
     private static IReadOnlyList<string> SpawnedSubtaskIds(SupervisorDecision d)
     {
         var ids = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
@@ -256,7 +279,7 @@ internal static class TrajectoryOutcomes
         var subtaskIds = SpawnedSubtaskIds(d);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
-        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"implemented {subtaskIds[i]}; unit tests green", ProducedBranch = $"agent/{subtaskIds[i]}" }).ToArray();
+        var results = ids.Select((id, i) => Graded(id, "Succeeded", summary: $"implemented {subtaskIds[i]}; unit tests green", branch: $"agent/{subtaskIds[i]}")).ToArray();
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
@@ -268,8 +291,8 @@ internal static class TrajectoryOutcomes
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var last = subtaskIds.Count - 1;
         var results = ids.Select((id, i) => i == last
-            ? new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"build failed: missing symbol referenced by {subtaskIds[i]}" }
-            : new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"implemented {subtaskIds[i]}; unit tests green", ProducedBranch = $"agent/{subtaskIds[i]}" }).ToArray();
+            ? Graded(id, "Failed", error: $"build failed: missing symbol referenced by {subtaskIds[i]}")
+            : Graded(id, "Succeeded", summary: $"implemented {subtaskIds[i]}; unit tests green", branch: $"agent/{subtaskIds[i]}")).ToArray();
 
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
@@ -278,7 +301,7 @@ internal static class TrajectoryOutcomes
     {
         var id = Guid.NewGuid();
         var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
-        var resolver = new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = $"reconciled the conflict; build and the full test suite pass {SupervisorResolverRecipe.TestsPassedMarker}", ProducedBranch = "resolve/head" };
+        var resolver = Graded(id, "Succeeded", summary: $"reconciled the conflict; build and the full test suite pass {SupervisorResolverRecipe.TestsPassedMarker}", branch: "resolve/head");
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
     }
 
@@ -303,7 +326,7 @@ internal static class TrajectoryOutcomes
         var subtaskIds = SpawnedSubtaskIds(d);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
-        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"{subtaskIds[i]} failed: build error" }).ToArray();
+        var results = ids.Select((id, i) => Graded(id, "Failed", error: $"{subtaskIds[i]} failed: build error")).ToArray();
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
@@ -312,7 +335,7 @@ internal static class TrajectoryOutcomes
     {
         var id = Guid.NewGuid();
         var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
-        var resolver = new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = "attempted to reconcile the conflict, but the build still fails and the tests do not pass", ProducedBranch = "resolve/attempt" };
+        var resolver = Graded(id, "Failed", summary: "attempted to reconcile the conflict, but the build still fails and the tests do not pass", branch: "resolve/attempt") with { Status = "Succeeded" };   // the AGENT finished; its checks did not pass — the verdict is the server's, not the agent's
         return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
     }
 
