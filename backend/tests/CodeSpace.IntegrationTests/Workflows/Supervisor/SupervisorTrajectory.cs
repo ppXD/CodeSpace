@@ -209,11 +209,16 @@ internal static class TrajectoryOutcomes
     /// turn after the model planned showed an outcome naming two ids that appear nowhere in the payload the model had
     /// just authored — a prompt contradicting itself on the run's most basic fact.
     /// </summary>
+    /// <summary>The trajectory's authorized plan ref — one stable id across turns, as a real run's plan row is.</summary>
+    private static readonly Guid FixtureWorkPlanId = Guid.Parse("2b7a1f43-59d8-4c62-8e10-7a3f5c9d0e18");
+
     public static SupervisorPriorDecision Plan(SupervisorDecision d, long seq)
     {
         var subtasks = SupervisorOutcome.ReadPlanSubtasks(d.PayloadJson);
 
-        return Prior(d, seq, JsonSerializer.Serialize(new { planned = subtasks, count = subtasks.Count }, AgentJson.Options));
+        // workPlanId/workPlanVersion because production's plan executor records them and the spawn executor stakes
+        // no obligation without a plan ref — omitting them describes a pre-protocol run with no contract at all.
+        return Prior(d, seq, JsonSerializer.Serialize(new { planned = subtasks, count = subtasks.Count, workPlanId = FixtureWorkPlanId, workPlanVersion = 1 }, AgentJson.Options));
     }
 
     /// <summary>

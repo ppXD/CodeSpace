@@ -229,6 +229,33 @@ public sealed class CompletionComposerFlowTests
             "the safe direction: unseen evidence reads as owed, never as settled. A projection that recited an all-clear here would tell a model its contract is met when the tape cannot show it.");
     }
 
+    /// <summary>
+    /// The other direction of the same bond, and the one that is easy to get wrong: production stakes only under an
+    /// AUTHORIZED plan, so a tape whose plan carries no ref has no obligations and no verdict. A projection that
+    /// recited one anyway would invent a contract the run does not have — over-rendering, which is worse than the
+    /// missing block it replaced, because the model would be told it owes something nobody staked.
+    /// </summary>
+    [Fact]
+    public async Task Neither_path_recites_anything_for_a_plan_that_was_never_authorized()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+
+        // A plan outcome with NO workPlanId — the pre-P1a shape the spawn executor refuses to stake against.
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""", """{"planned":[],"count":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = Guid.NewGuid(), status = "Succeeded", acceptancePassed = true, producedBranch = "codespace/agent/s1" } } }));
+
+        var tape = await LoadTapeAsync(runId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+
+        SupervisorStopNowRecital.Render(composed?.Assessment).ShouldBeNull("nothing was staked, so production has no verdict to recite");
+        SupervisorStopNowRecital.Render(SupervisorTapeCompletion.ProjectIfStoppedNow(tape)).ShouldBeNull("the projection must be silent wherever production is silent — an invented contract is the worse error");
+    }
+
     /// <summary>The run's tape in the shape a decider holds it — the same read <c>SupervisorTurnService</c> rehydrates.</summary>
     private async Task<IReadOnlyList<SupervisorPriorDecision>> LoadTapeAsync(Guid runId, Guid teamId)
     {
