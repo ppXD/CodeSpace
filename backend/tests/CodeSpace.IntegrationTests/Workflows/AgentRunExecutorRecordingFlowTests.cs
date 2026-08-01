@@ -94,6 +94,7 @@ public class AgentRunExecutorRecordingFlowTests
         scope.Resolve<CodeSpaceDbContext>(),
         scope.Resolve<IStructuredCritic>(),
         scope.Resolve<IArtifactOffloader>(),
+        scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
         scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
         scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
         NullLogger<AgentRunExecutor>.Instance);

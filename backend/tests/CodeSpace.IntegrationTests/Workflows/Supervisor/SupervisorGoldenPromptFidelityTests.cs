@@ -169,6 +169,27 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     [Fact]
+    public void The_stopped_now_recital_steers_in_the_direction_each_tape_actually_points()
+    {
+        // The live gate's answer to the first wiring of this block was unambiguous: every dimension read Unknown on
+        // every tape, so the recital said "settle what is owed" against a state no action could discharge, and all
+        // five arcs collapsed into plan→spawn loops. The block is only safe to show a model if a FINISHED tape's
+        // recital actually reads settled — so the direction, per scenario shape, is pinned here.
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+            if (scenario.Name is "all-succeeded" or "three-subtask-all-succeeded" or "four-subtask-all-succeeded" or "clean-integration")
+                prompt.ShouldContain("every contract dimension reads SETTLED", Case.Sensitive,
+                    $"'{scenario.Name}' is a finished, fully-attested tape — an owed-forever recital here tells the model to keep working on a contract that is already met, which is the exact live regression this pins against");
+
+            if (scenario.Name is "mixed-results" or "all-failed" or "retried-still-failed")
+                prompt.ShouldContain("UNRESOLVED", Case.Sensitive,
+                    $"'{scenario.Name}' has failed or unanswered obligations — a settled recital here would bless a stop-as-if-done");
+        }
+    }
+
+    [Fact]
     public void The_negative_controls_exclude_resolve_from_their_accepted_set()
     {
         // Cheap structural guard: a negative control that accidentally accepted Resolve would look green while

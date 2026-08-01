@@ -73,17 +73,24 @@ public sealed class SupervisorTrajectoryEvalTests
     }
 
     [Fact]
-    public async Task The_stopped_now_verdict_over_an_ungraded_tape_reads_unresolved()
+    public async Task The_stopped_now_verdict_tracks_what_the_tape_actually_owes()
     {
-        // Faithfulness, not decoration: these fixtures fold no acceptance verdicts, so nothing ANSWERS the staked
-        // obligations and every dimension reads Unknown — which is exactly what production's reducer returns for the
-        // same tape. The steer that matters is still delivered: a stop right now cannot read Solved.
-        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "validate-email" };
+        // Both directions on one arc, because the block is only safe to show a model if it MOVES: the failure
+        // environment's spawn folds a failed unit (grade Failed — owed), and the retry answers it (grade Passed,
+        // delivery attested — settled). The first wiring of this block could never reach the second state: nothing
+        // on the tape answered the staked obligations, the recital said "settle what is owed" against a state no
+        // action could discharge, and the live gate answered with plan→spawn loops on every arc.
+        var spy = new PromptCapturingDecider { PlanWithSubtaskId = "s2", RetryAfterSpawn = true };
 
-        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.HappyPath, maxTurns: 4, CancellationToken.None);
+        await SupervisorTrajectory.RunAsync(spy, SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 5, CancellationToken.None);
 
-        spy.Prompts[^1].ShouldContain("UNRESOLVED", Case.Sensitive);
-        spy.Prompts[^1].ShouldContain("never stop as if done", Case.Insensitive, "the block's whole purpose is to refuse a fake-done stop before it is chosen");
+        var afterFailedSpawn = spy.Prompts[2];
+        afterFailedSpawn.ShouldContain("UNRESOLVED", Case.Sensitive, "a failed unit is owed work — a settled recital here would bless a stop-as-if-done");
+        afterFailedSpawn.ShouldContain("never stop as if done", Case.Insensitive);
+
+        var afterRetrySucceeded = spy.Prompts[^1];
+        afterRetrySucceeded.ShouldContain("every contract dimension reads SETTLED", Case.Sensitive,
+            "the retry answered the failed unit with a passing, attested result — an owed-forever recital here is an obligation no action can discharge, the exact live regression");
     }
 
     [Fact]
@@ -375,13 +382,18 @@ public sealed class SupervisorTrajectoryEvalTests
             var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
 
             // Plan once, then spawn forever — the exact shape the live gate keeps recording (plan→spawn×7).
+            // The retry variant stops after its retry: spawning again would fold a FRESH failure over the unit the
+            // retry just answered, and the stopped-now verdict would (correctly) read owed again — the direction
+            // test needs the tape to END on the answered state to observe the settled arm.
             var kind = PlanForever ? SupervisorDecisionKinds.Plan
                 : !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
-                : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Spawn) && !kinds.Contains(SupervisorDecisionKinds.Retry) ? SupervisorDecisionKinds.Retry
+                : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Retry) ? SupervisorDecisionKinds.Stop
+                : RetryAfterSpawn && kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Retry
                 : SupervisorDecisionKinds.Spawn;
 
             var payload =
-                kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
+                kind == SupervisorDecisionKinds.Stop ? """{"summary":"retried and shipped"}"""
+                : kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
                 : PlanWithSubtaskId is not { } id ? "{}"
                 : kind == SupervisorDecisionKinds.Plan ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
                 : $$"""{"subtaskIds":["{{id}}"]}""";   // a spawn names the units it dispatches, as a real one does

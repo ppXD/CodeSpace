@@ -580,7 +580,7 @@ public sealed class AgentRunExecutorPushTests
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId, epoch);
         IPublishGuard[] guards = { new ProfileOptOutPublishGuard(), new NoCredentialPublishGuard(), new RepositoryPolicyPublishGuard() };
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, guards, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, guards, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs);
     }
 

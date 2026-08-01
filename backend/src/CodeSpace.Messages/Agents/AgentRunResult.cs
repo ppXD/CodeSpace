@@ -72,6 +72,16 @@ public sealed record AgentRunResult
     /// </summary>
     public string? BaseSha { get; init; }
 
+    /// <summary>
+    /// The publish-evidence artifact: a small JSON blob (publish state, branch, shas, patch artifact, publish error)
+    /// minted by the executor at capture/push time — where the push is OBSERVED. It is what makes a delivery
+    /// attestation derived from this result auditable: admission caps an unevidenced PASS on a required obligation
+    /// at InfraUnknown, so without this ref a tape-side reader can never read a required delivery as settled.
+    /// Null-omitted; absence is honest (nothing captured, or the best-effort mint faulted).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? PublishEvidenceId { get; init; }
+
     public AgentTokenUsage? TokenUsage { get; init; }
 
     /// <summary>
@@ -199,6 +209,10 @@ public sealed record RepositoryRunResult
 
     /// <summary>The cloned base revision this repo's work is rooted at (the SOTA #3 integrity anchor, per repo).</summary>
     public string? BaseSha { get; init; }
+
+    /// <summary>This repo's publish-evidence artifact — the per-repo mirror of the top-level <c>PublishEvidenceId</c>, minted at the same observation point. Null-omitted.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? PublishEvidenceId { get; init; }
 
     /// <summary>The ref this repo was cloned at — the PR base for <see cref="ProducedBranch"/>, so a downstream <c>git.open_change_set</c> can open a PR per repo by binding this result verbatim (no separately-authored target). Usually the repo's default branch; a tag when an author pinned one in the run's <c>WorkspaceSpec.Ref</c> — a non-branch ref makes that repo's open a per-repo Failed (resolving a real base from a tag clone is a follow-on). Null when the run had no resolvable ref.</summary>
     public string? BaseBranch { get; init; }

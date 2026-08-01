@@ -117,6 +117,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IStructuredCritic _critic;
     // Resolves a REFERENCED (offloaded) restored transcript back to bytes just before invocation (P3 continue).
     private readonly IArtifactOffloader _offloader;
+    private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     // The publish-or-park ledger: upserted at the end of every verification pass, regardless of the run's status.
     private readonly IPublishManifestStore _manifests;
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
@@ -124,7 +125,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, IPublishManifestStore manifests, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -138,6 +139,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _db = db;
         _critic = critic;
         _offloader = offloader;
+        _artifacts = artifacts;
         _manifests = manifests;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
@@ -411,6 +413,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
 
             result = await EnrichWithReattachWorkspaceChangesAsync(agentRunId, run.TeamId, handle, result, cancellationToken).ConfigureAwait(false);
+
+            result = await MintPublishEvidenceAsync(agentRunId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
 
             // S5: the acceptance invariant holds on THIS terminal path too — a contract-bearing run that completed
             // across a worker restart has no published branch to grade (see the no-push note above), so it fails
@@ -728,6 +732,62 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Offload the FULL, untruncated patch to the artifact store for the publish-manifest — independently best-effort: an artifact-store failure here must never discard the git-ground-truth fields a caller already assigned. Returns null on any failure (the manifest then simply carries no PatchArtifactId; the inline, possibly-truncated <see cref="AgentRunResult.Patch"/> is unaffected either way).</summary>
+    /// <summary>
+    /// Mint the publish-evidence artifact — the same facts the completion composer serializes from the manifest row
+    /// (publish state, alias, branch, shas, patch artifact, publish error) — minted HERE because this is where the
+    /// push is observed, and carried on the result so a tape-side delivery attestation is auditable without a row
+    /// read. Admission caps an unevidenced PASS on a required obligation at InfraUnknown, so without this the tape
+    /// could state a push it can never prove. Mirrors <see cref="BuildManifestUpsert"/>'s PublishState derivation;
+    /// best-effort like <see cref="TryOffloadPatchAsync"/> — a store hiccup never fails the run, the field stays
+    /// null, and a downstream pass-claim honestly caps instead of lying.
+    /// </summary>
+    private async Task<AgentRunResult> MintPublishEvidenceAsync(Guid runId, Guid teamId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (result.RepositoryResults.Count > 0)
+            {
+                var updated = new List<RepositoryRunResult>(result.RepositoryResults.Count);
+
+                foreach (var repo in result.RepositoryResults)
+                    updated.Add(HasPublishCapture(repo.ChangedFiles, repo.PatchArtifactId, repo.ProducedBranch)
+                        ? repo with { PublishEvidenceId = await PutPublishEvidenceAsync(teamId, repo.Alias, repo.ProducedBranch, repo.PushedCommitSha, repo.BaseSha, repo.PatchArtifactId, repo.PublishError, cancellationToken).ConfigureAwait(false) }
+                        : repo);
+
+                return result with { RepositoryResults = updated };
+            }
+
+            if (!HasPublishCapture(result.ChangedFiles, result.PatchArtifactId, result.ProducedBranch)) return result;
+
+            return result with { PublishEvidenceId = await PutPublishEvidenceAsync(teamId, "primary", result.ProducedBranch, result.PushedCommitSha, result.BaseSha, result.PatchArtifactId, result.PublishError, cancellationToken).ConfigureAwait(false) };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to mint publish evidence; delivery attestations from this result honestly carry none", runId);
+            return result;
+        }
+    }
+
+    /// <summary>Whether this outcome has anything a manifest row would record — the same three-way gate <see cref="PersistPublishManifestAsync"/> applies (the tape-side reader mirrors it, so evidence exists exactly where a manifest will).</summary>
+    private static bool HasPublishCapture(IReadOnlyList<string> changedFiles, Guid? patchArtifactId, string? producedBranch) =>
+        changedFiles.Count > 0 || patchArtifactId is not null || producedBranch is { Length: > 0 };
+
+    private async Task<Guid> PutPublishEvidenceAsync(Guid teamId, string alias, string? branch, string? commitSha, string? baseSha, Guid? patchArtifactId, string? publishError, CancellationToken cancellationToken)
+    {
+        var evidence = JsonSerializer.Serialize(new
+        {
+            publishState = branch is { Length: > 0 } ? nameof(PublishState.Pushed) : nameof(PublishState.PatchOnly),
+            repositoryAlias = alias,
+            branch,
+            commitSha,
+            baseSha,
+            patchArtifactId,
+            publishError,
+        }, AgentJson.Options);
+
+        return await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(evidence), "application/json", cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<Guid?> TryOffloadPatchAsync(Guid runId, Guid teamId, string patch, CancellationToken cancellationToken)
     {
         try
@@ -1018,6 +1078,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         result = await EnrichWithWorkspaceChangesAsync(runId, run.TeamId, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
         result = await PushProducedBranchIfEnabledAsync(runId, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+        result = await MintPublishEvidenceAsync(runId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
 
         result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 

@@ -65,6 +65,7 @@ public sealed class AgentBranchPushFlowTests
         var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
         result.ProducedBranch.ShouldBe(expectedBranch, "push is default-on — no opt-in needed to publish the produced branch");
+        result.PublishEvidenceId.ShouldNotBeNull("the executor mints the publish-evidence artifact where the push is observed — without it, a tape-side delivery attestation is unauditable and admission caps it at InfraUnknown, which made the stopped-now recital an obligation no action could discharge");
 
         (await remote.HasBranchAsync(expectedBranch)).ShouldBeTrue("the bare remote actually carries the pushed branch");
         (await remote.BranchContainsFileAsync(expectedBranch, "agent-change.txt")).ShouldBeTrue("the pushed branch tip contains the agent's file");
@@ -94,6 +95,7 @@ public sealed class AgentBranchPushFlowTests
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
         result.ProducedBranch.ShouldBeNull("the explicit opt-out guard blocks the push");
+        result.PublishEvidenceId.ShouldNotBeNull("evidence is minted for the CAPTURE, not the push — a patch-only outcome records PatchOnly, which is exactly what lets a delivery obligation read honestly Failed rather than silently Unknown");
         result.PublishSkipReason.ShouldBe("push disabled by the launch profile");
 
         (await remote.HasBranchAsync(AgentRunExecutor.BuildBranchName(runId))).ShouldBeFalse("the bare remote gained NO branch");
@@ -253,6 +255,7 @@ public sealed class AgentBranchPushFlowTests
             scope.Resolve<CodeSpaceDbContext>(),
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);

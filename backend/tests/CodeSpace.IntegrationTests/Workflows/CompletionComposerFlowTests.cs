@@ -193,6 +193,64 @@ public sealed class CompletionComposerFlowTests
     }
 
     /// <summary>
+    /// The settled-parity anchor — the detector that makes the delivery attestation trustworthy. A run that pushed,
+    /// passed its checks, and carries the full attestation on BOTH surfaces (manifest rows for the composer; pushed
+    /// tip + base + publish evidence on the tape for the projection) must read SETTLED on both paths, byte-identical.
+    /// Every earlier detector proves the two agree when something is missing; this one proves they agree when
+    /// everything is present — without it, the projection could quietly become un-settleable (the exact regression
+    /// the live gate caught: an obligation no action could discharge, answered with plan→spawn loops).
+    /// </summary>
+    [Fact]
+    public async Task A_published_and_accepted_run_reads_settled_on_both_paths()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Running);
+        var attemptId = Guid.NewGuid();
+
+        var planPayload = """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""";
+        var spawnOutcome = JsonSerializer.Serialize(new
+        {
+            agentResults = new[]
+            {
+                new
+                {
+                    agentRunId = attemptId,
+                    status = "Succeeded",
+                    acceptancePassed = true,
+                    acceptanceDetail = "tests-passed",
+                    acceptanceEvidenceId = Guid.NewGuid(),
+                    producedBranch = "codespace/agent/s1",
+                    pushedCommitSha = "c1",
+                    baseSha = "b1",
+                    publishEvidenceId = Guid.NewGuid(),
+                },
+            },
+        });
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan, planPayload, $$"""{"planned":[],"count":1,"workPlanId":"{{Guid.NewGuid()}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1"]}""", spawnOutcome);
+        await SeedManifestAsync(teamId, attemptId, baseSha: "b1", commitSha: "c1");
+
+        var tape = await LoadTapeAsync(runId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId,
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            CancellationToken.None);
+
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
+        var projected = SupervisorTapeCompletion.ProjectIfStoppedNow(tape);
+
+        var fromRows = SupervisorStopNowRecital.Render(composed?.Assessment);
+        var fromTape = SupervisorStopNowRecital.Render(projected);
+
+        fromRows.ShouldNotBeNull();
+        fromRows.ShouldContain("SETTLED", Case.Sensitive, "a pushed, accepted, fully-attested run IS settled — if production still reads owed here, the block can never steer a finished run to stop");
+        fromTape.ShouldBe(fromRows, "the tape carries the same attestation, so the projection must reach the same settled verdict — an un-settleable projection is the regression the live gate caught");
+    }
+
+    /// <summary>
     /// The documented boundary, asserted rather than trusted. A pushed manifest settles delivery for the DB compose
     /// and is invisible to the tape, so the two MAY differ here — but only in the conservative direction. A projection
     /// that read settled where production reads unresolved would tell a model its contract is met when it is not.

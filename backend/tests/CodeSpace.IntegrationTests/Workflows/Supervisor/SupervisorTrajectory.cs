@@ -264,6 +264,11 @@ internal static class TrajectoryOutcomes
             AcceptancePassed = passed,
             AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
             AcceptanceEvidenceId = passed ? Guid.NewGuid() : null,
+            // The delivery attestation a real pushed result carries (see the golden fixture's identical note): the
+            // recital can only steer honestly if a finished unit's delivery can actually settle.
+            PushedCommitSha = branch is null ? null : $"cafe{Math.Abs(branch.GetHashCode()):x8}",
+            BaseSha = branch is null ? null : "base0000feed",
+            PublishEvidenceId = branch is null ? null : Guid.NewGuid(),
         };
     }
 
