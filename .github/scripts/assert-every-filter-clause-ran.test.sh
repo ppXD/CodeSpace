@@ -55,6 +55,15 @@ expect 1 "fails when no clause matched at all" \
 expect 0 "matches a partial token exactly as FullyQualifiedName~ does" \
   bash "$guard" "$trx" RealModelSupervisorDecision
 
+# A METHOD-level token, not just a class. The injection lane's reason to exist is one specific arm, and a drift that
+# de-selects only that arm satisfies every class-level clause — so the guard has to work at this grain too. It does,
+# with no special casing, because the fully-qualified name it greps carries the method.
+expect 0 "matches a method-level token" \
+  bash "$guard" "$trx" The_real_model_decides
+
+expect 1 "fails when a method-level token selected nothing" \
+  bash "$guard" "$trx" RealModelSupervisor A_method_that_was_de_selected
+
 # Infrastructure faults must be loud, never a silent pass.
 expect 1 "fails when the trx is missing entirely" \
   bash "$guard" "${tmp}/absent.trx" RealModelSupervisor
