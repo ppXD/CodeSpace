@@ -481,6 +481,13 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
               {customizeTab === "supervisor" && <>
                 <div className="lt3-cnote">How Deep mode plans, delegates, reviews, and stops.</div>
+                {/* Budget sits OUTSIDE the deep/auto drawer because it is no longer a deep-only concept: the
+                    standard lane admits each map branch against this same ceiling. Quick stays out — a single
+                    agent is already running by the time any spend happens, so there is nothing to refuse and
+                    offering the control would promise an enforcement that does not exist. */}
+                {effort !== "quick" && (
+                  <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
+                )}
                 {effort === "deep" || effort === "auto" ? <>
                 <Combo label="Brain model" value={model} options={effort === "deep" ? modelOpts : agentModelOpts} onChange={pickModel} searchable />
                 <RowPop label="Agent model pool" value={poolLabel}>
@@ -519,7 +526,6 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                   </div>
                   <div className="lt3-poolhint">The run keeps working the plan until it's done — bounded by this concurrency and the Budget, not a fixed round or agent count.</div>
                 </RowPop>
-                <Combo label="Budget" value={cfg.budget} options={[{ value: "none", label: "No cap" }, { value: "5", label: "$5" }, { value: "10", label: "$10" }, { value: "25", label: "$25" }]} onChange={v => setC({ budget: v })} />
                 <Combo label="Autonomy ceiling" value={cfg.autonomyCeiling} options={[{ value: "", label: "Inherit" }, ...PERMS.map(p => ({ value: p.v, label: p.v }))]} onChange={v => setC({ autonomyCeiling: v })} />
                 <SToggleRow label="Integrate branches" on={cfg.integrateBranches} onToggle={() => setC({ integrateBranches: !cfg.integrateBranches })} />
                 <div className="lt3-hrow">
