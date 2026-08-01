@@ -295,10 +295,22 @@ public sealed class AgentCodeNode : INodeRuntime
             // slow suite) is an environment/workload fact, not a code defect, so it gets the SAME fresh-respawn
             // chance a crash/timeout does (mirrors AgentAcceptanceContract.IsInfraFailure, the same classification
             // the executor's revise loop / supervisor decider / recitation already apply elsewhere).
-            var acceptanceFailed = ReadString(payload, "exitReason") == AgentAcceptanceContract.FailClosedExitReason;
+            var exitReason = ReadString(payload, "exitReason");
+            var acceptanceFailed = exitReason == AgentAcceptanceContract.FailClosedExitReason;
             var acceptanceInfraFault = acceptanceFailed && AgentAcceptanceContract.IsInfraFailure(ReadOptionalString(payload, "acceptanceDetail"), WorkPresent(payload));
 
-            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed) && !acceptanceInfraFault;
+            // The SAME carve-out, one status over: NeedsReview is not one fact. The critic flagging an output is a
+            // verdict a respawn cannot change, but the IDLE watchdog killing a silent process is an environment
+            // fact — and its sibling the wall-clock watchdog ("timed-out") has always been retryable. Neither
+            // watchdog can tell an agent stuck at a prompt from one working quietly through a long build, so
+            // treating the idle one's guess as terminal turns a false positive into total loss: the quick lane has
+            // no error edge, and a map branch's default terminate mode discards every sibling's finished work too.
+            // Retries are still bounded by the node's own policy, so a genuinely stuck agent still lands here.
+            var stalled = exitReason == AgentAcceptanceContract.StalledExitReason;
+
+            var deterministic = (status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed)
+                                && !acceptanceInfraFault
+                                && !stalled;
 
             return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}", retryable: !deterministic);
         }

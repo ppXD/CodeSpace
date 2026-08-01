@@ -493,6 +493,8 @@ public class AgentCodeNodeTests
     [InlineData("Failed", "non-zero-exit", true)]       // an ordinary harness death — transient candidate
     [InlineData("TimedOut", null, true)]                // a wall-clock kill — transient by nature
     [InlineData("NeedsReview", null, false)]            // human-owed verdict — a respawn cannot change it
+    [InlineData("NeedsReview", "output-flagged", false)] // the critic disapproved — that IS the verdict, a respawn cannot argue with it
+    [InlineData("NeedsReview", "stalled", true)]         // the IDLE watchdog killed a silent process — the same kind of fact as its wall-clock sibling above, which has always retried
     [InlineData("Cancelled", null, false)]              // the user's own stop — never override it with a respawn
     [InlineData("Failed", "acceptance-failed", false)]  // a fail-closed verdict — same code + same check would fail again
     [InlineData("Failed", "harness-reported-failure", true)]  // exit-0-but-harness-Error — a fresh respawn may survive
@@ -504,6 +506,18 @@ public class AgentCodeNodeTests
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Retryable.ShouldBe(expectedRetryable, "the node's verdict tells the retry policy whether a fresh agent could change the outcome");
+    }
+
+    [Fact]
+    public void The_two_watchdogs_are_classified_alike_because_neither_can_see_why_the_process_went_quiet()
+    {
+        // The asymmetry this closes, stated as the invariant rather than as two separate rows: the wall-clock
+        // watchdog and the idle watchdog both terminate a process on a timer, and neither can tell an agent stuck
+        // at an unanswerable prompt from one working quietly through a long build. Treating only one of them as a
+        // terminal verdict cost the quick lane its whole run (no error edge) and cost a map branch every sibling's
+        // finished work (default terminate mode).
+        AgentAcceptanceContract.StalledExitReason.ShouldBe("stalled",
+            "the producer stamps this literal and the retry verdict keys on it — a rename that touches only one side silently restores the old behaviour");
     }
 
     [Fact]
