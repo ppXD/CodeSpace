@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows.Budget;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -458,9 +460,101 @@ public class MapFlowTests
 
     // manual → map(items={{trigger.things}}; body: ms → work[value={{item}}] → leaf[value={{item}}]) → terminal.
     // The body terminal `leaf` echoes {{item}} as { value: <item> }, which becomes results[i].
-    private static WorkflowDefinition StaticArrayMapDefinition(int? maxParallelism = null)
+    // ── The standard lane's budget ceiling ───────────────────────────────────────────
+
+    [Fact]
+    public async Task A_capped_map_admits_only_the_branches_its_budget_funds()
     {
-        var mapConfig = maxParallelism is { } mp ? $$"""{ "maxParallelism": {{mp}} }""" : "{}";
+        // THE tier that settles this: the invariant (settled + live <= cap) is enforced inside a transaction holding
+        // a per-run advisory lock, so only a real Postgres can show that concurrent branches cannot jointly overshoot.
+        // Cap $1.00 over 4 branches ⇒ each reserves $0.25 and all four fit. Pre-committing $0.60 leaves room for one.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, StaticArrayMapDefinition(maxCostUsd: 1.00m));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b", "c", "d"] }""");
+
+        using (var pre = _fixture.BeginScope())
+        {
+            // Stand in for spend this run already made before the fan-out — a planner call, an earlier map. This is
+            // the ONLY state in which a cap/N estimate refuses anything, and it is the realistic one.
+            var admitted = await pre.Resolve<IBudgetLedger>().ReserveAsync(runId, teamId, "prior-work", "planner", 0.60m, 1.00m, "realized-v1", null, null, CancellationToken.None);
+            admitted.Admitted.ShouldBeTrue("the fixture's own precondition must hold or the test measures nothing");
+        }
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var reservations = await db.BudgetReservation.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.Kind == WorkflowEngine.MapBranchReservationKind)
+            .ToListAsync();
+
+        reservations.Count.ShouldBe(1, $"$0.40 of headroom funds exactly one $0.25 branch; admitting more would break the ledger's own invariant (admitted: {reservations.Count})");
+
+        var committed = await verify.Resolve<IBudgetLedger>().CommittedUsdAsync(runId, teamId, CancellationToken.None);
+        committed.ShouldBeLessThanOrEqualTo(1.00m, "the whole point of routing this through the ledger is that the cap cannot be crossed");
+    }
+
+    [Fact]
+    public async Task An_uncapped_map_reserves_nothing_and_runs_exactly_as_before()
+    {
+        // The no-regression half. Every map that existed before this had no ceiling, and must still write no ledger
+        // row and complete identically — otherwise the feature taxes every run that never asked for it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, StaticArrayMapDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b", "c"] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await db.BudgetReservation.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0,
+            "an uncapped map must not touch the ledger at all");
+
+        var map = await MapNodeAsync(db, runId);
+        JsonDocument.Parse(map.OutputsJson).RootElement.GetProperty("count").GetInt32().ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task A_refused_branch_reads_as_a_branch_failure_the_maps_own_error_handling_governs()
+    {
+        // A refusal is not a new failure mode: it is a branch that failed, so the map's existing terminate/continue
+        // semantics decide the run's fate. This definition is terminate-mode (the default), so the map fails and
+        // says why — an operator who set a budget must be told the budget is what stopped the work.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, StaticArrayMapDefinition(maxCostUsd: 1.00m));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        using (var pre = _fixture.BeginScope())
+            await pre.Resolve<IBudgetLedger>().ReserveAsync(runId, teamId, "prior-work", "planner", 0.99m, 1.00m, "realized-v1", null, null, CancellationToken.None);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure, "terminate-mode: a branch the budget refused fails the map exactly as any other unhandled branch failure would");
+
+        // The run-level error is the engine's generic "Node 'map' failed." for EVERY node fault, so the reason has
+        // to be read off the node itself — which is where a refusal must name the ceiling, or an operator who set a
+        // budget cannot tell a budget stop from a model outage.
+        var map = await MapNodeAsync(db, runId);
+        (map.Error ?? "").ShouldContain("budget", Case.Insensitive, "the refusal must name what stopped the work");
+        (map.Error ?? "").ShouldContain("$1", Case.Sensitive, "and how much was allowed, or the operator has to go read config to interpret it");
+    }
+
+    private static WorkflowDefinition StaticArrayMapDefinition(int? maxParallelism = null, decimal? maxCostUsd = null)
+    {
+        var keys = new List<string>();
+        if (maxParallelism is { } mp) keys.Add($"\"maxParallelism\": {mp}");
+        if (maxCostUsd is { } cost) keys.Add($"\"maxCostUsd\": {cost.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        var mapConfig = keys.Count == 0 ? "{}" : "{ " + string.Join(", ", keys) + " }";
         return new WorkflowDefinition
         {
             SchemaVersion = 1,

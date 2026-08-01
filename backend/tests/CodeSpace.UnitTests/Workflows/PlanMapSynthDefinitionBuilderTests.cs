@@ -218,6 +218,18 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
+    public void Map_config_carries_the_route_cost_cap_so_the_fanout_is_bounded_by_budget_too()
+    {
+        var map = Builder.Build(Context(caps: new RouteCaps { MaxCostUsd = 7.5m })).Nodes.Single(n => n.Id == "map");
+
+        // The router computes a spend ceiling for every lane and the supervisor builder has always passed its own
+        // through. This one dropped it, so a Standard operator could set a budget the engine then ignored: the deep
+        // lane refused work over its cap while the map lane fanned out until the model plane or the clock stopped it.
+        map.Config.GetProperty("maxCostUsd").GetDecimal().ShouldBe(7.5m,
+            customMessage: "the route's RouteCaps.MaxCostUsd must reach the flow.map Config or the fan-out spends past the operator's budget");
+    }
+
+    [Fact]
     public void Map_config_is_empty_when_no_parallelism_cap_so_an_absent_cap_stays_unbounded()
     {
         var map = Builder.Build(Context(caps: new RouteCaps())).Nodes.Single(n => n.Id == "map");
@@ -225,6 +237,8 @@ public class PlanMapSynthDefinitionBuilderTests
         // Absent cap ⇒ the prior behaviour: no key, the map inherits the engine-wide default (no config/hash change).
         map.Config.TryGetProperty("maxParallelism", out _).ShouldBeFalse(
             "no cap set must leave the map unbounded — only write the key when the route actually caps parallelism");
+        map.Config.TryGetProperty("maxCostUsd", out _).ShouldBeFalse(
+            "same for the budget: an absent cap must not write the key, or every stored definition's config hash moves");
         map.Config.ValueKind.ShouldBe(JsonValueKind.Object);
         map.Config.EnumerateObject().ShouldBeEmpty("a capless map Config stays an empty object, byte-identical to the prior Empty()");
     }

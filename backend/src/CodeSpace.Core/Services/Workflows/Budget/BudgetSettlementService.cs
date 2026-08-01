@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Core.Services.Workflows.Engine;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -65,9 +66,53 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
             }
         }
 
+        released += await ReleaseTerminalMapBranchesAsync(batchSize, cancellationToken).ConfigureAwait(false);
+
         var expired = await _ledger.ExpireOverdueAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
         return (settled, released, expired);
+    }
+
+    /// <summary>
+    /// Return the headroom held by a TERMINAL run's map-branch reservations.
+    ///
+    /// <para>These are admission estimates, not billing records: a branch has no per-branch actual to settle to —
+    /// the run's real spend is accounted through its interaction records and read by <c>ITeamCostService</c> — so
+    /// what a reservation buys is the ceiling holding DURING the fan-out. Holding one past the run's end would
+    /// permanently consume a team's headroom for work that has already finished and been billed elsewhere.</para>
+    ///
+    /// <para>Deliberately a separate pass from <see cref="SettleRunAsync"/>: that one maps agent-attempt
+    /// reservations back to supervisor attempts through the decision tape, which a map branch has none of. Sharing
+    /// it would mean teaching the deep lane's settlement about a lane it knows nothing about.</para>
+    /// </summary>
+    private async Task<int> ReleaseTerminalMapBranchesAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var live = await _db.BudgetReservation.AsNoTracking()
+            .Where(r => r.Kind == WorkflowEngine.MapBranchReservationKind
+                     && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight))
+            .OrderBy(r => r.CreatedDate)
+            .Take(batchSize)
+            .Select(r => new { r.WorkflowRunId, r.TeamId, r.ScopeKey })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (live.Count == 0) return 0;
+
+        var terminalRunIds = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => live.Select(l => l.WorkflowRunId).Contains(r.Id)
+                     && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled))
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var terminal = terminalRunIds.ToHashSet();
+        var released = 0;
+
+        foreach (var row in live.Where(l => terminal.Contains(l.WorkflowRunId)))
+        {
+            await _ledger.ReleaseAsync(row.WorkflowRunId, row.TeamId, WorkflowEngine.MapBranchReservationKind, row.ScopeKey, cancellationToken).ConfigureAwait(false);
+            released++;
+        }
+
+        return released;
     }
 
     private async Task<(int Settled, int Released)> SettleRunAsync(Guid runId, Guid teamId, HashSet<string> liveScopeKeys, CancellationToken cancellationToken)

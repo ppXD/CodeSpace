@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -138,10 +139,21 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     });
 
     /// <summary>The map Config — carries the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>). Only the one key is written, and only when the cap is set — an absent cap leaves the map unbounded.</summary>
-    private static JsonElement MapConfigJson(TaskBuildContext context) =>
-        context.Route.Caps.MaxParallelism is { } cap
-            ? JsonSerializer.SerializeToElement(new { maxParallelism = cap })
-            : Empty();
+    private static JsonElement MapConfigJson(TaskBuildContext context)
+    {
+        var config = new JsonObject();
+
+        if (context.Route.Caps.MaxParallelism is { } parallelism) config["maxParallelism"] = parallelism;
+
+        // The route computes a spend ceiling for every lane, and the supervisor builder has always passed its own
+        // through (SupervisorDefinitionBuilder writes "maxCostUsd" the same way). This one dropped it, so a Standard
+        // run's operator could set a budget the engine then ignored entirely — the deep lane refused work over its
+        // cap while the map lane fanned out until the model plane or the wall clock stopped it.
+        if (context.Route.Caps.MaxCostUsd is { } costCap) config["maxCostUsd"] = costCap;
+
+        // Byte-identical to the old empty case when neither cap is set, so no stored definition changes hash.
+        return config.Count == 0 ? Empty() : JsonSerializer.SerializeToElement(config);
+    }
 
     /// <summary>The synth Config — the LLM the reduce runs on. Provider defaults to Anthropic (the same default the planner node + <c>WorkflowPlanProjector</c>'s synth use); the profile's model maps on via AddIfPresent. A test retargets the provider at the ILLMClient seam, never the builder.</summary>
     private static JsonElement SynthConfig(TaskBuildContext context)
