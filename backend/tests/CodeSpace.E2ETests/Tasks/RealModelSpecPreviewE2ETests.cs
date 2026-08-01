@@ -96,7 +96,19 @@ public sealed class RealModelSpecPreviewE2ETests
             if (result.Suggestion is not { } suggestion)
                 return (false, $"{Provider} '{live.Model}': the live compiler produced NOTHING for a concrete, well-specified goal — the card never appears, which is the whole feature not working");
 
-            suggestion.AcceptanceCriteria.ShouldAllBe(c => !string.IsNullOrWhiteSpace(c), "a blank bullet renders as an empty row in the card");
+            // A card with nothing on it is the feature not working, and it is the only outcome `Suggestion is not null`
+            // does not already exclude. The blank-bullet check that used to stand here could never fail: the compiler
+            // filters whitespace before it builds the suggestion, and an all-must-hold assertion over an empty list
+            // passes vacuously — so a completely empty card sailed through the one assertion meant to catch it.
+            suggestion.AcceptanceCriteria.Count.ShouldBeGreaterThan(0,
+                "the compiler returned a card with no definition-of-done bullets at all; criteria need no repository to write, so an empty list here is the model declining a question it could answer");
+
+            // The SAME floor its sibling fact measures. Without this the two contradict each other: a model that
+            // invented `["npm","test"]` against a repository-less goal FAILED the abstention fact and PASSED here,
+            // so the pair could report a green wire over exactly the behaviour one of them exists to forbid.
+            suggestion.AcceptanceChecks.ShouldBeEmpty(
+                $"no repository is bound, so any executable check is invented — got [{string.Join(", ", suggestion.AcceptanceChecks)}]");
+
             suggestion.TargetBranch.ShouldBeNull("the goal names no branch, so inventing one would silently retarget the operator's pull request");
 
             return (true, $"{Provider} '{live.Model}': compiled criteria={suggestion.AcceptanceCriteria.Count}, checks={suggestion.AcceptanceChecks.Count}, openPr={suggestion.OpenPullRequest?.ToString() ?? "none"}, confidence={suggestion.Confidence:0.00}");

@@ -102,18 +102,18 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the decision evals actually ran (no silent skip)
-        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so an FQN/trait regression could green
-        # this gate while exercising nothing — exactly how the session evals went unnoticed on no lane. Require >=1 selected.
-        # (A secrets-absent run still SELECTS + reports these classes, so the count is >=1 whether or not the gateway is set.)
+        # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or moved class silently
+        # stops running while its lane stays green. Checked PER CLAUSE by the shared script: a total-count floor is
+        # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
+        # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
+        # and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected RealModel decision evals to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model.trx \
+            RealModelCustom \
+            RealModelSampling \
+            RealModelSession \
+            RealModelSupervisor
 
   real-model-wholeloop:
     name: real model (live-brain whole-loop — supervisor arcs)
@@ -240,17 +240,15 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the whole-loop gates actually ran (no silent skip)
-        # Same fail-closed guard as the component job: `dotnet test --filter` exits 0 on zero matches, so an FQN/trait
-        # drift that de-selects the supervisor OR session whole-loop must RED this lane, not pass green at zero cost.
+        # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or moved class silently
+        # stops running while its lane stays green. Checked PER CLAUSE by the shared script: a total-count floor is
+        # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
+        # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
+        # and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-wholeloop.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected RealModel whole-loop gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-wholeloop.trx \
+            RealModelSupervisorWholeLoop
 
   real-model-wholeloop-aux:
     name: real model (live-brain whole-loop — session · planner · delivery arcs)
@@ -388,23 +386,18 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert every whole-loop gate actually ran (no silent skip)
-        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects a lane must RED here
-        # rather than pass green at zero cost. Checked PER CLAUSE, not as a total: a count-based floor of one is
-        # satisfied by any single surviving class, so it would wave through exactly the de-selection it exists to
-        # catch the moment a lane carries more than one. Add a clause to the filter above and add it here.
+        # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or moved class silently
+        # stops running while its lane stays green. Checked PER CLAUSE by the shared script: a total-count floor is
+        # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
+        # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
+        # and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-wholeloop-aux.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          missing=0
-          for clause in RealModelSession RealModelPlanner RealModelDeliveryGate RealModelSpecPreview; do
-            count=$(grep -oE "testName=\"[^\"]*${clause}[^\"]*\"" "$trx" | wc -l | tr -d ' ')
-            echo "${clause}: ${count} selected"
-            if [ "${count:-0}" -lt 1 ]; then
-              echo "::error::No ${clause} test was selected — the filter no longer matches it, so that gate ran on NO lane."
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-wholeloop-aux.trx \
+            RealModelDeliveryGate \
+            RealModelPlanner \
+            RealModelSession \
+            RealModelSpecPreview
 
   real-model-benchmark:
     name: real model (benchmark corpus solve-rate)
@@ -505,17 +498,15 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the benchmark gate actually ran (no silent skip)
-        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects the benchmark must RED this
-        # lane, not pass green at zero cost. (A secrets-absent run still SELECTS + reports the class, so the count is >=1.)
+        # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or moved class silently
+        # stops running while its lane stays green. Checked PER CLAUSE by the shared script: a total-count floor is
+        # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
+        # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
+        # and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-benchmark.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the RealModel benchmark gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-benchmark.trx \
+            RealModelBenchmark
 
   real-model-benchmark-extended:
     name: real model (extended benchmark corpus — report only)
@@ -600,15 +591,13 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the extended-benchmark report actually ran (no silent skip)
+        # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
+        # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
+        # filter above and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-benchmark-extended.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the RealModel extended-benchmark report to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-benchmark-extended.trx \
+            RealModelExtendedBenchmark
 
   real-model-injection:
     name: real model (agent/skill injection — claude gates, codex reports)
@@ -722,18 +711,17 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the injection gates actually ran (no silent skip)
-        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects the injection gates must
-        # RED this lane, not pass green at zero cost. (A secrets-absent run still SELECTS + reports these classes, so the
-        # count is >=1 whether or not the gateway is set.)
+        # `dotnet test --filter` exits 0 when the filter matches ZERO tests, so a renamed or moved class silently
+        # stops running while its lane stays green. Checked PER CLAUSE by the shared script: a total-count floor is
+        # satisfied by any one surviving class, so it waves through exactly the de-selection it exists to catch the
+        # moment a lane carries more than one clause — which is how this bit twice. Add a clause to the filter above
+        # and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-injection.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the RealModel injection gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-injection.trx \
+            RealCodexResume \
+            RealModelAgentInjection \
+            RealModelCodexInjection
           # The aggregate executed>=1 is NOT enough: this lane's REASON TO EXIST is the persona KILL-GATE. An FQN/trait
           # drift that de-selects ONLY the gating arm while the informational Codex + deterministic RealCodexResume arms
           # still match would keep executed>=1 and pass GREEN with the kill-gate running on NOTHING. Require the gating
@@ -821,15 +809,13 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the publish-manifest gate actually ran (no silent skip)
+        # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
+        # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
+        # filter above and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-publish-manifest.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the RealModel publish-manifest gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-publish-manifest.trx \
+            RealModelPublishManifest
 
   real-model-footer-signals:
     name: real model (run-canvas footer live-signals)
@@ -913,15 +899,13 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the footer-signals gates actually ran (no silent skip)
+        # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
+        # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
+        # filter above and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-footer-signals.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the RealModel footer-signals gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-footer-signals.trx \
+            RealModelFooterSignals
 
   real-model-stop-hook:
     name: real model (in-loop acceptance stop-hook)
@@ -1006,12 +990,10 @@ jobs:
           --results-directory backend/TestResults
 
       - name: Assert the stop-hook gates actually ran (no silent skip)
+        # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
+        # matches, and a count floor of one is satisfied by any single surviving class. Add a clause to the
+        # filter above and add it to the argument list below.
         run: |
-          trx=backend/TestResults/real-model-stop-hook.trx
-          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
-          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
-          echo "executed=${executed:-0}"
-          if [ "${executed:-0}" -lt 2 ]; then
-            echo "::error::Expected both the claude and codex Stop-hook proofs to run, but ${executed:-0} executed — the filter matched fewer than 2 (FQN/trait regression?)."
-            exit 1
-          fi
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-stop-hook.trx \
+            StopHookE2ETests
