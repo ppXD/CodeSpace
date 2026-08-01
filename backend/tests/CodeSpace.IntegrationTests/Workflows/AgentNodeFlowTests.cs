@@ -564,6 +564,14 @@ public class AgentNodeFlowTests
         return agentRun.Id;
     }
 
+    /// <summary>The MOST RECENT attempt's agent run — the respawn tests stage several, so <see cref="GetAgentRunIdAsync"/>'s Single would throw once a retry is bought.</summary>
+    private async Task<Guid> GetLatestAgentRunIdAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId).OrderByDescending(r => r.CreatedDate).FirstAsync()).Id;
+    }
+
     private async Task<Guid> GetAgentRunIdAsync(Guid runId)
     {
         using var scope = _fixture.BeginScope();
@@ -827,6 +835,96 @@ public class AgentNodeFlowTests
                 .ShouldBe(WorkflowRunStatus.Failure, "a human-owed verdict fails the node without burning the retry budget");
             (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
                 .ShouldBe(1, "a deterministic outcome is never respawned");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_stalled_agent_is_respawned_because_the_idle_watchdog_cannot_see_why_it_went_quiet()
+    {
+        // The sibling above proves a NeedsReview VERDICT is never respawned, and that is right. This proves the
+        // other producer of the same status is not a verdict at all: the idle watchdog terminates a process that
+        // stopped emitting, and it cannot tell an agent stuck at an unanswerable prompt from one working quietly
+        // through a long build. Its wall-clock sibling has always been retryable; this one silently was not, so a
+        // single quiet window ended a Quick run outright — on the tier named after unattended delivery, where the
+        // stall watchdog is on by default.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            await SimulateAgentExecutorAsync(await GetLatestAgentRunIdAsync(runId), new AgentRunResult
+            {
+                Status = AgentRunStatus.NeedsReview,
+                CompletionDisposition = CompletionDisposition.Blocked,
+                ExitReason = AgentAcceptanceContract.StalledExitReason,
+                Error = "no output for the idle window",
+            });
+            await RunEngineAsync(runId);
+
+            using (var mid = _fixture.BeginScope())
+                (await mid.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                    .ShouldBe(2, "the retry budget the node already carries must actually be spent — a fresh agent may not go quiet in the same place");
+
+            // The second attempt succeeds, which is the outcome the old classification made unreachable.
+            await SimulateAgentExecutorAsync(await GetLatestAgentRunIdAsync(runId), new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "done on the retry" });
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "a run that would have died on one quiet window now delivers");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_persistently_stalled_agent_still_fails_once_its_retry_budget_is_spent()
+    {
+        // The bound. Retrying a stall is a second chance, not an exemption — an agent genuinely wedged at a prompt
+        // must still land honestly rather than respawn forever, and the ledger caps it at exactly MaxAttempts.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                await SimulateAgentExecutorAsync(await GetLatestAgentRunIdAsync(runId), new AgentRunResult
+                {
+                    Status = AgentRunStatus.NeedsReview,
+                    CompletionDisposition = CompletionDisposition.Blocked,
+                    ExitReason = AgentAcceptanceContract.StalledExitReason,
+                    Error = "no output for the idle window",
+                });
+                await RunEngineAsync(runId);
+            }
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                .ShouldBe(2, "exactly MaxAttempts — a retryable stall must not become an unbounded respawn loop");
         }
         finally
         {

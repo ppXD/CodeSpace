@@ -43,6 +43,15 @@ public static class AgentAcceptanceContract
     public const string FailClosedExitReason = "acceptance-failed";
 
     /// <summary>
+    /// The <see cref="AgentRunResult.ExitReason"/> the IDLE watchdog stamps when it terminates a silent process.
+    /// Its sibling <c>"timed-out"</c> (the wall-clock watchdog) has always been retryable while this one was not,
+    /// though both are the same kind of fact: a watchdog killed the process, and neither can see whether the agent
+    /// was stuck at a prompt or simply working quietly through a long build. Pinned by a unit test (Rule 8) so the
+    /// producer and the retry verdict that keys on it cannot drift apart.
+    /// </summary>
+    public const string StalledExitReason = "stalled";
+
+    /// <summary>
     /// The fail-closed re-grade: the work (branch, diff, transcript) is preserved — the STATUS tells the truth, the
     /// contract was not met (or could not be verified). Every call site guards on the result already being a
     /// would-be <see cref="AgentRunStatus.Succeeded"/> before reaching here (the grading gate returns early on any
