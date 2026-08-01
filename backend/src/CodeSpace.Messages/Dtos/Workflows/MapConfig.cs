@@ -37,6 +37,14 @@ public sealed record MapConfig
     /// A blank/whitespace value falls back to the default at parse time.
     /// </summary>
     public string ResultKey { get; init; } = "results";
+
+    /// <summary>
+    /// Optional ceiling, in USD, on what this fan-out may spend. Null (default) means unbounded, which is what
+    /// every map did before this existed — an absent key leaves the config byte-identical, so no stored definition
+    /// changes hash. Set, the engine admits each branch against the run's shared budget ledger before dispatching
+    /// it and refuses the branches that would cross the ceiling.
+    /// </summary>
+    public decimal? MaxCostUsd { get; init; }
 }
 
 /// <summary>

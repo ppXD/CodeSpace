@@ -74,6 +74,17 @@ public class MapConfigTests
         // Null inherits the engine-wide default; a value is carried verbatim — the engine clamps it per
         // map via ResolveBodyParallelism (the same path the loop body uses), not here.
         MapPlan.From(new MapConfig()).MaxParallelism.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(null, null)]        // absent ⇒ unbounded, exactly as every map behaved before the cap existed
+    [InlineData(0.0, null)]         // zero is not a budget, it is a config mistake; treating it as one would refuse every branch
+    [InlineData(-5.0, null)]        // ditto negative
+    [InlineData(12.5, 12.5)]        // a real ceiling rides through
+    public void A_cost_cap_is_carried_only_when_it_is_a_real_ceiling(double? raw, double? expected)
+    {
+        MapPlan.From(new MapConfig { MaxCostUsd = raw is null ? null : (decimal)raw.Value })
+            .MaxCostUsd.ShouldBe(expected is null ? null : (decimal)expected.Value);
         MapPlan.From(new MapConfig { MaxParallelism = 3 }).MaxParallelism.ShouldBe(3);
     }
 

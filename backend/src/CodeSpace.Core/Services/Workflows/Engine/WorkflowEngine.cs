@@ -13,6 +13,7 @@ using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -1540,7 +1541,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         for (var i = 0; i < elements.Count; i++)
             tasks[i] = replay.Settled.TryGetValue(i, out var settled)
                 ? Task.FromResult(settled)
-                : RunMapBranchInChildScopeAsync(run, definition, mapNode, body, terminal, scope, elements[i], i, plan, nodeIterationKey, gate, cancellationToken);
+                : await AdmitBranchAsync(run, mapNode, plan, elements.Count, i, nodeIterationKey, cancellationToken).ConfigureAwait(false) is { Admitted: false } refused
+                    ? Task.FromResult(RefusedBranchOutcome(i, mapNode, plan, refused))
+                    : RunMapBranchInChildScopeAsync(run, definition, mapNode, body, terminal, scope, elements[i], i, plan, nodeIterationKey, gate, cancellationToken);
 
         // BARRIER on every branch before deciding the map's fate — a terminate-mode failure is RETURNED (not
         // thrown), so awaiting the whole batch never tears down before the suspended siblings' outcomes are
@@ -2175,6 +2178,52 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         };
 
     /// <summary>A continue-on-error element's placeholder result — <c>{ "error": { "message": ..., "node": ... } }</c> — mirroring the node error-output shape so a synthesizer can spot a failed element in <c>results[i].error</c>.</summary>
+    /// <summary>
+    /// Admit one branch against the run's shared budget ledger, or null when this map declares no ceiling (every
+    /// map before <see cref="MapConfig.MaxCostUsd"/> existed, and every map whose route sets no cap — that path
+    /// dispatches exactly as it always did, with no ledger row written).
+    ///
+    /// <para>The estimate mirrors the supervisor lane's own, deliberately: cap ÷ the number of units that could
+    /// run. There the divisor is the spawn ceiling, here it is the branch count, and both settle to actuals
+    /// afterwards. A map whose branches each estimate cap÷N therefore fits exactly when nothing else has spent —
+    /// so a refusal here means real prior spend on this run (a planner call, an earlier map) has already eaten the
+    /// headroom, which is precisely when an operator wants the fan-out to stop rather than to bill through.</para>
+    ///
+    /// <para>The ledger is resolved from the lifetime scope rather than injected: this is the one path that needs
+    /// it, and an eighteenth constructor parameter would touch every engine construction site in the test suite
+    /// for a dependency none of them exercise.</para>
+    /// </summary>
+    private async Task<BudgetAdmission?> AdmitBranchAsync(WorkflowRun run, NodeDefinition mapNode, MapPlan plan, int branchCount, int index, string nodeIterationKey, CancellationToken cancellationToken)
+    {
+        if (plan.MaxCostUsd is not { } capUsd) return null;
+
+        var estimate = capUsd / Math.Max(branchCount, 1);
+        // The SAME key the branch itself runs under, so a reservation is per branch per run and a resumed map
+        // re-reserves idempotently on its own cell rather than double-charging a sibling's.
+        var scopeKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{index}");
+
+        return await _lifetimeScope.Resolve<IBudgetLedger>()
+            .ReserveAsync(run.Id, run.TeamId, MapBranchReservationKind, scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A branch the budget refused, shaped exactly like a branch that ran and failed — so <c>continue</c> records
+    /// the marker and fans on, and <c>terminate</c> fails the map naming the ceiling. Nothing new is invented for
+    /// this case; a refusal IS a branch failure, and the map's own error handling already knows what to do with one.
+    /// </summary>
+    private static MapBranchOutcome RefusedBranchOutcome(int index, NodeDefinition mapNode, MapPlan plan, BudgetAdmission refused)
+    {
+        var message = $"Branch {index} of map '{mapNode.Id}' was refused by the run's ${plan.MaxCostUsd:0.##} budget ({refused.Reason ?? "no headroom"}; ${refused.CommittedUsd:0.##} of ${refused.CapUsd:0.##} already committed).";
+
+        return plan.ErrorHandling == MapErrorHandling.Terminate
+            ? new MapBranchOutcome(index, EmptyJsonObject(), Failed: true, TerminateFailure: message)
+            : new MapBranchOutcome(index, BuildMapFailureMarker(message, mapNode.Id), Failed: true);
+    }
+
+    /// <summary>The reservation kind for a map branch — distinct from the supervisor's <c>agent-attempt</c> so the deep lane's accounting and settlement stay byte-untouched.</summary>
+    internal const string MapBranchReservationKind = "map-branch";
+
     private static JsonElement BuildMapFailureMarker(string message, string nodeId) =>
         JsonSerializer.SerializeToElement(BuildErrorOutput(message, nodeId));
 
