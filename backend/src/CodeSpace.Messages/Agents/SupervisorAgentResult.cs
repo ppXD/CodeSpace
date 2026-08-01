@@ -52,6 +52,22 @@ public sealed record SupervisorAgentResult
     public string? ProducedBranch { get; init; }
 
     /// <summary>
+    /// The remote-CONFIRMED tip of the pushed branch (the provider readback), carried onto the tape so a tape-side
+    /// completion reading can attest the delivered bytes the way the composer attests them from the manifest row.
+    /// Conservation law: what the attempt PUSHED is world-state, and world-state rides the tape. Null-omitted.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PushedCommitSha { get; init; }
+
+    /// <summary>The base the attempt's diff was taken against — the other half of the delivered-bytes attestation. Null-omitted.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? BaseSha { get; init; }
+
+    /// <summary>The publish-evidence artifact minted where the push was observed (see <c>AgentRunResult.PublishEvidenceId</c>) — what lets a tape-derived delivery PASS survive admission's unevidenced-pass cap. Null-omitted; an old tape without it caps honestly.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? PublishEvidenceId { get; init; }
+
+    /// <summary>
     /// The agent's PER-REPOSITORY outcomes for a MULTI-repo workspace run (resolver loop #379 S7-B) — the compact
     /// projection of <c>AgentRunResult.RepositoryResults</c>, one entry per WRITABLE repo (alias + repository id +
     /// the branch it pushed + base). EMPTY for a single-repo run, whose single outcome is the top-level

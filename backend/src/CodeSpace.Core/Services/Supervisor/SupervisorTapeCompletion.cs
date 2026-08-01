@@ -18,27 +18,26 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// Nothing here re-implements a rule; the only thing it supplies is the tape-side reading of inputs the composer
 /// reads from rows.</para>
 ///
-/// <para><b>Faithfulness boundary — read before trusting this for anything but a prompt block.</b> Three inputs the
-/// composer takes from durable rows are absent here. One is provably inert; the other two are absent in the
-/// CONSERVATIVE direction:</para>
+/// <para><b>Faithfulness boundary — read before trusting this for anything but a prompt block.</b> Delivery and
+/// output receipts ARE minted here (<see cref="SupervisorDeliveryReceipts"/>), from the pushed tip, base sha and
+/// publish-evidence artifact the compact now carries — the tape's mirror of the manifest row, minted where the push
+/// was observed. What still cannot be mirrored, and errs conservative in every case:</para>
 /// <list type="bullet">
-/// <item><b>Inert:</b> acceptance receipts carry no content hashes. <c>CompletionReducer</c>'s hash-upgrade hook is
-/// reached only through the <c>Output</c> kind, and its fold filters by kind first — an Acceptance receipt never
-/// meets it. Omitting them cannot move a disposition at all.</item>
-/// <item><b>Conservative:</b> receipts carry no <c>WorkUnitRef</c> (the dispatch-time stamp, whose ContractHash the
-/// tape cannot reconstruct). Admission flags that as a warning and still admits, so the superseded-attempt filter is
-/// inactive. A stale FAILING receipt admitted beside a fresh passing one aggregates to Failed — MORE unresolved,
-/// never a false all-clear.</item>
-/// <item><b>Conservative:</b> no delivery receipts are minted at all. Production derives them from publish-manifest
-/// rows; a supervisor result carries a produced branch but not the commit sha or patch artifact a single-repo
-/// manifest records, so a partial mint would attest less than it appears to. An unminted delivery obligation reads
-/// Unknown, which is owed rather than settled.</item>
+/// <item><b>Inert:</b> acceptance receipts carry no content hashes. The reducer's hash-upgrade hook is reached only
+/// through the <c>Output</c> kind, and its fold filters by kind first — an Acceptance receipt never meets it.</item>
+/// <item><b>Closed, not conservative:</b> receipts DO carry a <c>WorkUnitRef</c> — the adapter reconstructs it from
+/// the tape's plan ref, which the staking gate guarantees exists whenever anything is staked — so admission's
+/// superseded-attempt filter is ACTIVE and a retried unit's stale failing receipt is dropped, exactly as in
+/// production. Pinned by the retry arc of the direction test.</item>
+/// <item><b>Conservative:</b> a single-repo compact strips the patch, so a patch-only single-repo outcome mints no
+/// output receipt (artifact stays owed); and a pre-attestation tape (no pushed sha, no publish evidence) yields a
+/// delivery pass with no evidence, which admission caps at InfraUnknown — owed again, never fabricated.</item>
 /// </list>
 /// <para>So this can read more unresolved than production, and cannot read settled where production reads
-/// unresolved. For a block whose whole job is to stop a model stopping as-if-done, that is the safe direction — and
-/// it is asserted, not assumed: one drift detector seeds a real run and requires the real composer to render the
-/// IDENTICAL recital, a second requires the projection to err toward owed where a manifest is invisible to it, and a
-/// third requires BOTH to stay silent over a plan that was never authorized.</para>
+/// unresolved. Asserted, not assumed, by four drift detectors: settled-parity (a seeded published+accepted run
+/// renders the IDENTICAL settled recital on both paths), owed-parity (both owe over an unpublished run), silence
+/// (both silent over an unauthorized plan), and the conservative arm (a manifest invisible to the tape reads owed
+/// here while production settles).</para>
 /// </summary>
 public static class SupervisorTapeCompletion
 {
@@ -55,7 +54,16 @@ public static class SupervisorTapeCompletion
         if (requirements.Count == 0) return null;
 
         var attempts = SupervisorAttemptAdapter.Project(decisions).Attempts;
-        var receipts = SupervisorGradedReceipts.FromTape(decisions);
+
+        // The dispatch-time work-unit stamp, reconstructed by the adapter from the tape's own plan ref — and the
+        // plan-ref staking gate above guarantees it exists whenever anything is staked. Without it on the receipts,
+        // admission's superseded-attempt filter is inactive and a retried unit's STALE failing receipt aggregates
+        // beside the fresh passing one — an obligation that stays owed after the very action that answered it.
+        var workUnitByAttempt = attempts.Where(a => a.WorkUnit is not null).ToDictionary(a => a.AttemptId, a => a.WorkUnit!);
+
+        var receipts = SupervisorGradedReceipts.FromTape(decisions, workUnitByAttempt)
+            .Concat(SupervisorDeliveryReceipts.FromTape(decisions, requirements, workUnitByAttempt))
+            .ToList();
 
         var admission = Completion.ReceiptAdmission.Admit(receipts, requirements, SupervisorExecutableSet.Compute(decisions), Completion.AttemptSelectors.SelectOperationalActive(attempts));
 

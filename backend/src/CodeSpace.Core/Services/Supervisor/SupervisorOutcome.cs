@@ -421,6 +421,12 @@ public static class SupervisorOutcome
             Error = result?.Error ?? rowError,
             ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             ProducedBranch = result?.ProducedBranch,
+            // #1283 delivery attestation: the pushed tip, its base, and the publish-evidence artifact ride the
+            // compact so a tape-only completion reading can mint the SAME delivery/output receipts the composer
+            // mints from the manifest row. Null on old results — the attestation then caps honestly downstream.
+            PushedCommitSha = result?.PushedCommitSha,
+            BaseSha = result?.BaseSha,
+            PublishEvidenceId = result?.PublishEvidenceId,
             // Resolver loop #379 S7-B/S7-C0: carry the agent's per-repo outcomes into the compact so the per-repo
             // resolution loop reads each repo's pushed branch straight off the ledger (replay-deterministic). The
             // unbounded per-repo DIFF is stripped (the merge reads it off the DB AgentRunResult, never this compact),

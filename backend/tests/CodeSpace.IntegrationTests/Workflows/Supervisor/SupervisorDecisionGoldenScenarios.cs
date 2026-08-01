@@ -463,6 +463,13 @@ public static class SupervisorDecisionGoldenScenarios
             AcceptancePassed = passed,
             AcceptanceDetail = passed ? "tests-passed" : "tests-failed-exit-1",
             AcceptanceEvidenceId = passed ? Guid.NewGuid() : null,
+            // The delivery attestation a real pushed result carries: the provider-confirmed tip, its base, and the
+            // publish evidence minted where the push was observed. Without these the staked delivery obligation can
+            // never settle, and the stopped-now recital reads "you still owe delivery" forever — an instruction no
+            // action can discharge, which the live gate answered with plan→spawn loops.
+            PushedCommitSha = branch is null ? null : $"cafe{Math.Abs(branch.GetHashCode()):x8}",
+            BaseSha = branch is null ? null : "base0000feed",
+            PublishEvidenceId = branch is null ? null : Guid.NewGuid(),
         };
     }
 
