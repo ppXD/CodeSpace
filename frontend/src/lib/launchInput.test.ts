@@ -293,12 +293,27 @@ describe("buildLaunchInput — multi-repo (relatedRepositories)", () => {
 });
 
 describe("buildLaunchInput — caps (Limits + Budget)", () => {
-  it("omits caps entirely on a quick run even when limits are set", () => {
+  it("a standard budget does NOT drag the supervisor-only limits along with it", () => {
+    // The obvious edit — widening the one caps gate — leaks four supervisor-lane settings onto standard, and the
+    // worst of them silently overrides the Standard preset's own concurrency with whatever the form defaulted to.
+    // Caught here the first time it was tried; pinned so it cannot be tried again quietly.
+    const input = buildLaunchInput(form({ effort: "standard", budget: "10", maxParallel: "9", autonomyCeiling: "Trusted", agentModels: ["m1"], agentPool: ["p1"] }));
+
+    expect(input.caps).toEqual({ maxCostUsd: 10 });
+    expect(input).not.toHaveProperty("autonomyCeiling");
+    expect(input).not.toHaveProperty("allowedModelIds");
+    expect(input).not.toHaveProperty("allowedAgentDefinitionIds");
+  });
+
+  it("still omits caps entirely on a quick run — there is no admission point to refuse at", () => {
+    // Deliberate, not an oversight: a single agent is already running by the time it spends, so a cap here would
+    // be a promise the engine cannot keep. Offering one would be worse than the honest absence.
     expect(buildLaunchInput(form({ effort: "quick", maxParallel: "3", budget: "10" }))).not.toHaveProperty("caps");
   });
 
-  it("omits caps on a standard run (Coordination tab is hidden there)", () => {
-    expect(buildLaunchInput(form({ effort: "standard", maxParallel: "3" }))).not.toHaveProperty("caps");
+  it("sends the budget on a standard run, because the map lane now admits each branch against it", () => {
+    // Before the engine enforced this, a budget sent here was silently ignored — worse than not offering one.
+    expect(buildLaunchInput(form({ effort: "standard", budget: "10" })).caps).toEqual({ maxCostUsd: 10 });
   });
 
   it("sends only concurrency + cost on a deep run — a supervised run loops until done, not a round/total-agent count", () => {

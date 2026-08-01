@@ -98,6 +98,19 @@ const posIntCap = (raw: string): number | undefined => {
 const tierExposesCaps = (effort: string) => effort === "deep" || effort === "auto";
 
 /**
+ * Which tiers may send a BUDGET — a strictly wider set than {@link tierExposesCaps}, and deliberately its own
+ * predicate. Standard joined once the engine began admitting each map branch against the run's budget ledger;
+ * before that a budget it sent would have been silently ignored, which is worse than not offering one. Widening
+ * `tierExposesCaps` itself would have been the obvious edit and the wrong one: it also gates the agent-model pool,
+ * the persona pool, the autonomy ceiling and the parallelism override, all supervisor-lane concepts — a standard
+ * run would have started overriding the Standard preset's own concurrency with the form's default.
+ *
+ * Quick stays out of both: a single agent is already running by the time it spends, so there is no admission
+ * point to refuse at, and a cap there would be a promise the engine cannot keep.
+ */
+const tierExposesBudget = (effort: string) => tierExposesCaps(effort) || effort === "standard";
+
+/**
  * Map the Launch-modal form state to the wire `LaunchTaskInput`. The single source of truth for what the
  * modal sends — extracted as a pure function so every field, the multi-repo split, and the caps gating are
  * exhaustively unit-tested. Optional fields are OMITTED (undefined) when the operator leaves a default, so
@@ -149,7 +162,7 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   const timeLimit = Number.parseInt(state.timeLimit, 10);
   if (Number.isFinite(timeLimit) && timeLimit >= 0 && timeLimit !== 3600) input.timeoutSeconds = timeLimit;
 
-  const caps = tierExposesCaps(state.effort) ? buildCaps(state) : undefined;
+  const caps = buildCaps(state, tierExposesCaps(state.effort), tierExposesBudget(state.effort));
   if (caps) input.caps = caps;
 
   // The agent model pool is a supervisor-lane bound (inert on a single-agent run), and the Coordination tab that
@@ -221,18 +234,19 @@ function buildRelatedRepositories(workspace: LaunchWorkspaceRepo[], primary: Lau
   return related.length ? related : undefined;
 }
 
-/** The Coordination "Limits" + "Budget" as the backend `caps` (TaskCapsOverride). Each cap is included
- *  only when set to a real value; budget `"none"` ⇒ no cost cap. All-unset ⇒ undefined (omit the key). */
-function buildCaps(state: LaunchFormState) {
+/** The Coordination "Limits" + "Budget" as the backend `caps` (TaskCapsOverride). Each cap is included only when
+ *  set to a real value AND its own tier gate allows it — the budget's gate is wider than the rest, because the
+ *  standard lane enforces a budget but has no use for the supervisor-lane limits. All-unset ⇒ undefined. */
+function buildCaps(state: LaunchFormState, exposeLimits: boolean, exposeBudget: boolean) {
   const caps: NonNullable<LaunchTaskInput["caps"]> = {};
 
-  const maxParallelism = posIntCap(state.maxParallel);
+  const maxParallelism = exposeLimits ? posIntCap(state.maxParallel) : undefined;
   if (maxParallelism !== undefined) caps.maxParallelism = maxParallelism;
 
   // Rounds + total-spawn are NOT operator knobs — a supervised run loops until done, bounded by cost + no-progress +
   // the model's stop (the round/total ceilings survive only as hidden backend back-stops). So the launch never sends them.
 
-  if (state.budget !== "none") {
+  if (exposeBudget && state.budget !== "none") {
     const cost = Number(state.budget);
     if (Number.isFinite(cost) && cost > 0) caps.maxCostUsd = cost;
   }
