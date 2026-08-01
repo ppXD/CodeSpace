@@ -89,6 +89,14 @@ public sealed class OracleRestoreFlowTests
             "the candidate added tests/env.sh — a file the oracle sources — and every byte the oracle already owned was left untouched. "
           + "Restoring only the paths that EXIST at base leaves the addition in place, so the check short-circuits to 0 and the run reports a pass it did not earn. "
           + "A protected path must end up byte-identical to base, which means additions are removed, not just edits reverted.");
+
+        // Failing is not enough — it has to fail for the RIGHT reason. Every fail-closed arm of this grader also
+        // yields Passed == false, so `Passed` alone cannot tell "the addition was swept and the restored oracle
+        // honestly failed the candidate" apart from "grading collapsed before it ever ran". Reverting the shallow-
+        // clone fix produces exactly the latter, and this test stayed green through it until the class was pinned.
+        grade.Class.ShouldNotBe(GradeFailureClass.Environment,
+            $"the grade fell over instead of grading (detail='{grade.Detail}') — an infra collapse reads as a verdict here, which is how the oracle floor was silently off before");
+        grade.Detail.ShouldNotContain("oracle-restore-failed", Case.Insensitive, "the restore itself must succeed; only the CHECK is allowed to fail");
     }
 
     [Fact]

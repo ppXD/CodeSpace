@@ -190,6 +190,25 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     [Fact]
+    public void The_cap_sensitivity_pair_cannot_be_passed_by_one_constant_answer()
+    {
+        // `unverified-resolution` and `resolve-cap-spent` carry the SAME failed reconciliation and differ only in
+        // whether the resolve budget is spent. That difference is the entire measurement, and it only exists while
+        // their accepted sets are DISJOINT — while both accepted Stop, a model that always stopped passed both and
+        // the pair reported health having discriminated nothing.
+        var withBudget = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "unverified-resolution");
+        var capSpent = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "resolve-cap-spent");
+
+        withBudget.AcceptedKinds.Intersect(capSpent.AcceptedKinds, StringComparer.Ordinal).ShouldBeEmpty(
+            "a kind accepted by both is a constant answer that passes the pair without ever reading the cap");
+
+        LlmSupervisorDecider.BuildUserPromptForTest(withBudget.Context)
+            .ShouldNotContain("resolve cap is spent", Case.Insensitive, "the budget-remaining half must not be told the cap is gone");
+        LlmSupervisorDecider.BuildUserPromptForTest(capSpent.Context)
+            .ShouldContain("resolve cap is spent", Case.Insensitive, "the budget-spent half must be told, or it is the same scenario twice");
+    }
+
+    [Fact]
     public void The_negative_controls_exclude_resolve_from_their_accepted_set()
     {
         // Cheap structural guard: a negative control that accidentally accepted Resolve would look green while

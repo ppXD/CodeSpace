@@ -180,7 +180,12 @@ public static class SupervisorDecisionGoldenScenarios
             ConflictedMerge(),
             Resolve(Agent(Resolver, "Succeeded", summary: "attempted to reconcile the conflict, but the build still fails and the tests do not pass", branch: "resolve/head")),
         }),
-        AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Stop },
+        // Resolve ALONE, deliberately. Accepting Stop here made this scenario share an answer with its own A/B
+        // partner, `resolve-cap-spent`, whose tape is the same failed reconciliation with the budget SPENT and which
+        // accepts {Stop, AskHuman}: a model that always stopped passed both, so the pair proved nothing about the
+        // cap — the one thing it exists to measure. The shipped prompt directs a resolve in this exact state
+        // ("Issue another 'resolve' … within the resolve cap"), so anything else is a real miss, not a judgement call.
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve },
     };
 
     /// <summary>THREE subtasks, only s2 FAILED → RETRY the failed one (positional teeth with a wider fan-out — must target s2, not blindly s1/s3).</summary>
