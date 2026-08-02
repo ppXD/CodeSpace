@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Publish;
 
@@ -22,6 +23,15 @@ public interface IPublishManifestStore
 {
     /// <summary>Upsert the <see cref="PublishManifestKind.Agent"/> row for one agent run's one repository.</summary>
     Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The FENCED overload: commit this pass's delivery claim only while the attempt still owns the run. The branch
+    /// push already refuses to fire for a reclaimed attempt; the ledger row asserting that the push happened did
+    /// not, so a zombie worker could stamp Pushed/Passed and only then lose the completion CAS — the reversible
+    /// remote effect guarded, the durable claim about it unguarded. The epoch rides INTO the update predicate, so
+    /// the comparison happens in the same statement that writes.
+    /// </summary>
+    Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, long expectedFenceEpoch, CancellationToken cancellationToken);
 
     /// <summary>Upsert the <see cref="PublishManifestKind.Integration"/> row for one workflow run's one repository (no owning agent run).</summary>
     Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken);
@@ -44,14 +54,18 @@ public interface IPublishManifestStore
 public sealed class PublishManifestStore : IPublishManifestStore, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ILogger<PublishManifestStore> _logger;
 
-    public PublishManifestStore(CodeSpaceDbContext db) { _db = db; }
+    public PublishManifestStore(CodeSpaceDbContext db, ILogger<PublishManifestStore> logger) { _db = db; _logger = logger; }
 
     public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken) =>
-        UpsertAsync(PublishManifestKind.Agent, agentRunId: agentRunId, input, cancellationToken);
+        UpsertAsync(PublishManifestKind.Agent, agentRunId: agentRunId, input, expectedFenceEpoch: null, cancellationToken);
+
+    public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, long expectedFenceEpoch, CancellationToken cancellationToken) =>
+        UpsertAsync(PublishManifestKind.Agent, agentRunId: agentRunId, input, expectedFenceEpoch, cancellationToken);
 
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) =>
-        UpsertAsync(PublishManifestKind.Integration, agentRunId: null, input, cancellationToken);
+        UpsertAsync(PublishManifestKind.Integration, agentRunId: null, input, expectedFenceEpoch: null, cancellationToken);
 
     /// <summary>
     /// Never add <c>CreatedBy</c>/<c>CreatedBy</c>-derived fields to either <c>ExecuteUpdateAsync</c>'s
@@ -61,12 +75,31 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
     /// relies on to tell a human-initiated PR-open from a system-authored one. Adding it here would silently let a
     /// later system write reassign a row's actor and misclassify a genuine human touch.
     /// </summary>
-    private async Task UpsertAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken)
+    /// <summary>Whether this attempt still owns the run — read FRESH and untracked so a reclaimer's bumped epoch is visible.</summary>
+    private async Task<bool> IsStillOursAsync(Guid agentRunId, long claimedEpoch, CancellationToken cancellationToken) =>
+        await _db.AgentRun.AsNoTracking().Where(r => r.Id == agentRunId).Select(r => r.FenceEpoch).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) == claimedEpoch;
+
+    private async Task UpsertAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, long? expectedFenceEpoch, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
 
+        // The delivery ledger is the IRREVERSIBLE claim of this pass — "this work was pushed, this acceptance
+        // passed" — and it was the only step in the sequence with no fence. The branch push a few lines earlier
+        // already refuses to fire for a reclaimed attempt; the row asserting that the push happened did not, so a
+        // zombie worker could stamp Pushed/Passed and only then lose the completion CAS. The reversible remote
+        // effect was guarded and the durable claim about it was not.
+        //
+        // The UPDATE carries the fence as a predicate, so it is a genuine conditional commit rather than a
+        // read-then-write: the epoch is compared inside the same statement that writes.
+        if (expectedFenceEpoch is { } epoch && agentRunId is { } fencedRunId && !await IsStillOursAsync(fencedRunId, epoch, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogWarning("Agent run {RunId}: skipping publish-manifest upsert — the run was reclaimed (fence epoch moved past {Claimed}); its completion would lose the CAS anyway", fencedRunId, epoch);
+            return;
+        }
+
         var updated = await _db.PublishManifest
-            .Where(m => m.Kind == kind && m.AgentRunId == agentRunId && m.WorkflowRunId == input.WorkflowRunId && m.RepositoryAlias == input.RepositoryAlias)
+            .Where(m => m.Kind == kind && m.AgentRunId == agentRunId && m.WorkflowRunId == input.WorkflowRunId && m.RepositoryAlias == input.RepositoryAlias
+                     && (expectedFenceEpoch == null || _db.AgentRun.Any(r => r.Id == agentRunId && r.FenceEpoch == expectedFenceEpoch)))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(m => m.RepositoryId, input.RepositoryId)
                 .SetProperty(m => m.BaseSha, input.BaseSha)

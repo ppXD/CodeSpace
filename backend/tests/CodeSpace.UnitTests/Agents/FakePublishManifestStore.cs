@@ -13,6 +13,14 @@ namespace CodeSpace.UnitTests.Agents;
 /// </summary>
 internal sealed class FakePublishManifestStore : IPublishManifestStore
 {
+    public List<long> FencedEpochs { get; } = new();
+
+    public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, long expectedFenceEpoch, CancellationToken cancellationToken)
+    {
+        FencedEpochs.Add(expectedFenceEpoch);
+        return UpsertForAgentRunAsync(agentRunId, input, cancellationToken);
+    }
+
     public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) => Task.CompletedTask;

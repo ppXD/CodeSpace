@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -37,6 +38,85 @@ public sealed class SingleAgentSpineFlowTests
         Acceptance = acceptance ?? new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
         WorkUnit = workUnit,
     };
+    private async Task<Guid> SeedFencedAgentRunAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.AgentRun.Add(new AgentRun { Id = id, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, TaskJson = "{}", FenceEpoch = 3 });
+        await db.SaveChangesAsync();
+
+        return id;
+    }
+
+    [Fact]
+    public async Task A_reclaimed_worker_cannot_stamp_the_delivery_ledger_it_no_longer_owns()
+    {
+        // The inversion this closes: the branch PUSH already refuses to fire for a reclaimed attempt, but the ledger
+        // row asserting that the push happened and the acceptance passed had no fence at all. A zombie worker could
+        // therefore commit Pushed/Passed — an irreversible claim about delivery — and only afterwards lose the
+        // completion CAS. The reversible remote effect was guarded; the durable claim about it was not.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = await SeedFencedAgentRunAsync(teamId);
+
+        long claimed;
+        using (var pre = _fixture.BeginScope())
+        {
+            var db = pre.Resolve<CodeSpaceDbContext>();
+            var run = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+            claimed = run.FenceEpoch;
+
+            // A reclaimer takes the run — exactly what the reconciler does to an abandoned attempt.
+            run.FenceEpoch = claimed + 1;
+            await db.SaveChangesAsync();
+        }
+
+        using (var act = _fixture.BeginScope())
+            await act.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId,
+                WorkflowRunId = null,
+                RepositoryAlias = "primary",
+                Branch = "codespace/agent/zombie",
+                PublishStateValue = PublishState.Pushed,
+                AcceptanceState = PublishAcceptanceState.Passed,
+            }, claimed, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().PublishManifest.AsNoTracking().CountAsync(m => m.AgentRunId == agentRunId))
+            .ShouldBe(0, "a reclaimed attempt must not be able to claim delivery — the epoch it holds is stale and its completion would lose the CAS anyway");
+    }
+
+    [Fact]
+    public async Task The_owning_worker_still_commits_its_delivery_row()
+    {
+        // The scope fence: the guard must reject only a STALE attempt. An attempt still holding the run writes
+        // exactly as before, or the fix would silently stop recording every delivery.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = await SeedFencedAgentRunAsync(teamId);
+
+        long claimed;
+        using (var pre = _fixture.BeginScope())
+            claimed = (await pre.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId)).FenceEpoch;
+
+        using (var act = _fixture.BeginScope())
+            await act.Resolve<IPublishManifestStore>().UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId,
+                WorkflowRunId = null,
+                RepositoryAlias = "primary",
+                Branch = "codespace/agent/owner",
+                PublishStateValue = PublishState.Pushed,
+                AcceptanceState = PublishAcceptanceState.Passed,
+            }, claimed, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var row = await verify.Resolve<CodeSpaceDbContext>().PublishManifest.AsNoTracking().SingleAsync(m => m.AgentRunId == agentRunId);
+        row.Branch.ShouldBe("codespace/agent/owner");
+        row.PublishStateValue.ShouldBe(PublishState.Pushed);
+    }
+
 
     [Fact]
     public async Task A_contract_bearing_dispatch_stakes_the_root_obligations()
