@@ -39,6 +39,36 @@
          IntegrationTests.Infrastructure. Referencing the project (rather than duplicating a TestInfra assembly)
          keeps one home for that infra; E2E declares its own [CollectionDefinition] over the shared fixture type. -->
     <ProjectReference Include="..\CodeSpace.IntegrationTests\CodeSpace.IntegrationTests.csproj" />
+    <!-- Build-only: the benchmark's cli-with-mcp arm spawns the real proxy, and CopyMcpProxyToOutput below lands it
+         where LocalProcessRunner.McpProxyBinaryPath() looks. Referenced the same way the API and the integration
+         tests reference it — a standalone process, never linked. -->
+    <ProjectReference Include="..\..\src\CodeSpace.Mcp\CodeSpace.Mcp.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
   </ItemGroup>
+
+  <!--
+    Land the codespace-mcp proxy next to the TEST assembly, at AppContext.BaseDirectory/codespace-mcp — exactly
+    where LocalProcessRunner.McpProxyBinaryPath() looks under `dotnet test`.
+
+    Without it, BuildMcpWiring's File.Exists guard fires and every run falls back to a TOOL-LESS execution. The
+    benchmark corpus fans out over (task x cli | cli-with-mcp) and records the mode it REQUESTED, so both arms ran
+    identically with no tool fabric while the scorecard reported a side-by-side comparison. The proxy was in no test
+    bin at all — the API's copy target lands it beside the API, and a ProjectReference does not carry a custom
+    target's outputs across.
+  -->
+  <Target Name="CopyMcpProxyToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <McpProxyOutDir>$(MSBuildThisFileDirectory)..\..\src\CodeSpace.Mcp\bin\$(Configuration)\$(TargetFramework)\</McpProxyOutDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
+    </ItemGroup>
+    <!-- Fail LOUD on an empty glob, mirroring the API's own guard: silently producing a proxy-less test bin is how
+         the two benchmark arms became the same arm without anything going red. -->
+    <Error Condition="'@(McpProxyFiles)' == ''" Text="MCP proxy build output not found under $(McpProxyOutDir) (glob codespace-mcp*) — codespace-mcp would be missing from $(OutDir), so every MCP-mode test would silently run tool-less. Check the build-only ProjectReference to CodeSpace.Mcp." />
+    <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
+  </Target>
 
 </Project>
