@@ -259,17 +259,28 @@ public sealed class PlanAuthorNode : INodeRuntime
         // The PERSISTED items bytes (one serialization, AgentJson camelCase) — outputs and store can't drift.
         using var items = JsonDocument.Parse(itemsJson);
 
-        return new()
+        var outputs = new Dictionary<string, JsonElement>
         {
             ["planId"] = JsonSerializer.SerializeToElement(planId),
             ["version"] = JsonSerializer.SerializeToElement(version),
             ["goal"] = JsonSerializer.SerializeToElement(plan.Goal),
             ["items"] = items.RootElement.Clone(),
             ["executionNeeded"] = JsonSerializer.SerializeToElement(!plan.HasEnoughContext),
+            // The authoring model as its OWN small key, not only inside `json`. A large `json` is offloaded to the
+            // artifact store and replaced by a reference, so a provenance fact buried in it becomes unreadable
+            // exactly when the plan is big enough to matter — which is how a live-model gate read `$artifact_ref`
+            // and could say nothing about which model had authored anything. A receipt has to be small, always
+            // present, and never subject to offload. Omitted when the producer stamped none (a deterministic fake),
+            // so an unstamped plan's outputs stay byte-identical.
             // AgentJson (camelCase + string enums) — NOT PlannerSchema.Options (a read-side option set with no naming
             // policy, which would emit Pascal keys and break the {{nodes.x.outputs.json.subtasks}} binding contract.
             ["json"] = JsonSerializer.SerializeToElement(plan, AgentJson.Options),
         };
+
+        // Conditional, never a null value: an unstamped plan's outputs must stay byte-identical to before.
+        if (plan.AuthoredByModel is { Length: > 0 } authoredBy) outputs["authoredByModel"] = JsonSerializer.SerializeToElement(authoredBy);
+
+        return outputs;
     }
 
     /// <summary>The redacted ledger summary — sizes + knobs, never the goal text itself (it can carry tenant data; the resolved-inputs path already records it redacted).</summary>
