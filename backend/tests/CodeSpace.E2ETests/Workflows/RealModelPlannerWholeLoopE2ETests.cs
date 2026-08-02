@@ -77,22 +77,30 @@ public sealed class RealModelPlannerWholeLoopE2ETests
 
         // The planner's llm.complete resolves its model from the team POOL (S6b); seed the gateway as the team's ONLY
         // Anthropic pool model so the planner authors against CODESPACE_LLM_* with no native key.
-        await SeedGatewayPoolModelAsync(teamId, BaseUrlFor(baseUrl!), apiKey!, model!);
+        var plannerRowId = await SeedGatewayPoolModelAsync(teamId, BaseUrlFor(baseUrl!), apiKey!, model!);
 
         // Deterministic routing (NOT model-dependent) — assert the headline plan-map-synth recipe before the live call.
         var route = await RouteStandardAsync(teamId);
         route.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout);
         route.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth);
 
-        // The live planner DECISION is the only gated-observed part; report ✅/⚠️, never red on a model miss. No
-        // assertion inside drive (a wiring fault surfaces as a run Failure → a legible ⚠️, not a propagating red).
+        // WIRING is gated; PLAN QUALITY is not. The two were conflated behind one report-only gate, and the cost was
+        // total: with no model pinned, LlmWorkflowPlanner falls to InProcessStructuredModel.ResolveAsync, which takes
+        // the FIRST structured client holding a pool model — and WorkflowsTestSeed seeds one per in-process fake, the
+        // first being TestPlanner, whose canned plan is a bare string array. So this "live planner" gate resolved a
+        // FAKE, its output failed the production DTO bind, and gating:false reported the wreck as green. It ran in
+        // 221ms; a gateway round trip cannot.
+        var runId = await ProjectRetargetSynthAndStartAsync(route, teamId, userId, plannerRowId);
+
+        var startedAt = DateTimeOffset.UtcNow;
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+        var elapsed = DateTimeOffset.UtcNow - startedAt;
+
+        await AssertTheLivePlannerActuallyRanAsync(runId, teamId, model!, elapsed);
+
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
-            var runId = await ProjectRetargetSynthAndStartAsync(route, teamId, userId);
-
-            await RunEngineAsync(runId);
-            await jobClient.WaitForPendingAsync();
-
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
 
@@ -120,7 +128,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
     }
 
     /// <summary>Build via the REAL plan-map-synth builder, retarget ONLY the SYNTH reduce to the deterministic fake (so just the PLANNER hits the live gateway), then start the snapshot run via the REAL starter. The planner node keeps its default Anthropic provider + no model pin → it resolves the seeded gateway pool model.</summary>
-    private async Task<Guid> ProjectRetargetSynthAndStartAsync(RoutePlan route, Guid teamId, Guid userId)
+    private async Task<Guid> ProjectRetargetSynthAndStartAsync(RoutePlan route, Guid teamId, Guid userId, Guid plannerRowId)
     {
         using var scope = _fixture.BeginScope();
 
@@ -132,10 +140,65 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         };
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
-        var definition = RetargetSynthToFake(builder.Build(context));
+        var definition = PinPlannerModel(RetargetSynthToFake(builder.Build(context)), plannerRowId);
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
+
+    /// <summary>
+    /// PIN the planner to an exact credentialed-model row. Without this the planner takes the auto path
+    /// (<c>InProcessStructuredModel.ResolveAsync</c>), which returns the first structured client that has any pool
+    /// model — and the seeded team has one per in-process fake. The fake wins, and the gate measures it.
+    ///
+    /// <para>This is a QUALIFICATION-tier pin, not a change to production semantics: an operator leaving the planner
+    /// model empty still gets the auto pick, which is the intended product behaviour. A gate that claims to measure a
+    /// specific model simply may not leave the choice to whoever the registry enumerates first.</para>
+    /// </summary>
+    private static WorkflowDefinition PinPlannerModel(WorkflowDefinition definition, Guid plannerRowId) => definition with
+    {
+        Nodes = definition.Nodes.Select(n => n.TypeKey != "plan.author" ? n : n with { Config = WithKey(n.Config, "plannerModelId", plannerRowId.ToString()) }).ToList(),
+    };
+
+    private static JsonElement WithKey(JsonElement config, string key, string value)
+    {
+        var bag = config.ValueKind == JsonValueKind.Object
+            ? JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(config.GetRawText())!
+            : new Dictionary<string, JsonElement>();
+
+        bag[key] = JsonSerializer.SerializeToElement(value);
+        return JsonSerializer.SerializeToElement(bag);
+    }
+
+    /// <summary>
+    /// The gated half: did a LIVE planner actually run? Every assertion here is a code/wiring fact, so each one is a
+    /// hard red — none of them can be moved by a model having a bad day. Plan QUALITY stays report-only afterwards.
+    /// </summary>
+    private async Task AssertTheLivePlannerActuallyRanAsync(Guid runId, Guid teamId, string expectedModel, TimeSpan elapsed)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var planner = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "planner");
+
+        planner.Status.ShouldNotBe(NodeStatus.Failure,
+            $"the planner node FAILED — that is a wiring or contract fault, never a model-quality outcome (error: {planner.Error ?? "(none)"})");
+
+        // The effective model, read back off the planner's own output. LlmWorkflowPlanner stamps `pick.ModelId` onto
+        // the plan it returns, so this is what the run ACTUALLY reasoned on — not what the test hoped it would.
+        var effective = JsonDocument.Parse(planner.OutputsJson).RootElement
+            .GetProperty("json").GetProperty("model").GetString();
+
+        effective.ShouldBe(expectedModel,
+            $"the planner resolved '{effective}' instead of the pinned live gateway model — a gate that measures whichever client the registry enumerated first measures nothing");
+
+        // A gateway round trip cannot complete in milliseconds. This is the assertion that would have caught the
+        // fake outright: the wreck it reported as green ran the whole engine, planner included, in 221ms.
+        elapsed.ShouldBeGreaterThan(LiveCallFloor,
+            $"the whole run took {elapsed.TotalMilliseconds:0}ms — too fast for a live gateway call, so the planner was almost certainly served by an in-process fake");
+    }
+
+    /// <summary>Below this, no network round trip happened. Deliberately far under any real latency so it can only ever catch a fake, never a fast day.</summary>
+    private static readonly TimeSpan LiveCallFloor = TimeSpan.FromMilliseconds(400);
 
     /// <summary>Retarget ONLY the synth node's provider to the deterministic synth fake — the planner stays the real model (pool→gateway). Mirrors RealModelPhaseAuthorshipFlowTests' synth retarget, but leaves the planner alone.</summary>
     private static WorkflowDefinition RetargetSynthToFake(WorkflowDefinition definition) => definition with
@@ -151,7 +214,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
     }
 
     /// <summary>Seed the gateway as the team's ONLY Anthropic pool model (the planner llm.complete resolves it via the pool). Mirrors the supervisor real-model tests' SeedBrainModelAsync.</summary>
-    private async Task SeedGatewayPoolModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
+    private async Task<Guid> SeedGatewayPoolModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -164,9 +227,11 @@ public sealed class RealModelPlannerWholeLoopE2ETests
             EncryptedApiKey = encryptor.Encrypt(apiKey), BaseUrl = baseUrl, Status = CredentialStatus.Active,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
 
         await db.SaveChangesAsync();
+        return rowId;
     }
 
     private async Task RunEngineAsync(Guid runId)
