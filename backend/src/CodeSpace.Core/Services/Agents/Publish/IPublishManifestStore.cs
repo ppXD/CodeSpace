@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Core.Services.Agents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -75,9 +76,9 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
     /// relies on to tell a human-initiated PR-open from a system-authored one. Adding it here would silently let a
     /// later system write reassign a row's actor and misclassify a genuine human touch.
     /// </summary>
-    /// <summary>Whether this attempt still owns the run — read FRESH and untracked so a reclaimer's bumped epoch is visible.</summary>
-    private async Task<bool> IsStillOursAsync(Guid agentRunId, long claimedEpoch, CancellationToken cancellationToken) =>
-        await _db.AgentRun.AsNoTracking().Where(r => r.Id == agentRunId).Select(r => r.FenceEpoch).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) == claimedEpoch;
+    /// <summary>The run's CURRENT epoch, read FRESH and untracked so a reclaimer's bump is visible. The comparison itself lives in <see cref="AgentRunFence"/> — one rule, not one per caller.</summary>
+    private Task<long> CurrentEpochAsync(Guid agentRunId, CancellationToken cancellationToken) =>
+        _db.AgentRun.AsNoTracking().Where(r => r.Id == agentRunId).Select(r => r.FenceEpoch).FirstOrDefaultAsync(cancellationToken);
 
     private async Task UpsertAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, long? expectedFenceEpoch, CancellationToken cancellationToken)
     {
@@ -91,10 +92,15 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
         //
         // The UPDATE carries the fence as a predicate, so it is a genuine conditional commit rather than a
         // read-then-write: the epoch is compared inside the same statement that writes.
-        if (expectedFenceEpoch is { } epoch && agentRunId is { } fencedRunId && !await IsStillOursAsync(fencedRunId, epoch, cancellationToken).ConfigureAwait(false))
+        if (expectedFenceEpoch is { } epoch && agentRunId is { } fencedRunId)
         {
-            _logger.LogWarning("Agent run {RunId}: skipping publish-manifest upsert — the run was reclaimed (fence epoch moved past {Claimed}); its completion would lose the CAS anyway", fencedRunId, epoch);
-            return;
+            var current = await CurrentEpochAsync(fencedRunId, cancellationToken).ConfigureAwait(false);
+
+            if (!AgentRunFence.StillOwns(current, epoch))
+            {
+                _logger.LogWarning("Agent run {RunId}: {Note}", fencedRunId, AgentRunFence.RefusalNote("publish-manifest upsert", current, epoch));
+                return;
+            }
         }
 
         var updated = await _db.PublishManifest
