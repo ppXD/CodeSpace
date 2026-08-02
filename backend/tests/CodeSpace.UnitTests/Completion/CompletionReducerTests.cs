@@ -465,13 +465,32 @@ public class CompletionReducerTests
         CompletionReducer.IsTerminalizable(a).ShouldBeTrue("a human-abstained outcome always terminalizes");
     }
 
+    [Fact]
+    public void A_staked_contract_that_leaves_nothing_owed_still_solves_on_a_clean_finish()
+    {
+        // The other side of the same predicate, and the reason it reads ANY obligation rather than acceptance
+        // specifically: a run whose contract was delivery-only, and whose delivery settled, HAS been verified against
+        // what was actually asked of it. Calling that Unknown because nobody also demanded an acceptance check would
+        // be its own untruth — the operator got exactly the contract they wrote.
+        var requirements = new[] { Requirement("delivery:s1", ContractKinds.Delivery, Requiredness.Required) };
+        var receipts = new[] { Receipt("delivery:s1", VerificationDisposition.Passed, ContractKinds.Delivery) };
+
+        CompletionReducer.Reduce(requirements, receipts, Facts(WorkflowRunStatus.Success)).Outcome
+            .ShouldBe(OutcomeDisposition.Solved, "a settled contract is evidence, even when acceptance was never part of it");
+    }
+
     [Theory]
-    [InlineData(WorkflowRunStatus.Success, true, null, OutcomeDisposition.Solved)]     // no contract + honest Success → the scorecard parity arm
+    // The parity arm this row used to pin is GONE, and its removal is the point: a contract-era run that staked
+    // NOTHING has no evidence in either direction, so a clean finish reads Unknown. Reading the exit code as success
+    // there is the "it exited zero, so it worked" inference the whole protocol exists to remove — and it was reaching
+    // the north-star metric through this arm. The negative rows are unchanged on purpose: a failed or cancelled run
+    // is not unknown, the engine's own terminal is evidence the goal was not reached.
+    [InlineData(WorkflowRunStatus.Success, true, null, OutcomeDisposition.Unknown)]
     [InlineData(WorkflowRunStatus.Failure, true, null, OutcomeDisposition.Unsolved)]
     [InlineData(WorkflowRunStatus.Cancelled, true, null, OutcomeDisposition.Unsolved)]
     [InlineData(WorkflowRunStatus.Failure, false, null, OutcomeDisposition.Unsolved)]  // crashed
     [InlineData(WorkflowRunStatus.Success, true, "no forward progress", OutcomeDisposition.Unsolved)]  // forced stop is never a fallback solve, even at engine Success
-    public void With_no_contract_the_outcome_falls_back_to_the_honest_end(WorkflowRunStatus status, bool orderly, string? forced, OutcomeDisposition expected)
+    public void With_nothing_staked_a_clean_finish_is_unknown_and_a_failure_is_still_unsolved(WorkflowRunStatus status, bool orderly, string? forced, OutcomeDisposition expected)
     {
         CompletionReducer.Reduce(None, NoReceipts, Facts(status, forced, orderly)).Outcome.ShouldBe(expected);
     }
@@ -729,11 +748,14 @@ public class CompletionReducerTests
     public void The_completion_policy_is_pinned_and_era_is_per_run()
     {
         // Bumping the policy version is an explicit protocol revision, never a refactor side-effect — and era is
-        // decided by the run's OWN stamped column, never a global clock.
-        CompletionPolicy.CurrentVersion.ShouldBe(1);
+        // decided by the run's OWN stamped column, never a global clock. v2 is the revision that stopped reading a
+        // clean exit code as Solved for a run that staked no obligation at all; this pin failing on that bump is the
+        // pin doing its job, and updating it is the explicit decision it exists to force.
+        CompletionPolicy.CurrentVersion.ShouldBe(2);
         CompletionPolicy.CurrentMode.ShouldBe(CompletionEnforcementMode.Shadow, "generic creation NEVER stamps Enforced — that is P2b's qualified-cohort rollout (Lock Clause 1)");
 
-        CompletionPolicy.BasisFor(1).ShouldBe(CompletionBasis.ContractDerived);
+        CompletionPolicy.BasisFor(1).ShouldBe(CompletionBasis.ContractDerived, "a v1 run stays contract-era — its stamp records WHICH policy assessed it, so v2 semantics never retroactively rewrite it");
+        CompletionPolicy.BasisFor(2).ShouldBe(CompletionBasis.ContractDerived);
         CompletionPolicy.BasisFor(null).ShouldBe(CompletionBasis.LegacyUnknown, "an unstamped run is pre-protocol — old tape is never re-derived");
     }
 

@@ -11,7 +11,10 @@ namespace CodeSpace.Core.Services.Completion;
 /// </summary>
 public static class CompletionPolicy
 {
-    public const int CurrentVersion = 1;
+    // Version 2: the reducer no longer reads a clean exit code as Solved for a run that staked no obligation at all.
+    // A protocol revision by the rule stated above (new reducer semantics), so runs created under v1 stay stamped v1
+    // and keep the semantics they were assessed under — this is not a refactor and must not be treated as one.
+    public const int CurrentVersion = 2;
 
     /// <summary>The enforcement mode every NEWLY CREATED run is stamped with while the protocol is in its Shadow phase (Lock Clause 1: production terminal mutation stays with the legacy engine until P2b enables Enforced per qualified cohort).</summary>
     public const CompletionEnforcementMode CurrentMode = CompletionEnforcementMode.Shadow;
