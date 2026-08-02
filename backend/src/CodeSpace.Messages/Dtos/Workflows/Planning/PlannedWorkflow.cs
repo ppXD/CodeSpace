@@ -31,6 +31,19 @@ public sealed record PlannedWorkflow
     public IReadOnlyList<string> Risks { get; init; } = Array.Empty<string>();
 
     /// <summary>
+    /// The model that AUTHORED this plan, stamped by the planner from its own resolved pool pick — not requested, not
+    /// configured: resolved. Null when the producer did not stamp one (a deterministic fake, an older plan).
+    ///
+    /// <para>Nothing recorded this before, so no test and no operator could tell which model a plan came from. That is
+    /// how a gate advertising "a live model authors the plan" ran for its whole life against an in-process fake: with
+    /// no model pinned the planner takes the auto path, which returns the first structured client holding a pool
+    /// model, and nothing downstream could contradict it. A resolved-model stamp is the smallest fact that makes the
+    /// claim checkable.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AuthoredByModel { get; init; }
+
+    /// <summary>
     /// The execution shape the planner recommends for each subtask branch. <c>"coding"</c> projects each
     /// branch onto an <c>agent.run</c> body node; anything else (the default) projects onto a plain
     /// <c>llm.complete</c> body node. The projector switches on this — the model never names a node type.

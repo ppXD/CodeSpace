@@ -185,11 +185,18 @@ public sealed class RealModelPlannerWholeLoopE2ETests
 
         // The effective model, read back off the planner's own output. LlmWorkflowPlanner stamps `pick.ModelId` onto
         // the plan it returns, so this is what the run ACTUALLY reasoned on — not what the test hoped it would.
-        var effective = JsonDocument.Parse(planner.OutputsJson).RootElement
-            .GetProperty("json").GetProperty("model").GetString();
+        // Read defensively: an ABSENT key is itself a finding (the plan carried no model at all), and it has to say
+        // so rather than throw a bare KeyNotFoundException that names neither the node nor what was there instead.
+        var outputs = JsonDocument.Parse(planner.OutputsJson).RootElement;
+        var plan = outputs.TryGetProperty("json", out var planJson) ? planJson : default;
+
+        plan.ValueKind.ShouldBe(JsonValueKind.Object, $"the planner emitted no 'json' output at all — keys present: [{string.Join(", ", outputs.EnumerateObject().Select(pr => pr.Name))}]");
+
+        var effective = plan.TryGetProperty("authoredByModel", out var m) ? m.GetString() : null;
 
         effective.ShouldBe(expectedModel,
-            $"the planner resolved '{effective}' instead of the pinned live gateway model — a gate that measures whichever client the registry enumerated first measures nothing");
+            $"the planner reasoned on '{effective ?? "(no model stamped on the plan)"}' instead of the pinned live gateway model '{expectedModel}' — "
+          + $"a gate that measures whichever client the registry enumerated first measures nothing. Plan keys: [{string.Join(", ", plan.EnumerateObject().Select(pr => pr.Name))}]");
 
         // A gateway round trip cannot complete in milliseconds. This is the assertion that would have caught the
         // fake outright: the wreck it reported as green ran the whole engine, planner included, in 221ms.
