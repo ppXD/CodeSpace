@@ -32,8 +32,16 @@ public static class CompletionReducer
         var artifact = ClassifyArtifact(requirements, authorized);
         var delivery = ClassifyDelivery(requirements, authorized);
 
+        // Whether ANY obligation was staked at all. Verification alone cannot say: NotApplicable means both "an
+        // authority ruled none was owed" and "nobody asked", and only the first of those may read Solved.
+        //
+        // Deliberately ANY kind, not acceptance specifically. A run whose contract is delivery-only, whose delivery
+        // obligation settled, HAS been verified against what was actually asked of it — calling that Unknown would
+        // be its own untruth. The evidence-free case is the one where nothing was staked in any kind.
+        var anyObligationStaked = requirements.Count > 0;
+
         var outcome = GuardUnroutedKinds(requirements,
-            GuardUnsettledObligations(requirements, artifact, delivery, ClassifyOutcome(verification, execution, facts)));
+            GuardUnsettledObligations(requirements, artifact, delivery, ClassifyOutcome(verification, execution, facts, anyObligationStaked)));
 
         return new CompletionAssessment
         {
@@ -245,7 +253,7 @@ public static class CompletionReducer
     /// <c>SupervisorEvalScorecard.ClassifyByRunStatus</c>'s shared precedent so the 2b consumer switch is
     /// metric-neutral for the no-contract population.
     /// </summary>
-    private static OutcomeDisposition ClassifyOutcome(VerificationDisposition verification, ExecutionDisposition execution, CompletionRunFacts facts) => verification switch
+    private static OutcomeDisposition ClassifyOutcome(VerificationDisposition verification, ExecutionDisposition execution, CompletionRunFacts facts, bool anyObligationStaked) => verification switch
     {
         VerificationDisposition.Passed => OutcomeDisposition.Solved,
         VerificationDisposition.Failed => OutcomeDisposition.Unsolved,
@@ -255,6 +263,23 @@ public static class CompletionReducer
         // verification VERDICT above still wins: partial work that FAILED its oracle reads Unsolved even if the
         // model then asked.
         VerificationDisposition.NotApplicable when facts.SelfReportedAbstention => OutcomeDisposition.Abstained,
+        // The clean-terminal fallback, and the ONE place it is legitimate. NotApplicable arrives two ways and they
+        // are not the same fact: a contract that WAS staked and left nothing owed (an authorized not-applicable, or
+        // a delivery-only contract that settled — a clean finish is genuinely Solved against what was asked), or
+        // NOTHING STAKED at all, where reading the
+        // exit code as success is the "it exited zero, so it worked" inference this whole protocol exists to remove.
+        // The legacy population never reaches here — a no-contract run goes through ReduceLegacy — so every run in
+        // the unstaked case is contract-era and was being scored on nothing.
+        //
+        // Deliberately asymmetric, and only here: a clean finish with nothing staked is UNKNOWN (no evidence either
+        // way), while a failed or cancelled one stays Unsolved, because the engine's own terminal IS evidence the
+        // goal was not reached. Hiding real failures behind "we don't know" would trade one untruth for another.
+        // Note this does NOT touch the `_ => Unknown` arm below: a staked-but-InfraUnknown verification must stay
+        // Unknown on a failed run too, or a candidate gets blamed for an infrastructure fault.
+        VerificationDisposition.NotApplicable when !anyObligationStaked =>
+            execution == ExecutionDisposition.Completed && facts.TerminalStatus == WorkflowRunStatus.Success && !facts.SelfReportedGiveUp
+                ? OutcomeDisposition.Unknown
+                : OutcomeDisposition.Unsolved,
         VerificationDisposition.NotApplicable => execution == ExecutionDisposition.Completed && facts.TerminalStatus == WorkflowRunStatus.Success && !facts.SelfReportedGiveUp
             ? OutcomeDisposition.Solved
             : OutcomeDisposition.Unsolved,
