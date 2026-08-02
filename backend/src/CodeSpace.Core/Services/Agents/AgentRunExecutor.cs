@@ -956,9 +956,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // effect. Read FRESH + untracked (GetAsync is AsNoTracking) so we see the reclaimer's bumped epoch.
         var current = await _runs.GetAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        if (current.FenceEpoch != claimedEpoch)
+        if (!AgentRunFence.StillOwns(current.FenceEpoch, claimedEpoch))
         {
-            _logger.LogWarning("Agent run {RunId}: skipping branch push — the run was reclaimed (epoch {Current} != claimed {Claimed}); its completion would lose the CAS", runId, current.FenceEpoch, claimedEpoch);
+            _logger.LogWarning("Agent run {RunId}: {Note}", runId, AgentRunFence.RefusalNote("branch push", current.FenceEpoch, claimedEpoch));
             return result;
         }
 
