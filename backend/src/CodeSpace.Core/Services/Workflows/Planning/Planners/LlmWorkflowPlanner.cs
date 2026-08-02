@@ -56,7 +56,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog), cancellationToken).ConfigureAwait(false);
 
-        return Deserialize(completion.Json);
+        // Stamped from the pick this call actually dispatched on, so the plan carries its own provenance.
+        return Deserialize(completion.Json) with { AuthoredByModel = pick.ModelId };
     }
 
     private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog) => new()

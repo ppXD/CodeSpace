@@ -735,6 +735,24 @@ public class WorkflowPlannerTests
     }
 
     [Fact]
+    public void A_plan_carries_the_model_that_authored_it_so_the_claim_is_checkable()
+    {
+        // Nothing recorded this before, so no test and no operator could tell which model a plan came from — which is
+        // how a gate advertising "a live model authors the plan" ran its whole life against an in-process fake.
+        // Null-omitted, so a producer that stamps nothing (a deterministic fake) is visibly absent rather than
+        // silently indistinguishable from a real one.
+        var plan = new PlannedWorkflow { Goal = "g", Subtasks = new[] { new PlannedSubtask { Id = "s1", Title = "t", Instruction = "i" } } };
+
+        plan.AuthoredByModel.ShouldBeNull("an unstamped plan must not look like a stamped one");
+
+        var stamped = plan with { AuthoredByModel = "claude-x" };
+        var json = JsonSerializer.SerializeToElement(stamped, AgentJson.Options);
+
+        json.GetProperty("authoredByModel").GetString().ShouldBe("claude-x", "the stamp has to survive to the node output, which is the only place a gate can read it");
+        JsonSerializer.SerializeToElement(plan, AgentJson.Options).TryGetProperty("authoredByModel", out _).ShouldBeFalse("null-omitted keeps an unstamped plan byte-identical to before");
+    }
+
+    [Fact]
     public void A_well_shaped_reply_still_binds_untouched()
     {
         var ok = JsonDocument.Parse("""{"goal":"g","subtasks":[{"id":"s1","title":"t","instruction":"i"}]}""").RootElement;
