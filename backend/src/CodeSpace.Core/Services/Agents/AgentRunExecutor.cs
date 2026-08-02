@@ -422,7 +422,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             result = await GradeAcceptanceIfPresentAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
-            await PersistPublishManifestAsync(agentRunId, run, task, result, cancellationToken).ConfigureAwait(false);
+            await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -1086,7 +1086,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Publish-or-park (I1/I2): record what this pass produced + published REGARDLESS of Status — a Failed or
         // TimedOut run's captured diff gets a row exactly like a Succeeded one. Idempotent (upserts), so an S6 revise
         // round's re-verification safely overwrites this same row with its own latest state.
-        await PersistPublishManifestAsync(runId, run, task, result, cancellationToken).ConfigureAwait(false);
+        await PersistPublishManifestAsync(runId, run, task, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
         return await ReviewOutputIfEnabledAsync(task, result, run, cancellationToken).ConfigureAwait(false);
     }
@@ -1104,21 +1104,27 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// Internal (not private) so this wiring is unit-pinned directly (InternalsVisibleTo), not only through a full
     /// executor run.
     /// </summary>
-    internal async Task PersistPublishManifestAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
+    /// <summary>
+    /// Commit this pass's delivery-ledger row, FENCED on the epoch this attempt claimed. The branch push a few
+    /// steps earlier already refuses to fire for a reclaimed attempt; this row — the durable claim that the push
+    /// happened and the acceptance passed — did not, so a zombie worker could stamp Pushed/Passed and only then
+    /// lose the completion CAS. The reversible remote effect was guarded and the irreversible ledger claim was not.
+    /// </summary>
+    internal async Task PersistPublishManifestAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, long claimedEpoch, CancellationToken cancellationToken)
     {
         try
         {
             if (result.RepositoryResults.Count > 0)
             {
                 foreach (var repo in result.RepositoryResults)
-                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, result.AcceptancePassed, repo.PushedCommitSha), cancellationToken).ConfigureAwait(false);
+                    await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, repo.Alias, repo.RepositoryId, repo.BaseSha, repo.PatchArtifactId, repo.ChangedFiles, repo.ProducedBranch, repo.PublishError, repo.PublishSkipReason, result.AcceptancePassed, repo.PushedCommitSha), claimedEpoch, cancellationToken).ConfigureAwait(false);
 
                 return;
             }
 
             if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null) return;   // nothing changed — no artifact to record
 
-            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha), cancellationToken).ConfigureAwait(false);
+            await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha), claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

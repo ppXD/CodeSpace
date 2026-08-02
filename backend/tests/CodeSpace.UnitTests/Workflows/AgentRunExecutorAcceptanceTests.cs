@@ -154,7 +154,7 @@ public class AgentRunExecutorAcceptanceTests
         };
 
         var graded = await executor.GradeAcceptanceIfPresentAsync(run, task, multi, CancellationToken.None);
-        await executor.PersistPublishManifestAsync(run.Id, run, task, graded, CancellationToken.None);
+        await executor.PersistPublishManifestAsync(run.Id, run, task, graded, claimedEpoch: 7, CancellationToken.None);
 
         manifests.Upserts.Count.ShouldBe(2, "one upsert per repo");
         manifests.Upserts.ShouldAllBe(u => u.AcceptanceState == PublishAcceptanceState.Failed,
@@ -450,6 +450,14 @@ public class AgentRunExecutorAcceptanceTests
 
         public FakeGrader Grader { get; }
         public List<PublishManifestUpsert> Upserts { get; } = new();
+
+        public List<long> FencedEpochs { get; } = new();
+
+        public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, long expectedFenceEpoch, CancellationToken cancellationToken)
+        {
+            FencedEpochs.Add(expectedFenceEpoch);
+            return UpsertForAgentRunAsync(agentRunId, input, cancellationToken);
+        }
 
         public Task UpsertForAgentRunAsync(Guid agentRunId, PublishManifestUpsert input, CancellationToken cancellationToken)
         {
