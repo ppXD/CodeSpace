@@ -718,4 +718,27 @@ public class WorkflowPlannerTests
             return Task.FromResult(_grounding);
         }
     }
+
+    [Fact]
+    public void A_reply_that_is_valid_json_but_the_wrong_shape_fails_as_a_contract_mismatch_not_a_crash()
+    {
+        // The exact reply that reached production: `subtasks` as an array of bare strings where the schema declares
+        // objects. Well-formed JSON, so the structured-output repair path cannot see it — it only handles malformed
+        // JSON. Left raw, the JsonException escaped as "Node planner threw unhandled exception", which reads as an
+        // engine crash and tells an operator nothing about which field disagreed.
+        var wrongShape = JsonDocument.Parse("""{"goal":"g","subtasks":["alpha","beta","gamma"]}""").RootElement;
+
+        var ex = Should.Throw<InvalidOperationException>(() => LlmWorkflowPlanner.Deserialize(wrongShape));
+
+        ex.Message.ShouldContain("planner schema", Case.Insensitive, "the operator must be told it is a contract mismatch");
+        ex.InnerException.ShouldBeOfType<JsonException>("the binding detail is preserved for diagnosis, not discarded");
+    }
+
+    [Fact]
+    public void A_well_shaped_reply_still_binds_untouched()
+    {
+        var ok = JsonDocument.Parse("""{"goal":"g","subtasks":[{"id":"s1","title":"t","instruction":"i"}]}""").RootElement;
+
+        LlmWorkflowPlanner.Deserialize(ok).Subtasks.Single().Id.ShouldBe("s1");
+    }
 }

@@ -105,9 +105,24 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return builder.ToString();
     }
 
-    private static PlannedWorkflow Deserialize(JsonElement json)
+    /// <summary>Internal (not private) so the DTO-bind boundary is unit-pinned directly — the failure it converts escaped as an unhandled crash for as long as nothing tested it.</summary>
+    internal static PlannedWorkflow Deserialize(JsonElement json)
     {
-        var plan = json.Deserialize<PlannedWorkflow>(PlannerSchema.Options);
+        PlannedWorkflow? plan;
+
+        try
+        {
+            plan = json.Deserialize<PlannedWorkflow>(PlannerSchema.Options);
+        }
+        catch (JsonException ex)
+        {
+            // A reply that is well-formed JSON but does not BIND to the DTO — e.g. `subtasks` as an array of bare
+            // strings where the schema declares objects. The structured-output repair path handles malformed JSON;
+            // it cannot see this one, because nothing is malformed. Left raw it escaped as "Node planner threw
+            // unhandled exception", which reads as an engine crash rather than a contract mismatch and tells an
+            // operator nothing about which field disagreed.
+            throw new InvalidOperationException($"The planner's reply did not match the planner schema's shape: {ex.Message}", ex);
+        }
 
         if (plan == null || plan.Subtasks.Count == 0)
             throw new InvalidOperationException("The planner returned an empty plan (no subtasks). The response did not conform to the planner schema.");
