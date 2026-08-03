@@ -362,13 +362,19 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             var db = verify.Resolve<CodeSpaceDbContext>();
 
             // The AUTHORITATIVE signal — the model's own PLAN decision payload: did it declare a dependsOn edge at all?
-            var planPayloads = await db.SupervisorDecisionRecord.AsNoTracking()
+            // Read the LATEST plan ONLY, because that is the one the runtime rail reads: SupervisorDependencyGate's
+            // DependsOnBySubtask walks the prior decisions BACKWARDS and returns at the first Plan it finds. Scanning
+            // every plan ever recorded armed this hard assert off an edge a later re-plan had already dropped — the
+            // rail disarmed, the assert did not, and the failure text still blamed the staging resolver. A run that
+            // re-plans (the live brain re-planned THREE times in run 30775218538) is the common case, not the corner.
+            var latestPlanPayload = await db.SupervisorDecisionRecord.AsNoTracking()
                 .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Plan)
-                .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+                .OrderByDescending(d => d.Sequence).Select(d => d.PayloadJson).FirstOrDefaultAsync();
 
-            var authoredDependency = planPayloads
-                .SelectMany(p => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.SupervisorPlanPayload>(p, AgentJson.Options)?.Subtasks
-                                  ?? Enumerable.Empty<Messages.Agents.SupervisorPlannedSubtask>())
+            var authoredDependency = (latestPlanPayload is null
+                    ? Enumerable.Empty<Messages.Agents.SupervisorPlannedSubtask>()
+                    : System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.SupervisorPlanPayload>(latestPlanPayload, AgentJson.Options)?.Subtasks
+                      ?? Enumerable.Empty<Messages.Agents.SupervisorPlannedSubtask>())
                 .Any(s => s.DependsOn is { Count: > 0 });
 
             // The MECHANISM signal: did ANY agent's captured diff include the dependent marker — only ever written by
