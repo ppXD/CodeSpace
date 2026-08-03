@@ -82,8 +82,15 @@ public sealed class DependencyHandoffFakeCli : IDisposable
     /// (<c>CodexHarness.BuildInvocation</c>) and Claude's always with <c>--print</c> (<c>ClaudeCodeHarness</c>).
     /// The codex branch is BYTE-IDENTICAL to before, so every existing codex consumer is unperturbed.
     ///
-    /// <para>The two branches must stay 1:1 in EVENT terms — one AssistantMessage then one Completed — so a fake run
-    /// folds the same Summary either way. Emitting both dialects unconditionally instead would CORRUPT codex: a
+    /// <para>The two branches must stay 1:1 in EVENT terms — one AssistantMessage then one Completed — AND must fold
+    /// the SAME Summary, which does not follow from the 1:1 and is the trap when porting this to another fake. The two
+    /// harnesses disagree on precedence: Codex takes <c>FinalSummary ?? AssistantMessage</c>, SKIPPING Completed
+    /// (<c>CodexHarness</c>), while Claude takes <c>FinalSummary ?? Completed ?? AssistantMessage</c>
+    /// (<c>ClaudeCodeHarness</c>), and neither harness can emit a FinalSummary at all. So the Claude result line's
+    /// <c>result</c> property — which is what becomes the Completed event's text — must carry the SAME text as the
+    /// codex <c>agent_message</c>, or the two branches silently fold different summaries. Harmless for THIS fake
+    /// (its consumers assert on ChangedFiles) but fatal for any fake whose marker is read off the summary. Pinned by
+    /// <c>The_two_dialects_fold_the_same_summary</c>. Emitting both dialects unconditionally instead would CORRUPT codex: a
     /// Claude <c>{"type":"assistant","message":{…}}</c> line parses under <c>CodexHarness</c> as an AssistantMessage
     /// whose text is the literal string "assistant", and being last it would win the summary. Do not emit Claude's
     /// <c>{"type":"system","subtype":"init"}</c> line either — it maps to a leading Started event with no codex
@@ -103,7 +110,9 @@ public sealed class DependencyHandoffFakeCli : IDisposable
         "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
         "else\n" +
         "  printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"DONE\"}]}}\\n'\n" +
-        "  printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"completed\",\"is_error\":false}\\n'\n" +
+        // `result` (not `subtype`) is what ReadResultText lifts into the Completed event's text, and Claude PREFERS
+        // Completed over AssistantMessage — so this must echo the codex agent_message, not say "completed".
+        "  printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"DONE\",\"is_error\":false}\\n'\n" +
         "fi\n" +
         "exit 0\n";
 }
