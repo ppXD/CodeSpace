@@ -70,6 +70,42 @@ public sealed class SupervisorDependencyStagingFlowTests
         task.Goal.ShouldContain(manifest.Branch!, customMessage: "the server-authored handoff block names the producer's branch in the agent's prompt");
     }
 
+    /// <summary>
+    /// The S1 probe must measure the HANDOFF, not the harness lottery. Which harness a live-brain run dispatches is
+    /// the MODEL's choice (an authored <c>agents[].harness</c>, or an Anthropic-defaulted team pool that
+    /// <c>HarnessModelReconciler</c> reconciles to claude-code on its own) — so a fake that stubs only codex leaves
+    /// the dependent running the REAL claude CLI, which can never write <see cref="DependencyHandoffFakeCli.DependentMarker"/>.
+    /// That made the live arm's hard assert UNSATISFIABLE while it blamed "a CODE regression in the dependency-staging
+    /// resolver" (real-model run 30775218538: the one codex agent ran FIRST, the three dependents ran claude-code).
+    /// Mutation check: restore the codex-only stub in <see cref="DependencyHandoffFakeCli"/> and the claude-code row
+    /// goes RED.
+    /// </summary>
+    [Theory]
+    [InlineData("codex-cli")]
+    [InlineData("claude-code")]
+    public async Task The_handoff_markers_are_recorded_under_whichever_harness_the_model_dispatches(string harnessKind)
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var cli = new DependencyHandoffFakeCli();
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+
+        var producer = await RunFakeCliAgentAsync(teamId, repoId, harnessKind, checkoutRef: null);
+        producer.Result.ChangedFiles.ShouldContain(DependencyHandoffFakeCli.ProducerMarker,
+            $"the FIRST agent under '{harnessKind}' must run the fake and write the producer marker — if it did not, the harness ran a REAL CLI and this probe measures nothing");
+
+        var producerBranch = (await SingleManifestAsync(producer.AgentRunId, teamId)).Branch;
+        producerBranch.ShouldNotBeNull("PublishMode=Branch + a bound credential → the producer's work was pushed");
+
+        var dependent = await RunFakeCliAgentAsync(teamId, repoId, harnessKind, checkoutRef: producerBranch);
+        dependent.Result.ChangedFiles.ShouldContain(DependencyHandoffFakeCli.DependentMarker,
+            $"a clone staged at the producer's branch already carries the producer marker, so under '{harnessKind}' the fake must take its dependent branch — this is the exact signal the live S1 arm asserts on");
+    }
+
     [Fact]
     public async Task A_single_patch_only_producer_still_hands_off_via_integration()
     {
@@ -362,6 +398,34 @@ public sealed class SupervisorDependencyStagingFlowTests
         finished.Status.ShouldBe(AgentRunStatus.Succeeded, "the producer must genuinely succeed for its manifest to carry real work");
 
         return (run.Id, finished.ResultJson!);
+    }
+
+    /// <summary>
+    /// Run ONE agent on a REAL registered harness (codex-cli / claude-code) through the fully DI-wired production
+    /// executor — unlike <see cref="RunProducerAsync"/>, which substitutes a <c>ScriptedHarness</c> and so can never
+    /// observe which CLI a harness actually spawns. <paramref name="checkoutRef"/> pins the clone (null → the
+    /// repository default), standing in for what dependency staging resolves at spawn time.
+    /// </summary>
+    private async Task<(Guid AgentRunId, AgentRunResult Result)> RunFakeCliAgentAsync(Guid teamId, Guid repositoryId, string harnessKind, string? checkoutRef)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var workspace = new WorkspaceSpec
+        {
+            Repositories = new[] { new WorkspaceRepositorySpec { Alias = "repo", RepositoryId = repositoryId, Ref = checkoutRef, IsPrimary = true } },
+        };
+
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "do the unit", Harness = harnessKind, Model = null, RepositoryId = repositoryId, Workspace = workspace },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+
+        await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(run.Id, CancellationToken.None);
+
+        var finished = await scope.Resolve<IAgentRunService>().GetAsync(run.Id, CancellationToken.None);
+        finished.Status.ShouldBe(AgentRunStatus.Succeeded,
+            $"the '{harnessKind}' harness must have spawned the FAKE cli (a real CLI would need credentials this test never seeds) — error: {finished.Error}");
+
+        return (run.Id, JsonSerializer.Deserialize<AgentRunResult>(finished.ResultJson!, AgentJson.Options)!);
     }
 
     private async Task<PublishManifest> SingleManifestAsync(Guid agentRunId, Guid teamId)

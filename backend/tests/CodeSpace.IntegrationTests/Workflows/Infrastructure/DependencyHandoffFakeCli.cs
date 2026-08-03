@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -31,7 +32,8 @@ public sealed class DependencyHandoffFakeCli : IDisposable
     /// <summary>Written ONLY by an agent whose clone already contains <see cref="ProducerMarker"/> — the S1 handoff mechanism proof.</summary>
     public const string DependentMarker = "step2-done.txt";
 
-    private readonly string _originalCommand;
+    private readonly string _originalCodexCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     public DependencyHandoffFakeCli()
@@ -39,20 +41,42 @@ public sealed class DependencyHandoffFakeCli : IDisposable
         _dir = Path.Combine(Path.GetTempPath(), "cs-dephandoff-fakecli-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
 
-        var script = Path.Combine(_dir, "fake-codex.sh");
+        var script = Path.Combine(_dir, "fake-agent.sh");
         File.WriteAllText(script, ScriptBody);
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
-        _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        // BOTH harnesses, not just codex: which harness a live-brain run actually dispatches is the MODEL's choice
+        // (RealSupervisorActionExecutor.Spawn's authored agents[].harness), and an Anthropic-defaulted team pool
+        // reconciles to claude-code on its own (HarnessModelReconciler). Stubbing codex alone left the dependent
+        // agents running the REAL claude CLI, which can never write this fake's markers — so the probe silently
+        // measured the harness lottery instead of the handoff.
+        _originalCodexCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCodexCommand.Length == 0 ? null : _originalCodexCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
+    /// <summary>
+    /// POSIX <c>/bin/sh</c>, harness-agnostic. The WORK half is unchanged and dialect-free (a pure function of the
+    /// clone's own filesystem state). Only the STREAM half branches, on the one discriminator that is a property of
+    /// the invocation rather than of the runner: Codex's argv always starts with <c>exec</c>
+    /// (<c>CodexHarness.BuildInvocation</c>) and Claude's always with <c>--print</c> (<c>ClaudeCodeHarness</c>).
+    /// The codex branch is BYTE-IDENTICAL to before, so every existing codex consumer is unperturbed.
+    ///
+    /// <para>The two branches must stay 1:1 in EVENT terms — one AssistantMessage then one Completed — so a fake run
+    /// folds the same Summary either way. Emitting both dialects unconditionally instead would CORRUPT codex: a
+    /// Claude <c>{"type":"assistant","message":{…}}</c> line parses under <c>CodexHarness</c> as an AssistantMessage
+    /// whose text is the literal string "assistant", and being last it would win the summary. Do not emit Claude's
+    /// <c>{"type":"system","subtype":"init"}</c> line either — it maps to a leading Started event with no codex
+    /// counterpart, breaking the 1:1.</para>
+    /// </summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
         "if [ -f " + ProducerMarker + " ]; then\n" +
@@ -62,7 +86,12 @@ public sealed class DependencyHandoffFakeCli : IDisposable
         "  printf 'step1 complete\\n' > " + ProducerMarker + "\n" +
         "  printf 'agent work\\n' > agent_1.txt\n" +
         "fi\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"DONE\"}\\n'\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "if [ \"$1\" = 'exec' ]; then\n" +
+        "  printf '{\"type\":\"agent_message\",\"message\":\"DONE\"}\\n'\n" +
+        "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "else\n" +
+        "  printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"DONE\"}]}}\\n'\n" +
+        "  printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"completed\",\"is_error\":false}\\n'\n" +
+        "fi\n" +
         "exit 0\n";
 }
