@@ -170,6 +170,44 @@ public static class SupervisorOutcome
         }
     }
 
+    /// <summary>
+    /// The subtasks a spawn WITHHELD rather than staged, with the server's reason for each — read off a spawn
+    /// outcome's <c>blockedSubtasks</c> array (<c>RealSupervisorActionExecutor.BuildBlockedSpawnOutcome</c>). Empty
+    /// when the key is absent/malformed, which is every accepted spawn.
+    ///
+    /// <para>Distinct from <see cref="ReadRejectionReason"/>: a REJECTED decision was refused outright (a malformed
+    /// or unknown-id action), whereas a BLOCKED one was well-formed and the server withheld specific units because
+    /// handing them off would have been silently wrong. Both stage zero agents, and both were previously visible to
+    /// the decider only as raw jsonb.</para>
+    /// </summary>
+    public static IReadOnlyList<SupervisorBlockedSubtask> ReadBlockedSubtasks(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorBlockedSubtask>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("blockedSubtasks", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return Array.Empty<SupervisorBlockedSubtask>();
+
+            return arr.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.Object)
+                .Select(e => new
+                {
+                    Id = e.TryGetProperty("subtaskId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+                    Reason = e.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null,
+                })
+                .Where(x => !string.IsNullOrWhiteSpace(x.Id))
+                .Select(x => new SupervisorBlockedSubtask { SubtaskId = x.Id!, Reason = x.Reason ?? "(no reason recorded)" })
+                .ToList();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorBlockedSubtask>();
+        }
+    }
+
     /// <summary>P3.5 — the OPTIONAL <c>detail</c> a server-forced stop stamped alongside its <c>reason</c> (<c>{ reason, detail }</c>) — a dynamic elaboration (e.g. the cost cap's realized-spend breakdown) for the bounds that carry one. Null when absent (every reason without a per-run figure to cite, and every non-forced stop).</summary>
     public static string? ReadStopDetail(string? payloadJson) => ReadStringField(payloadJson, "detail");
 

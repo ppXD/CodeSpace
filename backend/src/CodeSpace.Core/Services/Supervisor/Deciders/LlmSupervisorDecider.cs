@@ -703,9 +703,29 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // A merge whose on-disk integration CONFLICTED is rendered as a legible, actionable block (resolver loop #379) —
         // the conflicted files + the PRESERVED agent branches + the resolve-or-stop choice — so the decider acts on the
         // conflict rather than parsing it out of raw outcome jsonb. A clean/skipped merge keeps the compact line below.
+        // A spawn dependency staging WITHHELD: well-formed, but the server refused to hand off silently. Rendered
+        // BEFORE the conflict block because a blocked spawn may carry BOTH — the withheld units AND the integration
+        // detail — and the model needs to know WHICH units it lost before it reads why.
+        // A spawn dependency staging WITHHELD: well-formed, but the server refused to hand off silently. Rendered
+        // BEFORE the conflict block because a blocked spawn may carry BOTH — the withheld units AND the integration
+        // detail — and the model needs to know WHICH units it lost before it reads why.
+        if (SupervisorOutcome.ReadBlockedSubtasks(prior.OutcomeJson) is { Count: > 0 } blocked)
+        {
+            AppendBlockedSpawn(builder, prior, blocked);
+
+            if (SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } stagingConflict)
+                AppendConflictedIntegration(builder, prior.DecisionKind, "then re-author the spawn that was withheld", stagingConflict);
+
+            return;
+        }
+
+        // STAYS gated on Merge. A staging-time conflict reaches the model through the blocked-spawn branch above,
+        // which renders the same block: BuildBlockedSpawnOutcome only ever writes `integration` alongside a non-empty
+        // `blockedSubtasks`, so a conflicted integration on a spawn can never arrive here. Un-gating this was tried
+        // and reverted — the mutation test proved it dead code (re-gating reddened nothing).
         if (prior.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } integration)
         {
-            AppendConflictedMerge(builder, integration);
+            AppendConflictedIntegration(builder, prior.DecisionKind, "then you merge again", integration);
             return;
         }
 
@@ -866,9 +886,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     }
 
     /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>
-    private static void AppendConflictedMerge(StringBuilder builder, SupervisorIntegrationOutcome integration)
+    private static void AppendConflictedIntegration(StringBuilder builder, string decisionKind, string afterResolve, SupervisorIntegrationOutcome integration)
     {
-        builder.AppendLine("- merge: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
+        builder.AppendLine($"- {decisionKind}: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
         builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
 
         if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {integration.Reason}");
@@ -877,7 +897,23 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // The verb is named EXPLICITLY here (M0, 2026-07-11): the live golden eval proved a model picks its verb off
         // this copy, and the reconciling agent is the SERVER's to spawn — a model that reads "spawn ONE agent" emits
         // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation.
-        builder.AppendLine("    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, then you merge again. Or stop to leave the conflict for a human.");
+        builder.AppendLine($"    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, {afterResolve}. Or stop to leave the conflict for a human.");
+    }
+
+    /// <summary>
+    /// Name the units a spawn WITHHELD and why. Without this a blocked spawn reached the prompt as one raw-jsonb
+    /// line, indistinguishable from a spawn that simply had nothing to do — so the model could not tell that a unit
+    /// it planned is still owed. The closing line states the only two honest next moves, because a blocked unit is
+    /// not retryable as-authored: the block is a property of the producers' recorded work, not of the attempt.
+    /// </summary>
+    private static void AppendBlockedSpawn(StringBuilder builder, SupervisorPriorDecision prior, IReadOnlyList<SupervisorBlockedSubtask> blocked)
+    {
+        builder.AppendLine($"- {prior.DecisionKind}: {blocked.Count} subtask(s) WITHHELD by the server — they were NOT staged and no agent ran for them:");
+
+        foreach (var b in blocked)
+            builder.AppendLine($"    {b.SubtaskId}: {b.Reason}");
+
+        builder.AppendLine("    re-sending the same spawn will withhold them again — the block is about the producers' recorded work, not about this attempt. Reconcile or re-plan first.");
     }
 
     /// <summary>The index of the LAST element matching the predicate, or -1 — used to tag the most-recent spawn/retry.</summary>
