@@ -35,7 +35,10 @@ public sealed partial class RealSupervisorActionExecutor
         // decider's next turn re-authors against real ids. A run with NO plan keeps its pre-existing free-form
         // spawn semantics untouched (P+ plan-lineage formalizes that case).
         if (subtasks.Count > 0 && spawn.SubtaskIds.Where(id => !subtasks.ContainsKey(id)).ToList() is { Count: > 0 } unknown)
+        {
+            _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — it named subtask id(s) [{Unknown}] the current plan never declared; the plan's units are [{Declared}]", context.TurnNumber, context.NodeId, string.Join(", ", unknown), string.Join(", ", subtasks.Keys));
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownSubtaskSpawnOutcome(unknown, subtasks.Keys), AgentJson.Options));
+        }
 
         // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
         // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
@@ -177,13 +180,19 @@ public sealed partial class RealSupervisorActionExecutor
         var subtasks = ResolvePlannedSubtasks(context);
 
         if (retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId))
+        {
+            _logger.LogWarning("Supervisor REJECTED the retry at turn {Turn} on node {NodeId} — the decision named no subtaskId", context.TurnNumber, context.NodeId);
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildRejectedRetryOutcome(), AgentJson.Options));
+        }
 
         // H2 (strict action identity): a retry of an id the current plan never declared used to fall through the
         // instruction chain to the WHOLE GOAL — a ghost re-run under a stale-plan or typo'd id. Reject with the
         // declared universe instead (a run with NO plan keeps its pre-existing semantics; see the spawn's twin).
         if (subtasks.Count > 0 && !subtasks.ContainsKey(retry.SubtaskId))
+        {
+            _logger.LogWarning("Supervisor REJECTED the retry at turn {Turn} on node {NodeId} — it named subtask id '{SubtaskId}', which the current plan never declared; the plan's units are [{Declared}]", context.TurnNumber, context.NodeId, retry.SubtaskId, string.Join(", ", subtasks.Keys));
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildUnknownSubtaskRetryOutcome(retry.SubtaskId, subtasks.Keys), AgentJson.Options));
+        }
 
         // S1 handoff applies to a retry exactly as it does to a fresh spawn — a producer may have pushed a NEW branch
         // since this subtask's original attempt (e.g. it was itself retried), so re-resolving staging here (rather than
