@@ -328,6 +328,45 @@ public sealed class RealModelGateTests
         RealModelGate.IsGatewayInfraFailure(new InvalidOperationException("a real engine bug")).ShouldBeFalse("a logic bug must gate, never read as execution infra");
     }
 
+    /// <summary>
+    /// The precondition BOTH other classifiers assume and neither checks: that the agents ran the FAKE. ANY off-stub
+    /// run loses control — an all-or-nothing predicate would be disarmed by a single surviving stubbed run, and the
+    /// harness is rewritten PER DISPATCH so mixed fan-outs are the normal case, not an edge one. The third row is the
+    /// exact shape that used to launder: one codex run present, so a naive check passes, while zero agents succeeded
+    /// so ClassifyAgentExecution then refunds the whole thing as infra.
+    /// </summary>
+    [Theory]
+    [InlineData("codex-cli", "codex-cli", false, "codex-cli=1")]
+    [InlineData("codex-cli,codex-cli", "codex-cli", false, "codex-cli=2")]
+    [InlineData("codex-cli,claude-code,claude-code", "codex-cli", true, "claude-code=2, codex-cli=1")]
+    [InlineData("claude-code,claude-code", "codex-cli", true, "claude-code=2")]
+    [InlineData("claude-code", "codex-cli,claude-code", false, "claude-code=1")]
+    [InlineData("claude-code,claude-code", "", false, "claude-code=2")]
+    [InlineData("", "codex-cli", false, "agents=0")]
+    public void ClassifyHarnessControl_flags_any_run_on_a_harness_the_fake_never_armed(string harnessCsv, string stubbedCsv, bool expectLost, string expectCensus)
+    {
+        var harnesses = harnessCsv.Length == 0 ? Array.Empty<string>() : harnessCsv.Split(',');
+        var stubbed = stubbedCsv.Length == 0 ? Array.Empty<string>() : stubbedCsv.Split(',');
+
+        var (lostControl, census) = RealModelGate.ClassifyHarnessControl(harnesses, stubbed);
+
+        lostControl.ShouldBe(expectLost);
+        census.ShouldBe(expectCensus, "the census is the whole diagnostic payload — it must name every harness and how many ran on it");
+    }
+
+    [Fact]
+    public void ClassifyHarnessControl_is_not_disarmed_by_one_surviving_stubbed_run()
+    {
+        // The concrete false green this exists to kill: a mixed fan-out where nothing succeeded. Without the control
+        // check, ClassifyAgentExecution sees succeeded==0 and refunds it as an execution-infra fault, so the arm costs
+        // nothing and reads as a flaky runner — when in fact two agents ran a REAL CLI the fake never touched.
+        RealModelGate.ClassifyHarnessControl(new[] { "codex-cli", "claude-code", "claude-code" }, new[] { "codex-cli" })
+            .LostControl.ShouldBeTrue("one stubbed run among unstubbed ones is still lost control — the premise is about EVERY agent, not about at least one");
+
+        RealModelGate.ClassifyAgentExecution(new[] { AgentRunStatus.Failed, AgentRunStatus.Failed, AgentRunStatus.Failed })
+            .ExecutionInfraFault.ShouldBeTrue("...and this is what it would have been laundered into, which is why the control check must run FIRST");
+    }
+
     [Theory]
     // statuses encoded as a CSV of Succeeded(s)/Failed(f)/Queued(q) — the verdict's execution-health signal
     [InlineData("", false, "agents=0")]                       // never fanned out → a plan-only park is a GENUINE miss (gates), NOT infra
