@@ -106,6 +106,47 @@ public sealed class SupervisorDependencyStagingFlowTests
             $"a clone staged at the producer's branch already carries the producer marker, so under '{harnessKind}' the fake must take its dependent branch — this is the exact signal the live S1 arm asserts on");
     }
 
+    /// <summary>
+    /// The one staging arm with no coverage at any tier: a producer that genuinely SUCCEEDED but recorded nothing
+    /// this repository can hand off. A manifest row is written only when there is something to record
+    /// (<c>AgentRunExecutor.HasPublishCapture</c>: changed files, a patch artifact, or a pushed branch), so a
+    /// no-op producer — an investigate-only unit, or one whose work landed in a different repo — leaves the
+    /// dependency satisfied with zero manifests behind it.
+    ///
+    /// <para>The correct behaviour is to FALL THROUGH to the repository default branch: there is genuinely nothing
+    /// to inherit, so this is the one silent no-override that is not a defect. Pinning it matters in both
+    /// directions — it must not harden into a BLOCK (which would strand every dependent of a legitimately
+    /// no-op unit), and it must not reach past the empty manifest set for some other ref.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_producer_that_succeeded_but_recorded_nothing_leaves_the_dependent_on_the_default_branch()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        // Succeeds, touches nothing — the exact shape that satisfies the dependency gate while writing no manifest.
+        var (producerRunId, _) = await RunProducerAsync(teamId, repoId, "echo 'investigated, changed nothing'");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(producerRunId, teamId, CancellationToken.None))
+                .ShouldBeEmpty("a no-op producer records no manifest — the precondition this test exists to exercise; if this ever becomes non-empty the test is silently covering a different gate");
+
+        var context = ContextWith(runId, teamId, repoId,
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),
+            priorSpawns: await SucceededSpawn(teamId, ("producer", producerRunId)));
+
+        await ExecuteSpawnAsync(context, "dependent");
+
+        var task = await SingleStagedTaskAsync(runId);
+        task.Workspace.ShouldBeNull("nothing was produced to hand off, so the dependent legitimately clones the repository default branch — this arm must stay a fall-through, never a block");
+        task.Goal.ShouldNotContain("building on prior work", Case.Insensitive, "no handoff block may claim inherited work that does not exist");
+    }
+
     [Fact]
     public async Task A_single_patch_only_producer_still_hands_off_via_integration()
     {
