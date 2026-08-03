@@ -353,6 +353,40 @@ public static class RealModelGate
     }
 
     /// <summary>
+    /// Whether the arm still had CONTROL of what its agents ran — the precondition BOTH
+    /// <see cref="ClassifyAgentExecution"/> and <see cref="IsCaptureInfraFault"/> silently assume and neither checks.
+    /// Their premises ("a deterministic exit-0 fake cannot CHOOSE to fail"; "the fake ALWAYS writes a file on
+    /// success") are statements about THE FAKE. A fake arms a harness's command env var, but which harness an agent
+    /// runs on is chosen by production code the test cannot pin: the brain authors <c>agents[].harness</c>/
+    /// <c>agents[].model</c> per dispatch, and <c>HarnessModelReconciler</c> reconciles again against the team pool's
+    /// provider. When an agent lands on a harness this fake did NOT arm, it ran a REAL CLI — so both premises are void
+    /// and every downstream verdict is about something the arm never controlled.
+    ///
+    /// <para>ANY off-stub run loses control, not just an all-off-stub fan-out. The harness is rewritten PER DISPATCH,
+    /// so heterogeneous fan-outs are the normal case, and an all-or-nothing predicate is disarmed by a single
+    /// surviving stubbed run — leaving e.g. <c>[codex Failed, claude Failed, claude Failed]</c> to launder into the
+    /// infra refund exactly as before. Requiring EVERY run to be on a stubbed harness is what makes the premise true
+    /// at the point it is relied on, which is why the caller must run this BEFORE the two classifiers: past this
+    /// check, every remaining run is a fake run and their reasoning is sound again.</para>
+    ///
+    /// <para>Opt out with an EMPTY <paramref name="stubbedKinds"/> — the real-coding arm legitimately expects the real
+    /// claude binary. Zero agents is not a control loss but a plan-only park, which is a genuine model miss and must
+    /// keep gating as one (mirroring <see cref="ClassifyAgentExecution"/>'s own zero-agents rule).</para>
+    /// </summary>
+    public static (bool LostControl, string Census) ClassifyHarnessControl(IReadOnlyList<string> harnesses, IReadOnlyList<string> stubbedKinds)
+    {
+        var census = harnesses.Count == 0
+            ? "agents=0"
+            : string.Join(", ", harnesses.GroupBy(h => h).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Key}={g.Count()}"));
+
+        if (stubbedKinds.Count == 0 || harnesses.Count == 0) return (false, census);
+
+        var offStub = harnesses.Where(h => !stubbedKinds.Contains(h, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        return (offStub.Count > 0, census);
+    }
+
+    /// <summary>
     /// Whether a whole-loop run that SPAWNED + MERGED with succeeded agents yet captured ZERO real patches is a
     /// workspace-CAPTURE / execution infra fault rather than a model miss. ONLY meaningful when the spawned agents are
     /// DETERMINISTIC fakes that ALWAYS write a file on success (the headline arc's <c>FileWritingFakeCli</c>): the model

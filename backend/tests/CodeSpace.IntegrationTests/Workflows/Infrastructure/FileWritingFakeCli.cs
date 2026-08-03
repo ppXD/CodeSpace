@@ -35,6 +35,13 @@ public sealed class FileWritingFakeCli : IDisposable
     private readonly string _originalCommand;
     private readonly string _dir;
 
+    /// <summary>
+    /// The harness kinds this fake actually arms — the single source of truth an evaluator checks the run against
+    /// (RealModelGate.ClassifyHarnessControl). Codex ONLY: an agent the brain dispatches onto claude-code runs the
+    /// REAL claude CLI, which this fake never touches, so every "the deterministic fake did X" premise is void for it.
+    /// </summary>
+    public static readonly IReadOnlyList<string> StubbedHarnessKinds = new[] { "codex-cli" };
+
     public FileWritingFakeCli()
     {
         _dir = Path.Combine(Path.GetTempPath(), "cs-filewriting-fakecli-" + Guid.NewGuid().ToString("N"));

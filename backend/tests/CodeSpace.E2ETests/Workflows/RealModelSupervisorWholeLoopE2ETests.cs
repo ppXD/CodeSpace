@@ -142,7 +142,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: true);   // headline arc = FileWritingFakeCli (always patches on success)
+            var (outcome, note) = await EvaluateAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);   // headline arc = FileWritingFakeCli (always patches on success — but ONLY on the harness it arms)
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
         });
     }
@@ -811,7 +811,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: false);   // REAL claude — 0 patches IS a capability outcome, never a capture-infra skip
+            var (outcome, note) = await EvaluateAsync(runId, teamId, Array.Empty<string>());   // REAL claude — 0 patches IS a capability outcome, never a capture-infra skip; no fake to lose control of
 
             // The REAL-MODEL metric proof (post-#671): a SOLVE consumed real tokens that MUST reach the projected per-agent
             // metric (a real claude-code v2.1.x stream → AgentTokenUsageReader → result_jsonb → AgentMetricsReader). Only on a
@@ -997,7 +997,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Classified three-way for safe gating + returns a legible note. <paramref name="deterministicFakeAgents"/> (true for the headline FileWritingFakeCli arc) routes a spawned+merged-but-zero-captured-patches run to the non-gating capture-infra skip — a deterministic fake ALWAYS patches on success, so 0 patches is a workspace-capture fault, not a model miss; the real coding-agent arm passes false (its 0 patches IS a capability outcome).</summary>
-    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateAsync(Guid runId, Guid teamId, bool deterministicFakeAgents)
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateAsync(Guid runId, Guid teamId, IReadOnlyList<string> stubbedHarnessKinds)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -1016,7 +1016,19 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // that routing; the report-only reaction arcs use their own evaluators (the failure→retry arc EXPECTS an
         // all-failed fan-out and must not be re-routed here).
         var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
-            .Select(r => new { r.Status, r.Error, r.ResultJson }).ToListAsync();
+            .Select(r => new { r.Status, r.Error, r.ResultJson, r.Harness }).ToListAsync();
+
+        // BEFORE either classifier: did this arm still control what its agents ran? Both classifiers reason about
+        // THE FAKE, and an agent the brain dispatched onto a harness this fake never armed ran a real CLI instead —
+        // which would otherwise launder into the non-gating infra refund and read as ordinary model variance. This is
+        // a CodeFault (it gates at once and is never retried), because losing test control is a defect in the arm,
+        // not a property of the model. Past this point every remaining run IS a fake run, so the two classifiers'
+        // premises hold again.
+        var (lostControl, harnessCensus) = RealModelGate.ClassifyHarnessControl(agentRuns.Select(r => r.Harness).ToList(), stubbedHarnessKinds);
+        if (lostControl)
+            return (RealModelOutcome.CodeFault,
+                $"the arm lost control of its agents: it arms [{string.Join(", ", stubbedHarnessKinds)}] but the run dispatched {harnessCensus}. "
+              + "An agent on an unarmed harness ran a REAL CLI, so this arm's deterministic-fake premises are void and its verdict would be about something it never controlled.");
 
         var (executionInfraFault, agentSummary) = RealModelGate.ClassifyAgentExecution(agentRuns.Select(r => r.Status).ToList());
         if (executionInfraFault)
@@ -1050,7 +1062,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // fork-starved capture on a flaky shared host). Route to the non-gating infra skip, not a phantom CapabilityMiss.
         // Only for the deterministic-fake arc; the real coding agent's 0 patches is a genuine capability outcome.
         var succeededAgents = agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded);
-        if (RealModelGate.IsCaptureInfraFault(deterministicFakeAgents, spawnedAndMerged, succeededAgents, realPatchCount))
+        if (RealModelGate.IsCaptureInfraFault(stubbedHarnessKinds.Count > 0, spawnedAndMerged, succeededAgents, realPatchCount))
             throw new AgentExecutionInfraException(
                 $"the brain spawned+merged and {succeededAgents} agent(s) SUCCEEDED, but ZERO real patches were captured ({agentSummary}). "
               + "The headline fake agent ALWAYS writes a file on success, so a succeeded fan-out with no captured patch is a workspace-capture/execution infra fault on this runner (a fork-starved file write or git-diff capture), NOT a model miss.");
