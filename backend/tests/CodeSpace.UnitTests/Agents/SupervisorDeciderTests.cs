@@ -789,6 +789,36 @@ public class SupervisorDeciderTests
         SupervisorOutcome.ReadIntegration(outcomeJson).ShouldBeNull();
     }
 
+    /// <summary>
+    /// A rejected spawn/retry reached the tape before this block existed, but only through the raw-jsonb fallback —
+    /// undifferentiated from any other entry, while every comparable outcome (a conflicted merge, a server-authored
+    /// publish, a tier escalation) already got a named block. Live run 30809950520 showed what that costs: the model
+    /// re-authored the SAME no-subtaskId retry EIGHT times across turns 3-9 until the no-progress bound killed the
+    /// run. The futility line is the load-bearing part — a reason alone reads as commentary, and a decider that
+    /// treats it as commentary re-sends the same decision.
+    /// </summary>
+    [Fact]
+    public void The_user_prompt_renders_a_rejected_decision_as_an_actionable_correction()
+    {
+        const string rejected = """{"retry":"rejected","reason":"the retry decision named no subtaskId — a retry must name the plan-local subtask id to re-run"}""";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, Decision(SupervisorDecisionKinds.Retry, 3, rejected)));
+
+        prompt.ShouldContain("REJECTED by the server", Case.Insensitive, "the refusal is framed as a correction, not buried in raw jsonb");
+        prompt.ShouldContain("named no subtaskId", Case.Insensitive, "the server's own reason reaches the model verbatim");
+        prompt.ShouldContain("staged NOTHING", Case.Insensitive, "the model must know the turn produced no work, not merely that something was 'rejected'");
+        prompt.ShouldContain("will be rejected again", Case.Insensitive, "the futility of re-sending the same shape is the line that has to change the next decision");
+    }
+
+    [Fact]
+    public void An_accepted_decision_does_NOT_render_the_rejection_block()
+    {
+        // Behaviour-preserving: only a decision the server actually refused gets the correction block.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, Decision(SupervisorDecisionKinds.Retry, 3, """{"agentRunIds":[],"agentCount":0,"note":"no subtasks to spawn"}""")));
+
+        prompt.ShouldNotContain("REJECTED by the server", Case.Insensitive, "a zero-agent spawn that was ACCEPTED is not a refusal — calling it one would teach the model to fix a defect that is not there");
+    }
+
     [Fact]
     public void The_user_prompt_renders_a_conflicted_merge_as_a_legible_actionable_block()
     {

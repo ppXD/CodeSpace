@@ -718,7 +718,32 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        // A REJECTED spawn/retry — the server refused the decision and staged NOTHING. It reached the tape before
+        // this block existed, but only through the raw-jsonb fallback below, undifferentiated from any other entry.
+        // Live evidence that the raw form does not land: in run 30809950520 the model re-authored the SAME
+        // no-subtaskId retry EIGHT times across turns 3-9 until the no-progress bound killed the run. Every
+        // comparable outcome already gets a named block (a conflicted merge, a server-authored publish, an
+        // escalation); this one is the outlier, and it is the one that most needs to change the NEXT decision.
+        if (SupervisorOutcome.ReadRejectionReason(prior.OutcomeJson) is { } rejection)
+        {
+            AppendRejectedDecision(builder, prior, rejection);
+            return;
+        }
+
         builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>
+    /// Render a rejected spawn/retry so the next turn can act on it: WHAT was refused, the payload that was refused
+    /// (the model's own words, so it can see the defect rather than infer it), and the fact that re-authoring the same
+    /// shape is futile. The last line is the load-bearing one — the reason alone reads as commentary, and a decider
+    /// that treats it as commentary will re-send the same decision, which is exactly what was observed.
+    /// </summary>
+    private static void AppendRejectedDecision(StringBuilder builder, SupervisorPriorDecision prior, string reason)
+    {
+        builder.AppendLine($"- {prior.DecisionKind}: REJECTED by the server — {reason}");
+        builder.AppendLine($"    the payload that was refused: {prior.PayloadJson}");
+        builder.AppendLine("    it staged NOTHING and made no progress. Re-authoring the SAME shape will be rejected again — fix the named defect, or choose a different action.");
     }
 
     /// <summary>Names WHY a publish entry exists (the delivery contract required it, never the model's own choice) plus each target's disposition, so a later turn understands what happened without parsing the raw outcome jsonb.</summary>
