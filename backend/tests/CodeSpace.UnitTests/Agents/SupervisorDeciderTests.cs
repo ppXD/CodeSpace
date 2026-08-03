@@ -819,6 +819,44 @@ public class SupervisorDeciderTests
         prompt.ShouldNotContain("REJECTED by the server", Case.Insensitive, "a zero-agent spawn that was ACCEPTED is not a refusal — calling it one would teach the model to fix a defect that is not there");
     }
 
+    /// <summary>
+    /// A spawn whose dependency staging WITHHELD units reached the prompt as one raw-jsonb line — indistinguishable
+    /// from a spawn that simply had nothing to do, so the model could not tell that a planned unit is still owed.
+    /// </summary>
+    [Fact]
+    public void The_user_prompt_names_the_subtasks_a_spawn_withheld()
+    {
+        const string blockedOutcome = """{"agentRunIds":[],"agentCount":0,"blockedSubtasks":[{"subtaskId":"dependent","reason":"producer p1 recorded a diff but neither a branch nor a patch was captured for it"}]}""";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, Decision(SupervisorDecisionKinds.Spawn, 3, blockedOutcome)));
+
+        prompt.ShouldContain("WITHHELD by the server", Case.Insensitive, "a withheld unit is framed as such, not buried in raw jsonb");
+        prompt.ShouldContain("dependent", Case.Insensitive, "the model must know WHICH planned unit it is still owed");
+        prompt.ShouldContain("neither a branch nor a patch", Case.Insensitive, "the server's own reason reaches the model verbatim");
+        prompt.ShouldContain("withhold them again", Case.Insensitive, "re-sending the same spawn is futile — the block is about the producers' work, not this attempt");
+    }
+
+    /// <summary>
+    /// The asymmetry this closes: <c>BuildBlockedSpawnOutcome</c> deliberately writes the SAME integration shape a
+    /// merge writes — its doc-comment says it does so "so the EXISTING resolve verb can reconcile a staging-time
+    /// conflict exactly as it reconciles a merge-time one" — and <c>FindMostRecentConflictDecision</c> honours that
+    /// with no kind filter. Only the PROMPT rendering was gated to Merge, so the resolve path could act on a conflict
+    /// the model was never shown as one, and would therefore never choose 'resolve' for it.
+    /// </summary>
+    [Fact]
+    public void A_staging_time_conflict_on_a_spawn_renders_the_same_conflict_block_a_merge_gets()
+    {
+        const string stagingConflict = """{"agentRunIds":[],"agentCount":0,"blockedSubtasks":[{"subtaskId":"dependent","reason":"the producers' work could not be auto-integrated onto one branch"}],"integration":{"status":"Conflicted","reason":"the producers' work could not be auto-integrated onto one branch","outcomes":[{"label":"dependent","fallbackBranch":"codespace/agent/p1","conflictedFiles":["src/App.cs"]}]}}""";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, Decision(SupervisorDecisionKinds.Spawn, 3, stagingConflict)));
+
+        prompt.ShouldContain("INTEGRATION CONFLICTED", Case.Insensitive, "a staging-time conflict is a conflict — the model must see it as one, exactly as it sees a merge-time one");
+        prompt.ShouldContain("src/App.cs", Case.Insensitive, "the conflicted files are named");
+        prompt.ShouldContain("codespace/agent/p1", Case.Insensitive, "the preserved branch is named — the resolver's input");
+        prompt.ShouldContain("choose 'resolve'", Case.Insensitive, "the verb the server can actually act on is offered, which is the whole point of writing the merge-shaped block");
+        prompt.ShouldNotContain("- merge:", Case.Insensitive, "it was a SPAWN — labelling it 'merge' would describe an action the model never took");
+    }
+
     [Fact]
     public void The_user_prompt_renders_a_conflicted_merge_as_a_legible_actionable_block()
     {
