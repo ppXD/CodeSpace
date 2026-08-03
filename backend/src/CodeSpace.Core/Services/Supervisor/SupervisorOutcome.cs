@@ -139,6 +139,37 @@ public static class SupervisorOutcome
     /// <summary>The <c>reason</c> a SERVER-FORCED stop stamped on its PAYLOAD (<c>{ reason }</c> — a <c>SupervisorStopReasons</c> value like "no progress"); null when absent / malformed (a model-authored stop carries no reason, only an outcome + summary). The forced-stop analogue of <see cref="ReadStopSummary"/>: the run's "which bound stopped me" line.</summary>
     public static string? ReadStopReason(string? payloadJson) => ReadStringField(payloadJson, "reason");
 
+    /// <summary>
+    /// The reason a spawn/retry decision was REJECTED outright — the server refused to act on it and staged NOTHING
+    /// (a retry naming no <c>subtaskId</c>, or a spawn/retry naming ids the current plan never declared). Read off the
+    /// outcome's <c>{spawn|retry: "rejected", reason}</c> shape; null for every accepted decision.
+    ///
+    /// <para>Survives the post-barrier fold because a zero-agent outcome is returned UNCHANGED
+    /// (<see cref="FoldAgentResults"/>), so the reason is still on the rehydrated tape the decider reads.</para>
+    /// </summary>
+    public static string? ReadRejectionReason(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object) return null;
+
+            var rejected = (root.TryGetProperty("retry", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() == "rejected")
+                        || (root.TryGetProperty("spawn", out var sp) && sp.ValueKind == JsonValueKind.String && sp.GetString() == "rejected");
+
+            if (!rejected) return null;
+
+            return root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String ? reason.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>P3.5 — the OPTIONAL <c>detail</c> a server-forced stop stamped alongside its <c>reason</c> (<c>{ reason, detail }</c>) — a dynamic elaboration (e.g. the cost cap's realized-spend breakdown) for the bounds that carry one. Null when absent (every reason without a per-run figure to cite, and every non-forced stop).</summary>
     public static string? ReadStopDetail(string? payloadJson) => ReadStringField(payloadJson, "detail");
 
