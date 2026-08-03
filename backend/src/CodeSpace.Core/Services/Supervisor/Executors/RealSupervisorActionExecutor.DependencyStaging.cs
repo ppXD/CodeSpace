@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor.Executors;
 
@@ -27,15 +28,15 @@ public sealed partial class RealSupervisorActionExecutor
     /// <summary>Resolve one subtask's dependency staging. No declared dependency (<paramref name="dependsOn"/> empty) or no bound repository → <see cref="DependencyStagingResult.NoOverride"/> without touching the manifest store.</summary>
     private async Task<DependencyStagingResult> ResolveDependencyStagingAsync(IReadOnlyList<string> dependsOn, Guid? repositoryId, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        if (dependsOn.Count == 0 || repositoryId is not { } repoId) return DependencyStagingResult.NoOverride;
+        if (dependsOn.Count == 0 || repositoryId is not { } repoId) return NoStaging(dependsOn, repositoryId, 0, 0, context);
 
         var producerAgentRunIds = SupervisorDependencyGate.LatestSucceededAgentRunIds(context, dependsOn);
 
-        if (producerAgentRunIds.Count == 0) return DependencyStagingResult.NoOverride;
+        if (producerAgentRunIds.Count == 0) return NoStaging(dependsOn, repoId, 0, 0, context);
 
         var producers = await ResolveProducerManifestsAsync(producerAgentRunIds, repoId, context.TeamId, cancellationToken).ConfigureAwait(false);
 
-        if (producers.Count == 0) return DependencyStagingResult.NoOverride;   // every producer made no changes to THIS repo — nothing to hand off
+        if (producers.Count == 0) return NoStaging(dependsOn, repoId, producerAgentRunIds.Count, 0, context);   // every producer made no changes to THIS repo — nothing to hand off
 
         // A manifest row with NEITHER a pushed branch NOR an offloaded patch artifact has nothing this staging can
         // hand off — a small (below the 8KB inline-offload threshold) patch-only diff legitimately carries no
@@ -45,12 +46,58 @@ public sealed partial class RealSupervisorActionExecutor
         var missing = producers.Where(m => string.IsNullOrEmpty(m.Branch) && m.PatchArtifactId is null).ToList();
 
         if (missing.Count > 0)
-            return BlockedResult($"producer(s) {string.Join(", ", missing.Select(m => m.AgentRunId))} recorded a diff but neither a branch nor a patch was captured for it — the handoff cannot proceed silently");
+            return BlockedStaging($"producer(s) {string.Join(", ", missing.Select(m => m.AgentRunId))} recorded a diff but neither a branch nor a patch was captured for it — the handoff cannot proceed silently", context);
 
         if (producers.Count == 1 && !string.IsNullOrEmpty(producers[0].Branch))
+        {
+            _logger.LogInformation("Supervisor dependency staging pinned turn {Turn} on node {NodeId} to the lone producer's branch {Ref}", context.TurnNumber, context.NodeId, producers[0].Branch);
             return new DependencyStagingResult { Ref = producers[0].Branch, GoalFoldText = FoldSingleProducer(producers[0]) };
+        }
 
         return await IntegrateProducersAsync(producers, repoId, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// WHICH gate a staging no-op fell through, as a named reason. Pure + <c>internal static</c> so the LADDER is
+    /// unit-pinned (the same reason <see cref="BuildBlockedSpawnOutcome"/> is), because these four exits are otherwise
+    /// indistinguishable: all three no-op arms return the SAME <see cref="DependencyStagingResult.NoOverride"/>
+    /// singleton, which produces a task with a null Workspace — byte-identical to a subtask that declared no
+    /// dependency at all. A live run that hands off nothing therefore left no trace of WHY, which is exactly how
+    /// real-model run 30775218538 cost a forensic pass that still could not name the gate.
+    ///
+    /// <para>Callers pass the counts they have established SO FAR; the ladder short-circuits in the same order the
+    /// resolver evaluates them, so a partially-populated call can never report a later gate than the one it reached.
+    /// Null ⇒ staging proceeds (a ref will be resolved or the spawn blocked).</para>
+    /// </summary>
+    internal static string? DependencyStagingNoOpReason(IReadOnlyList<string> dependsOn, Guid? repositoryId, int succeededProducerCount, int manifestCount)
+    {
+        if (dependsOn.Count == 0) return "the subtask declared no dependsOn edge";
+
+        if (repositoryId is null) return "the subtask is bound to no repository";
+
+        if (succeededProducerCount == 0) return $"none of its {dependsOn.Count} declared dependency(ies) [{string.Join(", ", dependsOn)}] resolved to a non-rejected succeeded attempt";
+
+        if (manifestCount == 0) return $"{succeededProducerCount} producer run(s) succeeded but none recorded a publish manifest for this repository";
+
+        return null;
+    }
+
+    /// <summary>Name the gate this no-op fell through in the run's log, then return the (indistinguishable) no-override singleton — the staging sibling of <c>.Resolve.cs</c>'s named-reason no-op line.</summary>
+    private DependencyStagingResult NoStaging(IReadOnlyList<string> dependsOn, Guid? repositoryId, int succeededProducerCount, int manifestCount, SupervisorTurnContext context)
+    {
+        var reason = DependencyStagingNoOpReason(dependsOn, repositoryId, succeededProducerCount, manifestCount);
+
+        _logger.LogInformation("Supervisor dependency staging is a no-op at turn {Turn} on node {NodeId} ({Reason}) — the dependent clones the repository default branch", context.TurnNumber, context.NodeId, reason);
+
+        return DependencyStagingResult.NoOverride;
+    }
+
+    /// <summary>Withhold the spawn, naming the reason in the log as well as the outcome — the block is already loud in <c>blockedSubtasks</c>, but nothing read that key, so a blocked handoff was invisible in the run's log.</summary>
+    private DependencyStagingResult BlockedStaging(string reason, SupervisorTurnContext context)
+    {
+        _logger.LogWarning("Supervisor dependency staging BLOCKED the spawn at turn {Turn} on node {NodeId} ({Reason})", context.TurnNumber, context.NodeId, reason);
+
+        return BlockedResult(reason);
     }
 
     /// <summary>
@@ -106,7 +153,7 @@ public sealed partial class RealSupervisorActionExecutor
         var baseSha = producers.Select(p => p.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha));
 
         if (string.IsNullOrEmpty(baseSha))
-            return BlockedResult("the producers recorded no base revision to integrate the handoff from");
+            return BlockedStaging("the producers recorded no base revision to integrate the handoff from", context);
 
         WorkspaceRequest? workspace;
         try
@@ -115,11 +162,11 @@ public sealed partial class RealSupervisorActionExecutor
         }
         catch (WorkspaceException ex)
         {
-            return BlockedResult($"the repository could not be resolved to stage the handoff: {ex.Message}");
+            return BlockedStaging($"the repository could not be resolved to stage the handoff: {ex.Message}", context);
         }
 
         if (workspace is null)
-            return BlockedResult("the repository could not be resolved to a clone target");
+            return BlockedStaging("the repository could not be resolved to a clone target", context);
 
         var contributions = new List<BranchContribution>(producers.Count);
 
@@ -155,14 +202,26 @@ public sealed partial class RealSupervisorActionExecutor
         }
         catch (WorkspaceException ex)
         {
-            return BlockedResult($"integrating the producers' work failed: {ex.Message}");
+            return BlockedStaging($"integrating the producers' work failed: {ex.Message}", context);
         }
 
         if (result.Status != IntegrationStatus.Clean || result.IntegratedBranch is not { Length: > 0 } branch)
+        {
+            var conflicted = result.Outcomes.SelectMany(o => o.ConflictedFiles).Distinct().ToList();
+
+            // Not routed through BlockedStaging: this arm carries the conflict detail the decider's `resolve` verb
+            // needs, and naming the conflicted files in the log is what makes a staging-time conflict diagnosable
+            // without re-reading the integration branch.
+            _logger.LogWarning("Supervisor dependency staging BLOCKED the spawn at turn {Turn} on node {NodeId} — the {Count} producer(s) could not be auto-integrated ({Reason}); conflicted: {Conflicted}",
+                context.TurnNumber, context.NodeId, producers.Count, result.Reason ?? "no reason reported", conflicted.Count == 0 ? "(none reported)" : string.Join(", ", conflicted));
+
             return BlockedResult(
                 result.Reason ?? "the producers' work could not be auto-integrated onto one branch",
-                conflictedFiles: result.Outcomes.SelectMany(o => o.ConflictedFiles).Distinct().ToList(),
+                conflictedFiles: conflicted,
                 preservedBranches: result.Outcomes.Where(o => o.FallbackBranch is not null).Select(o => o.FallbackBranch!).ToList());
+        }
+
+        _logger.LogInformation("Supervisor dependency staging integrated {Count} producer(s) onto {Ref} at turn {Turn} on node {NodeId}", producers.Count, branch, context.TurnNumber, context.NodeId);
 
         return new DependencyStagingResult { Ref = branch, GoalFoldText = FoldIntegratedProducers(producers, branch) };
     }
