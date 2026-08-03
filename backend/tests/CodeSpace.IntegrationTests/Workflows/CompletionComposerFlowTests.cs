@@ -467,11 +467,58 @@ public sealed class CompletionComposerFlowTests
         record.EnforcementMode.ShouldBe("Shadow");
         record.Basis.ShouldBe("ContractDerived");
 
-        // Re-sweep: the run has a record → not a candidate; even a direct re-record with an unchanged assessment appends nothing.
-        (await shadow.SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBe(0);
+        // Re-sweep with NOTHING new: the run IS a candidate now (it has to be, or late evidence could never reach
+        // it), but its ledger watermark is unchanged, so the compose is skipped and nothing appends. Asserted on
+        // THIS run's rows rather than the sweep's return value — that count is global, and a shared test database
+        // makes it a coin flip the moment the sweep revisits anything at all.
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
         (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId)).ShouldBe(1);
 
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "Shadow NEVER mutates a terminal (Lock Clause 1)");
+    }
+
+    [Fact]
+    public async Task Evidence_arriving_after_the_first_assessment_still_reaches_one()
+    {
+        // The sweep used to exclude every run that already had an assessment, so the append-on-change logic beneath
+        // it was unreachable: a run was assessed once, and anything arriving afterwards — a reconciler settling a
+        // manifest, a grade landing late — could never move the record. A run's ledger keeps moving after its
+        // terminal, so "assessed once" was being treated as "assessed correctly".
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+
+        // An ORDERLY terminal: without a terminal stop on the tape the reducer reads Crashed, and this would be
+        // measuring the crash path rather than the late-evidence one.
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"i"}]}""", """{"planned":["s1"],"count":1,"workPlanId":"6f1d9c22-77b1-4f0e-9a1e-2c0f6f5a91b3","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        using var scope = _fixture.BeginScope();
+        var shadow = scope.Resolve<ICompletionShadowService>();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var first = await db.CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+        first.LedgerWatermarkJson.ShouldNotBeNull("the state it left behind must be recorded, or a later sweep cannot tell 'nothing new' from 'never looked'");
+        first.Outcome.ShouldBe("Unknown", "nothing was staked, so a clean finish claims nothing either way — the A1 floor");
+
+        // Late evidence: a graded spawn settling AFTER the terminal, plus the obligation it answers.
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = Guid.NewGuid(), status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", producedBranch = "codespace/agent/s1" } } }));
+
+        await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var records = await db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.WorkflowRunId == runId).OrderBy(a => a.CreatedDate).ToListAsync();
+
+        records.Count.ShouldBe(2, "the ledger moved, so the run must be re-composed rather than left with a verdict formed before the evidence existed — append-only, so the first assessment stays as the record of what was known then");
+        records[^1].Outcome.ShouldBe("Unsolved", "the late grade failed its oracle, and that is what the run now honestly reads");
     }
 
     [Fact]
@@ -510,6 +557,11 @@ public sealed class CompletionComposerFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
         run.Status = status;
+
+        // The engine stamps CompletedAt beside the terminal status; a fixture that skips it seeds a row production
+        // never produces, and the shadow sweep's revisit window keys on exactly that column.
+        if (status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
+            run.CompletedAt = DateTimeOffset.UtcNow;
         if (stampPolicy)
         {
             run.CompletionPolicyVersion = CompletionPolicy.CurrentVersion;

@@ -19,6 +19,16 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
 
     /// <summary>P3b-4 (INACTIVE adapter): the sealed six-state <c>TerminalDecision</c> name this run WOULD receive — parity evidence for P2b; never mutates the run's terminal (Lock Clause 1). Null on pre-P3b-4 rows.</summary>
     public string? WouldBeTerminalDecision { get; set; }
+
+    /// <summary>
+    /// The ledger state this assessment left behind — captured AFTER composing, because composing is not read-only:
+    /// it write-throughs the receipts it derives from the tape. A pre-compose snapshot would be stale the moment it
+    /// was stored, and every later sweep would see a difference that was its own doing.
+    ///
+    /// <para>It lets a re-sweep tell "nothing new has arrived" apart from "nobody looked again" without paying for a
+    /// recompose. Null on rows written before the column existed; those re-assess once and then carry one.</para>
+    /// </summary>
+    public string? LedgerWatermarkJson { get; set; }
     public int RejectionCount { get; set; }
     public int ContractErrorCount { get; set; }
     public DateTimeOffset CreatedDate { get; set; }
