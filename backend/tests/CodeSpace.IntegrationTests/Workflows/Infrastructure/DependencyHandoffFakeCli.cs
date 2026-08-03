@@ -4,8 +4,9 @@ using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 /// <summary>
-/// A fake Codex CLI for the LIVE-BRAIN S1 dependency-handoff whole-loop (re-enacting run 28fec923: a dependent
-/// subtask's fresh clone of the repository DEFAULT branch never saw its producer's committed work). Like
+/// A fake agent CLI — serving BOTH registered harnesses — for the LIVE-BRAIN S1 dependency-handoff whole-loop
+/// (re-enacting run 28fec923: a dependent subtask's fresh clone of the repository DEFAULT branch never saw its
+/// producer's committed work). Like
 /// <see cref="LiveBrainConflictFakeCli"/>, it is keyed only on a signal a live model can't avoid producing — here,
 /// OBSERVABLE WORKSPACE STATE rather than goal text: whether <see cref="ProducerMarker"/> is ALREADY PRESENT in the
 /// agent's own clone.
@@ -23,6 +24,17 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 ///
 /// <para>Behaviour is a pure function of the CLONE'S OWN FILESYSTEM STATE (no external state, no goal parsing) →
 /// bwrap-safe and independent of the live brain's exact wording. POSIX <c>/bin/sh</c> only.</para>
+///
+/// <para>⚠ Both command env vars this arms are PROCESS-WIDE, so while armed this shadows any REAL claude/codex
+/// binary in the same test process — and a real-CLI test that gates on "the env var points at a file that exists"
+/// (<c>RealClaudeResumeE2ETests.ClaudeResolves</c>) sees THIS script and runs instead of self-skipping. Unreachable
+/// in CI today: the only consumer that arms it in the E2E assembly self-skips before construction when
+/// <c>CODESPACE_LLM_*</c> is absent, and the real-model job filters to that one class. It IS reachable in a local
+/// full-assembly run with those secrets set, because the real-CLI resume classes declare no <c>[Collection]</c> and
+/// so run in parallel with this one — the same hazard <c>FakeCliHttpE2ECollection</c> (E2ETests, not visible from
+/// here) was created for, and whose summary still describes it as codex-only. Serializing those classes is tracked
+/// separately; do not widen
+/// this fake's reach further until it is.</para>
 /// </summary>
 public sealed class DependencyHandoffFakeCli : IDisposable
 {
