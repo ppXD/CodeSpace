@@ -551,9 +551,11 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
-    /// Fold the spawned agents' COMPACT results into a spawn/retry decision's recorded outcome (SOTA #2), ADDITIVELY:
-    /// the existing <c>agentRunIds</c> + <c>agentCount</c> are read OFF THE INPUT and re-emitted byte-intact (so the
-    /// E5 counters that read <c>agentCount</c> are unperturbed), with an <c>agentResults</c> array appended. Returns
+    /// Fold the spawned agents' COMPACT results into a spawn/retry decision's recorded outcome (SOTA #2), ADDITIVELY
+    /// — genuinely so, via <see cref="MergeKeys"/>: every key the outcome already carries survives (a retry's
+    /// <c>escalation</c> object above all), the existing <c>agentRunIds</c> + <c>agentCount</c> are read OFF THE INPUT
+    /// and re-emitted byte-intact (so the E5 counters that read <c>agentCount</c> are unperturbed), and an
+    /// <c>agentResults</c> array is appended. Returns
     /// the input UNCHANGED when it staged no agents (a zero-agent spawn keeps its <c>note</c> field — re-emitting a
     /// fixed shape would drop it + trigger a spurious write). Deterministic + idempotent: same terminal agents →
     /// same bytes, so the rehydrate persist no-ops after the first post-barrier stamp.
@@ -564,9 +566,15 @@ public static class SupervisorOutcome
 
         if (agentRunIds.Count == 0) return spawnOutcomeJson ?? "";
 
-        var agentCount = ReadStagedAgentCount(spawnOutcomeJson);
-
-        return JsonSerializer.Serialize(new { agentRunIds, agentCount, agentResults }, AgentJson.Options);
+        // agentRunIds/agentCount are re-emitted from the READERS, not copied raw, so this stays byte-equivalent to
+        // the pre-merge fold on those two keys (the readers drop malformed ids and default a missing count to 0).
+        // Everything else the outcome carries survives — see MergeKeys for why that matters.
+        return MergeKeys(spawnOutcomeJson, new Dictionary<string, object?>
+        {
+            ["agentRunIds"] = agentRunIds,
+            ["agentCount"] = ReadStagedAgentCount(spawnOutcomeJson),
+            ["agentResults"] = agentResults,
+        });
     }
 
     /// <summary>
@@ -574,29 +582,49 @@ public static class SupervisorOutcome
     /// server-run verdict that REPLACES the resolver's self-reported marker. Re-emits the existing
     /// <c>agentRunIds</c>/<c>agentCount</c>/<c>agentResults</c> BYTE-INTACT (read off the input, exactly as
     /// <see cref="FoldAgentResults"/>) and appends a single <c>acceptanceGrade</c> object, so the only byte change is the
-    /// new key — the rehydrate fold runs this AT MOST ONCE (guarded by <see cref="ReadAcceptanceGradePassed"/> having no
+    /// new key. Every OTHER key the resolve outcome carries survives too (<see cref="MergeKeys"/>) — the rehydrate fold runs this AT MOST ONCE (guarded by <see cref="ReadAcceptanceGradePassed"/> having no
     /// value yet), persists it, and every later replay reads the folded verdict off the durable tape (the grade I/O
     /// never re-runs). Pure.
     /// </summary>
     public static string FoldAcceptanceGrade(string? resolveOutcomeJson, bool passed, string detail)
     {
-        var agentRunIds = ReadStagedAgentRunIds(resolveOutcomeJson);
-        var agentCount = ReadStagedAgentCount(resolveOutcomeJson);
-        var agentResults = ReadAgentResults(resolveOutcomeJson);
-
-        return JsonSerializer.Serialize(new { agentRunIds, agentCount, agentResults, acceptanceGrade = new { passed, detail } }, AgentJson.Options);
+        return MergeKeys(resolveOutcomeJson, new Dictionary<string, object?>
+        {
+            ["agentRunIds"] = ReadStagedAgentRunIds(resolveOutcomeJson),
+            ["agentCount"] = ReadStagedAgentCount(resolveOutcomeJson),
+            ["agentResults"] = ReadAgentResults(resolveOutcomeJson),
+            ["acceptanceGrade"] = new { passed, detail },
+        });
     }
 
     /// <summary>
     /// Append an OBJECTIVE acceptance grade onto an ARBITRARY decision outcome, preserving every existing key verbatim
-    /// (L4 P1 — the terminal-STOP analogue of <see cref="FoldAcceptanceGrade"/>). Unlike the resolve fold, which re-emits
-    /// the fixed resolve shape, this is a GENERIC additive merge: it copies the outcome's own keys (a stop's
-    /// <c>stopped</c>/<c>outcome</c>/<c>summary</c>) in order and adds a single <c>acceptanceGrade</c> object — so the
-    /// stop's shape is never corrupted. Read back by the shape-agnostic <see cref="ReadAcceptanceGradePassed"/> (the same
+    /// (L4 P1 — the terminal-STOP analogue of <see cref="FoldAcceptanceGrade"/>). Adds nothing but the grade: the
+    /// outcome's own keys (a stop's <c>stopped</c>/<c>outcome</c>/<c>summary</c>) are copied in order by the shared
+    /// <see cref="MergeKeys"/>, so the stop's shape is never corrupted. Read back by the shape-agnostic <see cref="ReadAcceptanceGradePassed"/> (the same
     /// once-guard + verdict reader the resolve path uses). A null/blank/non-object input starts from an empty object.
     /// Pure + deterministic (keys preserved in source order, grade appended last).
     /// </summary>
     public static string AppendAcceptanceGrade(string? outcomeJson, bool passed, string detail)
+    {
+        return MergeKeys(outcomeJson, new Dictionary<string, object?> { ["acceptanceGrade"] = new { passed, detail } });
+    }
+
+    /// <summary>
+    /// Copy an outcome's OWN keys in source order, then set <paramref name="overrides"/> on top — the one additive
+    /// merge every fold uses, so no fold can silently drop a key it does not know about. An existing key keeps its
+    /// source position when overridden; a new one is appended. Pure + deterministic + idempotent (same input + same
+    /// overrides → same bytes), which is what lets the rehydrate persist no-op after the first post-barrier stamp.
+    ///
+    /// <para>This exists because re-emitting a FIXED shape is a silent data-loss bug, not a style choice:
+    /// <see cref="FoldAgentResults"/> used to re-emit only <c>agentRunIds</c>/<c>agentCount</c>/<c>agentResults</c>,
+    /// which DELETED the <c>escalation</c> object a retry writes (<c>RealSupervisorActionExecutor.Spawn</c>) before
+    /// its only consumers — <c>LlmSupervisorDecider</c> and <c>SupervisorRecitation</c>, both of which read the
+    /// REHYDRATED tape — could ever see it. Any future fold must come through here.</para>
+    ///
+    /// <para>A null/blank/non-object input starts from an empty object (defensive).</para>
+    /// </summary>
+    private static string MergeKeys(string? outcomeJson, Dictionary<string, object?> overrides)
     {
         var merged = new Dictionary<string, object?>();
 
@@ -613,7 +641,8 @@ public static class SupervisorOutcome
             catch (JsonException) { merged.Clear(); }   // unparseable → start from an empty object (defensive; a stop outcome is always valid)
         }
 
-        merged["acceptanceGrade"] = new { passed, detail };
+        foreach (var (key, value) in overrides)
+            merged[key] = value;
 
         return JsonSerializer.Serialize(merged, AgentJson.Options);
     }
