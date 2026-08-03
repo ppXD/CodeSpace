@@ -107,6 +107,38 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     /// <summary>
+    /// The dual-dialect fake must fold the SAME Summary under both harnesses — a property that does NOT follow from
+    /// emitting a 1:1 event sequence, because the two harnesses disagree on precedence: Codex takes
+    /// <c>FinalSummary ?? AssistantMessage</c> (skipping Completed) while Claude takes
+    /// <c>FinalSummary ?? Completed ?? AssistantMessage</c>, and neither can emit a FinalSummary. A claude
+    /// <c>result</c> line saying "completed" therefore folds "completed" where codex folds the agent message.
+    ///
+    /// <para>Harmless for this fake (its consumers read ChangedFiles) but the trap for every fake this pattern gets
+    /// ported to — <c>LiveBrainConflictFakeCli</c>'s RESOLUTION_VERIFIED and <c>ReviewVerdictFakeCli</c>'s VERDICT:
+    /// payload are both read OFF THE SUMMARY, so porting the pattern without this fix would silently erase them.
+    /// Pinning it here, on the reference implementation, is what makes that port safe.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_two_dialects_fold_the_same_summary()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var cli = new DependencyHandoffFakeCli();
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+
+        var codex = await RunFakeCliAgentAsync(teamId, repoId, "codex-cli", checkoutRef: null);
+        var claude = await RunFakeCliAgentAsync(teamId, repoId, "claude-code", checkoutRef: null);
+
+        codex.Result.Summary.ShouldNotBeNullOrWhiteSpace("a fake that folds no summary would make this comparison vacuous");
+        claude.Result.Summary.ShouldBe(codex.Result.Summary,
+            "the two dialects must fold the SAME summary — Claude prefers the Completed event's `result` text while Codex skips Completed entirely, so the claude result line must echo the codex agent_message rather than say 'completed'");
+    }
+
+    /// <summary>
     /// The one staging arm with no coverage at any tier: a producer that genuinely SUCCEEDED but recorded nothing
     /// this repository can hand off. A manifest row is written only when there is something to record
     /// (<c>AgentRunExecutor.HasPublishCapture</c>: changed files, a patch artifact, or a pushed branch), so a
