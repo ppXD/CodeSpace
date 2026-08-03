@@ -19,6 +19,54 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorDependencyStagingTests
 {
+    // ── DependencyStagingNoOpReason: every silent gate names itself ─────────────────────
+
+    /// <summary>
+    /// All three no-op arms return the SAME <see cref="DependencyStagingResult.NoOverride"/> singleton, so the
+    /// only thing that can tell them apart after the fact is this reason. Each row must therefore name the gate it
+    /// fell through — and, critically, be DISTINGUISHABLE from the others (pinned below). Ordering matters: a caller
+    /// passes only the counts it has established so far, so an earlier gate must always win over a later one.
+    /// </summary>
+    [Theory]
+    [InlineData(0, true, 0, 0, "declared no dependsOn edge")]                      // gate 1a — no edge
+    [InlineData(2, false, 0, 0, "bound to no repository")]                         // gate 1b — no repo
+    [InlineData(2, true, 0, 0, "non-rejected succeeded attempt")]                  // gate 2 — no usable producer
+    [InlineData(2, true, 2, 0, "none recorded a publish manifest")]                // gate 3 — no manifest for this repo
+    public void Each_silent_staging_gate_names_itself(int dependsOnCount, bool hasRepository, int producers, int manifests, string expected)
+    {
+        var dependsOn = Enumerable.Range(1, dependsOnCount).Select(i => $"dep{i}").ToList();
+        var repositoryId = hasRepository ? Guid.NewGuid() : (Guid?)null;
+
+        var reason = RealSupervisorActionExecutor.DependencyStagingNoOpReason(dependsOn, repositoryId, producers, manifests);
+
+        reason.ShouldNotBeNull("a no-op arm that names no gate is exactly the state that made run 30775218538 undiagnosable");
+        reason.ShouldContain(expected);
+    }
+
+    [Fact]
+    public void Staging_proceeds_when_every_gate_is_satisfied()
+    {
+        RealSupervisorActionExecutor.DependencyStagingNoOpReason(new[] { "dep1" }, Guid.NewGuid(), 1, 1)
+            .ShouldBeNull("a reason here would log a no-op for a handoff that actually resolved");
+    }
+
+    [Fact]
+    public void The_four_gate_reasons_are_mutually_distinguishable()
+    {
+        var repo = Guid.NewGuid();
+        var two = new[] { "dep1", "dep2" };
+
+        var reasons = new[]
+        {
+            RealSupervisorActionExecutor.DependencyStagingNoOpReason(Array.Empty<string>(), repo, 0, 0),
+            RealSupervisorActionExecutor.DependencyStagingNoOpReason(two, null, 0, 0),
+            RealSupervisorActionExecutor.DependencyStagingNoOpReason(two, repo, 0, 0),
+            RealSupervisorActionExecutor.DependencyStagingNoOpReason(two, repo, 2, 0),
+        };
+
+        reasons.Distinct().Count().ShouldBe(4, "two gates sharing a reason string are two gates a forensic reader cannot tell apart — the whole point of naming them");
+    }
+
     // ── DependsOnFor: BaseSubtaskId override precedence ─────────────────────────────────
 
     [Fact]
