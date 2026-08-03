@@ -46,7 +46,23 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
 
     public async Task<int> SweepAsync(int batchSize, CancellationToken cancellationToken)
     {
-        var candidates = await _db.WorkflowRun.AsNoTracking()
+        // TWO passes, deliberately separate rather than one widened query.
+        //
+        // The first is the original: terminal runs never assessed. Unchanged — a run appears in it once and then
+        // never again, so it can never starve behind a busier neighbour.
+        //
+        // The second exists because the first was ALL there was, which made the append-on-change logic in
+        // RecordAsync unreachable: a run was assessed once, and evidence arriving after its terminal — a reconciler
+        // settling a manifest, a grade landing late — could never move the record. A run's ledger keeps moving after
+        // it terminalizes, so "assessed once" was being read as "assessed correctly".
+        //
+        // Bounded by TIME rather than by assessment count. Widening the first query instead would make every sweep
+        // re-examine the newest batchSize terminal runs forever while older ones were never reached again — the
+        // exact starvation this split avoids. A precise staleness predicate (one indexed comparison instead of a
+        // window) needs a monotonic per-run ledger revision, which is P2's work and not worth pre-empting here.
+        var revisitAfter = DateTimeOffset.UtcNow - RevisitWindow;
+
+        var unassessed = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.CompletionPolicyVersion != null
                         && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
                         && !_db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id))
@@ -55,9 +71,19 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             .Select(r => new { r.Id, r.TeamId, r.Status })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        var revisit = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.CompletionPolicyVersion != null
+                        && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
+                        && r.CompletedAt != null && r.CompletedAt >= revisitAfter
+                        && _db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id))
+            .OrderByDescending(r => r.CompletedAt)
+            .Take(batchSize)
+            .Select(r => new { r.Id, r.TeamId, r.Status })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
         var appended = 0;
 
-        foreach (var run in candidates)
+        foreach (var run in unassessed.Concat(revisit))
         {
             try
             {
@@ -72,21 +98,38 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         return appended;
     }
 
+    /// <summary>
+    /// How long after a run terminalizes its assessment stays open to revision. Evidence does arrive late — a
+    /// reconciler settling a manifest, a grade folding after the terminal — and a window is what makes revisiting
+    /// affordable without re-examining every terminal run this deployment has ever produced. A committed value, not
+    /// a toggle: changing how long the protocol keeps looking is a code change with a diff, never an operator knob.
+    /// </summary>
+    public static readonly TimeSpan RevisitWindow = TimeSpan.FromHours(24);
+
     private async Task<bool> RecordAsync(Guid runId, Guid teamId, WorkflowRunStatus status, CancellationToken cancellationToken)
     {
+        // The gate that makes revisiting affordable: six counts over the ledgers the composer reads, compared with
+        // the state the last assessment LEFT BEHIND. Unchanged ⇒ nothing can have moved the verdict, so the compose
+        // is skipped entirely. A pre-watermark row carries none and re-assesses once.
+        var before = JsonSerializer.Serialize(await CompletionLedgerWatermarks.CaptureAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false), AgentJson.Options);
+
+        var previous = await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.WorkflowRunId == runId)
+            .OrderByDescending(a => a.CreatedDate)
+            .Select(a => new { a.AssessmentJson, a.LedgerWatermarkJson })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (previous is { LedgerWatermarkJson: not null } && previous.LedgerWatermarkJson == before) return false;
+
         var composed = await _composer.ComposeAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (composed is null) return false;
 
         var assessmentJson = JsonSerializer.Serialize(composed.Assessment, AgentJson.Options);
 
-        var latest = await _db.CompletionAssessmentRecord.AsNoTracking()
-            .Where(a => a.WorkflowRunId == runId)
-            .OrderByDescending(a => a.CreatedDate)
-            .Select(a => a.AssessmentJson)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-
-        if (latest == assessmentJson) return false;   // unchanged — append-only with change detection
+        // The ledger moved but the VERDICT may not have — a manifest rewritten to the same state, a decision that
+        // changed nothing. The watermark decides whether to LOOK; this decides whether there is anything to say.
+        if (previous?.AssessmentJson == assessmentJson) return false;
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var degradedStop = (await UnattendedDeliveryScorecardService.DegradedStopRunIdsAsync(_db, new[] { runId }, teamId, cancellationToken).ConfigureAwait(false)).Contains(runId);
@@ -110,6 +153,10 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             // The legacy ladder's verdict AT COMPOSE TIME — the delta query's other half.
             LegacyIsSolved = UnattendedDeliveryScorecardService.IsSolved(manifests, status, degradedStop),
             WouldBeTerminalDecision = wouldBe.ToString(),
+            // Captured AFTER composing, on purpose. ComposeAsync is NOT read-only — it write-throughs the receipts
+            // it derives from the tape, so storing the pre-compose snapshot would leave every later sweep seeing a
+            // difference that was its own doing, and the gate would never skip anything.
+            LedgerWatermarkJson = JsonSerializer.Serialize(await CompletionLedgerWatermarks.CaptureAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false), AgentJson.Options),
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });

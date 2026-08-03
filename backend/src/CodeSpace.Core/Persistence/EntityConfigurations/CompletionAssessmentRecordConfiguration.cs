@@ -12,6 +12,7 @@ public class CompletionAssessmentRecordConfiguration : IEntityTypeConfiguration<
         builder.HasKey(r => r.Id);
         builder.Property(r => r.AssessmentJson).HasColumnName("assessment_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.WouldBeTerminalDecision).HasColumnName("would_be_terminal_decision");
+        builder.Property(r => r.LedgerWatermarkJson).HasColumnName("ledger_watermark_json");
         builder.HasIndex(r => new { r.WorkflowRunId, r.CreatedDate });
     }
 }
