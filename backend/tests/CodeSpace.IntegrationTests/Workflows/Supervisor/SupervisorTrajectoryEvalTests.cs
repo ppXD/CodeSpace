@@ -97,6 +97,41 @@ public sealed class SupervisorTrajectoryEvalTests
         PayloadJson = "{}", OutcomeJson = outcomeJson,
     };
 
+    /// <summary>
+    /// The harness must not INVENT units a spawn never named. It used to substitute a hardcoded ["s1","s2"] and then
+    /// report both as SUCCEEDED — so the model was shown success for units absent from its own plan while its real
+    /// units stayed unfinished, and spawning again was the rational response. That is the documented plan→spawn×7
+    /// loop, and it was manufactured by the measuring instrument, not by the brain.
+    ///
+    /// <para>Production stages ZERO for a spawn that names nothing (StageAgentsAndParkAsync → note: "no subtasks to
+    /// spawn"). The harness must say the same thing, or the eval scores the model against a fiction.</para>
+    /// </summary>
+    [Fact]
+    public void A_spawn_that_names_no_subtask_stages_nothing_exactly_as_production_does()
+    {
+        var spawn = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = """{"subtaskIds":[]}""" };
+
+        var folded = TrajectoryOutcomes.AllSucceeded(spawn, seq: 2);
+
+        SupervisorOutcome.ReadStagedAgentCount(folded.OutcomeJson).ShouldBe(0, "production stages nothing for a spawn that names nothing — a harness that stages two invented units is measuring a fiction");
+        SupervisorOutcome.ReadAgentResults(folded.OutcomeJson).ShouldBeEmpty("an invented unit that 'succeeded' is what taught the model its own plan was never finished");
+        folded.OutcomeJson.ShouldContain("no subtasks to spawn", Case.Insensitive, "byte-mirroring production's own note keeps the two from drifting");
+        folded.OutcomeJson.ShouldNotContain("s1", Case.Sensitive, "the hardcoded ids must be gone, not merely unused on the happy path");
+    }
+
+    [Fact]
+    public void A_spawn_that_names_its_subtasks_still_folds_them_verbatim()
+    {
+        // Behaviour-preserving on the path that matters: a well-formed spawn is unaffected.
+        var spawn = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = """{"subtaskIds":["validate-email","send-receipt"]}""" };
+
+        var folded = TrajectoryOutcomes.AllSucceeded(spawn, seq: 2);
+
+        SupervisorOutcome.ReadStagedAgentCount(folded.OutcomeJson).ShouldBe(2);
+        folded.OutcomeJson.ShouldContain("validate-email", Case.Sensitive, "the model's OWN ids come back, so its plan and its results agree");
+        folded.OutcomeJson.ShouldContain("send-receipt", Case.Sensitive);
+    }
+
     [Fact]
     public async Task A_brain_that_loops_replanning_hits_the_cap_and_fails()
     {
@@ -415,6 +450,15 @@ public sealed class SupervisorTrajectoryEvalTests
 
     // ── Scripted deciders (decide purely from the prior-decision kinds — no model) ──────────────────────────
 
+    /// <summary>
+    /// A scripted decision's payload. A SPAWN must NAME the units it is spawning, exactly as a well-formed model
+    /// spawn does — the harness no longer invents ids for a spawn that names none, because production stages nothing
+    /// for that shape and inventing them is what manufactured the plan→spawn×7 loop. Every other verb keeps its
+    /// empty payload.
+    /// </summary>
+    private static string ScriptedPayload(string kind) =>
+        kind == SupervisorDecisionKinds.Spawn ? """{"subtaskIds":["s1","s2"]}""" : "{}";
+
     /// <summary>A converging brain: plan if nothing planned, spawn if planned-not-spawned, merge if spawned-not-merged, else stop.</summary>
     private sealed class ConvergingDecider : ISupervisorDecider
     {
@@ -427,7 +471,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = kind == SupervisorDecisionKinds.Stop ? "{\"outcome\":\"completed\"}" : "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = kind == SupervisorDecisionKinds.Stop ? "{\"outcome\":\"completed\"}" : ScriptedPayload(kind) });
         }
     }
 
@@ -464,7 +508,7 @@ public sealed class SupervisorTrajectoryEvalTests
             var payload =
                 kind == SupervisorDecisionKinds.Stop ? """{"summary":"retried and shipped"}"""
                 : kind == SupervisorDecisionKinds.Retry ? """{"subtaskId":"s2"}"""
-                : PlanWithSubtaskId is not { } id ? "{}"
+                : PlanWithSubtaskId is not { } id ? ScriptedPayload(kind)   // an unnamed spawn would now stage nothing, exactly as production refuses it
                 : kind == SupervisorDecisionKinds.Plan ? $$"""{"subtasks":[{"id":"{{id}}","title":"t","instruction":"i"}]}"""
                 : $$"""{"subtaskIds":["{{id}}"]}""";   // a spawn names the units it dispatches, as a real one does
 
@@ -492,7 +536,7 @@ public sealed class SupervisorTrajectoryEvalTests
             var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
             var kind = !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -507,7 +551,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -523,7 +567,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -540,7 +584,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -581,7 +625,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : conflicted && !verifiedResolve ? SupervisorDecisionKinds.Resolve
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -601,7 +645,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -617,7 +661,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -638,7 +682,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : conflicted && !verifiedResolve ? SupervisorDecisionKinds.Resolve
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -658,7 +702,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : conflicted && !kinds.Contains(SupervisorDecisionKinds.Resolve) ? SupervisorDecisionKinds.Resolve
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -675,7 +719,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 
@@ -692,7 +736,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 
-            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = ScriptedPayload(kind) });
         }
     }
 }
