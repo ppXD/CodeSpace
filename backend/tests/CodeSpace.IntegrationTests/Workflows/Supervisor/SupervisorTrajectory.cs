@@ -409,6 +409,14 @@ public static class SupervisorTrajectoryScore
 
         static string DescribeOne(SupervisorPriorDecision d)
         {
+            // A decision with NO outcome never completed (the deadline/cancellation arm can leave one trailing). Every
+            // reader below returns its empty default for null, which would render it as "accepted, but no agent ran" —
+            // a claim the data does not support, and the exact failure this whole breakdown exists to stop making.
+            // A decision with NO outcome never completed (the deadline/cancellation arm can leave one trailing). Every
+            // reader below returns its empty default for null, which would render it as "accepted, but no agent ran" —
+            // a claim the data does not support, and the exact failure this whole breakdown exists to stop making.
+            if (string.IsNullOrWhiteSpace(d.OutcomeJson)) return "no outcome recorded — the decision did not complete";
+
             if (SupervisorOutcome.ReadRejectionReason(d.OutcomeJson) is { } rejected) return $"REJECTED — {rejected}";
 
             if (SupervisorOutcome.ReadBlockedSubtasks(d.OutcomeJson) is { Count: > 0 } blocked)

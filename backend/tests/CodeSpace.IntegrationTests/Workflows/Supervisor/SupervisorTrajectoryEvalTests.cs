@@ -53,6 +53,7 @@ public sealed class SupervisorTrajectoryEvalTests
                 LedgerEntry(SupervisorDecisionKinds.Spawn, 3, withheld),
                 LedgerEntry(SupervisorDecisionKinds.Spawn, 4, staged),
                 LedgerEntry(SupervisorDecisionKinds.Spawn, 5, acceptedButEmpty),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 6, null),
             },
         });
 
@@ -65,6 +66,7 @@ public sealed class SupervisorTrajectoryEvalTests
         note.ShouldContain("dependent", Case.Insensitive, "the withheld unit is named");
         note.ShouldContain("staged 1 agent", Case.Insensitive, "a verb that genuinely fanned out says so — otherwise a real loop and a rejected loop still look alike");
         note.ShouldContain("staged NOTHING", Case.Insensitive, "accepted-but-empty is its own third case, not silently folded into either other one");
+        note.ShouldContain("did not complete", Case.Insensitive, "a decision with NO outcome must not be described as accepted — every reader returns its empty default for null, which would otherwise render it as 'accepted, but no agent ran'");
         note.ShouldNotContain("#5 plan", Case.Insensitive, "only agent-staging verbs are described — a plan is not one");
     }
 
@@ -89,7 +91,7 @@ public sealed class SupervisorTrajectoryEvalTests
         note.ShouldNotContain("What each staging verb did", Case.Insensitive);
     }
 
-    private static SupervisorPriorDecision LedgerEntry(string kind, long sequence, string outcomeJson) => new()
+    private static SupervisorPriorDecision LedgerEntry(string kind, long sequence, string? outcomeJson) => new()
     {
         Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded,
         PayloadJson = "{}", OutcomeJson = outcomeJson,
