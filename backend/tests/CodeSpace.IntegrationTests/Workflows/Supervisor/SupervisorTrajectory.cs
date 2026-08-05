@@ -272,16 +272,27 @@ internal static class TrajectoryOutcomes
         };
     }
 
-    private static IReadOnlyList<string> SpawnedSubtaskIds(SupervisorDecision d)
-    {
-        var ids = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
+    /// <summary>
+    /// The subtask ids a spawn NAMED — never invented. The old fallback to a hardcoded <c>["s1","s2"]</c> made the
+    /// harness DIVERGE from production on the one input that matters: production stages ZERO agents for a spawn that
+    /// names nothing (<c>StageAgentsAndParkAsync</c> → <c>note: "no subtasks to spawn"</c>), while the harness handed
+    /// back two invented units that then SUCCEEDED.
+    ///
+    /// <para>That is the documented <c>plan→spawn×7</c> loop, mechanised: the model is shown success for units it
+    /// never planned, its OWN units stay permanently unfinished, and spawning again is the rational move. The eval
+    /// was rewarding a malformed spawn and then scoring the model for not converging.</para>
+    /// </summary>
+    private static IReadOnlyList<string> SpawnedSubtaskIds(SupervisorDecision d) => SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
 
-        return ids.Count > 0 ? ids : new[] { "s1", "s2" };
-    }
+    /// <summary>Production's outcome for a spawn that staged nothing — byte-mirrored so the harness cannot reward what production refuses.</summary>
+    private static SupervisorPriorDecision NothingStaged(SupervisorDecision d, long seq) =>
+        Prior(d, seq, JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
 
     public static SupervisorPriorDecision AllSucceeded(SupervisorDecision d, long seq)
     {
         var subtaskIds = SpawnedSubtaskIds(d);
+
+        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var results = ids.Select((id, i) => Graded(id, "Succeeded", summary: $"implemented {subtaskIds[i]}; unit tests green", branch: $"agent/{subtaskIds[i]}")).ToArray();
@@ -292,6 +303,8 @@ internal static class TrajectoryOutcomes
     public static SupervisorPriorDecision OneFailed(SupervisorDecision d, long seq)
     {
         var subtaskIds = SpawnedSubtaskIds(d);
+
+        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var last = subtaskIds.Count - 1;
@@ -329,6 +342,8 @@ internal static class TrajectoryOutcomes
     public static SupervisorPriorDecision BothFailed(SupervisorDecision d, long seq)
     {
         var subtaskIds = SpawnedSubtaskIds(d);
+
+        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var results = ids.Select((id, i) => Graded(id, "Failed", error: $"{subtaskIds[i]} failed: build error")).ToArray();
