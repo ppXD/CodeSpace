@@ -27,6 +27,74 @@ public sealed class SupervisorTrajectoryEvalTests
         ok.ShouldBeTrue(note);
     }
 
+    /// <summary>
+    /// A non-terminating verdict must say what the brain looped ON, not just that it looped. This lane emits none of
+    /// the supervisor's own log stream, so the verb sequence was the ONLY thing a reader got — which is why the eval
+    /// sat red on main for days across a dozen unrelated commits: "plan→spawn×7" names a symptom nobody can act on.
+    /// A loop of REJECTED decisions and a loop of real fan-outs are completely different bugs and rendered identically.
+    /// </summary>
+    [Fact]
+    public void A_looping_verdict_names_what_each_staging_verb_actually_did()
+    {
+        const string rejected = """{"agentRunIds":[],"agentCount":0,"spawn":"rejected","reason":"the spawn named subtask id(s) [ghost] the current plan never declared"}""";
+        const string withheld = """{"agentRunIds":[],"agentCount":0,"blockedSubtasks":[{"subtaskId":"dependent","reason":"neither a branch nor a patch was captured"}]}""";
+        const string staged = """{"agentRunIds":["1e4b8f4c-0000-0000-0000-000000000001"],"agentCount":1}""";
+        const string acceptedButEmpty = """{"agentRunIds":[],"agentCount":0,"note":"no subtasks to spawn"}""";
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(new SupervisorTrajectoryResult
+        {
+            Kinds = new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Spawn },
+            ReachedStop = false,
+            HitTurnCap = true,
+            Ledger = new[]
+            {
+                LedgerEntry(SupervisorDecisionKinds.Plan, 1, "{}"),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 2, rejected),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 3, withheld),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 4, staged),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 5, acceptedButEmpty),
+            },
+        });
+
+        ok.ShouldBeFalse("a run that never stopped is still a failure — this change is about the NOTE, not the verdict");
+
+        note.ShouldContain("plan→spawn→spawn→spawn→spawn", Case.Insensitive, "the verb sequence is still there — this is additive");
+        note.ShouldContain("REJECTED", Case.Insensitive, "a refused decision must be distinguishable from an accepted one");
+        note.ShouldContain("never declared", Case.Insensitive, "the server's own reason reaches the reader verbatim");
+        note.ShouldContain("WITHHELD", Case.Insensitive, "a blocked hand-off is a different bug from a refusal and must read as one");
+        note.ShouldContain("dependent", Case.Insensitive, "the withheld unit is named");
+        note.ShouldContain("staged 1 agent", Case.Insensitive, "a verb that genuinely fanned out says so — otherwise a real loop and a rejected loop still look alike");
+        note.ShouldContain("staged NOTHING", Case.Insensitive, "accepted-but-empty is its own third case, not silently folded into either other one");
+        note.ShouldNotContain("#5 plan", Case.Insensitive, "only agent-staging verbs are described — a plan is not one");
+    }
+
+    [Fact]
+    public void A_terminating_verdict_is_not_padded_with_the_per_verb_breakdown()
+    {
+        // The breakdown is diagnostic for a loop. A run that reached a stop is scored on shipping, and appending the
+        // walk there would bury the actual verdict under noise on every ordinary pass.
+        var (_, note) = SupervisorTrajectoryScore.Score(new SupervisorTrajectoryResult
+        {
+            Kinds = new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Stop },
+            ReachedStop = true,
+            HitTurnCap = false,
+            Ledger = new[]
+            {
+                LedgerEntry(SupervisorDecisionKinds.Plan, 1, "{}"),
+                LedgerEntry(SupervisorDecisionKinds.Spawn, 2, """{"agentRunIds":[],"agentCount":0,"spawn":"rejected","reason":"x"}"""),
+                LedgerEntry(SupervisorDecisionKinds.Stop, 3, "{}"),
+            },
+        });
+
+        note.ShouldNotContain("What each staging verb did", Case.Insensitive);
+    }
+
+    private static SupervisorPriorDecision LedgerEntry(string kind, long sequence, string outcomeJson) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = "{}", OutcomeJson = outcomeJson,
+    };
+
     [Fact]
     public async Task A_brain_that_loops_replanning_hits_the_cap_and_fails()
     {

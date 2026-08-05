@@ -386,14 +386,49 @@ public static class SupervisorTrajectoryScore
     /// <summary>The work-unit ceiling — agent-staging verbs (spawn/retry/resolve). The happy path needs ONE; a recovery path needs two; far more is a brain that churns on re-spawns without converging.</summary>
     public const int MaxWorkUnits = 4;
 
+    /// <summary>
+    /// What each agent-staging verb ACTUALLY DID, appended to a non-terminating verdict. The verb sequence alone says
+    /// the brain looped; it cannot say what it looped ON, and this lane emits none of the supervisor's own log stream
+    /// — so a run that reads "plan→spawn→spawn→spawn→spawn→spawn→spawn→spawn" gives the next reader no move. That is
+    /// why the eval sat red on main for days across a dozen unrelated commits: the verdict named a symptom nobody
+    /// could act on.
+    ///
+    /// <para>Reads the SAME three outcome readers production uses, so a disposition here can never disagree with what
+    /// the decider was told: a REJECTED decision (malformed / unknown id), a WITHHELD one (dependency staging refused
+    /// to hand off silently), or an accepted one and how many agents it staged. A loop of rejections and a loop of
+    /// real fan-outs are completely different bugs and used to render identically.</para>
+    /// </summary>
+    private static string DescribeStagingVerbs(IReadOnlyList<SupervisorPriorDecision> ledger)
+    {
+        var lines = ledger
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .Select((d, i) => $"  #{i + 1} {d.DecisionKind}: {DescribeOne(d)}")
+            .ToList();
+
+        return lines.Count == 0 ? "" : "\nWhat each staging verb did:\n" + string.Join("\n", lines);
+
+        static string DescribeOne(SupervisorPriorDecision d)
+        {
+            if (SupervisorOutcome.ReadRejectionReason(d.OutcomeJson) is { } rejected) return $"REJECTED — {rejected}";
+
+            if (SupervisorOutcome.ReadBlockedSubtasks(d.OutcomeJson) is { Count: > 0 } blocked)
+                return $"WITHHELD {blocked.Count} subtask(s) — {string.Join("; ", blocked.Select(b => $"{b.SubtaskId}: {b.Reason}"))}";
+
+            var staged = SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson);
+
+            return staged == 0 ? "staged NOTHING (accepted, but no agent ran)" : $"staged {staged} agent(s)";
+        }
+    }
+
     public static (bool Ok, string Note) Score(SupervisorTrajectoryResult t)
     {
         var trail = string.Join("→", t.Kinds);
 
         if (!t.ReachedStop)
-            return (false, t.HitTurnCap
+            return (false, (t.HitTurnCap
                 ? $"never stopped — hit the turn cap (the brain loops / doesn't drive to completion). Trajectory: {trail}"
-                : $"did not reach a terminal stop within the time budget (deadline/cancellation). Trajectory: {trail}");
+                : $"did not reach a terminal stop within the time budget (deadline/cancellation). Trajectory: {trail}")
+                + DescribeStagingVerbs(t.Ledger));
 
         // SHIP = a REAL reviewable head at the stop (a clean integration OR a verified resolution), read off the ledger by
         // the production reader — so a conflicted merge / unverified resolve / un-integrated fresh work does NOT count.
