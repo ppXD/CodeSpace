@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 namespace CodeSpace.E2ETests.Agents;
 
@@ -233,6 +234,11 @@ public sealed class RealClaudeResumeE2ETests
     private static bool ClaudeResolves()
     {
         var cmd = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar);
+
+        // A fake armed by a concurrently-running class satisfies File.Exists, so "the path exists" would run THIS
+        // real-CLI test against a stub and assert real-resume semantics on it. Self-skip instead.
+        if (FakeAgentCliMarker.IsFakeCli(cmd)) return false;
+
         if (!string.IsNullOrEmpty(cmd)) return File.Exists(cmd);
 
         return (Environment.GetEnvironmentVariable("PATH") ?? "").Split(':')

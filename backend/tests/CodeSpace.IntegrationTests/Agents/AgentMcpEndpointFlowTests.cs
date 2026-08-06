@@ -21,6 +21,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 namespace CodeSpace.IntegrationTests.Agents;
 
@@ -329,6 +330,11 @@ public class AgentMcpEndpointFlowTests
     private static string? ResolveClaudeOrNull()
     {
         var configured = Environment.GetEnvironmentVariable("CODESPACE_CLAUDE_CODE_PATH");
+
+        // A fake armed by a concurrently-running class satisfies File.Exists — resolving it here would point this
+        // REAL-binary smoke at a stub that cannot load an .mcp.json at all.
+        if (FakeAgentCliMarker.IsFakeCli(configured)) return null;
+
         if (!string.IsNullOrEmpty(configured)) return File.Exists(configured) ? configured : null;
 
         try
