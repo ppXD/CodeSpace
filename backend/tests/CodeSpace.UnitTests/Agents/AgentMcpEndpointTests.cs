@@ -117,8 +117,10 @@ public class AgentMcpEndpointTests
         using var client = await ConnectAsync(socketPath);
         await SendLineAsync(client, "the-WRONG-token");
 
-        // Send a real JSON-RPC request AFTER the bad token; the endpoint must never reply — the read returns EOF.
-        await SendLineAsync(client, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+        // Send a real JSON-RPC request AFTER the bad token, so a still-serving endpoint would have something to
+        // reply TO. The send itself is best-effort: if the close already landed, writing to the dead peer throws
+        // Broken pipe — which is that same close observed from the write side, not a failure of the property.
+        await TrySendLineAsync(client, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
 
         await using var net = new NetworkStream(client, ownsSocket: false);
 
@@ -201,6 +203,30 @@ public class AgentMcpEndpointTests
         var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         await client.ConnectAsync(new UnixDomainSocketEndPoint(socketPath));
         return client;
+    }
+
+    /// <summary>
+    /// Send a line, tolerating the peer having ALREADY closed. The close this test is about races the write as well
+    /// as the read: #1309 taught the READ side that a hard close arrives as RST instead of EOF, but the same race
+    /// hits the second write, where it surfaces as Broken pipe — which reddened CI on PR #1313, a heartbeat change
+    /// touching nothing near sockets. Both are the endpoint having closed, which is the property under test.
+    ///
+    /// <para>Only used for a send whose whole purpose is "give a still-serving endpoint something to reply to".
+    /// The FIRST send must still throw if it fails — that one has to reach the endpoint for the test to mean
+    /// anything, which is why <see cref="SendLineAsync"/> stays strict.</para>
+    /// </summary>
+    private static async Task TrySendLineAsync(Socket socket, string line)
+    {
+        try
+        {
+            await SendLineAsync(socket, line);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.Shutdown or SocketError.ConnectionReset or SocketError.ConnectionAborted)
+        {
+        }
+        catch (IOException ex) when (ex.InnerException is SocketException { SocketErrorCode: SocketError.Shutdown or SocketError.ConnectionReset or SocketError.ConnectionAborted })
+        {
+        }
     }
 
     private static async Task SendLineAsync(Socket socket, string line)
