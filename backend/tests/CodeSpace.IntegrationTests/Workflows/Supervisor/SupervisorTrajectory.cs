@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 
@@ -285,14 +286,25 @@ internal static class TrajectoryOutcomes
     private static IReadOnlyList<string> SpawnedSubtaskIds(SupervisorDecision d) => SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
 
     /// <summary>Production's outcome for a spawn that staged nothing — byte-mirrored so the harness cannot reward what production refuses.</summary>
-    private static SupervisorPriorDecision NothingStaged(SupervisorDecision d, long seq) =>
-        Prior(d, seq, JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
+    /// <summary>
+    /// What PRODUCTION does with a spawn that names no unit — serialized from the executor's OWN builder, never a
+    /// hand-copy. This lane simulates outcomes instead of driving <c>RealSupervisorActionExecutor</c>, so anything it
+    /// mirrors by hand silently stops matching the moment production moves. It did: the executor learned to REFUSE an
+    /// unnamed spawn (so the decider gets a correction it can act on), while this kept emitting the older
+    /// accepted-with-a-note shape — and two runs' worth of "did the refusal land?" comparison could not have shown a
+    /// difference either way, because the refusal is unreachable from here by construction.
+    ///
+    /// <para>The clamp's all-deferred case does not arise in this harness: nothing here narrows a payload, so an empty
+    /// spawn is always the model's own.</para>
+    /// </summary>
+    private static SupervisorPriorDecision RefusedSpawn(SupervisorDecision d, long seq) =>
+        Prior(d, seq, JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedSpawnOutcome(), AgentJson.Options));
 
     public static SupervisorPriorDecision AllSucceeded(SupervisorDecision d, long seq)
     {
         var subtaskIds = SpawnedSubtaskIds(d);
 
-        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
+        if (subtaskIds.Count == 0) return RefusedSpawn(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var results = ids.Select((id, i) => Graded(id, "Succeeded", summary: $"implemented {subtaskIds[i]}; unit tests green", branch: $"agent/{subtaskIds[i]}")).ToArray();
@@ -304,7 +316,7 @@ internal static class TrajectoryOutcomes
     {
         var subtaskIds = SpawnedSubtaskIds(d);
 
-        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
+        if (subtaskIds.Count == 0) return RefusedSpawn(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var last = subtaskIds.Count - 1;
@@ -343,7 +355,7 @@ internal static class TrajectoryOutcomes
     {
         var subtaskIds = SpawnedSubtaskIds(d);
 
-        if (subtaskIds.Count == 0) return NothingStaged(d, seq);
+        if (subtaskIds.Count == 0) return RefusedSpawn(d, seq);
         var ids = subtaskIds.Select(_ => Guid.NewGuid()).ToArray();
         var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
         var results = ids.Select((id, i) => Graded(id, "Failed", error: $"{subtaskIds[i]} failed: build error")).ToArray();

@@ -115,8 +115,15 @@ public sealed class SupervisorTrajectoryEvalTests
 
         SupervisorOutcome.ReadStagedAgentCount(folded.OutcomeJson).ShouldBe(0, "production stages nothing for a spawn that names nothing — a harness that stages two invented units is measuring a fiction");
         SupervisorOutcome.ReadAgentResults(folded.OutcomeJson).ShouldBeEmpty("an invented unit that 'succeeded' is what taught the model its own plan was never finished");
-        folded.OutcomeJson.ShouldContain("no subtasks to spawn", Case.Insensitive, "byte-mirroring production's own note keeps the two from drifting");
         folded.OutcomeJson.ShouldNotContain("s1", Case.Sensitive, "the hardcoded ids must be gone, not merely unused on the happy path");
+
+        // The refusal, read through the SAME reader the decider's correction block keys on. This lane simulates
+        // outcomes rather than driving the real executor, so if it mirrors an older production shape the eval reports
+        // a disposition production stopped emitting — which is exactly what happened until this was wired to the
+        // executor's own builder.
+        SupervisorOutcome.ReadRejectionReason(folded.OutcomeJson).ShouldNotBeNull(
+            "production REFUSES an unnamed spawn; a harness still emitting the accepted-with-a-note shape makes the refusal unobservable in the one lane that measures it");
+        SupervisorOutcome.ReadRejectionReason(folded.OutcomeJson)!.ShouldContain("named no subtaskIds");
     }
 
     [Fact]
