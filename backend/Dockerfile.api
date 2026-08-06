@@ -1,6 +1,6 @@
 # CodeSpace PUBLIC API image — the HTTP frontend ONLY.
 #
-# Deploy this with CODESPACE_HANGFIRE_PROCESSING_ENABLED=false: the pod serves the REST/SSE surface and ENQUEUES
+# Deploy this with HangfireHosting=Api: the pod serves the REST/SSE surface and ENQUEUES
 # work, but starts NO Hangfire processing server (HangfireRegistrar.CodeSpace.cs returns early when processing is
 # off), so it NEVER executes an agent run and NEVER hosts a per-run MCP endpoint. Agent execution lives
 # EXCLUSIVELY in the worker image (backend/Dockerfile.worker — the local sandbox runner). Deploy the two images as

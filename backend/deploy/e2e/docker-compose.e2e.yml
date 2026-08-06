@@ -32,7 +32,7 @@ services:
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
       Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
       CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
-      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "false"
+      HangfireHosting: "Api"
     ports:
       - "18080:8080"
 
@@ -52,7 +52,7 @@ services:
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
       Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
       CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
-      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "true"
+      HangfireHosting: "Worker"
       CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "true"
       CODESPACE_CODEX_CLI_PATH: "/opt/fake-codex"
     volumes:

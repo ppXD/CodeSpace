@@ -39,12 +39,11 @@ services:
   # The CodeSpace app, split into TWO deployments off TWO images that mirror the production topology — the public
   # HTTP frontend and the local sandbox runner are different security/scaling concerns, so they are different
   # images (backend/Dockerfile.api + backend/Dockerfile.worker). Both run the SAME CodeSpace.Api.dll; the ROLE is
-  # selected by CODESPACE_HANGFIRE_PROCESSING_ENABLED. Both are behind the "app" profile so the default local-dev
+  # selected by the HangfireHosting setting (Api | Worker), read through the normal configuration pipeline. Both are behind the "app" profile so the default local-dev
   # flow stays "compose up Postgres + `dotnet run`"; run the full containerised stack with
   # `docker compose --profile app up`. In k8s these become two Deployments that scale (replica) independently.
 
-  # PUBLIC API — serves HTTP + enqueues, processes NO jobs (CODESPACE_HANGFIRE_PROCESSING_ENABLED=false → no
-  # Hangfire server). It executes no agent and hosts no MCP endpoint, so it carries none of the agent-execution /
+  # PUBLIC API — serves HTTP + enqueues, processes NO jobs (HangfireHosting=Api → no Hangfire server). It executes no agent and hosts no MCP endpoint, so it carries none of the agent-execution /
   # isolation deps (lean, internet-facing → small attack surface). Built from the minimal Dockerfile.api.
   api:
     profiles: ["app"]
@@ -63,10 +62,10 @@ services:
       ASPNETCORE_URLS: http://+:8080
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
       # This pod NEVER processes jobs — it serves HTTP + enqueues only. Agent execution lives in the worker.
-      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "false"
+      HangfireHosting: "Api"
 
-  # WORKER = THE LOCAL SANDBOX RUNNER — the Hangfire PROCESSING pod (CODESPACE_HANGFIRE_PROCESSING_ENABLED unset →
-  # default-ON). Agent runs + the per-run MCP endpoint execute HERE; the harness CLI is spawned as a confined child
+  # WORKER = THE LOCAL SANDBOX RUNNER — the Hangfire PROCESSING pod (HangfireHosting=Worker, which is also the
+  # default when the key is absent). Agent runs + the per-run MCP endpoint execute HERE; the harness CLI is spawned as a confined child
   # by LocalProcessRunner. Built from Dockerfile.worker, which carries git + bubblewrap + util-linux (prlimit) +
   # the codespace-mcp proxy. The MCP endpoint + tool governance are turned ON here; code defaults stay fail-closed
   # default-OFF (a deployment that does not set these is byte-identical to today). Every flag is ${VAR:-default}.
@@ -92,8 +91,9 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
-      # This pod IS the worker — leave Hangfire processing ON (default) so it executes agent runs + the MCP endpoint.
-      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "${CODESPACE_HANGFIRE_PROCESSING_ENABLED:-true}"
+      # This pod IS the worker — it executes agent runs + the per-run MCP endpoint. Stated explicitly rather than
+      # relying on the default, so the topology is readable from the compose file alone.
+      HangfireHosting: "Worker"
       # Open the per-run MCP endpoint for every agent run (the governed tool fabric the CLI harness reaches).
       CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "${CODESPACE_AGENT_MCP_ENDPOINT_ENABLED:-true}"
       # Route side-effecting tool calls through the exactly-once ledger + durable HITL approval (read-only tools
