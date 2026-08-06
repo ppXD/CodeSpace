@@ -335,6 +335,69 @@ public sealed class RealModelGateTests
     /// exact shape that used to launder: one codex run present, so a naive check passes, while zero agents succeeded
     /// so ClassifyAgentExecution then refunds the whole thing as infra.
     /// </summary>
+    /// <summary>
+    /// A gating:false arm must never RED the job — and it did. Run 30809950520's stop-DoD arm died on a
+    /// JsonException because the live model authored a stop payload missing a `required` property; the arm never
+    /// reached a verdict, and a lane declared report-only failed the whole job on it.
+    /// </summary>
+    [Fact]
+    public async Task A_report_only_arm_that_FAULTS_reports_instead_of_reddening_the_job()
+    {
+        var summary = Path.Combine(Path.GetTempPath(), $"gate-armfault-{Guid.NewGuid():N}.md");
+
+        try
+        {
+            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("missing required properties including: 'outcome'"), gating: false, summary);
+
+            var written = await File.ReadAllTextAsync(summary);
+            written.ShouldContain("FAULTED before reaching a verdict", Case.Insensitive, "the fault is surfaced, not silently swallowed");
+            written.ShouldContain("JsonException", Case.Insensitive, "the reader needs the actual fault to act on it");
+        }
+        finally { File.Delete(summary); }
+    }
+
+    /// <summary>
+    /// The carve-out that keeps this from disarming the thing it protects: some report-only arms assert HARD inside
+    /// the closure ON PURPOSE — the S1 handoff arm documents exactly that ("the handoff MECHANISM is asserted HARD
+    /// (Shouldly, bypassing the soft report-only gate)"). An assertion is the arm SPEAKING; anything else is the arm
+    /// BREAKING. Only the second is absorbed.
+    /// </summary>
+    [Fact]
+    public async Task A_report_only_arm_that_ASSERTS_still_fails_because_that_assertion_is_deliberate()
+    {
+        var summary = Path.Combine(Path.GetTempPath(), $"gate-armassert-{Guid.NewGuid():N}.md");
+
+        // Caught by hand, not with Should.ThrowAsync: Shouldly deliberately refuses to capture a
+        // ShouldAssertException thrown by the delegate, because doing so would mask real assertion failures inside it.
+        var propagated = false;
+
+        try
+        {
+            await RealModelGate.AssessLiveAsync("Anthropic", () => throw new ShouldAssertException("handoffWorked should be True but was False"), gating: false, summary);
+        }
+        catch (ShouldAssertException)
+        {
+            propagated = true;
+        }
+        finally { File.Delete(summary); }
+
+        propagated.ShouldBeTrue("a report-only arm's OWN hard assertion must still fail the job — that is the documented bypass the S1 handoff arm relies on");
+    }
+
+    /// <summary>A GATING arm keeps propagating everything — a required wire that breaks is a real problem, not something to report past.</summary>
+    [Fact]
+    public async Task A_gating_arm_still_propagates_a_fault()
+    {
+        var summary = Path.Combine(Path.GetTempPath(), $"gate-armgating-{Guid.NewGuid():N}.md");
+
+        try
+        {
+            await Should.ThrowAsync<System.Text.Json.JsonException>(() =>
+                RealModelGate.AssessLiveAsync("Anthropic", () => throw new System.Text.Json.JsonException("boom"), gating: true, summary));
+        }
+        finally { File.Delete(summary); }
+    }
+
     [Theory]
     [InlineData("codex-cli", "codex-cli", false, "codex-cli=1")]
     [InlineData("codex-cli,codex-cli", "codex-cli", false, "codex-cli=2")]

@@ -93,6 +93,19 @@ public static class RealModelGate
         {
             ReportInfraSkip(provider, ex, stepSummaryPath);
         }
+        catch (Exception ex) when (!gating && ex is not ShouldAssertException)
+        {
+            // A gating:false arm that can still RED the job is lying about being non-gating, and it happened: run
+            // 30809950520's stop-DoD arm died on a JsonException because the live model authored a stop payload
+            // missing a `required` property. Nothing about that is a verdict — the arm never reached one.
+            //
+            // A ShouldAssertException is EXCLUDED deliberately and must keep propagating. Some report-only arms
+            // assert HARD inside the closure on purpose — the S1 handoff arm says so in as many words ("the handoff
+            // MECHANISM is asserted HARD (Shouldly, bypassing the soft report-only gate)") — so swallowing those
+            // would disarm the very regressions the report-only framing was chosen to keep watching. The split is
+            // between the arm SPEAKING (an assertion it authored) and the arm BREAKING (anything else).
+            ReportInformational(false, $"{provider} arm FAULTED before reaching a verdict — {ex.GetType().Name}: {ex.Message}. Reported, not gating: a report-only arm cannot red the job, and no verdict was produced to report.", stepSummaryPath);
+        }
     }
 
     /// <summary>
