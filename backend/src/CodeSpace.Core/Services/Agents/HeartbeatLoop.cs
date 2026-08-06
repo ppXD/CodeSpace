@@ -15,14 +15,20 @@ public static class HeartbeatLoop
     /// <paramref name="onPingError"/> and the loop continues — a missed heartbeat must never kill liveness.
     /// Returns cleanly when cancelled; never surfaces <see cref="OperationCanceledException"/> to the caller.
     /// The first ping is deferred by one interval because the claim already stamped an initial heartbeat.
+    ///
+    /// <para><paramref name="timeProvider"/> exists so the cadence can be driven deterministically in a test instead
+    /// of raced against the wall clock. It is OPTIONAL and defaults to <see cref="TimeProvider.System"/>, so every
+    /// existing call site compiles unchanged and production behaviour is byte-identical — the system provider's
+    /// <c>Delay</c> IS the <c>Task.Delay</c> this used before. <see cref="TimeProvider"/> rather than a bespoke clock
+    /// interface: it is the BCL's own seam, so the next thing that needs one does not invent a second vocabulary.</para>
     /// </summary>
-    public static async Task RunAsync(Func<CancellationToken, Task> ping, TimeSpan interval, Action<Exception> onPingError, CancellationToken cancellationToken)
+    public static async Task RunAsync(Func<CancellationToken, Task> ping, TimeSpan interval, Action<Exception> onPingError, CancellationToken cancellationToken, TimeProvider? timeProvider = null)
     {
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(interval, timeProvider ?? TimeProvider.System, cancellationToken).ConfigureAwait(false);
 
                 try
                 {
