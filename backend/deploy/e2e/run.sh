@@ -41,11 +41,20 @@ echo "==> health probe: worker"
 wait_ready "$WORKER" "worker"
 [ "$(curl -fsS -o /dev/null -w '%{http_code}' "$API/health/live" 2>/dev/null)" = "200" ] || fail "/health/live not 200 (anonymous liveness)"
 
-echo "==> the API image is LEAN (no agent CLIs / git / proxy)"
+# The API image carries no agent-EXECUTION machinery. git is the ONE sanctioned exception, documented in
+# Dockerfile.api's header (S1): TaskLaunchService resolves a launch's immutable base vector synchronously via
+# `git ls-remote` (RemoteTipResolver) — read-only, no clone, no working tree. This check forbade it anyway and had
+# been red on main since 2026-07-11, unnoticed because the job only runs when these paths change.
+#
+# So git is asserted PRESENT, not merely allowed: the exception is deliberate, and an image that lost git would
+# break launch. Removing the ls-remote dependency should red here and force this contract to be re-stated, rather
+# than silently widening what "lean" means.
+echo "==> the API image is LEAN (no agent CLIs / proxy; git present for ls-remote only)"
 $COMPOSE exec -T api sh -c '
-  for b in codex claude node git bwrap; do command -v "$b" >/dev/null 2>&1 && { echo "LEAK: $b present in API"; exit 1; }; done
+  for b in codex claude node bwrap; do command -v "$b" >/dev/null 2>&1 && { echo "LEAK: $b present in API"; exit 1; }; done
   ls codespace-mcp* >/dev/null 2>&1 && { echo "LEAK: codespace-mcp present in API"; exit 1; }
-  echo "    API carries zero agent-execution machinery"' || fail "API image is not clean"
+  command -v git >/dev/null 2>&1 || { echo "MISSING: git absent from API — launch base-vector resolution (git ls-remote) cannot work"; exit 1; }
+  echo "    API carries zero agent-execution machinery; git present for ls-remote only"' || fail "API image is not clean"
 
 echo "==> seed a team + user + membership"
 $COMPOSE exec -T postgres psql -U codespace -d codespace -v ON_ERROR_STOP=1 -q < seed.sql || fail "seed failed"
