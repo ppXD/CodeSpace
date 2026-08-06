@@ -312,7 +312,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         _logger.LogInformation("Supervisor deferred {Deferred} subtask(s) with unmet dependencies at turn {Turn} on node {NodeId}, clamping the spawn to {Ready} ready subtask(s)", deferred.Count, context.TurnNumber, context.NodeId, ready.Count);
 
-        return decision with { PayloadJson = NarrowSpawnPayload(root, ready) };
+        return decision with { PayloadJson = NarrowSpawnPayload(root, ready, deferred) };
     }
 
     /// <summary>
@@ -368,14 +368,23 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// room most needs explained. Deterministic → a replay re-derives the identical bytes + idempotency key. Internal so
     /// the byte-preservation is unit-pinned directly, not only through a DB flow.
     /// </summary>
-    internal static string NarrowSpawnPayload(JsonObject root, IReadOnlyList<string> ready)
+    internal static string NarrowSpawnPayload(JsonObject root, IReadOnlyList<string> ready, IReadOnlyList<string> deferred)
     {
         root["subtaskIds"] = JsonSerializer.SerializeToNode(ready, AgentJson.Options);
+
+        // Stamp WHAT was withheld, so an empty fan-out is ATTRIBUTABLE downstream. This method only runs when the
+        // clamp actually deferred something, so the key's presence is exactly "the server emptied this" — the one
+        // fact that separates a legitimate all-deferred spawn from a model that named no units at all. They are
+        // otherwise byte-identical at subtaskIds:[] and call for opposite responses.
+        root[DeferredSubtaskIdsKey] = JsonSerializer.SerializeToNode(deferred, AgentJson.Options);
 
         ClampAgents(root, ready.ToHashSet());
 
         return root.ToJsonString(AgentJson.Options);
     }
+
+    /// <summary>The payload key naming the subtasks the dependency clamp WITHHELD — the executor's only way to tell a server-emptied spawn from a model-authored empty one. Written ONLY by <see cref="NarrowSpawnPayload"/>, i.e. only when something was actually deferred.</summary>
+    internal const string DeferredSubtaskIdsKey = "deferredSubtaskIds";
 
     /// <summary>The spawn payload's subtask ids, read off the frozen JSON node (string values only). Empty when absent / malformed — the clamp then defers nothing.</summary>
     private static IReadOnlyList<string> ReadSubtaskIds(JsonObject root) =>

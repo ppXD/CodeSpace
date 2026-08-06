@@ -35,12 +35,14 @@ public sealed partial class RealSupervisorActionExecutor
         //
         // NOT applied to a spawn the SERVER emptied: the dependency clamp legitimately narrows an all-deferred
         // fan-out to zero, and calling that a malformed decision would tell the model to fix a defect it did not
-        // commit. The two are byte-identical at subtaskIds:[], so attribution comes from the CONTEXT rather than the
-        // payload — a plan with nothing blocked cannot have been clamped. Deliberately conservative: when the
-        // frontier DOES hold blocked units the spawn is accepted as today, because a false accusation is the worse
-        // error. (Attributing via a payload stamp was tried and abandoned: the clamp's bytes feed a replay's
-        // idempotency key, and its byte-exactness is pinned by SupervisorSpawnClampTests.)
-        if (spawn.SubtaskIds.Count == 0 && SupervisorDependencyGate.Frontier(context).Blocked.Count == 0)
+        // commit. Attribution is the clamp's own stamp, because that is the only thing that actually discriminates:
+        // the clamp writes it exactly when it deferred something, and returns untouched otherwise.
+        //
+        // A first attempt asked the dependency FRONTIER instead ("a plan with nothing blocked cannot have been
+        // clamped") and silently did nothing — Blocked is every unfinished unit with an unmet edge, so ANY plan
+        // declaring an edge suppressed the refusal, which is every plan these scenarios author. Run 31074294816
+        // shipped that version and still recorded 120 accepted-empty spawns and zero refusals.
+        if (spawn.SubtaskIds.Count == 0 && !SupervisorOutcome.HasDeferredSubtasks(decision.PayloadJson))
         {
             _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — the decision named no subtaskIds", context.TurnNumber, context.NodeId);
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildRejectedSpawnOutcome(), AgentJson.Options));

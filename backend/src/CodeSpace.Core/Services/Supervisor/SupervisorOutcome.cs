@@ -208,6 +208,30 @@ public static class SupervisorOutcome
         }
     }
 
+    /// <summary>
+    /// Whether the dependency clamp WITHHELD units from this spawn payload. The executor's only way to tell a spawn
+    /// the SERVER emptied from one the MODEL named nothing in — byte-identical at <c>subtaskIds: []</c>, opposite
+    /// responses. The clamp writes the key only when it actually deferred something.
+    /// </summary>
+    public static bool HasDeferredSubtasks(string? spawnPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(spawnPayloadJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(spawnPayloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("deferredSubtaskIds", out var arr)
+                && arr.ValueKind == JsonValueKind.Array
+                && arr.GetArrayLength() > 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>P3.5 — the OPTIONAL <c>detail</c> a server-forced stop stamped alongside its <c>reason</c> (<c>{ reason, detail }</c>) — a dynamic elaboration (e.g. the cost cap's realized-spend breakdown) for the bounds that carry one. Null when absent (every reason without a per-run figure to cite, and every non-forced stop).</summary>
     public static string? ReadStopDetail(string? payloadJson) => ReadStringField(payloadJson, "detail");
 

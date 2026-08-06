@@ -43,26 +43,38 @@ public class SupervisorDependencyStagingTests
     }
 
     /// <summary>
-    /// The attribution that keeps the refusal honest, pinned on the PURE frontier the executor consults. An
-    /// all-deferred dependency clamp legitimately narrows a spawn to zero units — that is the server working, not a
-    /// malformed decision, and telling the model it "named no subtaskIds" there would send it to fix a defect it did
-    /// not commit. A FLAT plan has nothing to defer, so an empty spawn under one can only be the model's own.
+    /// The discriminator, pinned on the ONE fact that actually separates the two cases. The clamp writes
+    /// <c>deferredSubtaskIds</c> exactly when it withheld something, and returns the payload untouched otherwise —
+    /// so the key's presence IS "the server emptied this".
+    ///
+    /// <para>A first attempt asked the dependency FRONTIER ("a plan with nothing blocked cannot have been clamped")
+    /// and silently did nothing: Blocked is every unfinished unit with an unmet edge, so ANY plan declaring an edge
+    /// suppressed the refusal — which is every plan these scenarios author. That version shipped and run
+    /// 31074294816 still recorded 120 accepted-empty spawns and zero refusals. The row below with a blocking edge
+    /// but no stamp is the case it got wrong.</para>
     /// </summary>
-    [Fact]
-    public void A_flat_plan_blocks_nothing_so_an_empty_spawn_under_it_can_only_be_the_models_own()
+    [Theory]
+    [InlineData("""{"subtaskIds":[]}""", false)]
+    [InlineData("""{"subtaskIds":[],"deferredSubtaskIds":[]}""", false)]
+    [InlineData("""{"subtaskIds":[],"deferredSubtaskIds":["b"]}""", true)]
+    [InlineData("""{"subtaskIds":["a"],"deferredSubtaskIds":["b"]}""", true)]
+    [InlineData(null, false)]
+    [InlineData("not json", false)]
+    public void Only_the_clamps_own_stamp_marks_a_spawn_the_server_emptied(string? payloadJson, bool expectDeferred)
     {
-        var flat = ContextWithPlan(("a", null), ("b", null));
-
-        SupervisorDependencyGate.Frontier(flat).Blocked.ShouldBeEmpty("no dependency edges ⇒ the clamp can never have emptied this spawn ⇒ an empty one is malformed");
+        SupervisorOutcome.HasDeferredSubtasks(payloadJson).ShouldBe(expectDeferred);
     }
 
     [Fact]
-    public void A_plan_whose_units_wait_on_an_unsatisfied_dependency_DOES_block_so_an_empty_spawn_is_not_accused()
+    public void A_plan_with_a_blocking_edge_does_not_by_itself_excuse_an_empty_spawn()
     {
+        // THE regression the frontier version shipped: an edge exists, so Frontier(...).Blocked is non-empty — yet
+        // this spawn carries no stamp, so the clamp did not empty it and the model named nothing. It must be refused.
         var withEdge = ContextWithPlan(("a", null), ("b", new[] { "a" }));
 
-        SupervisorDependencyGate.Frontier(withEdge).Blocked.Select(x => x.Id).ShouldContain("b",
-            "'b' waits on an unrun 'a' — the clamp CAN empty this spawn, so the executor must not call it malformed");
+        SupervisorDependencyGate.Frontier(withEdge).Blocked.ShouldNotBeEmpty("the plan does have a blocked unit");
+        SupervisorOutcome.HasDeferredSubtasks("""{"subtaskIds":[]}""").ShouldBeFalse(
+            "...but nothing was deferred INTO this spawn, so a blocked plan must not excuse a model that named no units");
     }
 
     private static SupervisorTurnContext ContextWithPlan(params (string Id, string[]? DependsOn)[] subtasks)
