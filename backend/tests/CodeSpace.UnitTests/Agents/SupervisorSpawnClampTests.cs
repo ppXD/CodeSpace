@@ -16,7 +16,12 @@ namespace CodeSpace.UnitTests.Agents;
 public class SupervisorSpawnClampTests
 {
     private static string Narrow(string payloadJson, params string[] ready) =>
-        SupervisorTurnService.NarrowSpawnPayload(JsonNode.Parse(payloadJson)!.AsObject(), ready);
+        SupervisorTurnService.NarrowSpawnPayload(JsonNode.Parse(payloadJson)!.AsObject(), ready, Deferred(payloadJson, ready));
+
+    /// <summary>Whatever the payload asked for that is not ready — what the real clamp passes, since it only narrows when it deferred something.</summary>
+    private static IReadOnlyList<string> Deferred(string payloadJson, IReadOnlyList<string> ready) =>
+        (JsonNode.Parse(payloadJson)!.AsObject()["subtaskIds"] as JsonArray ?? new JsonArray())
+            .Select(n => n!.GetValue<string>()).Where(id => !ready.Contains(id)).ToList();
 
     [Fact]
     public void Narrowing_preserves_the_decision_level_rationale()
@@ -60,8 +65,12 @@ public class SupervisorSpawnClampTests
     [Fact]
     public void A_plain_spawn_narrows_to_just_the_ready_subtask_ids()
     {
+        // The byte expectation now carries deferredSubtaskIds. That does NOT loosen what this file pins: the
+        // guarantee is that the clamp is a NARROW edit which never DROPS a key the projector froze, and a key the
+        // SERVER deliberately adds is not a dropped one. It is load-bearing downstream — the executor reads it to
+        // tell a spawn the clamp emptied from one the model named nothing in (RealSupervisorActionExecutor.Spawn).
         Narrow("""{"subtaskIds":["s1","s2","s3"]}""", "s1", "s3")
-            .ShouldBe("""{"subtaskIds":["s1","s3"]}""", "a plain spawn (no agents, no rationale) narrows to a clean subtaskIds list");
+            .ShouldBe("""{"subtaskIds":["s1","s3"],"deferredSubtaskIds":["s2"]}""", "a plain spawn narrows to a clean subtaskIds list, plus the server's record of what it withheld");
     }
 
     [Fact]

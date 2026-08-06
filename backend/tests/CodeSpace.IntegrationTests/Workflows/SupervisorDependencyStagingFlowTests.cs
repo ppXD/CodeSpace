@@ -107,6 +107,51 @@ public sealed class SupervisorDependencyStagingFlowTests
     }
 
     /// <summary>
+    /// The refusal, driven through the REAL executor — the only place the discriminator actually lives. A unit test
+    /// on the reader cannot pin this: the first attempt at this refusal asked the dependency FRONTIER instead of the
+    /// clamp's stamp, shipped, and did nothing, and reader-level tests stayed green throughout because they never
+    /// exercised the branch.
+    ///
+    /// <para>Both rows are empty spawns under a plan that DECLARES AN EDGE — the shape the frontier version got
+    /// wrong. Only the stamped one is excused: the clamp writes it exactly when it withheld something, so its
+    /// absence means the model itself named no units.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false, true)]   // no stamp → the model named nothing → REFUSED
+    [InlineData(true, false)]   // the clamp emptied it → accepted, as before
+    public async Task An_empty_spawn_is_refused_only_when_the_clamp_did_not_empty_it(bool clampEmptiedIt, bool expectRefusal)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var context = ContextWith(runId, teamId, Guid.NewGuid(),
+            plan: Plan(("producer", null), ("dependent", new[] { "producer" })),   // a real edge ⇒ the frontier reports blocked
+            priorSpawns: await SucceededSpawn(teamId));
+
+        var payload = clampEmptiedIt
+            ? """{"subtaskIds":[],"deferredSubtaskIds":["dependent"]}"""
+            : """{"subtaskIds":[]}""";
+
+        using var scope = _fixture.BeginScope();
+        var execution = await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(
+            new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = payload }, context, CancellationToken.None);
+
+        var reason = SupervisorOutcome.ReadRejectionReason(execution.OutcomeJson);
+
+        if (expectRefusal)
+        {
+            reason.ShouldNotBeNull("the model named no subtaskIds and the clamp withheld nothing — refusing is the only way it ever learns");
+            reason!.ShouldContain("named no subtaskIds");
+        }
+        else
+        {
+            reason.ShouldBeNull("the SERVER emptied this spawn — accusing the model would send it to fix a defect it did not commit");
+        }
+
+        SupervisorOutcome.ReadStagedAgentCount(execution.OutcomeJson).ShouldBe(0, "either way nothing is staged — only the attribution differs");
+    }
+
+    /// <summary>
     /// The dual-dialect fake must fold the SAME Summary under both harnesses — a property that does NOT follow from
     /// emitting a 1:1 event sequence, because the two harnesses disagree on precedence: Codex takes
     /// <c>FinalSummary ?? AssistantMessage</c> (skipping Completed) while Claude takes
