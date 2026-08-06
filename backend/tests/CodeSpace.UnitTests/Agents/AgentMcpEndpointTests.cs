@@ -121,10 +121,35 @@ public class AgentMcpEndpointTests
         await SendLineAsync(client, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
 
         await using var net = new NetworkStream(client, ownsSocket: false);
+
+        var response = await ReadReplyOrNullIfClosedAsync(net, TimeSpan.FromSeconds(5));
+        response.ShouldBeNull(customMessage: "a wrong token must close the connection before any JSON-RPC reply");
+    }
+
+    /// <summary>
+    /// Read one reply, treating a HARD close as the same "served nothing" a graceful EOF is. The endpoint decides to
+    /// close the moment it sees a bad token, and this test writes a second line AFTER that — writing to a peer that
+    /// has already closed makes its stack answer with RST rather than FIN, so the read throws
+    /// <c>Connection reset by peer</c> instead of returning null. Which of the two arrives is a race between the
+    /// server's close and the client's write, and it flaked exactly that way on PR #1308's CI, on a diff touching
+    /// only the supervisor spawn path.
+    ///
+    /// <para>Both forms mean the one thing under test — the endpoint served no JSON-RPC. The old assertion demanded
+    /// EOF specifically, which is narrower than its own intent. The teeth are unchanged: an actual reply returns a
+    /// non-null line and reds, and a hang still reds because the timeout is NOT absorbed.</para>
+    /// </summary>
+    private static async Task<string?> ReadReplyOrNullIfClosedAsync(NetworkStream net, TimeSpan timeout)
+    {
         using var reader = new StreamReader(net, Encoding.UTF8);
 
-        var response = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        response.ShouldBeNull(customMessage: "a wrong token must close the connection (EOF) before any JSON-RPC reply");
+        try
+        {
+            return await reader.ReadLineAsync().WaitAsync(timeout);
+        }
+        catch (IOException ex) when (ex.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted })
+        {
+            return null;
+        }
     }
 
     [Fact]
