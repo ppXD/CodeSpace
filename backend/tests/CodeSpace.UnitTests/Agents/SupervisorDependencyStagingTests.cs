@@ -19,6 +19,74 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorDependencyStagingTests
 {
+    // ── An empty staging verb is REFUSED, unless the server emptied it ──────────────────
+
+    /// <summary>
+    /// The decision schema requires only <c>kind</c>, so <c>{"kind":"spawn"}</c> with no spawn payload at all is
+    /// schema-VALID; the projector substitutes an empty payload and the spawn used to be ACCEPTED, staging nothing
+    /// and telling the model nothing. That dominated the decision-eval lane — every scenario looping plan→spawn×7
+    /// into the turn cap with every spawn staging nothing. Its retry twin has always been refused
+    /// (<see cref="RealSupervisorActionExecutor.BuildRejectedRetryOutcome"/>); this makes the pair symmetric, which
+    /// is what lets the decider's existing correction block reach it.
+    /// </summary>
+    [Fact]
+    public void A_spawn_naming_no_subtask_is_refused_in_the_same_shape_the_retry_twin_uses()
+    {
+        var spawn = JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedSpawnOutcome(), AgentJson.Options);
+        var retry = JsonSerializer.Serialize(RealSupervisorActionExecutor.BuildRejectedRetryOutcome(), AgentJson.Options);
+
+        SupervisorOutcome.ReadRejectionReason(spawn).ShouldNotBeNull("the correction block the decider renders keys on this reader — an outcome it cannot read is invisible to the model");
+        SupervisorOutcome.ReadRejectionReason(spawn)!.ShouldContain("named no subtaskIds");
+        SupervisorOutcome.ReadStagedAgentCount(spawn).ShouldBe(0);
+
+        SupervisorOutcome.ReadRejectionReason(retry).ShouldNotBeNull("the twin, unchanged — the two must stay symmetric or one of them silently stops being rendered");
+    }
+
+    /// <summary>
+    /// The attribution that keeps the refusal honest, pinned on the PURE frontier the executor consults. An
+    /// all-deferred dependency clamp legitimately narrows a spawn to zero units — that is the server working, not a
+    /// malformed decision, and telling the model it "named no subtaskIds" there would send it to fix a defect it did
+    /// not commit. A FLAT plan has nothing to defer, so an empty spawn under one can only be the model's own.
+    /// </summary>
+    [Fact]
+    public void A_flat_plan_blocks_nothing_so_an_empty_spawn_under_it_can_only_be_the_models_own()
+    {
+        var flat = ContextWithPlan(("a", null), ("b", null));
+
+        SupervisorDependencyGate.Frontier(flat).Blocked.ShouldBeEmpty("no dependency edges ⇒ the clamp can never have emptied this spawn ⇒ an empty one is malformed");
+    }
+
+    [Fact]
+    public void A_plan_whose_units_wait_on_an_unsatisfied_dependency_DOES_block_so_an_empty_spawn_is_not_accused()
+    {
+        var withEdge = ContextWithPlan(("a", null), ("b", new[] { "a" }));
+
+        SupervisorDependencyGate.Frontier(withEdge).Blocked.Select(x => x.Id).ShouldContain("b",
+            "'b' waits on an unrun 'a' — the clamp CAN empty this spawn, so the executor must not call it malformed");
+    }
+
+    private static SupervisorTurnContext ContextWithPlan(params (string Id, string[]? DependsOn)[] subtasks)
+    {
+        var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
+        {
+            Goal = "g",
+            Subtasks = subtasks.Select(x => new SupervisorPlannedSubtask { Id = x.Id, Title = x.Id, Instruction = "do", DependsOn = x.DependsOn }).ToList(),
+        }, AgentJson.Options);
+
+        return new SupervisorTurnContext
+        {
+            Goal = "g",
+            SupervisorRunId = Guid.NewGuid(),
+            TeamId = Guid.NewGuid(),
+            NodeId = "sup",
+            TurnNumber = 1,
+            PriorDecisions = new[]
+            {
+                new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = "{}" },
+            },
+        };
+    }
+
     // ── DependencyStagingNoOpReason: every silent gate names itself ─────────────────────
 
     /// <summary>

@@ -27,6 +27,25 @@ public sealed partial class RealSupervisorActionExecutor
         var spawn = Deserialize<SupervisorSpawnPayload>(decision.PayloadJson) ?? new SupervisorSpawnPayload();
         var subtasks = ResolvePlannedSubtasks(context);
 
+        // A spawn that names NO unit is a malformed decision, and must be refused the way its retry twin already is
+        // (BuildRejectedRetryOutcome) rather than accepted as a no-op. The decision schema requires only `kind`, so
+        // `{"kind":"spawn"}` with no spawn object at all is schema-VALID; the projector then substitutes an empty
+        // payload and this staged nothing while telling the model nothing. Observed dominating the decision-eval
+        // lane: every scenario looping plan→spawn×7 into the turn cap, every spawn staging nothing.
+        //
+        // NOT applied to a spawn the SERVER emptied: the dependency clamp legitimately narrows an all-deferred
+        // fan-out to zero, and calling that a malformed decision would tell the model to fix a defect it did not
+        // commit. The two are byte-identical at subtaskIds:[], so attribution comes from the CONTEXT rather than the
+        // payload — a plan with nothing blocked cannot have been clamped. Deliberately conservative: when the
+        // frontier DOES hold blocked units the spawn is accepted as today, because a false accusation is the worse
+        // error. (Attributing via a payload stamp was tried and abandoned: the clamp's bytes feed a replay's
+        // idempotency key, and its byte-exactness is pinned by SupervisorSpawnClampTests.)
+        if (spawn.SubtaskIds.Count == 0 && SupervisorDependencyGate.Frontier(context).Blocked.Count == 0)
+        {
+            _logger.LogWarning("Supervisor REJECTED the spawn at turn {Turn} on node {NodeId} — the decision named no subtaskIds", context.TurnNumber, context.NodeId);
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildRejectedSpawnOutcome(), AgentJson.Options));
+        }
+
         // H2 (strict action identity): when a plan EXISTS, every spawned id must be one of ITS units — an unknown
         // id used to silently fall through BuildAgentTask's instruction chain all the way to the WHOLE GOAL (a
         // ghost agent re-running the entire task under a typo'd or stale-plan id, its results keyed to a unit the
@@ -146,6 +165,20 @@ public sealed partial class RealSupervisorActionExecutor
     /// no-progress watchdog already counts this turn's empty <c>agentResults</c> as a stall tick; this only makes
     /// the reason legible to the decider on ITS next turn.
     /// </summary>
+    /// <summary>
+    /// The rejection outcome for a spawn that named NO unit — the twin of <see cref="BuildRejectedRetryOutcome"/>,
+    /// in the same <c>{verb: "rejected", reason}</c> shape the decider's correction block renders. Reached when the
+    /// model emits <c>kind: "spawn"</c> without a spawn payload (schema-valid: only <c>kind</c> is required) or with
+    /// an empty <c>subtaskIds</c>, and NOT when the dependency clamp emptied it.
+    /// </summary>
+    internal static object BuildRejectedSpawnOutcome() => new
+    {
+        agentRunIds = Array.Empty<Guid>(),
+        agentCount = 0,
+        spawn = "rejected",
+        reason = "the spawn decision named no subtaskIds — a spawn must name the plan-local subtask id(s) to fan out",
+    };
+
     internal static object BuildRejectedRetryOutcome() => new
     {
         retry = "rejected",
