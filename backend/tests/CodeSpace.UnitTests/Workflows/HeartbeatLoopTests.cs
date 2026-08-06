@@ -23,37 +23,32 @@ public class HeartbeatLoopTests
     {
         var time = new FakeTimeProvider();
         var interval = TimeSpan.FromSeconds(30);
+        var pinged = new SemaphoreSlim(0);
         var count = 0;
         using var cts = new CancellationTokenSource();
 
         var loop = HeartbeatLoop.RunAsync(
-            _ => { Interlocked.Increment(ref count); return Task.CompletedTask; },
+            _ => { Interlocked.Increment(ref count); pinged.Release(); return Task.CompletedTask; },
             interval,
             _ => { },
             cts.Token,
             time);
 
-        count.ShouldBe(0, "the first ping is deferred by one interval — the claim already stamped an initial heartbeat");
+        Volatile.Read(ref count).ShouldBe(0, "the first ping is deferred by one interval — the claim already stamped an initial heartbeat");
 
         for (var i = 1; i <= 3; i++)
         {
-            await AdvanceAsync(time, interval);
-            count.ShouldBe(i, $"exactly one ping per elapsed interval — after {i} interval(s) there must be {i}, not 'at least' {i}");
+            time.Advance(interval);
+
+            (await pinged.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBeTrue($"ping {i} never arrived after advancing the clock a full interval");
+            Volatile.Read(ref count).ShouldBe(i, $"exactly one ping per elapsed interval — after {i} interval(s) there must be {i}, not 'at least' {i}");
         }
 
         cts.Cancel();
         await loop;   // returns cleanly on cancel — must not throw
 
-        await AdvanceAsync(time, interval);
-        count.ShouldBe(3, "a cancelled loop pings no more, however much time passes");
-    }
-
-    /// <summary>Advance the fake clock, then yield until the loop's continuation has actually run — advancing only releases the delay, it does not schedule the awaiter.</summary>
-    private static async Task AdvanceAsync(FakeTimeProvider time, TimeSpan by)
-    {
-        time.Advance(by);
-
-        for (var i = 0; i < 50; i++) await Task.Yield();
+        time.Advance(interval);
+        (await pinged.WaitAsync(TimeSpan.FromMilliseconds(200))).ShouldBeFalse("a cancelled loop pings no more, however much time passes");
     }
 
     [Fact]
