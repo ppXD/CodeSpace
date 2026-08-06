@@ -1,6 +1,6 @@
 # CodeSpace WORKER image — THE LOCAL SANDBOX RUNNER.
 #
-# This is the Hangfire PROCESSING pod (deploy with CODESPACE_HANGFIRE_PROCESSING_ENABLED unset / true): agent runs
+# This is the Hangfire PROCESSING pod (deploy with HangfireHosting=Worker, also the default): agent runs
 # and the per-run MCP endpoint execute HERE, and the harness CLI (claude / codex) is spawned as a CONFINED child
 # process by LocalProcessRunner. It is a SEPARATE image from the public API (backend/Dockerfile.api) precisely
 # because it carries the agent-execution + isolation dependencies the internet-facing API must NOT:
