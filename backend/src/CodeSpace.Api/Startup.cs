@@ -3,10 +3,8 @@ using CodeSpace.Api.Extensions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
-using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
@@ -94,13 +92,11 @@ public class Startup
         // generation, no connection-lifetime tuning, no transient resilience. Register the hardened, resilient named
         // clients (generous tunable budget + SocketsHttpHandler + retry/Retry-After) — shared with the resilience test.
         services.AddLlmHttpClients();
-        // Background janitor that sweeps expired oauth_pending_state rows every 5 minutes.
-        // ConsumeAsync drops a row on successful flow, but abandoned flows (user closed tab)
-        // would accumulate without this.
-        services.AddHostedService<OAuthStateCleanupHostedService>();
-        // Loud warning whenever a user still has the bootstrap password flag set — operators
-        // running with the committed default credentials see this every 30 minutes.
-        services.AddHostedService<UnrotatedBootstrapPasswordWarningHostedService>();
+        // Periodic background work is uniformly IRecurringJob (Rule 14) — there is deliberately no AddHostedService
+        // here. A hosted service runs its own timer on EVERY pod including the public API, outside the mediator
+        // pipeline and invisible to the dashboard; a recurring job runs only where a Hangfire server does (the Worker
+        // role), gets UnitOfWork/logging middleware, and is inspectable + manually triggerable. The OAuth-state
+        // janitor and the unrotated-bootstrap-password auditor both live in Jobs/RecurringJobs now.
         // Hangfire wiring. Storage (Postgres, own schema) + worker pool. The dashboard +
         // recurring-job registration happen in Configure() below via UseCodeSpaceHangfire
         // because RecurringJob.AddOrUpdate needs a live IServiceProvider.
