@@ -64,7 +64,6 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     private const string Provider = "Anthropic";   // the blessed brain wire (RealModelGate gates it)
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _integrateBefore;
 
     public RealModelSupervisorWholeLoopE2ETests(PostgresFixture fixture)
     {

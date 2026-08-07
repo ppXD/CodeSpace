@@ -56,7 +56,6 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
     private const string NodeId = "sup";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _integrateBefore;
 
     public SupervisorWholeLoopE2ETests(PostgresFixture fixture)
     {

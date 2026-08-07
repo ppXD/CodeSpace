@@ -16,7 +16,6 @@ namespace CodeSpace.UnitTests.Workflows;
 public sealed class LocalFileArtifactBlobBackendTests : IDisposable
 {
     private readonly string _root;
-    private readonly string? _originalEnv;
 
     public LocalFileArtifactBlobBackendTests()
     {

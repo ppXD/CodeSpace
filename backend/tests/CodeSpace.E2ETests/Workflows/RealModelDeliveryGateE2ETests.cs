@@ -62,7 +62,6 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
 
     private readonly PostgresFixture _fixture;
 
-    private readonly string? _integrateBefore;
 
     public RealModelDeliveryGateE2ETests(PostgresFixture fixture)
     {

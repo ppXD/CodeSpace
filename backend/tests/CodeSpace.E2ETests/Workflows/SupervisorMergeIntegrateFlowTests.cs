@@ -47,7 +47,6 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
     private const string Goal = "ship the feature";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorMergeIntegrateFlowTests(PostgresFixture fixture)
     {

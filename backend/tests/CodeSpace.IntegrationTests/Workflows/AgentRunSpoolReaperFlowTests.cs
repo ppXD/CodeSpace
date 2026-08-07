@@ -24,7 +24,6 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _originalSpoolRoot;
     private readonly string _spoolRoot;
 
     public AgentRunSpoolReaperFlowTests(PostgresFixture fixture)
