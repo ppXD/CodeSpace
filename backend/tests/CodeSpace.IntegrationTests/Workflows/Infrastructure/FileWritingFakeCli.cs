@@ -1,9 +1,11 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 /// <summary>
-/// A fake Codex CLI that ACTUALLY EDITS A FILE in its workspace before emitting the done event — the piece the
+/// A fake agent CLI — serving BOTH registered harnesses — that ACTUALLY EDITS A FILE in its workspace before
+/// emitting the done event — the piece the
 /// whole-loop supervisor E2E needs that <see cref="SubtaskAwareFakeCli"/> (stdout-only) can't give. The REAL
 /// <c>AgentRunExecutor</c> runs this through the REAL <c>LocalProcessRunner</c> with the process cwd set to the
 /// agent's cloned workspace (<c>SandboxSpec.WorkingDirectory</c>), so a file this script writes lands in the clone
@@ -33,26 +35,31 @@ public sealed class FileWritingFakeCli : IDisposable
     public const string FilePrefix = "agent_";
 
     private readonly string _originalCommand;
+    private readonly string _originalClaudeCommand;
     private readonly string _dir;
 
     /// <summary>
     /// The harness kinds this fake actually arms — the single source of truth an evaluator checks the run against
-    /// (RealModelGate.ClassifyHarnessControl). Codex ONLY: an agent the brain dispatches onto claude-code runs the
-    /// REAL claude CLI, which this fake never touches, so every "the deterministic fake did X" premise is void for it.
+    /// (RealModelGate.ClassifyHarnessControl). BOTH: which harness a live-brain run dispatches is the MODEL's
+    /// choice, and an Anthropic-defaulted team pool reconciles to claude-code on its own (HarnessModelReconciler) —
+    /// a codex-only stub left those agents running the REAL claude CLI, and the whole-loop arm red honestly as
+    /// "lost control" the moment #1299's classifier landed (run 31170717869).
     /// </summary>
-    public static readonly IReadOnlyList<string> StubbedHarnessKinds = new[] { "codex-cli" };
+    public static readonly IReadOnlyList<string> StubbedHarnessKinds = new[] { "codex-cli", "claude-code" };
 
     public FileWritingFakeCli()
     {
         _dir = Path.Combine(Path.GetTempPath(), "cs-filewriting-fakecli-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
 
-        var script = Path.Combine(_dir, "fake-codex.sh");
+        var script = Path.Combine(_dir, "fake-agent.sh");
         File.WriteAllText(script, ScriptBody);
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         _originalCommand = Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar) ?? "";
+        _originalClaudeCommand = Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar) ?? "";
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, script);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
     }
 
     /// <summary>The deterministic summary the executor's BuildResult folds for a given branch goal.</summary>
@@ -68,24 +75,37 @@ public sealed class FileWritingFakeCli : IDisposable
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, _originalCommand.Length == 0 ? null : _originalCommand);
+        Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, _originalClaudeCommand.Length == 0 ? null : _originalClaudeCommand);
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
     /// <summary>
-    /// Walk the positional args so <c>$goal</c> ends as the LAST one (Codex puts the prompt last), derive a
+    /// Walk the positional args so <c>$goal</c> ends as the LAST one (BOTH harnesses put the prompt last —
+    /// <c>CodexHarness.BuildInvocation</c> and <c>ClaudeCodeHarness.BuildInvocation</c> alike), derive a
     /// filesystem-safe filename from it (non-alphanumerics → <c>_</c>), WRITE that file into the cwd (the workspace
-    /// clone), then print the three-line codex-shaped JSONL stream whose final assistant message is
-    /// <c>"DONE: &lt;goal&gt;"</c>.
+    /// clone) — the WORK half is dialect-free. Only the STREAM half branches, on the one discriminator that is a
+    /// property of the invocation: Codex's argv always starts with <c>exec</c>, Claude's with <c>--print</c>. The
+    /// codex branch is BYTE-IDENTICAL to the pre-dual-stub script, so every codex consumer (incl. the Rule-12.5
+    /// drift pins) is unperturbed. The claude <c>result</c> line's <c>result</c> property carries the SAME
+    /// <c>"DONE: &lt;goal&gt;"</c> as the codex <c>agent_message</c> — Claude folds <c>FinalSummary ?? Completed ??
+    /// AssistantMessage</c> while Codex SKIPS Completed, so echoing the summary there (never a literal "completed")
+    /// is what keeps the two dialects folding the same Summary the whole-loop assertions read
+    /// (<see cref="ExpectedSummaryFor"/>). Pinned parse-level by the drift tests.
     /// </summary>
-    private static string ScriptBody =>
+    internal static string ScriptBody =>
         "#!/bin/sh\n" +
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_')\n" +
         "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\"\n" +
-        "printf '{\"type\":\"agent_reasoning\",\"message\":\"Editing for: %s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
-        "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "if [ \"$1\" = 'exec' ]; then\n" +
+        "  printf '{\"type\":\"agent_reasoning\",\"message\":\"Editing for: %s\"}\\n' \"$esc\"\n" +
+        "  printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
+        "  printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +
+        "else\n" +
+        "  printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"" + SummaryPrefix + "%s\"}]}}\\n' \"$esc\"\n" +
+        "  printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"" + SummaryPrefix + "%s\",\"is_error\":false}\\n' \"$esc\"\n" +
+        "fi\n" +
         "exit 0\n";
 }
