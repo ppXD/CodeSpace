@@ -22,12 +22,6 @@ public class AuthenticationExtensionTests
     }
 
     [Fact]
-    public void AllowAnonymousFallbackEnvVar_constant_pinned()
-    {
-        AuthenticationExtension.AllowAnonymousFallbackEnvVar.ShouldBe("CODESPACE_ALLOW_ANONYMOUS_FALLBACK");
-    }
-
-    [Fact]
     public void Short_jwt_key_throws_with_min_byte_length_in_message()
     {
         var services = new ServiceCollection();
@@ -41,52 +35,24 @@ public class AuthenticationExtensionTests
         ex.Message.ShouldContain("bytes");
     }
 
-    [Fact]
-    public void Missing_jwt_key_in_Production_throws()
+    /// <summary>
+    /// A missing key is fatal in EVERY environment, not just Production. The env escape hatch that used to let a
+    /// Development host boot fully anonymous is gone — appsettings.json ships a committed dev key, so the only way to
+    /// reach this path is to deliberately blank it, and that should be loud rather than a silent slide into no auth.
+    /// </summary>
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Development")]
+    public void Missing_jwt_key_throws_in_every_environment(string environmentName)
     {
         var services = new ServiceCollection();
         var configuration = BuildConfiguration(jwtKey: null);
-        var environment = BuildEnvironment(Environments.Production);
+        var environment = BuildEnvironment(environmentName);
 
         var act = () => services.AddCustomAuthentication(configuration, environment);
 
         var ex = act.ShouldThrow<InvalidOperationException>();
-        ex.Message.ShouldContain("Production");
-    }
-
-    [Fact]
-    public void Missing_jwt_key_in_Development_without_explicit_opt_in_throws()
-    {
-        ClearAllowAnonymousFallback();
-
-        var services = new ServiceCollection();
-        var configuration = BuildConfiguration(jwtKey: null);
-        var environment = BuildEnvironment(Environments.Development);
-
-        var act = () => services.AddCustomAuthentication(configuration, environment);
-
-        var ex = act.ShouldThrow<InvalidOperationException>();
-        ex.Message.ShouldContain(AuthenticationExtension.AllowAnonymousFallbackEnvVar);
-    }
-
-    [Fact]
-    public void Missing_jwt_key_in_Development_with_opt_in_returns_silently()
-    {
-        Environment.SetEnvironmentVariable(AuthenticationExtension.AllowAnonymousFallbackEnvVar, "true");
-        try
-        {
-            var services = new ServiceCollection();
-            var configuration = BuildConfiguration(jwtKey: null);
-            var environment = BuildEnvironment(Environments.Development);
-
-            // Should NOT throw — operator explicitly accepted anonymous fallback.
-            Action act = () => services.AddCustomAuthentication(configuration, environment);
-            act.ShouldNotThrow();
-        }
-        finally
-        {
-            ClearAllowAnonymousFallback();
-        }
+        ex.Message.ShouldContain("Authentication:Jwt:SymmetricKey", Case.Sensitive, "the message must name the key an operator has to set");
     }
 
     [Fact]
@@ -107,8 +73,6 @@ public class AuthenticationExtensionTests
     }
 
     private static IHostEnvironment BuildEnvironment(string environmentName) => new FakeHostEnvironment { EnvironmentName = environmentName };
-
-    private static void ClearAllowAnonymousFallback() => Environment.SetEnvironmentVariable(AuthenticationExtension.AllowAnonymousFallbackEnvVar, null);
 
     private sealed class FakeHostEnvironment : IHostEnvironment
     {

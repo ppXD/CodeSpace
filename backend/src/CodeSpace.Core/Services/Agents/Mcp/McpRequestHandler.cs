@@ -45,12 +45,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     public const string ServerVersion = "0.1.0";
 
     /// <summary>
-    /// Env flag that opts a run into tool governance (the ToolCallLedger: exactly-once + audit for side-effecting
-    /// tools). Default-OFF, opt-in ("1"/"true"/"TRUE" only — mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/>):
-    /// flag-OFF writes NO ledger rows and the handler is byte-identical to its pre-governance behavior. Rule 8: pinned
-    /// by a unit test, read in production only through <see cref="IsGovernanceEnabled"/>.
+    /// Whether side-effecting tool calls route through governance — the ToolCallLedger's exactly-once record plus the
+    /// durable human-approval surface. Committed here rather than read from the environment, and ON, which is the
+    /// posture the worker deployment already ran: the full tool catalog is served by default
+    /// (<see cref="AgentRunExecutor.FullToolCatalogByDefault"/>), and serving it ungoverned is a combination no
+    /// deployment ever chose. Read-only tools never reach this path at all. Changing it is a one-line reviewed edit.
     /// </summary>
-    public const string GovernanceEnabledEnvVar = "CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED";
+    public const bool GovernanceEnabled = true;
 
     /// <summary>
     /// Env override for how long a side-effecting tool call BLOCKS awaiting a human approval before it returns the
@@ -119,14 +120,6 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var raw = Environment.GetEnvironmentVariable(ApprovalBoundSecondsEnvVar)?.Trim();
 
         return int.TryParse(raw, out var seconds) && seconds > 0 ? seconds : DefaultApprovalBoundSeconds;
-    }
-
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/> exactly (Rule 8). Production reads governance opt-in through this single gate.</summary>
-    public static bool IsGovernanceEnabled()
-    {
-        var raw = Environment.GetEnvironmentVariable(GovernanceEnabledEnvVar)?.Trim();
-
-        return raw is "1" or "true" or "TRUE";
     }
 
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)

@@ -87,12 +87,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     public const string IntegrateBranchEnabledEnvVar = "CODESPACE_AGENT_INTEGRATE_BRANCH_ENABLED";
 
     /// <summary>
-    /// Operators opt INTO the in-process MCP endpoint (the run-scoped tool-fabric server a CLI harness can later
-    /// reach) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything else → no
-    /// endpoint is minted, so the run is byte-identical to today). Pinned by a test (Rule 8) — renaming it silently
-    /// turns the feature off for an operator who enabled it.
+    /// Whether a run whose task expresses no preference gets the FULL tool catalog (the side-effecting fabric) rather
+    /// than the read-only slice. Committed here rather than read from the environment: this is the posture the only
+    /// deployment that exists already ran, and a security posture that changes with an unreviewed environment variable
+    /// is exactly what this codebase does not keep. Changing it is a one-line edit in a reviewed PR.
     /// </summary>
-    public const string McpEndpointEnabledEnvVar = "CODESPACE_AGENT_MCP_ENDPOINT_ENABLED";
+    internal const bool FullToolCatalogByDefault = true;
 
     private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
 
@@ -1418,8 +1418,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private static AgentRunResult AcceptanceFailed(AgentRunResult result, string? detail) => AgentAcceptanceContract.FailClosed(result, detail);
 
     /// <summary>
-    /// Review the agent's produced change with an INDEPENDENT critic at completion. Doubly-off ⇒ byte-identical
-    /// (no per-run <c>OutputReviewMode</c> baked, OR the shared <see cref="CriticToggle"/> kill-switch is off). Self-skips
+    /// Review the agent's produced change with an INDEPENDENT critic at completion. Off ⇒ byte-identical
+    /// (no per-run <c>OutputReviewMode</c> baked). Self-skips
     /// when there's nothing to gate — a non-success, or a no-op / re-attach run with no captured diff. A DISAPPROVED change
     /// re-grades the would-be <see cref="AgentRunStatus.Succeeded"/> run to <see cref="AgentRunStatus.NeedsReview"/>
     /// (<see cref="CompletionDisposition.NeedsReview"/>) so a human looks before the downstream PR-open (Succeeded-gated)
@@ -1429,7 +1429,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
-        if (task.OutputReviewMode == ReviewMode.None || !CriticToggle.Enabled) return result;
+        if (task.OutputReviewMode == ReviewMode.None) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
 
@@ -1589,22 +1589,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal static bool ShouldIntegrate(bool perRunOptIn) => IsIntegrateEnabled() || perRunOptIn;
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
-    internal static bool IsMcpEndpointEnabled()
-    {
-        var raw = Environment.GetEnvironmentVariable(McpEndpointEnabledEnvVar)?.Trim();
-
-        return raw is "1" or "true" or "TRUE";
-    }
-
     /// <summary>
-    /// The single per-run gate deciding whether the MCP endpoint opens for THIS run: the deployment-wide env flag
-    /// (<see cref="IsMcpEndpointEnabled"/>) OR the task's explicit per-run opt-in (<see cref="AgentTask.EnableMcpEndpoint"/>).
-    /// Fail-open toward the operator: a per-run opt-in can turn the fabric ON for one run without flipping the ambient
-    /// flag, but cannot turn it OFF when the operator enabled it deployment-wide. Pure + internal so it's unit-pinned and
-    /// the benchmark runner can read the SAME gate to record what the executor actually did (no mislabeled rows).
+    /// The single gate deciding whether THIS run is served the full side-effecting tool fabric: the task's explicit
+    /// per-run choice, or <see cref="FullToolCatalogByDefault"/> when it expresses none. The per-run field now narrows
+    /// as well as widens — <c>false</c> holds a run to the read-only slice, which the benchmark's CLI-only arm needs
+    /// now that the ambient default is on. Pure + internal so it's unit-pinned and the benchmark runner can read the
+    /// SAME gate to record what the executor actually did (no mislabeled rows).
     /// </summary>
-    internal static bool ShouldOpenMcpEndpoint(AgentTask task) => IsMcpEndpointEnabled() || task.EnableMcpEndpoint == true;
+    internal static bool ShouldOpenMcpEndpoint(AgentTask task) => task.EnableMcpEndpoint ?? FullToolCatalogByDefault;
 
     /// <summary>
     /// Which slice of the tool catalog this run's endpoint serves. The endpoint now opens for EVERY run; this is the
@@ -1623,7 +1615,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// when it can't be resolved at <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, log a clear Warning naming the
     /// resolved path + the override env var (every run will degrade to TOOL-LESS); otherwise log a confirming
     /// Information line that also notes whether the full side-effecting fabric is enabled deployment-wide
-    /// (<see cref="IsMcpEndpointEnabled"/>). Pure logging — never throws, never fails boot (the fabric is optional infra).
+    /// (<see cref="FullToolCatalogByDefault"/>). Pure logging — never throws, never fails boot (the fabric is optional infra).
     /// The per-run <see cref="BuildMcpWiring"/> ALSO fail-closes + logs per run; this is the proactive deploy-time half of
     /// the same fail-closed signal. Internal + static so it's unit-pinnable without a host.
     /// </summary>
@@ -1633,7 +1625,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (File.Exists(proxyPath))
         {
-            logger.LogInformation("MCP tool fabric ready; codespace-mcp proxy resolved at '{ProxyPath}'. Read-only tools (get_context + git reads) serve by default; the full side-effecting fabric is {FabricState}.", proxyPath, IsMcpEndpointEnabled() ? "ENABLED deployment-wide" : "opt-in per run");
+            logger.LogInformation("MCP tool fabric ready; codespace-mcp proxy resolved at '{ProxyPath}'. Read-only tools (get_context + git reads) serve by default; the full side-effecting fabric is {FabricState}.", proxyPath, FullToolCatalogByDefault ? "ENABLED by default" : "opt-in per run");
             return;
         }
 
@@ -1666,9 +1658,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
         var connects = scope.ServiceProvider.GetRequiredService<IAgentMcpConnectRegistry>();
 
-        // The governance flag is read ONCE here (Rule 8 single gate); the endpoint threads it + the run's fence epoch
-        // into each connection's handler so a side-effecting tool call is ledger-tracked. Flag-OFF → no ledger rows.
-        var governanceEnabled = McpRequestHandler.IsGovernanceEnabled();
+        // Governance is a committed constant; the endpoint threads it + the run's fence epoch into each connection's
+        // handler so a side-effecting tool call is ledger-tracked.
+        var governanceEnabled = McpRequestHandler.GovernanceEnabled;
 
         // The catalog mode is the ONLY thing the opt-in changes now: the endpoint ALWAYS opens, serving the read-only
         // tools by default and the whole fabric only when the run opted in.

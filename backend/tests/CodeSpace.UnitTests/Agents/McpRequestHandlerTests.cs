@@ -724,11 +724,11 @@ public class McpRequestHandlerTests
     // ── tool governance (the ToolCallLedger wiring) ───────────────────────────
 
     [Fact]
-    public void Governance_flag_env_var_literal_is_pinned()
+    public void Governance_is_on_by_default()
     {
-        // Renaming this silently turns governance off for an operator who enabled it via env (Rule 8). A bump must be
-        // a deliberate, visible decision.
-        McpRequestHandler.GovernanceEnabledEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED");
+        // The full side-effecting catalog is served by default, and serving it UNGOVERNED — no exactly-once ledger, no
+        // approval surface — is a combination no deployment ever chose. Flipping this must be a visible decision.
+        McpRequestHandler.GovernanceEnabled.ShouldBeTrue();
     }
 
     [Fact]

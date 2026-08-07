@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// BAKED into the immutable run snapshot (unlike the synchronous planner critic), so every turn + every replay reads the
 /// same critic config — durability comes for free from the existing config-bake.
 ///
-/// <para>DOUBLY-OFF by default (per-run <see cref="ReviewMode.None"/> + the shared <see cref="CriticToggle"/> kill-switch),
+/// <para>OFF by default (per-run <see cref="ReviewMode.None"/>),
 /// so an unconfigured supervisor run is byte-identical — the decorator is a pure passthrough. FAILS OPEN: a failed review
 /// returns the original decision, so review is never worse than no review. GATE is HARD (S8): a disapproved decision
 /// does not execute — one bounded re-decide against the evidence-attached critique, a second independent review, and a
@@ -43,11 +43,11 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
 
         // The applicable mode: a PLAN decision prefers the plan-scoped critic (the tier-generic "plan critic",
         // S4e) so the operator can critique plans without paying a review on every spawn/merge/stop; everything
-        // else — and plans when no plan critic is set — rides the all-step decision critic. Doubly-off ⇒
-        // byte-identical (no per-run review baked, OR the operator killed the critic globally).
+        // else — and plans when no plan critic is set — rides the all-step decision critic. Off ⇒
+        // byte-identical (no per-run review baked).
         var mode = ReviewModeFor(context, decision);
 
-        if (mode == ReviewMode.None || !CriticToggle.Enabled) return decision;
+        if (mode == ReviewMode.None) return decision;
 
         // P1d checks-before-critics: a structurally-invalid PLAN (a dangling DependsOn or a cycle) is force-stopped by
         // the free Tier-0 SupervisorPlanValidator in the post-decision gate no matter what a critic rules, so paying up

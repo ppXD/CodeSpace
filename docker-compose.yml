@@ -104,11 +104,9 @@ services:
       # Both pods share ONE key-ring and ONE token signer, so these MUST match the api service's values above.
       CODESPACE_VARIABLE_MASTER_KEY: "${CODESPACE_VARIABLE_MASTER_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE=}"
       Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
-      # Open the per-run MCP endpoint for every agent run (the governed tool fabric the CLI harness reaches).
-      CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "${CODESPACE_AGENT_MCP_ENDPOINT_ENABLED:-true}"
-      # Route side-effecting tool calls through the exactly-once ledger + durable HITL approval (read-only tools
-      # are unaffected). Default-ON here so the governance closed-loop actually runs.
-      CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED: "${CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED:-true}"
+      # The full tool fabric and its governance used to be turned on here. Both are committed constants now
+      # (AgentRunExecutor.FullToolCatalogByDefault, McpRequestHandler.GovernanceEnabled) at exactly the values this
+      # file set, so every deployment gets the posture this one had rather than whatever its env happened to say.
       # The codespace-mcp proxy is published next to the API by the csproj target, so the default path resolves;
       # set this only to point at an air-gapped mirror or a custom location.
       CODESPACE_MCP_PROXY_PATH: "${CODESPACE_MCP_PROXY_PATH:-}"

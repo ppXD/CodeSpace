@@ -213,27 +213,24 @@ public class CodeSpaceModule : Autofac.Module
     ///   UNCONDITIONALLY: it touches neither the ledger nor the approval surface, so it has no governance dependency and
     ///   is useful in any run whose MCP endpoint is open (the endpoint gate is separate from governance). A run with no
     ///   session simply gets a clean "nothing to retrieve".</item>
-    ///   <item><see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2) — gated on tool
-    ///   governance: the decision flow needs the ledger + approval surface, which only exist when governance is on.
-    ///   Gating at REGISTRATION (not just at the handler) keeps a governance-OFF process byte-identical to pre-D2 — the
-    ///   tool is absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c>, so the catalog and <c>tools/list</c> never
-    ///   mention it. Read through the single <see cref="Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled"/>
-    ///   gate (Rule 8).</item>
+    ///   <item><see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2) — needs the ledger +
+    ///   approval surface, which exist whenever governance does. That used to be an environment flag read here, so the
+    ///   tool could be absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c> and missing from <c>tools/list</c>
+    ///   depending on a deployment variable; governance is now a committed constant
+    ///   (<see cref="Services.Agents.Mcp.McpRequestHandler.GovernanceEnabled"/>), so the catalog is the same
+    ///   everywhere.</item>
     /// </list>
     /// </summary>
     private void RegisterFirstPartyAgentTools(ContainerBuilder builder)
     {
         builder.RegisterType<Services.Agents.Tools.GetContextTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
-
-        if (!Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled()) return;
-
         builder.RegisterType<Services.Agents.Tools.DecisionRequestTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
     }
 
     /// <summary>
     /// Decorators wrap a convention-registered service AFTER <see cref="RegisterDependency"/> has registered the
     /// implementation. The critic planner decorator wraps <c>IWorkflowPlanner</c> with the generic adversarial-review
-    /// primitive — inert by default (per-request <c>ReviewMode.None</c> + the <c>CriticToggle</c> kill-switch), so an
+    /// primitive — inert by default (per-request <c>ReviewMode.None</c>), so an
     /// unconfigured plan is byte-identical to the bare planner.
     /// </summary>
     private static void RegisterDecorators(ContainerBuilder builder)

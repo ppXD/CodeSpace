@@ -149,7 +149,7 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
         using var workerCts = new CancellationTokenSource();
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
 
         try
         {
@@ -209,7 +209,7 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
         using var workerCts = new CancellationTokenSource();
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
 
         try
         {
@@ -247,7 +247,7 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
         using var workerCts = new CancellationTokenSource();
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
 
         try
         {
@@ -293,7 +293,7 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
         using var workerCts = new CancellationTokenSource();
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
 
         try
         {
@@ -437,14 +437,14 @@ public class AgentMcpEndpointFlowTests
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, enableMcp: false);
 
         using var connects = ConnectRegistryFromFixture();
 
-        // Full fabric OFF (the default): the endpoint opens in READ-ONLY mode for the harness span (proven serving in
+        // Full fabric OFF for THIS run: the endpoint opens in READ-ONLY mode for the harness span (proven serving in
         // A_full_fabric_off_run_opens_a_read_only_endpoint...), then disposes on exit like any endpoint — so AFTER a
         // quick run the seam no longer resolves the run and the socket is unlinked.
-        await ExecuteAsync(runId, new ScriptedHarness("printf 'done\\n'"), mcpEnabled: false);
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'done\\n'"));
 
         connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "the read-only endpoint is torn down on the harness's exit — the seam must not resolve a completed run");
         File.Exists(LocalProcessRunner.McpSocketPathFor(runId.ToString("N"))).ShouldBeFalse(customMessage: "dispose must unlink the per-run socket file");
@@ -462,12 +462,12 @@ public class AgentMcpEndpointFlowTests
         var teamId = await SeedTeamAsync();
         // Unleashed so a side-effecting tool WOULD be gate-Allowed in full mode — proving the read-only MODE (not the
         // autonomy gate) is what withholds it.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, enableMcp: false);
 
         using var connects = ConnectRegistryFromFixture();
-        // mcpEnabled:false → the full side-effecting fabric is OFF → the endpoint opens in read-only mode. A sleeping
+        // enableMcp:false → the full side-effecting fabric is OFF for this run → the endpoint opens read-only. A sleeping
         // harness keeps it open while we drive JSON-RPC over the real per-run socket.
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 6"), mcpEnabled: false));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 6")));
 
         var connect = await WaitForConnectAsync(connects, runId, run);
         await using var client = await McpClient.ConnectAsync(connect);
@@ -499,7 +499,7 @@ public class AgentMcpEndpointFlowTests
         // Endpoint flag ON + a declaring harness that requests a config home + the proxy binary present → the runner
         // writes the .mcp.json before the (quick) harness runs. After completion the spool persists (reaped by age, not
         // on completion), so we read it.
-        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), mcpEnabled: true);
+        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"));
 
         var declarationPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "agent-home", ".mcp.json");
         File.Exists(declarationPath).ShouldBeTrue(customMessage: "the endpoint flag ON + a declaring harness must write the MCP declaration into the per-run config-home");
@@ -532,7 +532,7 @@ public class AgentMcpEndpointFlowTests
         // Endpoint flag ON + a declaring harness, but the resolved proxy binary does NOT exist host-side (FIX 2 fail-
         // closed): the executor writes NO declaration (handing the agent a config pointing at a missing binary would
         // surface as a confusingly-broken MCP init), and the run still completes — MCP is optional infra.
-        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), mcpEnabled: true, proxyPresent: false);
+        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), proxyPresent: false);
 
         var declarationPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "agent-home", ".mcp.json");
         File.Exists(declarationPath).ShouldBeFalse(customMessage: "a missing proxy binary must fail closed — no declaration pointing at it");
@@ -565,7 +565,7 @@ public class AgentMcpEndpointFlowTests
             // Flag ON + a DECLARING harness (so a successful bind WOULD write a declaration), but the bind is doomed →
             // ExecuteAsync logs a Warning, proceeds WITHOUT the endpoint, writes NO declaration (the wiring is gated on a
             // non-null endpoint), and the quick harness still completes the run.
-            await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), mcpEnabled: true);
+            await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"));
 
             connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "a bind failure must register NO endpoint — the seam never resolves the run");
 
@@ -596,7 +596,7 @@ public class AgentMcpEndpointFlowTests
         // never WAITS this out (it cancels the re-attach the instant the token-survival assertions pass), so the duration
         // is bounded by the choreography, not the sleep. A short sleep would race the endpoint-opens and flake under load.
         using var workerCts = new CancellationTokenSource();
-        var firstRun = Task.Run(() => ExecuteAsync(runId, new DeclaringScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+        var firstRun = Task.Run(() => ExecuteAsync(runId, new DeclaringScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
 
         var firstConnect = await WaitForConnectAsync(connects, runId, firstRun);
         var persistedToken = firstConnect.Token;   // == the token minted + persisted on the handle (single source)
@@ -624,7 +624,7 @@ public class AgentMcpEndpointFlowTests
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
 
         using var reattachCts = new CancellationTokenSource();
-        var reattach = Task.Run(() => ReattachAsync(runId, new DeclaringScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: reattachCts.Token));
+        var reattach = Task.Run(() => ReattachAsync(runId, new DeclaringScriptedHarness("sleep 120"), cancellationToken: reattachCts.Token));
 
         var reConnect = await WaitForConnectAsync(connects, runId, reattach);
         reConnect.Token.ShouldBe(persistedToken, "the re-attach re-binds the SAME token the agent's declaration already holds — survived worker death via the persisted handle");
@@ -669,13 +669,13 @@ public class AgentMcpEndpointFlowTests
 
         var teamId = await SeedTeamAsync();
         // Unleashed so every tool (incl. the destructive ones) is tier-permitted → projected into the allow-list.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" });
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" }, enableMcp: false);
 
         var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
 
         // Endpoint flag ON + a declaring + tool-projecting harness + the proxy present → the wiring is written, so the
         // executor augments the harness allow-list with the governed mcp__codespace__* names before BuildInvocation.
-        await ExecuteAsync(runId, harness, mcpEnabled: true);
+        await ExecuteAsync(runId, harness);
 
         var tools = harness.CapturedTools.ShouldNotBeNull(customMessage: "the executor must have invoked BuildInvocation with a Tools list");
 
@@ -703,9 +703,9 @@ public class AgentMcpEndpointFlowTests
 
         var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
 
-        // Full fabric OFF (the default) + a declaring harness + the proxy present → the read-only endpoint opens and its
+        // Full fabric OFF for this run + a declaring harness + the proxy present → the read-only endpoint opens and its
         // allow-list augmentation merges ONLY the read-only codespace tools.
-        await ExecuteAsync(runId, harness, mcpEnabled: false);
+        await ExecuteAsync(runId, harness);
 
         var tools = harness.CapturedTools.ShouldNotBeNull(customMessage: "the executor must have invoked BuildInvocation with a Tools list");
 
@@ -730,7 +730,7 @@ public class AgentMcpEndpointFlowTests
 
         var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
 
-        await ExecuteAsync(runId, harness, mcpEnabled: true);
+        await ExecuteAsync(runId, harness);
 
         // No regression: a default-all run keeps a null/empty allow-list so the CLI default still reaches the MCP tools —
         // augmenting must NOT convert it into a restricted list of only the codespace tools.
@@ -758,7 +758,7 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
         // Endpoint AND governance ON → the side-effecting path routes through the exactly-once ToolCallLedger.
-        var run = RunExecutorInBackground(runId, new ScriptedHarness("sleep 6"), governanceEnabled: true);
+        var run = RunExecutorInBackground(runId, new ScriptedHarness("sleep 6"));
 
         var connect = await WaitForConnectAsync(connects, runId);
         await using var client = await McpClient.ConnectAsync(connect);
@@ -798,7 +798,7 @@ public class AgentMcpEndpointFlowTests
         // Endpoint + governance ON but the proxy binary is missing → fail-closed: no declaration is written (the CLI
         // would have no MCP server to reach), and the run still completes (the fabric is optional infra). The clear
         // per-run Warning is logged by BuildMcpWiring; the boot diagnostic (LogMcpProxyReadiness) is unit-pinned.
-        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), mcpEnabled: true, proxyPresent: false, governanceEnabled: true);
+        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), proxyPresent: false);
 
         var declarationPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "agent-home", ".mcp.json");
         File.Exists(declarationPath).ShouldBeFalse(customMessage: "a missing proxy binary must fail closed — no declaration pointing at it");
@@ -853,7 +853,7 @@ public class AgentMcpEndpointFlowTests
 
         // The REAL executor runs the fake agent through the GOVERNANCE-ON container (so the endpoint's DI registry holds
         // decision.request) with runtime governance ON (so the handler runs the decision loop) while the endpoint is open.
-        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness(fake.Script), mcpEnabled: true, governanceEnabled: true, useGovernanceContainer: true, cancellationToken: workerCts.Token));
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness(fake.Script), useGovernanceContainer: true, cancellationToken: workerCts.Token));
 
         try
         {
@@ -969,7 +969,7 @@ public class AgentMcpEndpointFlowTests
         return (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status;
     }
 
-    private Task RunExecutorInBackground(Guid runId, IAgentHarness harness, bool governanceEnabled = false) => Task.Run(() => ExecuteAsync(runId, harness, mcpEnabled: true, governanceEnabled: governanceEnabled));
+    private Task RunExecutorInBackground(Guid runId, IAgentHarness harness) => Task.Run(() => ExecuteAsync(runId, harness));
 
     /// <summary>
     /// Drive the REAL ExecuteAsync. The wiring is FOLDED into the single endpoint flag (FIX 4): when it's on AND the
@@ -978,17 +978,12 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, bool proxyPresent = true, bool governanceEnabled = false, bool useGovernanceContainer = false, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, CancellationToken cancellationToken = default)
     {
-        var previousEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
+        // The catalog choice rides the RUN now (CreateRunAsync's enableMcp) and governance is a committed constant, so
+        // the only environment this still drives is the proxy path — a genuine filesystem seam, not a feature flag.
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
-        var previousGovernance = Environment.GetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, mcpEnabled ? "true" : null);
-        // The endpoint now opens for EVERY run (read-only by default, full on mcpEnabled), so the proxy is wanted
-        // regardless of the full-fabric flag — drive its presence by proxyPresent alone, not by mcpEnabled.
         Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? StandInProxyPath() : "/nonexistent/codespace-mcp");
-        // The endpoint reads IsGovernanceEnabled() once at open, so the loop only runs E2E when this is set ON too.
-        Environment.SetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar, governanceEnabled ? "true" : null);
 
         try
         {
@@ -999,19 +994,15 @@ public class AgentMcpEndpointFlowTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, previousEndpoint);
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, previousProxy);
-            Environment.SetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar, previousGovernance);
         }
     }
 
     /// <summary>Drive a FRESH executor's ReattachAsync with the endpoint flag (+ proxy path) ON — the cross-worker-death re-open path.</summary>
-    private async Task ReattachAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, CancellationToken cancellationToken = default)
+    private async Task ReattachAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, CancellationToken cancellationToken = default)
     {
-        var previousEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, mcpEnabled ? "true" : null);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, mcpEnabled ? StandInProxyPath() : null);
+        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? StandInProxyPath() : null);
 
         try
         {
@@ -1020,7 +1011,6 @@ public class AgentMcpEndpointFlowTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, previousEndpoint);
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, previousProxy);
         }
     }
@@ -1061,7 +1051,7 @@ public class AgentMcpEndpointFlowTests
             await Task.Delay(50);
         }
 
-        throw new TimeoutException($"The MCP endpoint for run {runId} did not register within 15s — check that ExecuteAsync opened it before the harness (env {AgentRunExecutor.McpEndpointEnabledEnvVar}=true).");
+        throw new TimeoutException($"The MCP endpoint for run {runId} did not register within 15s — check that ExecuteAsync opened it before the harness.");
     }
 
     /// <summary>Wait until the run's durable handle has been persisted WITH the McpRunToken — production only re-attaches runs whose handle was written, so the test must not race the cancel ahead of SetRunnerHandleAsync (the endpoint registers earlier, in OpenMcpEndpointIfEnabledAsync).</summary>
@@ -1329,11 +1319,12 @@ public class AgentMcpEndpointFlowTests
 
     // ── Seeding (mirrors McpToolTeamScopeFlowTests + AgentRunExecutorTests) ──
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null)
+    /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set.</summary>
+    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools },
+            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools, EnableMcpEndpoint = enableMcp },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

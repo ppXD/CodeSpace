@@ -126,18 +126,6 @@ public class LlmStructuredCriticTests
         verdict.Rationale.ShouldNotBeNullOrWhiteSpace("a blank rationale degrades to a placeholder, never silent");
     }
 
-    [Theory]
-    [InlineData(null, true)]
-    [InlineData("", true)]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("garbage", true)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("  False  ", false)]
-    public void CriticToggle_defaults_on_and_is_off_only_for_an_explicit_disable(string? raw, bool expected)
-        => CriticToggle.IsEnabled(raw).ShouldBe(expected);
-
     [Fact]
     public void The_two_schemas_are_well_formed_objects()
     {

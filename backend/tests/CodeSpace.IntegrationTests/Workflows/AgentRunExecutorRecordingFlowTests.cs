@@ -36,53 +36,43 @@ public class AgentRunExecutorRecordingFlowTests
     [Fact]
     public async Task The_output_review_critic_records_a_correlated_interaction_pair_onto_the_workflow_run_ledger()
     {
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");   // open the critic gate regardless of ambient CI env
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-        try
+        // The reviewer model sits under a REGISTERED structured fake provider, so the critic resolves a client and
+        // makes a real (recording-decorator-wrapped) structured call — the call whose interaction we assert lands.
+        var (_, reviewerModelId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "reviewer-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var task = new AgentTask { Goal = "ship the widget", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerModelId };
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did it", ChangedFiles = new[] { "src/widget.cs" }, Patch = "diff --git a/src/widget.cs b/src/widget.cs\n+// change" };
+
+        using (var scope = _fixture.BeginScope())
         {
-            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            // A persisted agent run spawned by this workflow run's agent.run node — the (WorkflowRunId, NodeId) cell
+            // the interaction records key onto.
+            var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
 
-            // The reviewer model sits under a REGISTERED structured fake provider, so the critic resolves a client and
-            // makes a real (recording-decorator-wrapped) structured call — the call whose interaction we assert lands.
-            var (_, reviewerModelId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "reviewer-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
-
-            var workflowId = await CreateWorkflowAsync(teamId, userId);
-            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-
-            var task = new AgentTask { Goal = "ship the widget", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerModelId };
-            var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did it", ChangedFiles = new[] { "src/widget.cs" }, Patch = "diff --git a/src/widget.cs b/src/widget.cs\n+// change" };
-
-            using (var scope = _fixture.BeginScope())
-            {
-                // A persisted agent run spawned by this workflow run's agent.run node — the (WorkflowRunId, NodeId) cell
-                // the interaction records key onto.
-                var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
-
-                await BuildExecutor(scope).ReviewOutputIfEnabledAsync(task, result, agentRun, CancellationToken.None);
-            }
-
-            using var verify = _fixture.BeginScope();
-            var db = verify.Resolve<CodeSpaceDbContext>();
-
-            var interactions = await db.WorkflowRunRecord.AsNoTracking()
-                .Where(r => r.RunId == runId && r.NodeId == "agent-node" && (r.RecordType == WorkflowRunRecordTypes.InteractionStarted || r.RecordType == WorkflowRunRecordTypes.InteractionCompleted))
-                .OrderBy(r => r.Sequence)
-                .ToListAsync();
-
-            interactions.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted },
-                customMessage: "the executor pushes a scope around the critic so its model call — from a Hangfire job outside the engine's node scope — records a correlated pair on the run's ledger");
-            interactions[0].CorrelationId.ShouldNotBeNull();
-            interactions[0].CorrelationId.ShouldBe(interactions[1].CorrelationId, "the started+completed pair share one correlation id");
-
-            var started = JsonDocument.Parse(interactions[0].PayloadJson).RootElement;
-            started.GetProperty("kind").GetString().ShouldBe(LlmStructuredCritic.ReviewCallKind,
-                customMessage: "every critic call records under the critic's OWN kind (K/L2 — the journal's intent label); the executor's agent.critic push still provides the identity cell, its kind shadowed by the critic's re-label");
+            await BuildExecutor(scope).ReviewOutputIfEnabledAsync(task, result, agentRun, CancellationToken.None);
         }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var interactions = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.NodeId == "agent-node" && (r.RecordType == WorkflowRunRecordTypes.InteractionStarted || r.RecordType == WorkflowRunRecordTypes.InteractionCompleted))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        interactions.Select(r => r.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionCompleted },
+            customMessage: "the executor pushes a scope around the critic so its model call — from a Hangfire job outside the engine's node scope — records a correlated pair on the run's ledger");
+        interactions[0].CorrelationId.ShouldNotBeNull();
+        interactions[0].CorrelationId.ShouldBe(interactions[1].CorrelationId, "the started+completed pair share one correlation id");
+
+        var started = JsonDocument.Parse(interactions[0].PayloadJson).RootElement;
+        started.GetProperty("kind").GetString().ShouldBe(LlmStructuredCritic.ReviewCallKind,
+            customMessage: "every critic call records under the critic's OWN kind (K/L2 — the journal's intent label); the executor's agent.critic push still provides the identity cell, its kind shadowed by the critic's re-label");
     }
 
     // Construct the REAL executor with the review path's live collaborators resolved from the scope; the harness /

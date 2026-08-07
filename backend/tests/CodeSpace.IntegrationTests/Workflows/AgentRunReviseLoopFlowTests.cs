@@ -122,35 +122,26 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
-        {
-            var teamId = await SeedTeamAsync();
-            var reviewerRowId = await SeedCriticModelAsync(teamId);
-            ResetCriticScript();
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCriticModelAsync(teamId);
+        ResetCriticScript();
 
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-            // GATE mode: a flag would hard-halt to NeedsReview. The sound work draws only a MINOR nitpick, and the
-            // severity-authoritative projection APPROVES it (no blocker) — so the run stays Succeeded, unflagged.
-            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId });
+        // GATE mode: a flag would hard-halt to NeedsReview. The sound work draws only a MINOR nitpick, and the
+        // severity-authoritative projection APPROVES it (no blocker) — so the run stays Succeeded, unflagged.
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId });
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(first: NitpickScript, revised: RevisedScript));
+        await ExecuteAsync(runId, new ReviseAwareHarness(first: NitpickScript, revised: RevisedScript));
 
-            var (run, result) = await LoadAsync(runId);
+        var (run, result) = await LoadAsync(runId);
 
-            run.Status.ShouldBe(AgentRunStatus.Succeeded, "a Minor-only flag no longer halts the gate — the produced work is not blocked over a nitpick");
-            result.ReviseRounds.ShouldBe(0, "a Gate mode never revises; and a Minor flag never triggered one either");
-            result.ReviewFeedback.ShouldBeNull("an approved run carries no feedback");
-            CriticCalls().ShouldBe(1, "the critic was consulted exactly once and its minor-only verdict approved");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "a Minor-only flag no longer halts the gate — the produced work is not blocked over a nitpick");
+        result.ReviseRounds.ShouldBe(0, "a Gate mode never revises; and a Minor flag never triggered one either");
+        result.ReviewFeedback.ShouldBeNull("an approved run carries no feedback");
+        CriticCalls().ShouldBe(1, "the critic was consulted exactly once and its minor-only verdict approved");
     }
 
     [Fact]
@@ -159,39 +150,30 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
-        {
-            var teamId = await SeedTeamAsync();
-            var reviewerRowId = await SeedCriticModelAsync(teamId);
-            ResetCriticScript();
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCriticModelAsync(teamId);
+        ResetCriticScript();
 
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-            // Improve + no explicit budget → the executor's default ONE round (Improve MEANS improve).
-            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId });
+        // Improve + no explicit budget → the executor's default ONE round (Improve MEANS improve).
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId });
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: RevisedScript));
+        await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: RevisedScript));
 
-            var (run, result) = await LoadAsync(runId);
+        var (run, result) = await LoadAsync(runId);
 
-            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision removed the planted flaw — the SAME independent critic approved it");
-            result.ReviseRounds.ShouldBe(1);
-            result.AcceptancePassed.ShouldBe(true, "the structural floor also re-graded on the revised branch");
-            result.ReviewFeedback.ShouldBeNull("an approved final review carries no feedback — the flag was healed, not suppressed");
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision removed the planted flaw — the SAME independent critic approved it");
+        result.ReviseRounds.ShouldBe(1);
+        result.AcceptancePassed.ShouldBe(true, "the structural floor also re-graded on the revised branch");
+        result.ReviewFeedback.ShouldBeNull("an approved final review carries no feedback — the flag was healed, not suppressed");
 
-            CriticCalls().ShouldBe(2, "the critic billed exactly once per round — flag, then approve");
+        CriticCalls().ShouldBe(2, "the critic billed exactly once per round — flag, then approve");
 
-            var events = await LoadEventsAsync(runId);
-            events.Single(e => e.Contains("revising (round 1 of 1)")).ShouldContain(DeterministicCriticLlmClient.Critique, customMessage: "the CRITIQUE is what feeds back — the agent revises against the reviewer's words");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        var events = await LoadEventsAsync(runId);
+        events.Single(e => e.Contains("revising (round 1 of 1)")).ShouldContain(DeterministicCriticLlmClient.Critique, customMessage: "the CRITIQUE is what feeds back — the agent revises against the reviewer's words");
     }
 
     [Fact]
@@ -200,41 +182,32 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
-        {
-            var teamId = await SeedTeamAsync();
-            var reviewerRowId = await SeedCriticModelAsync(teamId);
-            ResetCriticScript();
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCriticModelAsync(teamId);
+        ResetCriticScript();
 
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 0\n");   // the structural floor passes — ONLY the critic gates
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-            // Budget 3, but the "revision" never removes the flaw (both scripts carry the reject marker) → the critic
-            // re-flags the IDENTICAL feedback. P1b-2: convergence recognises the unchanged re-flag and stops EARLY —
-            // rounds 2 and 3 are never billed — instead of silently exhausting the whole budget on an unmovable issue.
-            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 3 });
+        // Budget 3, but the "revision" never removes the flaw (both scripts carry the reject marker) → the critic
+        // re-flags the IDENTICAL feedback. P1b-2: convergence recognises the unchanged re-flag and stops EARLY —
+        // rounds 2 and 3 are never billed — instead of silently exhausting the whole budget on an unmovable issue.
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 3 });
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: DraftScript));
+        await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: DraftScript));
 
-            var (run, result) = await LoadAsync(runId);
+        var (run, result) = await LoadAsync(runId);
 
-            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the flaw persisted — the run is flagged for a human, never a silent pass");
-            result.ReviseRounds.ShouldBe(1, "convergence stopped after ONE round — the identical re-flag was not worth rounds 2 and 3");
-            result.ReviewFeedback.ShouldNotBeNull("the flag stands with the reviewer's feedback for the human");
+        run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the flaw persisted — the run is flagged for a human, never a silent pass");
+        result.ReviseRounds.ShouldBe(1, "convergence stopped after ONE round — the identical re-flag was not worth rounds 2 and 3");
+        result.ReviewFeedback.ShouldNotBeNull("the flag stands with the reviewer's feedback for the human");
 
-            CriticCalls().ShouldBe(2, "first review + round-1 review only — the stall stopped rounds 2 and 3 before they billed the critic");
+        CriticCalls().ShouldBe(2, "first review + round-1 review only — the stall stopped rounds 2 and 3 before they billed the critic");
 
-            var events = await LoadEventsAsync(runId);
-            events.ShouldContain(e => e.Contains(AgentRunExecutor.ReviseStalledPrefix), "the operator sees the loop gave up on an unmovable issue, not a silently-spent budget");
-            events.Count(e => e.Contains("revising (round")).ShouldBe(1, "exactly one revise round was announced before the stall");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        var events = await LoadEventsAsync(runId);
+        events.ShouldContain(e => e.Contains(AgentRunExecutor.ReviseStalledPrefix), "the operator sees the loop gave up on an unmovable issue, not a silently-spent budget");
+        events.Count(e => e.Contains("revising (round")).ShouldBe(1, "exactly one revise round was announced before the stall");
     }
 
     [Fact]
@@ -243,42 +216,33 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
-        {
-            var teamId = await SeedTeamAsync();
-            var reviewerRowId = await SeedCriticModelAsync(teamId);
-            ResetCriticScript();
+        var teamId = await SeedTeamAsync();
+        var reviewerRowId = await SeedCriticModelAsync(teamId);
+        ResetCriticScript();
 
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync(CheckScript);   // BOTH gates armed: the real check AND the critic
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);   // BOTH gates armed: the real check AND the critic
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-            // Budget 1: round 1 (draft) flunks the ORACLE; the one revision half-fixes — the check passes but the
-            // planted flaw remains — and the budget is spent, so the critic's flag STANDS.
-            var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 1 });
+        // Budget 1: round 1 (draft) flunks the ORACLE; the one revision half-fixes — the check passes but the
+        // planted flaw remains — and the budget is spent, so the critic's flag STANDS.
+        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 1 });
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: HalfFixScript));
+        await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: HalfFixScript));
 
-            var (run, result) = await LoadAsync(runId);
+        var (run, result) = await LoadAsync(runId);
 
-            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the budget is spent and the flaw remains — the flag stands for a human, never a silent pass");
-            result.ExitReason.ShouldBe("output-flagged");
-            result.AcceptancePassed.ShouldBe(true, "the oracle half IS fixed — the verdicts stay separately truthful");
-            result.ReviseRounds.ShouldBe(1);
-            result.ReviewFeedback.ShouldNotBeNull();
-            result.ReviewFeedback.ShouldContain(DeterministicCriticLlmClient.Critique);
+        run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the budget is spent and the flaw remains — the flag stands for a human, never a silent pass");
+        result.ExitReason.ShouldBe("output-flagged");
+        result.AcceptancePassed.ShouldBe(true, "the oracle half IS fixed — the verdicts stay separately truthful");
+        result.ReviseRounds.ShouldBe(1);
+        result.ReviewFeedback.ShouldNotBeNull();
+        result.ReviewFeedback.ShouldContain(DeterministicCriticLlmClient.Critique);
 
-            CriticCalls().ShouldBe(1, "round 1's FAILED oracle never billed a review (grade runs first); only the revised round reached the critic");
+        CriticCalls().ShouldBe(1, "round 1's FAILED oracle never billed a review (grade runs first); only the revised round reached the critic");
 
-            var events = await LoadEventsAsync(runId);
-            events.Single(e => e.Contains("revising")).ShouldContain("acceptance check failed", Case.Insensitive, "the round was bought by the ORACLE, not the critic — order proven");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        var events = await LoadEventsAsync(runId);
+        events.Single(e => e.Contains("revising")).ShouldContain("acceptance check failed", Case.Insensitive, "the round was bought by the ORACLE, not the critic — order proven");
     }
 
     // ─── Seeding ─────────────────────────────────────────────────────────────

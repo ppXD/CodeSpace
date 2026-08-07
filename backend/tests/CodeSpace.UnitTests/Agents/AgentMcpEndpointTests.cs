@@ -22,12 +22,12 @@ namespace CodeSpace.UnitTests.Agents;
 public class AgentMcpEndpointTests
 {
     [Fact]
-    public void Enabling_env_var_literal_is_pinned()
+    public void The_full_tool_catalog_is_the_committed_default()
     {
-        // Renaming this silently turns the feature off for an operator who enabled it via env (Rule 8). The wiring is
-        // FOLDED into this one flag: a non-null endpoint (this flag on + the bind succeeded) is the only gate for
-        // writing the declaration — there is no second wiring flag.
-        AgentRunExecutor.McpEndpointEnabledEnvVar.ShouldBe("CODESPACE_AGENT_MCP_ENDPOINT_ENABLED");
+        // The endpoint opens for every run; this decides whether it serves the whole fabric or only the read-only
+        // slice. It used to be an environment flag, so the tool surface an agent saw depended on a deployment
+        // variable. Committed now — a run narrows out of it explicitly via AgentTask.EnableMcpEndpoint.
+        AgentRunExecutor.FullToolCatalogByDefault.ShouldBeTrue();
     }
 
     [Fact]

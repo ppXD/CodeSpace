@@ -101,38 +101,29 @@ public sealed class GroundedPlanReviewFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
+        using var reviewerCli = new ReviewVerdictFakeCli();
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedAsync(("hack.txt", ReviewVerdictFakeCli.FlawMarker + "\n"));
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<CriticReviewScript>().Reset();
+        var decorator = new CriticPlannerDecorator(new FixedPlanner(), scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(), scope.Resolve<IAgentPlanReviewer>());
+
+        var plan = await decorator.PlanAsync(new WorkflowPlanRequest
         {
-            using var reviewerCli = new ReviewVerdictFakeCli();
+            TaskText = "ship the feature on a clean base",
+            TeamId = teamId,
+            Review = ReviewMode.Gate,
+            ReviewerAgent = true,
+            RepositoryId = repoId,
+        }, CancellationToken.None);
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedAsync(("hack.txt", ReviewVerdictFakeCli.FlawMarker + "\n"));
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
-
-            using var scope = _fixture.BeginScope();
-            scope.Resolve<CriticReviewScript>().Reset();
-            var decorator = new CriticPlannerDecorator(new FixedPlanner(), scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(), scope.Resolve<IAgentPlanReviewer>());
-
-            var plan = await decorator.PlanAsync(new WorkflowPlanRequest
-            {
-                TaskText = "ship the feature on a clean base",
-                TeamId = teamId,
-                Review = ReviewMode.Gate,
-                ReviewerAgent = true,
-                RepositoryId = repoId,
-            }, CancellationToken.None);
-
-            plan.Risks.ShouldContain(r => r.Contains("grep found"), "the grounded evidence from the REAL clone rides the plan the human confirms");
-            plan.Risks.ShouldContain(r => r.Contains("flagged concerns"), "the agent's verdict annotates exactly as a model verdict would");
-            scope.Resolve<CriticReviewScript>().Calls.ShouldBe(0, "the agent produced a verdict — the model critic was never billed");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        plan.Risks.ShouldContain(r => r.Contains("grep found"), "the grounded evidence from the REAL clone rides the plan the human confirms");
+        plan.Risks.ShouldContain(r => r.Contains("flagged concerns"), "the agent's verdict annotates exactly as a model verdict would");
+        scope.Resolve<CriticReviewScript>().Calls.ShouldBe(0, "the agent produced a verdict — the model critic was never billed");
     }
 
     // ─── plumbing (the S8 reviewer-flow test's proven fixtures) ──────────────

@@ -85,9 +85,11 @@ public class BenchmarkRunnerBuildTaskTests
         agentTask.Autonomy.ShouldBe(AgentAutonomyLevel.Standard, "null autonomy ⇒ the Standard default");
     }
 
+    // BOTH arms are explicit. The bare-cli arm used to leave this null and rely on the ambient env flag being off; the
+    // committed default is now ON, so null would give both arms the fabric and silently flatten the A/B into one arm.
     [Theory]
-    [InlineData(BenchmarkMode.HarnessCliWithMcp, true)]   // the mcp mode opts the run-scoped MCP endpoint in
-    [InlineData(BenchmarkMode.HarnessCli, null)]          // the bare cli mode leaves it unset (executor default)
+    [InlineData(BenchmarkMode.HarnessCliWithMcp, true)]   // the mcp mode opts the run-scoped MCP fabric in
+    [InlineData(BenchmarkMode.HarnessCli, false)]         // the bare cli mode opts OUT — read-only catalog only
     public void The_mode_sets_the_per_run_mcp_opt_in_independently_of_the_selection(BenchmarkMode mode, bool? expected)
     {
         var agentTask = BenchmarkRunner.BuildAgentTask(Task(), mode, Workspace, selection: null);

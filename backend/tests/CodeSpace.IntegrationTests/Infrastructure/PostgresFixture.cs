@@ -98,13 +98,9 @@ public sealed class PostgresFixture : IAsyncLifetime
         return _iocGovernanceOn.BeginLifetimeScope();
     }
 
-    private Autofac.IContainer BuildGovernanceOnContainer()
-    {
-        var prior = Environment.GetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar);
-        Environment.SetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar, "true");
-        try { return BuildIocContainer(ConnectionString); }
-        finally { Environment.SetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar, prior); }
-    }
+    // Governance is a committed constant now, so this no longer has to toggle an environment variable around the
+    // container build. Kept as its own container because governance-scoped tests want an isolated one.
+    private Autofac.IContainer BuildGovernanceOnContainer() => BuildIocContainer(ConnectionString);
 
     public async Task DisposeAsync()
     {

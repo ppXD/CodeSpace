@@ -14,7 +14,6 @@ namespace CodeSpace.UnitTests.Agents;
 /// advertised) and tools/call (a side-effecting name is refused before the gate). Full mode is byte-identical to before.
 /// </summary>
 [Trait("Category", "Unit")]
-[Collection("McpEndpointEnvMutation")]   // serialize with AgentRunExecutorPushTests — both mutate CODESPACE_AGENT_MCP_ENDPOINT_ENABLED
 public class McpCatalogModeTests
 {
     private sealed class FakeTool : IAgentTool
@@ -56,26 +55,14 @@ public class McpCatalogModeTests
     // ─── mode resolution ──────────────────────────────────────────────────────
 
     [Theory]
-    [InlineData(null, null, McpCatalogMode.ReadOnly)]   // the DEFAULT — no opt-in → read-only
-    [InlineData(null, false, McpCatalogMode.ReadOnly)]  // explicit per-run false still defers → read-only
-    [InlineData(null, true, McpCatalogMode.Full)]       // per-run opt-in → full
-    [InlineData("1", null, McpCatalogMode.Full)]        // ambient flag on → full
-    [InlineData("true", null, McpCatalogMode.Full)]
-    public void ResolveMcpCatalogMode_is_full_only_on_opt_in_else_read_only(string? envValue, bool? perRunOptIn, McpCatalogMode expected)
+    [InlineData(null, McpCatalogMode.Full)]       // the DEFAULT — no per-run choice → the committed default (full)
+    [InlineData(true, McpCatalogMode.Full)]       // explicit opt-in → full
+    [InlineData(false, McpCatalogMode.ReadOnly)]  // explicit opt-OUT → read-only
+    public void ResolveMcpCatalogMode_takes_the_per_run_choice_else_the_committed_default(bool? perRunChoice, McpCatalogMode expected)
     {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, envValue);
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunChoice };
 
-            var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunOptIn };
-
-            AgentRunExecutor.ResolveMcpCatalogMode(task).ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, original);
-        }
+        AgentRunExecutor.ResolveMcpCatalogMode(task).ShouldBe(expected);
     }
 
     // ─── tools/list filtering ─────────────────────────────────────────────────
