@@ -138,10 +138,20 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
             (false, null) => JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options),
         };
 
-        _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s)", plan.Subtasks.Count, plan.Phases?.Count ?? 0);
+        // The edges token is the dep-handoff diagnosis's join key (run 31170757534: every staged unit logged "no
+        // dependsOn edge" while the failing assertion read edges off the LATEST plan — whether the model keeps
+        // re-planning the edge onto units it never spawns was unanswerable because no log named WHICH units carry
+        // edges). One grep-able line per plan beside the staged-units line closes that.
+        _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s); dependency edges: {Edges}", plan.Subtasks.Count, plan.Phases?.Count ?? 0, DescribeEdges(plan.Subtasks));
 
         return SupervisorExecution.Synchronous(outcome);
     }
+
+    /// <summary>The plan's dependency edges, one token per edge-bearing unit ("s2->[s1] s3->[s1,s2]"), or "(none)" for a flat plan. Pure + pinned — a CI grep joins this against the staged-units log to see whether the units carrying edges are the ones actually spawned.</summary>
+    internal static string DescribeEdges(IReadOnlyList<SupervisorPlannedSubtask> subtasks) =>
+        subtasks.Where(s => s.DependsOn is { Count: > 0 }).Select(s => $"{s.Id}->[{string.Join(",", s.DependsOn!)}]").ToList() is { Count: > 0 } edges
+            ? string.Join(" ", edges)
+            : "(none)";
 
     /// <summary>
     /// The loop-tier work-plan write. Exactly-once per decision via the per-turn origin key — a crash-replayed
