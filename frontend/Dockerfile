@@ -12,11 +12,11 @@ COPY package.json ./
 COPY pnpm-lock.yaml* package-lock.json* ./
 
 # Preserve original install behaviour (project historically built with `npm install --force`)
-RUN npm install
+RUN pnpm install
 
 # Copy the rest of the source and build
 COPY . .
-RUN npm run build
+RUN pnpm run build
 
 # ── Runtime stage: clean nginx; install node via apk to keep libc/OpenSSL aligned ──
 FROM nginx:stable-alpine
