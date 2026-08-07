@@ -86,8 +86,17 @@ public class AgentToolRegistryFlowTests
         // set by design. This entry is that conscious decision.
         readOnlyKinds.ShouldBe(new[] { "get_context", "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "the read-only (ledger-short-circuit, ungoverned) tool set must stay EXACTLY this curated allowlist — a new read-only tool is a conscious edit here; an unexpected entry means a side-effecting node forgot IsSideEffecting=true");
 
-        registry.All.Where(t => !t.IsReadOnly).ShouldAllBe(t => t.IsDestructive && t.RequiresApproval,
-            "every NON-read-only tool routes through the governed path — side-effecting, approval-gated by default");
+        // decision.request is the ONE non-read-only, non-gated tool BY DESIGN: an ASK, not a side effect — the
+        // handler intercepts it BEFORE the autonomy gate (a Confined tier must never DENY a question) and drives the
+        // durable decision flow on the same tool-ledger spine. It registers unconditionally now that governance is a
+        // committed constant, so this pin names it as the conscious exception instead of reading it as a leak.
+        var ask = registry.All.Single(t => t.Kind == Core.Services.Agents.Tools.DecisionRequestTool.ToolKind);
+        ask.IsDestructive.ShouldBeFalse("an ask never destroys anything");
+        ask.RequiresApproval.ShouldBeFalse("the decision flow IS the human surface — gating the ask behind an approval would deadlock it");
+
+        registry.All.Where(t => !t.IsReadOnly && t.Kind != Core.Services.Agents.Tools.DecisionRequestTool.ToolKind)
+            .ShouldAllBe(t => t.IsDestructive && t.RequiresApproval,
+                "every OTHER non-read-only tool routes through the governed path — side-effecting, approval-gated by default");
     }
 
     [Fact]

@@ -669,11 +669,12 @@ public class AgentMcpEndpointFlowTests
 
         var teamId = await SeedTeamAsync();
         // Unleashed so every tool (incl. the destructive ones) is tier-permitted → projected into the allow-list.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" }, enableMcp: false);
+        // The run expresses no catalog choice → the committed default (the FULL catalog) applies.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" });
 
         var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
 
-        // Endpoint flag ON + a declaring + tool-projecting harness + the proxy present → the wiring is written, so the
+        // Full catalog + a declaring + tool-projecting harness + the proxy present → the wiring is written, so the
         // executor augments the harness allow-list with the governed mcp__codespace__* names before BuildInvocation.
         await ExecuteAsync(runId, harness);
 
@@ -698,8 +699,8 @@ public class AgentMcpEndpointFlowTests
 
         var teamId = await SeedTeamAsync();
         // Unleashed so a side-effecting tool WOULD be tier-permitted — proving the read-only MODE (not the tier) is what
-        // keeps it out of the allow-list.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" });
+        // keeps it out of the allow-list. enableMcp:false is the run's own catalog narrowing (the committed default is full).
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" }, enableMcp: false);
 
         var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
 
