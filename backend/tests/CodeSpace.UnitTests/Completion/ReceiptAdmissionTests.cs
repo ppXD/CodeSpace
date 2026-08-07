@@ -47,12 +47,63 @@ public class ReceiptAdmissionTests
     }
 
     [Fact]
-    public void A_contract_hash_mismatch_is_an_amended_obligation()
+    public void A_receipt_attesting_a_contract_the_requirement_never_staked_is_rejected()
     {
+        // Same-domain check (P1): the receipt's dispatch stamp vs the SpecHash its requirement STAKED — both
+        // attempt-grain. A mismatch here is a genuine anomaly (the receipt attests an authorship the ledger
+        // never staked), not a dispatch override.
         var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1", contractHash: "sha256/canonical-json-v1:OLD"));
 
-        ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1") }, Set(("s1", "sha256/canonical-json-v1:NEW")), null)
+        ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1", specHash: "sha256/canonical-json-v1:NEW") }, Set(("s1", null)), null)
             .Rejections.ShouldHaveSingleItem().Code.ShouldBe(ReceiptRejectionCodes.ContractHashMismatch);
+    }
+
+    [Fact]
+    public void An_override_dispatch_receipt_is_never_parked_against_the_plan_grain_hash()
+    {
+        // THE P1 false-park regression: a goal-override dispatch (or a revised-instruction retry) stakes and
+        // attests the EFFECTIVE attempt-grain contract, while the executable unit's hash is PLAN-grain (computed
+        // without overrides — SupervisorExecutableSet.PlanGrainHashes says so on the tin). The retired check
+        // compared across those grains, so every such receipt was a GUARANTEED ContractHashMismatch park even
+        // though dispatch, staking, and receipt all agree. Same-domain admission must admit it.
+        var attemptGrain = "sha256/canonical-json-v1:EFFECTIVE-WITH-OVERRIDE";
+        var planGrain = "sha256/canonical-json-v1:PLAN-NO-OVERRIDES";
+        var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1", contractHash: attemptGrain)) with { EvidenceRef = Guid.NewGuid() };
+
+        var result = ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1", specHash: attemptGrain) }, Set(("s1", planGrain)), null);
+
+        result.Admitted.ShouldHaveSingleItem().ShouldBeSameAs(receipt);
+        result.Rejections.ShouldBeEmpty("the plan-grain unit hash is CES lineage vocabulary, never an admission comparand — domains are never compared across");
+    }
+
+    [Fact]
+    public void A_stale_receipt_from_a_superseded_attempt_dies_as_superseded_never_as_amended()
+    {
+        // Ordering pin: a superseded attempt's receipt naturally carries the OLD staked hash too — its honest
+        // rejection is SupersededAttempt (lineage), not ContractHashMismatch (authorship). The superseded filter
+        // must run first.
+        var oldAttempt = Guid.NewGuid();
+        var receipt = Receipt("acc:s1", oldAttempt, Unit("s1", contractHash: "sha256/canonical-json-v1:OLD"));
+
+        ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1", specHash: "sha256/canonical-json-v1:REVISED") }, Set(("s1", null)), Active("s1", Guid.NewGuid(), ordinal: 2))
+            .Rejections.ShouldHaveSingleItem().Code.ShouldBe(ReceiptRejectionCodes.SupersededAttempt);
+    }
+
+    [Fact]
+    public void A_hash_less_side_never_trips_the_contract_binding()
+    {
+        // The same both-sides-present tolerance the retired check had: a tape-reconstructed receipt carries no
+        // dispatch stamp, and a legacy requirement row carries no SpecHash — neither may park a run.
+        var stampless = Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) with { EvidenceRef = Guid.NewGuid() };
+        var stamped = Receipt("acc:s2", Guid.NewGuid(), Unit("s2", contractHash: "sha256/canonical-json-v1:X")) with { EvidenceRef = Guid.NewGuid() };
+
+        var result = ReceiptAdmission.Admit(
+            new[] { stampless, stamped },
+            new[] { Requirement("acc:s1", specHash: "sha256/canonical-json-v1:X"), Requirement("acc:s2") },
+            Set(("s1", null), ("s2", null)), null);
+
+        result.Admitted.Count.ShouldBe(2);
+        result.Rejections.ShouldBeEmpty();
     }
 
     [Fact]
@@ -168,9 +219,9 @@ public class ReceiptAdmissionTests
             [new UnitKey(PlanId, 1, unitId)] = new AttemptProjection { AttemptId = attemptId, UnitId = unitId, WorkUnit = new WorkUnitRef { WorkPlanId = PlanId, PlanVersion = 1, UnitId = unitId }, AttemptOrdinal = ordinal, State = AttemptState.Authorized },
         };
 
-    private static RequirementEnvelope Requirement(string requirementRef, string kind = ContractKinds.Acceptance) => new()
+    private static RequirementEnvelope Requirement(string requirementRef, string kind = ContractKinds.Acceptance, string? specHash = null) => new()
     {
-        RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.Operator, ContractSchemaVersion = "1",
+        RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.Operator, ContractSchemaVersion = "1", SpecHash = specHash,
     };
 
     private static ReceiptEnvelope Receipt(string requirementRef, Guid attemptId, WorkUnitRef? workUnit, string kind = ContractKinds.Acceptance) => new()

@@ -27,13 +27,15 @@ public sealed record ReceiptAdmissionResult(IReadOnlyList<ReceiptEnvelope> Admit
 /// THE one admission membrane between collected receipts and the reducer (P1b-4 / v4.2 §四). The reducer is
 /// deliberately a pure fold — identity, lineage and cardinality integrity are enforced HERE, once, for every
 /// consumer: a receipt must answer a KNOWN requirement (ref + kind), belong to a unit of the CURRENT executable
-/// set at the CURRENT plan version, carry the unit's contract hash when both sides have one, come from the
-/// OPERATIONAL ACTIVE attempt (a superseded attempt's receipt never reaches a fold — Lock Clause 3), attest a
-/// DISTINCT target (duplicate receipts for one target collapse to the first, so ExpectedCardinality can never be
-/// faked by repetition). An identity-less receipt (no <see cref="ReceiptEnvelope.WorkUnit"/>) is admitted with a
-/// WARNING — tolerable under Legacy/Shadow, fatal under Enforced, decided by the composer, never here. Batch 2
-/// (EvidenceRef readback, EvaluatorVersion allowlist, generation/lease currency) lands with P3a's substrate; the
-/// codes are reserved now so admission only ever TIGHTENS.
+/// set at the CURRENT plan version, attest the SAME contract its requirement STAKED when both sides carry a hash
+/// (same-domain: the requirement's SpecHash and the receipt's dispatch stamp are both attempt-grain — never the
+/// executable unit's plan-grain hash, see the P1 note inside), come from the OPERATIONAL ACTIVE attempt (a
+/// superseded attempt's receipt never reaches a fold — Lock Clause 3), attest a DISTINCT target (duplicate
+/// receipts for one target collapse to the first, so ExpectedCardinality can never be faked by repetition). An
+/// identity-less receipt (no <see cref="ReceiptEnvelope.WorkUnit"/>) is admitted with a WARNING — tolerable under
+/// Legacy/Shadow, fatal under Enforced, decided by the composer, never here. Batch 2 (EvidenceRef readback,
+/// EvaluatorVersion allowlist, generation/lease currency) lands with P3a's substrate; the codes are reserved now
+/// so admission only ever TIGHTENS.
 /// </summary>
 public static class ReceiptAdmission
 {
@@ -72,11 +74,6 @@ public static class ReceiptAdmission
                     continue;
                 }
 
-                if (receipt.WorkUnit.ContractHash is not null && unit.ContractHash is not null && receipt.WorkUnit.ContractHash != unit.ContractHash)
-                {
-                    rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.ContractHashMismatch, $"unit '{unit.UnitId}': receipt attests contract {receipt.WorkUnit.ContractHash} but the executable contract is {unit.ContractHash}"));
-                    continue;
-                }
             }
 
             if (receipt.WorkUnit is { } wu && operationalActive is not null
@@ -84,6 +81,24 @@ public static class ReceiptAdmission
                 && active.AttemptId != receipt.AttemptId)
             {
                 rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.SupersededAttempt, $"unit '{wu.UnitId}': receipt is from attempt {receipt.AttemptId} but the operational active attempt is {active.AttemptId} (ordinal {active.AttemptOrdinal})"));
+                continue;
+            }
+
+            // P1 (hash-domain separation): the contract binding is checked SAME-DOMAIN — the receipt's dispatch
+            // stamp against the SpecHash its requirement STAKED. Both are attempt-grain: staging stakes the
+            // EFFECTIVE contract (dispatch overrides included) and a retry's re-stake upserts the revised hash,
+            // so for the operational-active attempt the two attest the same authorship. The retired comparison
+            // read the executable unit's PLAN-grain hash (computed without overrides) instead, which made every
+            // goal-override dispatch and every revised-instruction retry a GUARANTEED false park — while a true
+            // contract amendment is caught earlier and honestly (a replan is a new PlanVersion → PlanVersionMismatch;
+            // a stale attempt's receipt dies to SupersededAttempt above). Runs after the superseded filter so a
+            // stale receipt keeps its honest code; compares only when both sides carry a hash, the same tolerance
+            // the retired check had (tape-reconstructed receipts and legacy requirements carry none).
+            if (receipt.WorkUnit?.ContractHash is { } attested
+                && requirements.FirstOrDefault(r => r.RequirementRef == receipt.RequirementRef && r.Kind == receipt.Kind)?.SpecHash is { } staked
+                && attested != staked)
+            {
+                rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.ContractHashMismatch, $"requirement '{receipt.RequirementRef}': receipt attests contract {attested} but the staked requirement's contract is {staked}"));
                 continue;
             }
 
