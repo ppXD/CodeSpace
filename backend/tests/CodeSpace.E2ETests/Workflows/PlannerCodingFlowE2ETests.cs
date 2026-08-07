@@ -73,51 +73,41 @@ public class PlannerCodingFlowE2ETests
         // it is real. One script serves every branch — the per-branch differentiation is the goal arg.
         using var cli = new SubtaskAwareFakeCli();
 
-        var plannerFlagBefore = Environment.GetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
 
-            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-            // ── Plan via the command — the CODING-kind fake makes the projector emit an agent.run map body. ──
-            var result = await PlanCodingFromTaskAsync(teamId, userId, "Improve the onboarding module");
+        // ── Plan via the command — the CODING-kind fake makes the projector emit an agent.run map body. ──
+        var result = await PlanCodingFromTaskAsync(teamId, userId, "Improve the onboarding module");
 
-            result.PlannerEnabled.ShouldBeTrue();
-            result.Plan.ShouldNotBeNull();
-            result.Definition.ShouldNotBeNull();
-            result.Plan!.RecommendedWorkflowKind.ShouldBe(DeterministicTaskPlannerLlmClient.CodingKind);
+        result.Plan.ShouldNotBeNull();
+        result.Definition.ShouldNotBeNull();
+        result.Plan!.RecommendedWorkflowKind.ShouldBe(DeterministicTaskPlannerLlmClient.CodingKind);
 
-            // ── LOAD-BEARING: the PLANNER projected the coding path. The map body is agent.run, not hand-built. ──
-            AssertProjectedMapBodyIsAgentCode(result.Definition!);
+        // ── LOAD-BEARING: the PLANNER projected the coding path. The map body is agent.run, not hand-built. ──
+        AssertProjectedMapBodyIsAgentCode(result.Definition!);
 
-            // ── Persist + run. Retarget ONLY the synth llm.complete to the fake provider; leave agent.run alone. ──
-            var runnable = RetargetSynthToFake(result.Definition!);
-            var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
-            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        // ── Persist + run. Retarget ONLY the synth llm.complete to the fake provider; leave agent.run alone. ──
+        var runnable = RetargetSynthToFake(result.Definition!);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            var jobClient = ResolveJobClient();
-            jobClient.Clear();
-            jobClient.AutoExecute = true;   // the executor dispatch runs the REAL AgentRunExecutor + real runner + fake CLI
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;   // the executor dispatch runs the REAL AgentRunExecutor + real runner + fake CLI
 
-            // ── Pass 1: the run suspends on the projector's plan-review approval wait (before the map). ──
-            await RunEngineAsync(runId);
-            await AssertSuspendedOnApprovalAsync(runId);
+        // ── Pass 1: the run suspends on the projector's plan-review approval wait (before the map). ──
+        await RunEngineAsync(runId);
+        await AssertSuspendedOnApprovalAsync(runId);
 
-            // ── Approve → pass 2: the map fans out agent.run branches; each parks + dispatches its real executor job. ──
-            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
-            await RunEngineAsync(runId);
+        // ── Approve → pass 2: the map fans out agent.run branches; each parks + dispatches its real executor job. ──
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
 
-            // ── Drain the deferred chain: the real executor jobs spawn the fake CLI through the real runner, each
-            //    completes for real, the completion notifier resumes, the last branch advances the map → synthesize. ──
-            await jobClient.WaitForPendingAsync();
+        // ── Drain the deferred chain: the real executor jobs spawn the fake CLI through the real runner, each
+        //    completes for real, the completion notifier resumes, the last branch advances the map → synthesize. ──
+        await jobClient.WaitForPendingAsync();
 
-            await AssertCompletedThroughRealAgentsAsync(runId, teamId);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, plannerFlagBefore);
-        }
+        await AssertCompletedThroughRealAgentsAsync(runId, teamId);
     }
 
     // ─── Assertions ──────────────────────────────────────────────────────────

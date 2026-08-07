@@ -67,18 +67,15 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
     public RealModelDeliveryGateE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _integrateBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
 
         // Chassis parity with RealModelSupervisorWholeLoopE2ETests: the throwable DI mutation first, then the env
         // set. Integrate-at-stop ON matches the proven headline arc — without it a merge is tape-only and the
         // I3/delivery ladder walks a different (unproven-in-live) branch than the one the deterministic tiers pin.
         SetDeciderMode(useLiveModel: true);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _integrateBefore);
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDeciderMode>().UseLiveModel = false;   // restore the shared-fixture default for siblings

@@ -16,22 +16,17 @@ namespace CodeSpace.Core.Services.Agents;
 /// a question), so it is OPT-IN (Rule 8, default-OFF) — an operator enables it when they want the net, and the SOTA
 /// upgrade is an LLM judge (human-gated; no model egress here). The detection (<see cref="EndsWithUnresolvedQuestion"/>)
 /// is PURE + harness-agnostic — it reads only the normalized <c>AgentRunResult.Summary</c> both harnesses populate — so
-/// it unit-tests exhaustively; only <see cref="Enabled"/> reads the environment.</para>
+/// it unit-tests exhaustively.</para>
 /// </summary>
 public static class FinalOutputReview
 {
-    /// <summary>Operator opt-in for the best-effort final-output review (Rule 8). Default-OFF. Pinned by a unit test — a rename silently disables the net for any operator who enabled it.</summary>
-    public const string EnabledEnvVar = "CODESPACE_AGENT_FINAL_OUTPUT_REVIEW_ENABLED";
-
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); default-OFF (no re-grade) otherwise. Mirrors the other agent opt-in flags exactly (Rule 8).</summary>
-    public static bool Enabled
-    {
-        get
-        {
-            var raw = Environment.GetEnvironmentVariable(EnabledEnvVar)?.Trim();
-            return raw is "1" or "true" or "TRUE";
-        }
-    }
+    /// <summary>
+    /// Whether the best-effort final-output review runs. Committed and ON. A run that ends by asking the human a
+    /// question and is filed as a green Succeeded is the dishonest-completion case this whole layer exists to catch,
+    /// so the net is worth its false positives — and a false positive costs a NeedsReview, which preserves the work
+    /// and asks a person to look, rather than failing anything. Changing it is a one-line reviewed edit.
+    /// </summary>
+    public const bool Enabled = true;
 
     // Curated, high-precision hand-back phrases: a CLOSING line containing one reads as "I need YOU to decide / act
     // before this is done", even without a trailing '?'. Lower-case; matched case-insensitively against the last line.

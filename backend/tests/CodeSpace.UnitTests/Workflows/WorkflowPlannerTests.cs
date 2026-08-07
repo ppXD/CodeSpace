@@ -29,15 +29,6 @@ namespace CodeSpace.UnitTests.Workflows;
 [Collection("DefaultHarnessEnvMutation")]   // reads the unset default harness — serialize with the env-mutating AgentHarnessDefaultsTests
 public class WorkflowPlannerTests
 {
-    // ── Flag env-const pin (Rule 8) ───────────────────────────────────────────
-
-    [Fact]
-    public void EnabledEnvVar_constant_name_is_pinned()
-    {
-        // Renaming this breaks every operator who flipped planning on via env. Hard-pin the literal.
-        WorkflowPlanningService.EnabledEnvVar.ShouldBe("CODESPACE_WORKFLOW_PLANNER_ENABLED");
-    }
-
     // ── Response-schema shape pin (the commit-contract) ───────────────────────
 
     [Fact]
@@ -163,53 +154,17 @@ public class WorkflowPlannerTests
         plan.RecommendedWorkflowKind.ShouldBe("coding");
     }
 
-    // ── Flag-OFF: disabled result, planner never invoked ──────────────────────
-
     [Fact]
-    public async Task Flag_off_returns_disabled_result_without_invoking_the_planner()
+    public async Task Planning_projects_and_returns_a_validated_definition()
     {
-        // The flag lives in the process-global env; restore it in finally so a leftover value can't bleed into
-        // another test (symmetry with Flag_on). null IS the default — only this service reads this var.
-        var original = Environment.GetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        try
-        {
-            var planner = new RecordingPlanner();
-            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), new RecordingGrounding());
+        var planner = new RecordingPlanner(SamplePlan("analysis"));
+        var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), new RecordingGrounding());
 
-            var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
+        var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
-            result.PlannerEnabled.ShouldBeFalse();
-            result.Plan.ShouldBeNull();
-            result.Definition.ShouldBeNull();
-            planner.Invocations.ShouldBe(0, "the planner must not be called when the flag is off");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, original);
-        }
-    }
-
-    [Fact]
-    public async Task Flag_on_plans_projects_and_returns_a_validated_definition()
-    {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var planner = new RecordingPlanner(SamplePlan("analysis"));
-            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), new RecordingGrounding());
-
-            var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
-
-            result.PlannerEnabled.ShouldBeTrue();
-            result.Plan.ShouldNotBeNull();
-            result.Definition.ShouldNotBeNull();
-            planner.Invocations.ShouldBe(1);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        result.Plan.ShouldNotBeNull();
+        result.Definition.ShouldNotBeNull();
+        planner.Invocations.ShouldBe(1);
     }
 
     // ── Projection validates + the map items binding resolves to the subtasks ──
@@ -463,30 +418,22 @@ public class WorkflowPlannerTests
     [Fact]
     public async Task Flag_on_grounds_with_the_request_repository_and_team_then_passes_it_to_the_planner()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var repositoryId = Guid.NewGuid();
-            var teamId = Guid.NewGuid();
-            var planner = new RecordingPlanner(SamplePlan("analysis"));
-            var grounding = new RecordingGrounding("Repository top-level layout for acme/api. Top-level entries:\n- src (directory)");
-            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), grounding);
+        var repositoryId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var planner = new RecordingPlanner(SamplePlan("analysis"));
+        var grounding = new RecordingGrounding("Repository top-level layout for acme/api. Top-level entries:\n- src (directory)");
+        var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), grounding);
 
-            await service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = "do it", TeamId = teamId, RepositoryId = repositoryId }, CancellationToken.None);
+        await service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = "do it", TeamId = teamId, RepositoryId = repositoryId }, CancellationToken.None);
 
-            // The service grounded against the SAME repo + team the request carried (team never the wire — sourced upstream).
-            grounding.Invocations.ShouldBe(1);
-            grounding.SeenRepositoryId.ShouldBe(repositoryId);
-            grounding.SeenTeamId.ShouldBe(teamId);
+        // The service grounded against the SAME repo + team the request carried (team never the wire — sourced upstream).
+        grounding.Invocations.ShouldBe(1);
+        grounding.SeenRepositoryId.ShouldBe(repositoryId);
+        grounding.SeenTeamId.ShouldBe(teamId);
 
-            // ...and folded the result into request.GroundingContext so the planner SAW it (the planner stays a pure consumer).
-            planner.LastRequest.ShouldNotBeNull();
-            planner.LastRequest!.GroundingContext.ShouldContain("Repository top-level layout");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        // ...and folded the result into request.GroundingContext so the planner SAW it (the planner stays a pure consumer).
+        planner.LastRequest.ShouldNotBeNull();
+        planner.LastRequest!.GroundingContext.ShouldContain("Repository top-level layout");
     }
 
     // ── RepoGroundingProvider: null repo + honest string assembly ─────────────

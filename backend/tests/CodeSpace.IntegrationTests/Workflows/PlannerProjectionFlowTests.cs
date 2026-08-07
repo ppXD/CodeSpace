@@ -52,41 +52,32 @@ public class PlannerProjectionFlowTests
     [Fact]
     public async Task Plan_projects_a_valid_definition_that_runs_suspends_on_approval_then_fans_out_over_the_subtasks()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-            // ── Plan from a task via the command — team resolved from ICurrentTeam, never the body. ──
-            var result = await PlanFromTaskAsync(teamId, userId, "Improve the onboarding module");
+        // ── Plan from a task via the command — team resolved from ICurrentTeam, never the body. ──
+        var result = await PlanFromTaskAsync(teamId, userId, "Improve the onboarding module");
 
-            result.PlannerEnabled.ShouldBeTrue();
-            result.Plan.ShouldNotBeNull();
-            result.Definition.ShouldNotBeNull();
-            result.Plan!.Subtasks.Count.ShouldBe(DeterministicTaskPlannerLlmClient.SubtaskTitles.Count);
+        result.Plan.ShouldNotBeNull();
+        result.Definition.ShouldNotBeNull();
+        result.Plan!.Subtasks.Count.ShouldBe(DeterministicTaskPlannerLlmClient.SubtaskTitles.Count);
 
-            // The projection is valid (assert independently of the service's own pre-return validation).
-            Validate(result.Definition!).IsValid.ShouldBeTrue();
+        // The projection is valid (assert independently of the service's own pre-return validation).
+        Validate(result.Definition!).IsValid.ShouldBeTrue();
 
-            // ── Persist + run. Retarget the llm.complete nodes to the fake provider so the engine runs with no key. ──
-            var runnable = RetargetLlmToFake(result.Definition!);
-            var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
-            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        // ── Persist + run. Retarget the llm.complete nodes to the fake provider so the engine runs with no key. ──
+        var runnable = RetargetLlmToFake(result.Definition!);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            // ── Pass 1: the run suspends on the plan-review approval wait. ──
-            await RunEngineAsync(runId);
-            await AssertSuspendedOnApprovalAsync(runId);
+        // ── Pass 1: the run suspends on the plan-review approval wait. ──
+        await RunEngineAsync(runId);
+        await AssertSuspendedOnApprovalAsync(runId);
 
-            // ── Approve → re-run: the map fans out one branch per subtask and the run completes. ──
-            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
-            await RunEngineAsync(runId);
+        // ── Approve → re-run: the map fans out one branch per subtask and the run completes. ──
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
 
-            await AssertCompletedAndFannedOutAsync(runId);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        await AssertCompletedAndFannedOutAsync(runId);
     }
 
     // ─── Assertions ──────────────────────────────────────────────────────────

@@ -55,13 +55,12 @@ public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTask
 }
 
 /// <summary>
-/// The planning result. When the planner is disabled (<see cref="PlannerEnabled"/> = false) the planner is
-/// never invoked and <see cref="Plan"/> / <see cref="Definition"/> are null — a clean disabled outcome, not
-/// an error. When enabled, both are populated and the definition has already passed validation.
+/// The planning result: <see cref="Plan"/> and <see cref="Definition"/> are both populated and the definition has
+/// already passed validation. There used to be a <c>PlannerEnabled</c> flag here for the case where a deployment
+/// variable had planning switched off; planning is unconditional now, so the flag could only ever read true.
 /// </summary>
 public sealed record PlanWorkflowFromTaskResult
 {
-    public required bool PlannerEnabled { get; init; }
     public PlannedWorkflow? Plan { get; init; }
     public WorkflowDefinition? Definition { get; init; }
 }

@@ -69,17 +69,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     public RealModelSupervisorWholeLoopE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _integrateBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
 
         // The only THROWABLE mutation (the DI resolve that flips the decider) runs FIRST, so a ctor throw leaks no
         // process-global; the env-var set (which cannot throw) follows. Dispose restores both.
         SetDeciderMode(useLiveModel: true);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _integrateBefore);
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDeciderMode>().UseLiveModel = false;   // restore the shared-fixture default for siblings

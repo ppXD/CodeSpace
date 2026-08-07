@@ -14,13 +14,6 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// </summary>
 public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedDependency
 {
-    /// <summary>
-    /// Feature flag (Rule 8). Default-OFF: true ONLY for "1"/"true"/"TRUE" (trimmed); pinned by a unit test so
-    /// a rename is a compile-time-visible decision. An air-gapped / fork operator flips planning on without a
-    /// code change.
-    /// </summary>
-    public const string EnabledEnvVar = "CODESPACE_WORKFLOW_PLANNER_ENABLED";
-
     // Single-impl assumption: today the only IWorkflowPlanner is LlmWorkflowPlanner (structured_llm). When a 2nd
     // backend lands (agent_planner / template), this bare injection becomes a silent Autofac last-wins — add an
     // IWorkflowPlannerRegistry (mirroring IAgentHarnessRegistry) keyed by a Kind on the request and inject THAT.
@@ -39,8 +32,6 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
 
     public async Task<PlanWorkflowFromTaskResult> PlanFromTaskAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
     {
-        if (!IsEnabled()) return new PlanWorkflowFromTaskResult { PlannerEnabled = false };
-
         // Service-level grounding (most generic — every planner backend consumes request.GroundingContext). Team
         // from request.TeamId (sourced from ICurrentTeam upstream, never the wire); a repo outside the team → null.
         // reference: null — this lane authors a REUSABLE definition; a pin belongs to a RUN (resolved at ITS
@@ -53,7 +44,7 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
 
         EnsureValidProjection(definition);
 
-        return new PlanWorkflowFromTaskResult { PlannerEnabled = true, Plan = plan, Definition = definition };
+        return new PlanWorkflowFromTaskResult { Plan = plan, Definition = definition };
     }
 
     /// <summary>Pick the projection the operator asked for: the L3 coordinated <c>flow.loop</c> variant when <c>Coordinated</c>, else the one-shot graph (the default — byte-identical to the original).</summary>
@@ -71,11 +62,4 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
             throw new WorkflowValidationException(result.Errors);
     }
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
-    internal static bool IsEnabled()
-    {
-        var raw = Environment.GetEnvironmentVariable(EnabledEnvVar)?.Trim();
-
-        return raw is "1" or "true" or "TRUE";
-    }
 }

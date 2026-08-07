@@ -79,12 +79,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const long DefaultMaxSessionTranscriptBytes = 32L * 1024 * 1024;
 
     /// <summary>
-    /// Operators opt INTO on-disk integration of K parallel agent contributions into ONE branch (a side-effecting
-    /// write to the user's remote — SOTA #3) by setting this to "1"/"true". Fail-closed default-OFF
-    /// (absent/""/"0"/"false"/anything else → no clone, no integration, no LLM synthesis call, byte-identical to
-    /// today). Pinned by a test (Rule 8) — renaming it silently turns the feature off for an operator who enabled it.
+    /// Whether a run with no explicit opt-in INTEGRATES its K parallel agent contributions into ONE branch. Committed
+    /// and ON: K parallel agents that each publish their own branch and leave the human to merge them is the
+    /// hand-back this arc exists to remove, and the step is bounded — it clones, integrates, and synthesises once.
+    /// Changing it is a one-line reviewed edit.
     /// </summary>
-    public const string IntegrateBranchEnabledEnvVar = "CODESPACE_AGENT_INTEGRATE_BRANCH_ENABLED";
+    internal const bool IntegrateBranchByDefault = true;
 
     /// <summary>
     /// Whether a run whose task expresses no preference gets the FULL tool catalog (the side-effecting fabric) rather
@@ -1570,24 +1570,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return null;
     }
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
-    internal static bool IsIntegrateEnabled()
-    {
-        var raw = Environment.GetEnvironmentVariable(IntegrateBranchEnabledEnvVar)?.Trim();
-
-        return raw is "1" or "true" or "TRUE";
-    }
-
     /// <summary>
-    /// The single gate deciding whether a run INTEGRATES its parallel agent contributions on disk: the
-    /// deployment-wide env flag (<see cref="IsIntegrateEnabled"/>) OR an explicit per-run/profile opt-in. Fail-open
-    /// toward the operator (a per-run opt-in turns integration ON for one run without flipping the ambient flag).
-    /// Unlike the per-agent branch push (<see cref="EvaluatePublishGuardsAsync"/>), on-disk integration stays
-    /// env-gated for now — it is a heavier, need-driven structural step (multi-producer staging / stop-time
-    /// consolidation), owned by a later slice of this arc, not the per-agent publish spine. Pure + internal so it's
-    /// unit-pinned and production reads it through this single gate.
+    /// The single gate deciding whether a run INTEGRATES its parallel agent contributions on disk: the profile's
+    /// explicit choice, else <see cref="IntegrateBranchByDefault"/>. It used to OR with a deployment-wide environment
+    /// flag, so a profile could ask for integration but never decline it; the choice now narrows as well as widens.
+    /// Pure + internal so it's unit-pinned and production reads it through this single gate.
     /// </summary>
-    internal static bool ShouldIntegrate(bool perRunOptIn) => IsIntegrateEnabled() || perRunOptIn;
+    internal static bool ShouldIntegrate(bool? perRunChoice) => perRunChoice ?? IntegrateBranchByDefault;
 
     /// <summary>
     /// The single gate deciding whether THIS run is served the full side-effecting tool fabric: the task's explicit

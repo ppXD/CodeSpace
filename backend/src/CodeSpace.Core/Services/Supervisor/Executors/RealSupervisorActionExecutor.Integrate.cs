@@ -34,7 +34,7 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var profile = context.AgentProfile;
 
-        if (!forcedByPublishGate && !AgentRunExecutor.ShouldIntegrate(perRunOptIn: profile?.IntegrateBranches == true)) return;
+        if (!forcedByPublishGate && !AgentRunExecutor.ShouldIntegrate(profile?.IntegrateBranches)) return;
         if (merged.Count == 0) return;
 
         if (!forcedByPublishGate)
