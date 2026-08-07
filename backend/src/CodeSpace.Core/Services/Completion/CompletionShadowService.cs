@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -139,6 +140,16 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var receipts = await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var handoffReachable = await _handoff.IsHandoffReachableAsync(runId, teamId, receipts, cancellationToken).ConfigureAwait(false);
         var wouldBe = TerminalDecider.Decide(composed.Assessment, handoffReachable);
+
+        // P1 (fail-close mirror): the authority refuses a CleanSuccess built over integrity violations, so the
+        // recorded would-be decision must apply the SAME predicate — parity evidence that says "would have been
+        // CleanSuccess" for a run Enforced would in fact park is evidence about a rule that doesn't exist.
+        if (wouldBe == TerminalDecision.CleanSuccess)
+        {
+            var requirements = await _contracts.ListRequirementsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 }) wouldBe = TerminalDecision.Park;
+        }
 
         _db.CompletionAssessmentRecord.Add(new CompletionAssessmentRecord
         {

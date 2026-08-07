@@ -84,6 +84,17 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         // terminal verify must compare against the ledgers the DECISION was actually derived over.
         watermarks = await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
+        // P1 (fail-close): a CleanSuccess BUILT OVER integrity violations parks instead — an identity-less receipt
+        // folded under Shadow tolerance, a ghost-attempt contract error, an unsupported requirement schema. Only
+        // the SUCCESS claim is gated: an HonestFailure over tainted evidence stamps Failure unchanged (failure is
+        // the conservative direction), and the park states already park.
+        if (decision == TerminalDecision.CleanSuccess && CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 } violations)
+        {
+            _logger.LogWarning("Terminal authority refused a CleanSuccess for run {RunId} — {Count} integrity violation(s): {Violations}", workflowRunId, violations.Count, string.Join(" · ", violations));
+
+            return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Park — the Success claim rests on evidence with integrity violations: {string.Join("; ", violations)}", TerminalDecision.Park, watermarks);
+        }
+
         return decision switch
         {
             TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
