@@ -24,11 +24,16 @@ public class CodeSpaceModule : Autofac.Module
     private readonly IConfiguration _configuration;
     private readonly Assembly[] _assemblies;
 
-    public CodeSpaceModule(ILogger logger, IConfiguration configuration)
+    /// <summary>
+    /// <paramref name="assemblies"/> are the assemblies the mediator scans for handlers. It defaults to this one when
+    /// none is passed, which is every caller today; it is a parameter so a host that composes an EXTRA assembly of
+    /// handlers (a plugin pack, a test double set) states that at the call site rather than editing this constructor.
+    /// </summary>
+    public CodeSpaceModule(ILogger logger, IConfiguration configuration, params Assembly[] assemblies)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _assemblies = new[] { typeof(CodeSpaceModule).Assembly };
+        _assemblies = assemblies is { Length: > 0 } ? assemblies : new[] { typeof(CodeSpaceModule).Assembly };
     }
 
     protected override void Load(ContainerBuilder builder)
