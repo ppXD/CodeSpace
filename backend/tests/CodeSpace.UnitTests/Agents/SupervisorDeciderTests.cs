@@ -9,6 +9,7 @@ using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using Shouldly;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.UnitTests.Agents;
 
@@ -959,7 +960,7 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
-        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -975,8 +976,8 @@ public class SupervisorDeciderTests
         // the user prompt; no repo ⇒ no lookup ⇒ byte-identical.
         var repoId = Guid.NewGuid();
         var grounding = new RecordingRepoGrounding();
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding);
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context() with { AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repoId, PinnedSha = "abc123def456" } }, CancellationToken.None);
 
@@ -992,7 +993,7 @@ public class SupervisorDeciderTests
         // Scan M2: with no pin, the operator's launch-pinned branch is the next-most-stable anchor — grounding on
         // the default branch would show the brain a DIFFERENT tree than the one its agents clone.
         var grounding = new RecordingRepoGrounding();
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context() with { AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), BaseRef = "release/2.x" } }, CancellationToken.None);
 
@@ -1003,7 +1004,7 @@ public class SupervisorDeciderTests
     public async Task A_run_without_a_repo_never_looks_up_grounding()
     {
         var grounding = new RecordingRepoGrounding();
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), grounding, NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1023,7 +1024,7 @@ public class SupervisorDeciderTests
     public async Task A_run_with_no_selected_brain_model_fails_closed_to_a_terminal_stop()
     {
         // supervisorModelId is REQUIRED — the operator must pick the brain model; the supervisor never guesses its own.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context() with { SupervisorModelId = null }, CancellationToken.None);
 
@@ -1037,7 +1038,7 @@ public class SupervisorDeciderTests
     {
         // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
         // configured, or none within the allowed pool) → the brain stops cleanly rather than guess a model or key.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() })), FakeSelector.Empty(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1071,7 +1072,7 @@ public class SupervisorDeciderTests
         // The gateway returned a structurally WRONG reply (a bare JSON string, not a decision object) — deserialization
         // would throw. The decider must still fail closed to a clean stop, never crash the durable run on a degraded reply.
         var raw = JsonSerializer.SerializeToElement("not a decision object");
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1091,7 +1092,7 @@ public class SupervisorDeciderTests
         // decision) — the decider fails closed to a clean stop, NEVER crashing the durable run. This is THE canonical
         // capability miss ("no conformant decision"): it must end as a clean stop so the whole-loop reads it as a
         // CapabilityMiss (non-gating), not a code fault.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1109,7 +1110,7 @@ public class SupervisorDeciderTests
         // A genuine gateway/credential INFRA fault is NOT swallowed into a stop — it PROPAGATES so the engine fails the
         // run (visible + rerunnable) and the live-gate treats it as non-gating infra (consistent with the decision-eval
         // lane), never a silent "completed" no-op that masks an outage.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
     }
@@ -1117,8 +1118,8 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
     {
-        var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1173,11 +1174,11 @@ public class SupervisorDeciderTests
     {
         // End-to-end through DecideAsync (not just the static helper): a populated pool + a registered harness must
         // flow through BuildCapabilityCatalogAsync → the LLM request's user prompt, so the live brain is informed.
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
         var decider = new LlmSupervisorDecider(
             new FakeRegistry(client),
             FakeSelector.WithModelAndPool("claude-sonnet-4-5", new PoolModelInfo("metis-coder-max", "Anthropic")),
-            new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+            new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1191,12 +1192,12 @@ public class SupervisorDeciderTests
     {
         // P3 — the brain authors a per-agent persona by slug, so the team's persona library must reach the live decide
         // prompt (slug + name + description), end-to-end through BuildCapabilityCatalogAsync.
-        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() });
         var decider = new LlmSupervisorDecider(
             new FakeRegistry(client),
             FakeSelector.WithModel(),
             new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")),
-            FakePersonas.With(("security-reviewer", "Security Reviewer", "Audits for vulnerabilities")), new FakeTapeStore(), new NullRepoGrounding());
+            FakePersonas.With(("security-reviewer", "Security Reviewer", "Audits for vulnerabilities")), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1213,7 +1214,7 @@ public class SupervisorDeciderTests
         // belongs) — the lenient converter drops the FIELD (the run-level repo applies), never the whole decision.
         var reply = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["scan"],"agents":[{"subtaskId":"scan","role":"scanner","repositoryId":"backend"}]},"rationale":{"why":"fan out the ready subtask"}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(reply);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1229,7 +1230,7 @@ public class SupervisorDeciderTests
         var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;   // a string where an array belongs — validator-shaped drift
         var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["oops"]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(broken, repaired);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1238,6 +1239,122 @@ public class SupervisorDeciderTests
         client.Requests[1].UserPrompt.ShouldContain("$.spawn", customMessage: "the repair prompt NAMES the bind path so the model fixes the right leaf");
         client.Requests[1].UserPrompt.ShouldContain("\"oops\"", customMessage: "the model repairs its OWN reply, not a fresh decide");
         client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
+    }
+
+    // ── The coherence gate: a BOUND decision whose kind names a payload it doesn't carry buys ONE repair ──
+    // (the schema-inexpressible invariant — top-level `required` can't be conditional on `kind`, and the forced-
+    // tool wire steers without constraining, so `{"kind":"spawn"}` is schema-valid, binds cleanly, and would
+    // otherwise project to an empty payload the executor rejects a full turn later)
+
+    [Fact]
+    public async Task A_payload_less_spawn_buys_ONE_repair_call_echoing_the_raw_reply()
+    {
+        var bare = JsonDocument.Parse("""{"kind":"spawn","rationale":{"why":"fan out st-1"}}""").RootElement;
+        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, repaired);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the repaired reply lands as the decision");
+        decision.PayloadJson.ShouldContain("st-1", customMessage: "the repaired payload is the one projected — never the substituted empty one");
+        client.Requests.Count.ShouldBe(2, "exactly one bounded repair round-trip");
+        client.Requests[1].UserPrompt.ShouldContain("fan out st-1", customMessage: "the model repairs its OWN raw reply — the echo is what lets it see the defect instead of inferring it");
+        client.Requests[1].UserPrompt.ShouldContain("'spawn' object", customMessage: "the defect names the exact sub-object the payload must ride in");
+        client.Requests[1].SystemPrompt.ShouldContain("corrected decision JSON", customMessage: "repair-only framing — same intent, no new decisions");
+    }
+
+    [Fact]
+    public async Task A_top_level_flattened_spawn_is_repaired_with_the_flattened_ids_echoed()
+    {
+        // The live-probed defect shape (2026-08-07): the subtask ids EXIST but at the decision's top level, where
+        // nothing reads them. The DTO binds (extra fields are lenient), the spawn sub-object is null, and before
+        // this gate the projector substituted an empty payload — so the executor's correction quoted a payload the
+        // model never wrote, and the model re-authored the same shape turn after turn.
+        var flattened = JsonDocument.Parse("""{"kind":"spawn","subtaskIds":["st-1"]}""").RootElement;
+        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(flattened, repaired);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn);
+        decision.PayloadJson.ShouldContain("st-1", customMessage: "the repaired, correctly-nested payload lands");
+        client.Requests[1].UserPrompt.ShouldContain("\"subtaskIds\":[\"st-1\"]", customMessage: "the repair echoes the model's OWN flattened ids — the evidence it needs to self-diagnose the nesting");
+        client.Requests[1].UserPrompt.ShouldContain("anywhere else", customMessage: "the defect says top-level fields are never read");
+    }
+
+    [Fact]
+    public async Task A_spawn_with_an_EMPTY_subtaskIds_array_is_repaired_before_projection()
+    {
+        // The shape that slips every earlier net: the sub-object is PRESENT (no bind error) and minItems is not
+        // validated client-side — without this gate it sails through to the executor's rejection a turn later.
+        var empty = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":[]}}""").RootElement;
+        var repaired = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["st-1"]}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(empty, repaired);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.PayloadJson.ShouldContain("st-1");
+        client.Requests.Count.ShouldBe(2, "an empty fan-out is the model's own authorship at decide time (the dependency clamp runs later, server-side) — repairable, exactly like a missing sub-object");
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Plan, """{"kind":"plan"}""", """{"kind":"plan","plan":{"goal":"g","subtasks":[{"id":"a","title":"A","instruction":"do a"}]}}""", "do a")]
+    [InlineData(SupervisorDecisionKinds.Retry, """{"kind":"retry"}""", """{"kind":"retry","retry":{"subtaskId":"st-1"}}""", "st-1")]
+    [InlineData(SupervisorDecisionKinds.AskHuman, """{"kind":"ask_human"}""", """{"kind":"ask_human","askHuman":{"question":"which db?"}}""", "which db?")]
+    [InlineData(SupervisorDecisionKinds.Stop, """{"kind":"stop"}""", """{"kind":"stop","stop":{"outcome":"completed","summary":"shipped it"}}""", "shipped it")]
+    public async Task Every_payload_bearing_kind_missing_its_payload_buys_the_same_repair(string kind, string bare, string repaired, string marker)
+    {
+        var client = new SequencedRawJsonStructuredClient(JsonDocument.Parse(bare).RootElement, JsonDocument.Parse(repaired).RootElement);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(kind);
+        decision.PayloadJson.ShouldContain(marker, customMessage: "the repaired payload lands — ONE generic gate covers every payload-bearing verb, no per-verb special case");
+        client.Requests.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task A_repair_that_is_still_payload_less_keeps_the_original_decision()
+    {
+        var bare = JsonDocument.Parse("""{"kind":"spawn"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare);   // the repair replays the same bare reply
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the ORIGINAL decision proceeds — the executor's rejection path is unchanged by a missed repair");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtaskIds").GetArrayLength().ShouldBe(0, "the canonical empty payload, exactly as before the gate existed");
+        client.Requests.Count.ShouldBe(2, "the repair is BOUNDED — one attempt, never a loop");
+    }
+
+    [Fact]
+    public async Task A_capability_miss_during_the_payload_repair_keeps_the_original_decision()
+    {
+        var client = new ReplyThenCapabilityMissClient(JsonDocument.Parse("""{"kind":"spawn"}""").RootElement);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "a model-side miss during the repair fails toward the original decision — never a crash, never a loop");
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Merge)]     // schema: required [] — an empty merge legitimately means "merge everything mergeable"
+    [InlineData(SupervisorDecisionKinds.Resolve)]   // schema: no payload sub-object at all
+    public async Task A_payload_less_exempt_kind_burns_no_repair_call(string kind)
+    {
+        var raw = JsonDocument.Parse($$"""{"kind":"{{kind}}"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(raw);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(kind);
+        client.Requests.Count.ShouldBe(1, "a kind whose payload is legitimately optional must never be 'repaired' — that would burn a call correcting a defect the model did not commit");
     }
 
     // ── P1.4: a TRUNCATED completion buys ONE retry with a RAISED output budget before the bind-check flow ──
@@ -1262,7 +1379,7 @@ public class SupervisorDeciderTests
         var truncated = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["only-one"]}}""").RootElement;
         var complete = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["one","two","three"]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(new[] { truncated, complete }, new[] { finishReason, null });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1279,7 +1396,7 @@ public class SupervisorDeciderTests
         // Byte-identical to before this fix on the dominant (non-truncated) path — no wasted extra call.
         var clean = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["a"]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(clean);   // default finish reason: null → Clean
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1294,7 +1411,7 @@ public class SupervisorDeciderTests
         // decides its fate exactly as if the retry had never been attempted.
         var truncated = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["only-one"]}}""").RootElement;
         var client = new TruncatedThenCapabilityMissClient(truncated, "length");
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1331,7 +1448,7 @@ public class SupervisorDeciderTests
     {
         var broken = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":"oops"}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(broken);   // the repair replays the same broken reply
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1351,7 +1468,7 @@ public class SupervisorDeciderTests
         var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
         var valid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["a"]}]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(invalid, valid);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1368,7 +1485,7 @@ public class SupervisorDeciderTests
         // Byte-identical to before this fix on the dominant (already-valid) path — no wasted extra call.
         var valid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["a"]}]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(valid);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1383,7 +1500,7 @@ public class SupervisorDeciderTests
         // consults it, so this path is provably inert outside 'plan'.
         var spawn = JsonDocument.Parse("""{"kind":"spawn","spawn":{"subtaskIds":["a"]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(spawn);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1398,7 +1515,7 @@ public class SupervisorDeciderTests
         // existing gate still force-stops it exactly as before this fix existed.
         var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(invalid, invalid);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1414,7 +1531,7 @@ public class SupervisorDeciderTests
         // already tolerate) — fail TOWARD the original invalid decision rather than crashing the run.
         var invalid = JsonDocument.Parse("""{"kind":"plan","plan":{"goal":"ship","subtasks":[{"id":"a","title":"A","instruction":"do a"},{"id":"b","title":"B","instruction":"do b","dependsOn":["z"]}]}}""").RootElement;
         var client = new TruncatedThenCapabilityMissClient(invalid, finishReason: null!);
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -1472,7 +1589,7 @@ public class SupervisorDeciderTests
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
     private static LlmSupervisorDecider Decider(SupervisorModelDecision model) =>
-        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding());
+        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
     // ── Fakes at the honest IStructuredLLMClient seam ────────────────────────────────
 
@@ -1548,6 +1665,27 @@ public class SupervisorDeciderTests
             var json = _replies.Count > 1 ? _replies.Dequeue() : _replies.Peek();
             var finishReason = _finishReasons.Count > 1 ? _finishReasons.Dequeue() : (_finishReasons.Count == 1 ? _finishReasons.Peek() : null);
             return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new LlmUsage { FinishReason = finishReason } });
+        }
+    }
+
+    /// <summary>First structured call returns the given raw reply; every later call throws a Malformed-category <see cref="LlmApiException"/> — pins that a model-side miss DURING the coherence repair fails toward the original decision.</summary>
+    private sealed class ReplyThenCapabilityMissClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly JsonElement _first;
+        private bool _replied;
+        public ReplyThenCapabilityMissClient(JsonElement first) => _first = first;
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            if (_replied) throw new LlmApiException("TestSupervisor", null, LlmErrorCategory.Malformed, "boom");
+
+            _replied = true;
+            return Task.FromResult(new StructuredLLMCompletion { Json = _first, Model = request.Model });
         }
     }
 
@@ -1651,7 +1789,7 @@ public class SupervisorDeciderTests
         // the window never bound.
         var store = new FakeTapeStore();
         var client = new CompactionScriptClient("DIGEST: planned a/b, a succeeded on branch-a", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "t", Title = "t", Instruction = "do t" } } } });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(turnNumber: 12, Tape(12)), CancellationToken.None);
 
@@ -1683,7 +1821,7 @@ public class SupervisorDeciderTests
 
         var store = new FakeTapeStore();
         var client = new CompactionScriptClient("DIGEST: s1 failed its check", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "t", Title = "t", Instruction = "do t" } } } });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(turnNumber: 12, tape), CancellationToken.None);
 
@@ -1697,8 +1835,8 @@ public class SupervisorDeciderTests
         // 6 priors → foldable = max(0, 6−8) = 0 < MinCompactFold: compaction can't shrink the prompt, so the
         // overflow falls to the existing fail-closed clean stop (honest Stopped downstream) and nothing persists.
         var store = new FakeTapeStore();
-        var client = new CompactionScriptClient("unused", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan }) { AlwaysOverflow = true };
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding());
+        var client = new CompactionScriptClient("unused", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload() }) { AlwaysOverflow = true };
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         var decision = await decider.DecideAsync(Context(turnNumber: 6, Tape(6)), CancellationToken.None);
 
@@ -1714,7 +1852,7 @@ public class SupervisorDeciderTests
         // [digest + tail] from the start, no window hit, no new summarizer call.
         var store = new FakeTapeStore { Stored = new SupervisorTapeSummary { UpToSequence = 4, Text = "DIGEST-FROM-EARLIER" } };
         var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = new SupervisorPlanPayload { Subtasks = new[] { new SupervisorPlannedSubtask { Id = "t", Title = "t", Instruction = "do t" } } } });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         await decider.DecideAsync(Context(turnNumber: 12, Tape(12)), CancellationToken.None);
 

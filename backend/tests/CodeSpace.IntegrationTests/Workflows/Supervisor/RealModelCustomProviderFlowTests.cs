@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -25,7 +26,7 @@ public sealed class RealModelCustomProviderFlowTests
         {
             // Tag the SAME gateway as Provider="Custom" → the decider's provider-match resolves the Custom client.
             var credential = RealModelLiveWire.Credential("Custom", baseUrl, apiKey);
-            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding());
+            var decider = new LlmSupervisorDecider(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
             var scores = new List<SupervisorDecisionScore>();
             foreach (var scenario in SupervisorDecisionGoldenScenarios.All)

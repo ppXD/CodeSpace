@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -37,7 +38,7 @@ public sealed class RealModelSessionContinueFlowTests
         {
             var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
             var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
-            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding());
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
             var scores = new List<SupervisorDecisionScore>();
             foreach (var scenario in SessionContinueGoldenScenarios.All)

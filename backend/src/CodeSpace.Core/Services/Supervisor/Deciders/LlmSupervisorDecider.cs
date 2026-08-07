@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
@@ -32,8 +33,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
     private readonly ISupervisorTapeSummaryStore _tapeSummaries;
     private readonly Workflows.Planning.IRepoGroundingProvider _grounding;
+    private readonly ILogger<LlmSupervisorDecider> _logger;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions, ISupervisorTapeSummaryStore tapeSummaries, Workflows.Planning.IRepoGroundingProvider grounding)
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions, ISupervisorTapeSummaryStore tapeSummaries, Workflows.Planning.IRepoGroundingProvider grounding, ILogger<LlmSupervisorDecider> logger)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
@@ -41,6 +43,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         _agentDefinitions = agentDefinitions;
         _tapeSummaries = tapeSummaries;
         _grounding = grounding;
+        _logger = logger;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -123,6 +126,28 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop(bindError);
 
+        // The schema-inexpressible invariant — the chosen kind's payload sub-object must be PRESENT — is enforced
+        // here on the RAW bound decision, because projection SUBSTITUTES an empty payload for a missing sub-object:
+        // past that line the executor rejects a payload the model never wrote, the rendered correction quotes that
+        // substitute, and the model re-authors the same defective shape turn after turn. One bounded repair echoes
+        // the model's OWN raw reply (a top-level-flattened spawn is self-diagnosable from the echo alone); a repair
+        // that misses or is still incoherent keeps the ORIGINAL decision, so the executor's rejection path runs
+        // exactly as before this existed.
+        if (SupervisorDecisionCoherence.MissingPayload(model) is { } defect)
+        {
+            _logger.LogWarning("Supervisor decision chose kind '{Kind}' without a usable payload — {Defect}; raw reply: {RawReply}", model.Kind, defect, StructuredJsonText.Preview(completion.Json.GetRawText()));
+
+            var repaired = await TryRepairMissingPayloadAsync(structured, pick, completion, defect, cancellationToken).ConfigureAwait(false);
+
+            if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
+            {
+                completion = repaired;
+                model = coherent;
+            }
+            else
+                _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
+        }
+
         // Capture the authoring model call (the pool-picked model + this reply's token usage) — the turn service folds it
         // into the NON-hashed outcome, never the payload, so it can't drift the idempotency key. It's how the journal shows
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).
@@ -199,6 +224,36 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 Model = pick.ModelId,
                 SystemPrompt = "You repair one malformed supervisor decision. Reply with ONLY the corrected decision JSON object — same intent, no commentary, no new decisions.",
                 UserPrompt = $"Your previous reply matched the JSON schema but could not be bound to the decision contract.\n\nBinding error: {bindError ?? "(unspecified)"}\n\nYour previous reply:\n{broken.Json.GetRawText()}\n\nRe-emit the SAME decision with that error corrected.",
+                JsonSchema = SupervisorDecisionSchema.ResponseSchema,
+                MaxOutputTokens = 4096,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One bounded REPAIR round-trip after a bound-but-INCOHERENT decision — the kind names a payload sub-object the
+    /// reply doesn't carry (<see cref="SupervisorDecisionCoherence"/>). The model receives its OWN raw reply plus the
+    /// named defect and must re-emit the SAME decision with the payload nested where the contract reads it. The echo
+    /// is load-bearing: a spawn whose subtaskIds were flattened to the top level is self-diagnosable from the reply
+    /// alone (live-probed 2026-08-07 — the raw echo alone recovered 6/6 where the substituted-payload correction
+    /// produced the only repeat). Returns null on a model-side miss (fail toward the original decision — the
+    /// executor's rejection path); a genuine INFRA fault propagates, exactly like the primary call.
+    /// </summary>
+    private static async Task<StructuredLLMCompletion?> TryRepairMissingPayloadAsync(IStructuredLLMClient structured, ModelPoolPick pick, StructuredLLMCompletion broken, string defect, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = "You repair one malformed supervisor decision. Reply with ONLY the corrected decision JSON object — same intent, no commentary, no new decisions.",
+                UserPrompt = $"Your previous reply chose a decision kind but did not carry that kind's payload where the contract reads it.\n\nDefect: {defect}\n\nYour previous reply:\n{broken.Json.GetRawText()}\n\nRe-emit the SAME decision with the payload carried inside its kind's own object.",
                 JsonSchema = SupervisorDecisionSchema.ResponseSchema,
                 MaxOutputTokens = 4096,
                 Temperature = 0,
