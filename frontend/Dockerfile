@@ -5,7 +5,7 @@ WORKDIR /app
 
 RUN apk add --no-cache git
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.5.2 --activate
 
 # Copy manifests first for better layer caching
 COPY package.json ./
