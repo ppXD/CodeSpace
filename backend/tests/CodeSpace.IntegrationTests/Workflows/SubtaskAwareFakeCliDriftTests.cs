@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -91,6 +92,80 @@ public class SubtaskAwareFakeCliDriftTests
         // (clean K-way merge); the E2E asserts the captured diff names a file with this prefix.
         FileWritingFakeCli.FileFor("do alpha").ShouldBe("agent_do_alpha.txt");
         FileWritingFakeCli.FileFor("do beta").ShouldBe("agent_do_beta.txt");
+    }
+
+    [Fact]
+    public void The_file_writing_fake_claude_dialect_folds_the_same_summary_as_its_codex_dialect()
+    {
+        // The #1297 trap, pinned parse-level: Claude folds FinalSummary ?? Completed ?? AssistantMessage while
+        // Codex SKIPS Completed — so the claude result line's `result` property must echo the codex agent_message
+        // ("DONE: <goal>"), never a literal "completed", or the two dialects silently fold different summaries and
+        // every whole-loop assertion on ExpectedSummaryFor becomes harness-lottery-dependent.
+        const string goal = "do alpha";
+
+        var claudeLines = new[]
+        {
+            $$$"""{"type":"assistant","message":{"content":[{"type":"text","text":"{{{FileWritingFakeCli.SummaryPrefix}}}do alpha"}]}}""",
+            $$$"""{"type":"result","subtype":"success","result":"{{{FileWritingFakeCli.SummaryPrefix}}}do alpha","is_error":false}""",
+        };
+
+        var claude = new ClaudeCodeHarness();
+        var result = claude.BuildResult(claudeLines.SelectMany(claude.ParseEvents).ToList(), exitCode: 0);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal), "the two dialects must fold the SAME summary — the claude fold prefers the result line's text");
+    }
+
+    [Fact]
+    public void The_file_writing_fake_script_serves_the_dialect_of_whichever_harness_invokes_it()
+    {
+        // The end-to-end half the parse pins can't see: the SCRIPT's own `$1` discriminator (codex argv always
+        // starts with `exec`, claude with `--print`) and its last-positional goal extraction — both harnesses put
+        // the prompt last. Runs the materialized script through /bin/sh exactly as the runner would, once per
+        // dialect, and asserts each stdout parses through ITS harness to the SAME summary + the goal-derived file
+        // lands in the cwd (the workspace-clone edit the whole-loop arm integrates).
+        if (OperatingSystem.IsWindows()) return;
+
+        const string goal = "do alpha";
+        var dir = Path.Combine(Path.GetTempPath(), "cs-filewriting-dialect-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        try
+        {
+            var script = Path.Combine(dir, "fake-agent.sh");
+            File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var codexStdout = RunScript(dir, script, "exec", "--json", goal);
+            var claudeStdout = RunScript(dir, script, "--print", "--output-format", "stream-json", goal);
+
+            var codex = new CodexHarness();
+            var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), exitCode: 0);
+            var claude = new ClaudeCodeHarness();
+            var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), exitCode: 0);
+
+            codexResult.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal));
+            claudeResult.Summary.ShouldBe(codexResult.Summary, "one script, two dialects, one summary — the $1 branch must serve whichever harness the model picked");
+            File.Exists(Path.Combine(dir, FileWritingFakeCli.FileFor(goal))).ShouldBeTrue("the WORK half is dialect-free — the goal-derived file is written regardless of who invoked it");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    private static string[] RunScript(string cwd, string script, params string[] args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
+        psi.ArgumentList.Add(script);
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
+
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(10_000).ShouldBeTrue("the fake script must exit promptly");
+        process.ExitCode.ShouldBe(0);
+
+        return stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
     }
 
     [Fact]
