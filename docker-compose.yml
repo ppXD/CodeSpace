@@ -63,6 +63,13 @@ services:
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
       # This pod NEVER processes jobs — it serves HTTP + enqueues only. Agent execution lives in the worker.
       HangfireHosting: "Api"
+      # ASPNETCORE_ENVIRONMENT=Production above means the variable-encryption master key is REQUIRED (Development is
+      # the only environment with a fallback), so without these two the pod throws at container build and crash-loops.
+      # The values are LOCAL-ONLY and labelled as such; override both in anything an operator would call a deployment.
+      CODESPACE_VARIABLE_MASTER_KEY: "${CODESPACE_VARIABLE_MASTER_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE=}"
+      # Stated explicitly rather than inheriting appsettings.json's committed dev key — a Production-labelled pod
+      # silently signing tokens with a source-controlled key is exactly the footgun this line makes visible.
+      Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
 
   # WORKER = THE LOCAL SANDBOX RUNNER — the Hangfire PROCESSING pod (HangfireHosting=Worker, which is also the
   # default when the key is absent). Agent runs + the per-run MCP endpoint execute HERE; the harness CLI is spawned as a confined child
@@ -94,6 +101,9 @@ services:
       # This pod IS the worker — it executes agent runs + the per-run MCP endpoint. Stated explicitly rather than
       # relying on the default, so the topology is readable from the compose file alone.
       HangfireHosting: "Worker"
+      # Both pods share ONE key-ring and ONE token signer, so these MUST match the api service's values above.
+      CODESPACE_VARIABLE_MASTER_KEY: "${CODESPACE_VARIABLE_MASTER_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE=}"
+      Authentication__Jwt__SymmetricKey: "${CODESPACE_JWT_SYMMETRIC_KEY:-local-dev-only-jwt-key-minimum-32-chars-long}"
       # Open the per-run MCP endpoint for every agent run (the governed tool fabric the CLI harness reaches).
       CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "${CODESPACE_AGENT_MCP_ENDPOINT_ENABLED:-true}"
       # Route side-effecting tool calls through the exactly-once ledger + durable HITL approval (read-only tools
