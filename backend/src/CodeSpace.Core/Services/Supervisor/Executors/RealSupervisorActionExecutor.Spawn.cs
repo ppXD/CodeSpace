@@ -518,10 +518,14 @@ public sealed partial class RealSupervisorActionExecutor
 
         var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Count, escalation }, AgentJson.Options);
 
-        _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s))", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count));
+        _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s)); units: {Units}", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count), DescribeStagedUnits(tasks));
 
         return SupervisorExecution.ParkedOnAgents(outcome, agentRunIds.Count);
     }
+
+    /// <summary>The plan-local unit ids this staging dispatches, comma-joined ("s1,s2"); a task with no subtask key (a free-form spawn under no plan) reads "(unkeyed)". Pure + pinned — the other half of the plan log's edges↔units join.</summary>
+    internal static string DescribeStagedUnits(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks) =>
+        string.Join(",", tasks.Select(t => string.IsNullOrEmpty(t.Task.SubtaskId) ? "(unkeyed)" : t.Task.SubtaskId));
 
     /// <summary>The crash-recovery correction for <see cref="StageAgentsAndParkAsync"/>: reads the reclaimed orphan's OWN persisted <see cref="AgentTask.Model"/> back off its TaskJson — never re-derived — and stamps it as the escalation's <c>To</c>, since that row's dispatch was fixed by the crashed pass, not by this replay. Falls back to the original guess only if the row/model can't be read (best-effort, never throws) — a slightly-stale note is still better than a hard failure over purely informational metadata.</summary>
     private async Task<SupervisorRetryEscalationOutcome> ReconcileEscalationWithDispatchedModelAsync(SupervisorRetryEscalationOutcome escalation, Guid dispatchedAgentRunId, CancellationToken cancellationToken)

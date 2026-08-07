@@ -1122,7 +1122,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 return;
             }
 
-            if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null) return;   // nothing changed — no artifact to record
+            if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null)
+            {
+                // Nothing changed — no artifact to record. Named rather than silent: this is the exact spot whose
+                // silence made "1 producer run(s) succeeded but none recorded a publish manifest" undiagnosable in
+                // run 31170757534 — dependency staging then legitimately falls through to the default branch, and
+                // WITHOUT this line the producer side of that story never appears in any log.
+                _logger.LogInformation("Agent run {RunId}: no publish manifest recorded — nothing captured (changedFiles=0, patch=none, patchArtifact=none, producedBranch={Branch}); a dependent staged on this unit inherits the repository default branch", runId, string.IsNullOrEmpty(result.ProducedBranch) ? "(none)" : result.ProducedBranch);
+                return;
+            }
 
             await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha), claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
