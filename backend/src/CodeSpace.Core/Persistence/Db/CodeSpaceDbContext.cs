@@ -69,6 +69,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<WorkSession> WorkSession => Set<WorkSession>();
     public DbSet<PublishManifest> PublishManifest => Set<PublishManifest>();
     public DbSet<CompletionRequirement> CompletionRequirement => Set<CompletionRequirement>();
+    public DbSet<CompletionRequirementRevision> CompletionRequirementRevision => Set<CompletionRequirementRevision>();
     public DbSet<CompletionReceipt> CompletionReceipt => Set<CompletionReceipt>();
     public DbSet<CompletionAssessmentRecord> CompletionAssessmentRecord => Set<CompletionAssessmentRecord>();
     public DbSet<BudgetReservation> BudgetReservation => Set<BudgetReservation>();

@@ -14,6 +14,18 @@ public class CompletionRequirementConfiguration : IEntityTypeConfiguration<Compl
     }
 }
 
+public class CompletionRequirementRevisionConfiguration : IEntityTypeConfiguration<CompletionRequirementRevision>
+{
+    public void Configure(EntityTypeBuilder<CompletionRequirementRevision> builder)
+    {
+        builder.HasKey(r => r.Id);
+        builder.Property(r => r.EnvelopeJson).HasColumnName("envelope_jsonb").HasColumnType("jsonb");
+        // The append order: a table-wide Postgres identity the database assigns — EF never sends it, only reads it back.
+        builder.Property(r => r.Revision).UseIdentityAlwaysColumn();
+        builder.HasIndex(r => new { r.WorkflowRunId, r.Kind, r.RequirementRef, r.Revision });
+    }
+}
+
 public class CompletionReceiptConfiguration : IEntityTypeConfiguration<CompletionReceipt>
 {
     public void Configure(EntityTypeBuilder<CompletionReceipt> builder)

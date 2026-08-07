@@ -49,7 +49,11 @@ public static class SupervisorTapeCompletion
     /// </summary>
     public static CompletionAssessment? ProjectIfStoppedNow(IReadOnlyList<SupervisorPriorDecision> decisions)
     {
-        var requirements = SupervisorUnitContract.BuildStakedRequirements(StakedUnits(decisions), ContractAuthority.ModelProposal);
+        // The mirror stamps the LATEST ref-bearing plan's identity — the same ref production's staging chokepoint
+        // read at its own stake time (the guard below already requires one to exist before anything is staked).
+        var planRef = decisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan).Select(d => SupervisorOutcome.ReadPlanRef(d.OutcomeJson)).LastOrDefault(r => r is not null);
+
+        var requirements = SupervisorUnitContract.BuildStakedRequirements(StakedUnits(decisions), ContractAuthority.ModelProposal, planRef);
 
         if (requirements.Count == 0) return null;
 
