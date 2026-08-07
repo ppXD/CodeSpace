@@ -21,6 +21,7 @@ using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.E2ETests.Sessions;
 
@@ -132,7 +133,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         {
             var credential = new ResolvedModelCredential { Provider = Provider, BaseUrl = baseUrl!.TrimEnd('/'), ApiKey = apiKey! };
             var registry = new LLMClientRegistry(new ILLMClient[] { new Core.Services.Workflows.Llm.Anthropic.AnthropicClient(SharedHttp), new Core.Services.Workflows.Llm.OpenAi.OpenAiClient(SharedHttp) });
-            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary(), new E2ETapeStore(), new CodeSpace.IntegrationTests.Workflows.Supervisor.NullRepoGrounding());
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary(), new E2ETapeStore(), new CodeSpace.IntegrationTests.Workflows.Supervisor.NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
             var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
             var score = SupervisorDecisionEval.Score(scenario, decision);
