@@ -12,7 +12,11 @@ namespace CodeSpace.Core.Services.Completion;
 /// </summary>
 public interface ICompletionContractStore
 {
-    Task UpsertRequirementsAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, CancellationToken cancellationToken);
+    /// <summary>Returns each upserted (ref, kind)'s CURRENT revision id — the row this call appended, or on an idempotent replay the one already standing — so a dispatcher can stamp the attempt with the exact ledger identity it was staked under.</summary>
+    Task<IReadOnlyDictionary<(string RequirementRef, string Kind), long>> UpsertRequirementsAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, CancellationToken cancellationToken);
+
+    /// <summary>P1 (v4.3): every (ref, kind)'s current (max) revision id for one run — what admission compares a receipt's bound revision against. Empty for a pre-ledger legacy run.</summary>
+    Task<IReadOnlyDictionary<(string RequirementRef, string Kind), long>> GetCurrentRequirementRevisionsAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
 
     Task AppendReceiptAsync(Guid workflowRunId, Guid teamId, ReceiptEnvelope receipt, CancellationToken cancellationToken);
 

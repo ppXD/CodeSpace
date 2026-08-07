@@ -14,9 +14,9 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
 
     public CompletionContractStore(CodeSpaceDbContext db) => _db = db;
 
-    public async Task UpsertRequirementsAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, CancellationToken cancellationToken)
+    public async Task<IReadOnlyDictionary<(string RequirementRef, string Kind), long>> UpsertRequirementsAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<RequirementEnvelope> requirements, CancellationToken cancellationToken)
     {
-        if (requirements.Count == 0) return;
+        if (requirements.Count == 0) return new Dictionary<(string, string), long>();
 
         var refs = requirements.Select(r => r.RequirementRef).ToList();
         var existing = await _db.CompletionRequirement
@@ -71,6 +71,33 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
             foreach (var entry in _db.ChangeTracker.Entries<CompletionRequirementRevision>().Where(e => e.State == Microsoft.EntityFrameworkCore.EntityState.Added).ToList())
                 entry.State = Microsoft.EntityFrameworkCore.EntityState.Detached;
         }
+
+        // The CURRENT revision per upserted key, read from the DATABASE rather than the change tracker on purpose:
+        // one query answers identically for a fresh append (identity read-back), an idempotent replay (nothing
+        // appended — the standing row wins), and the unique-index race path above (the winner's rows are the truth).
+        var keys = requirements.Select(r => (r.RequirementRef, r.Kind)).ToHashSet();
+
+        return (await CurrentRevisionsAsync(workflowRunId, teamId, refs, cancellationToken).ConfigureAwait(false))
+            .Where(kvp => keys.Contains(kvp.Key))
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+    }
+
+    public Task<IReadOnlyDictionary<(string RequirementRef, string Kind), long>> GetCurrentRequirementRevisionsAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
+        CurrentRevisionsAsync(workflowRunId, teamId, refs: null, cancellationToken);
+
+    /// <summary>Max revision per (ref, kind) for one run — optionally narrowed to a ref list (the upsert's own keys).</summary>
+    private async Task<IReadOnlyDictionary<(string RequirementRef, string Kind), long>> CurrentRevisionsAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<string>? refs, CancellationToken cancellationToken)
+    {
+        var query = _db.CompletionRequirementRevision.AsNoTracking().Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId);
+
+        if (refs is not null) query = query.Where(r => refs.Contains(r.RequirementRef));
+
+        var rows = await query
+            .GroupBy(r => new { r.RequirementRef, r.Kind })
+            .Select(g => new { g.Key.RequirementRef, g.Key.Kind, Revision = g.Max(x => x.Revision) })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.ToDictionary(r => (r.RequirementRef, r.Kind), r => r.Revision);
     }
 
     public async Task<IReadOnlyList<RequirementEnvelope>> ListRequirementRevisionsAsync(Guid workflowRunId, Guid teamId, string requirementRef, string kind, CancellationToken cancellationToken)

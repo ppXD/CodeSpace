@@ -73,6 +73,31 @@ public sealed class CompletionContractStoreFlowTests
     }
 
     [Fact]
+    public async Task The_upsert_returns_the_current_revision_a_dispatcher_can_stamp()
+    {
+        // P1 (revision binding): a fresh stake returns its appended row's id; an idempotent replay returns the
+        // SAME id (a crash-replayed staging stamps consistently); an amendment returns the newer one — and the
+        // per-run view agrees with all three.
+        var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<ICompletionContractStore>();
+
+        var requirement = Requirement("acceptance:s1", specHash: "sha256/canonical-json-v1:aaa");
+        var key = ("acceptance:s1", ContractKinds.Acceptance);
+
+        var first = await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);
+        var replay = await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);
+
+        replay[key].ShouldBe(first[key], "an idempotent replay resolves to the SAME revision — the reclaimed-orphan consistency the dispatch stamp relies on");
+
+        var amended = await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement with { SpecHash = "sha256/canonical-json-v1:bbb" } }, CancellationToken.None);
+
+        amended[key].ShouldBeGreaterThan(first[key], "an amendment appends — the returned id is the newer row");
+        (await store.GetCurrentRequirementRevisionsAsync(runId, teamId, CancellationToken.None))[key].ShouldBe(amended[key]);
+    }
+
+    [Fact]
     public async Task Receipts_append_exactly_once_per_attempt_and_target()
     {
         var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);

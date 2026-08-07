@@ -20,4 +20,14 @@ public sealed record WorkUnitRef
     /// <summary>canonical-json-v1 hash of the unit's contract at dispatch (v4.1-B). Null for a contract-less unit.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ContractHash { get; init; }
+
+    /// <summary>
+    /// P1 (v4.3): the unit's ACCEPTANCE requirement revision this attempt was dispatched under — the ledger row the
+    /// dispatch-time stake produced (or, on an idempotent crash replay, the one it already had). Identity where
+    /// <see cref="ContractHash"/> is value: a revert-shaped amendment (A→B→A) collides on hash but never on
+    /// revision. The delivery/output rows of the same stake wave share the acceptance row's staleness, so ONE
+    /// revision names the wave. Null on legacy stamps and plan-less dispatches (null-omitted — byte-stable).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? RequirementRevision { get; init; }
 }

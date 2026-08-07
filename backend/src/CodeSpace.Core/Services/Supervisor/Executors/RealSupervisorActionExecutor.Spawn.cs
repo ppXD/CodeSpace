@@ -473,7 +473,16 @@ public sealed partial class RealSupervisorActionExecutor
             {
                 try
                 {
-                    await _contracts.UpsertRequirementsAsync(context.SupervisorRunId, context.TeamId, requirements, cancellationToken).ConfigureAwait(false);
+                    var revisions = await _contracts.UpsertRequirementsAsync(context.SupervisorRunId, context.TeamId, requirements, cancellationToken).ConfigureAwait(false);
+
+                    // P1 (v4.3, receipt↔revision binding): the attempt is dispatched UNDER the acceptance revision
+                    // this very stake produced — or, on a crash-replayed staging, the identical one the idempotent
+                    // upsert left standing — stamped BEFORE the agent rows are created so every receipt the attempt
+                    // ever mints inherits the binding through its WorkUnitRef. A reclaimed orphan keeps its crashed
+                    // pass's persisted stamp, which the replayed no-op stake resolves to the same revision.
+                    tasks = tasks.Select(t => t.Task.WorkUnit is { } wu && t.Task.SubtaskId is { Length: > 0 } id && revisions.TryGetValue((SupervisorUnitContract.AcceptanceRef(id), Messages.Contracts.ContractKinds.Acceptance), out var revision)
+                        ? (t.Task with { WorkUnit = wu with { RequirementRevision = revision } }, t.Spec)
+                        : t).ToList();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

@@ -90,6 +90,54 @@ public class ReceiptAdmissionTests
     }
 
     [Fact]
+    public void An_acceptance_receipt_bound_to_a_superseded_revision_is_rejected()
+    {
+        // P1 (revision binding): identity where the hash check is value — a revert-shaped amendment (A→B→A)
+        // collides on hash, never on revision.
+        var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1") with { RequirementRevision = 3 }) with { EvidenceRef = Guid.NewGuid() };
+        var current = new Dictionary<(string, string), long> { [("acc:s1", ContractKinds.Acceptance)] = 5 };
+
+        ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null, current)
+            .Rejections.ShouldHaveSingleItem().Code.ShouldBe(ReceiptRejectionCodes.SupersededContract);
+    }
+
+    [Fact]
+    public void A_receipt_bound_to_the_current_revision_is_admitted()
+    {
+        var receipt = Receipt("acc:s1", Guid.NewGuid(), Unit("s1") with { RequirementRevision = 5 }) with { EvidenceRef = Guid.NewGuid() };
+        var current = new Dictionary<(string, string), long> { [("acc:s1", ContractKinds.Acceptance)] = 5 };
+
+        var result = ReceiptAdmission.Admit(new[] { receipt }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null, current);
+
+        result.Admitted.ShouldHaveSingleItem();
+        result.Rejections.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void The_revision_binding_is_tolerant_on_every_absent_side()
+    {
+        // An unstamped receipt (legacy tape, plan-less dispatch), a caller with no revision view (the tape
+        // mirror), and a NON-acceptance kind (one revision names the stake WAVE by its acceptance row — a
+        // delivery receipt is not independently bound) must all pass through.
+        var unstamped = Receipt("acc:s1", Guid.NewGuid(), Unit("s1")) with { EvidenceRef = Guid.NewGuid() };
+        var current = new Dictionary<(string, string), long> { [("acc:s1", ContractKinds.Acceptance)] = 5 };
+
+        ReceiptAdmission.Admit(new[] { unstamped }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null, current)
+            .Rejections.ShouldBeEmpty("no binding → the value-based checks below own it");
+
+        var stale = Receipt("acc:s1", Guid.NewGuid(), Unit("s1") with { RequirementRevision = 3 }) with { EvidenceRef = Guid.NewGuid() };
+
+        ReceiptAdmission.Admit(new[] { stale }, new[] { Requirement("acc:s1") }, Set(("s1", null)), null, currentRevisions: null)
+            .Rejections.ShouldBeEmpty("no revision view (the tape mirror) → tolerant");
+
+        var delivery = Receipt("del:s1", Guid.NewGuid(), Unit("s1") with { RequirementRevision = 3 }, ContractKinds.Delivery) with { TargetRef = "repo-A", EvidenceRef = Guid.NewGuid() };
+        var deliveryCurrent = new Dictionary<(string, string), long> { [("del:s1", ContractKinds.Delivery)] = 5 };
+
+        ReceiptAdmission.Admit(new[] { delivery }, new[] { Requirement("del:s1", ContractKinds.Delivery) }, Set(("s1", null)), null, deliveryCurrent)
+            .Rejections.ShouldBeEmpty("only the acceptance kind binds — the wave's other rows share its staleness through it");
+    }
+
+    [Fact]
     public void A_hash_less_side_never_trips_the_contract_binding()
     {
         // The same both-sides-present tolerance the retired check had: a tape-reconstructed receipt carries no
