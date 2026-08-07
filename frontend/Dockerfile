@@ -5,6 +5,8 @@ WORKDIR /app
 
 RUN apk add --no-cache git
 
+RUN corepack enable
+
 # Copy manifests first for better layer caching
 COPY package.json ./
 COPY pnpm-lock.yaml* package-lock.json* ./
