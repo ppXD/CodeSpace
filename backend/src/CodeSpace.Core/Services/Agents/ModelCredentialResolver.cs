@@ -25,12 +25,12 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
     /// </summary>
     public const string OpenAIOperatorKeyEnvVar = "CODESPACE_OPENAI_API_KEY";
 
-    // Provider tag → operator-global worker env var (the single-tenant last-resort key). Anthropic shares the
-    // SAME var the in-process llm.complete client reads, so one operator key serves both paths.
-    private static readonly IReadOnlyDictionary<string, string> OperatorGlobalKeyEnvVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    /// <summary>Provider tag → the operator-global key for it, off the bound settings. Anthropic shares the SAME configured value the in-process llm.complete client reads, so one operator key serves both paths.</summary>
+    private static string? OperatorGlobalKeyFor(string provider) => provider switch
     {
-        ["Anthropic"] = AnthropicClient.ApiKeyEnvVar,
-        ["OpenAI"] = OpenAIOperatorKeyEnvVar,
+        var p when string.Equals(p, "Anthropic", StringComparison.OrdinalIgnoreCase) => Settings.RuntimeSettings.Current.AnthropicOperatorApiKey,
+        var p when string.Equals(p, "OpenAI", StringComparison.OrdinalIgnoreCase) => Settings.RuntimeSettings.Current.OpenAIOperatorApiKey,
+        _ => null,
     };
 
     private readonly CodeSpaceDbContext _db;
@@ -141,13 +141,13 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
 
     /// <summary>
     /// Last resort: the operator-global single-tenant key from the worker env, for the first supported provider
-    /// that has one set. NOT tenant-isolated — a strict operator simply sets no <c>CODESPACE_*_API_KEY</c>, and
-    /// then teams must each configure a credential. Reads the env directly (no secret persisted anywhere).
+    /// that has one configured. NOT tenant-isolated — a strict operator simply configures none, and then teams must
+    /// each set up their own credential. Read from configuration; no secret is persisted anywhere.
     /// </summary>
     private static ResolvedModelCredential? ResolveOperatorGlobal(IReadOnlyList<string> supportedProviders)
     {
         foreach (var provider in supportedProviders)
-            if (OperatorGlobalKeyEnvVars.TryGetValue(provider, out var envVar) && Environment.GetEnvironmentVariable(envVar) is { Length: > 0 } key)
+            if (OperatorGlobalKeyFor(provider) is { Length: > 0 } key)
                 return new ResolvedModelCredential { Provider = provider, ApiKey = key };
 
         return null;

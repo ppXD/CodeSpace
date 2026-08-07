@@ -58,41 +58,38 @@ public class CodeSpaceModule : Autofac.Module
 
     /// <summary>
     /// Singleton AES-GCM encryption for the unified <c>variable</c> subsystem.
-    /// Master key sourced from <see cref="Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar"/>
-    /// (preferred), falling back to <see cref="Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar"/>
-    /// so existing dev / test environments don't break during the transition.
+    /// Master key from <c>Variables:MasterKey</c>, still honouring the legacy flat
+    /// <c>CODESPACE_VARIABLE_MASTER_KEY</c> / <c>CODESPACE_TEAM_SECRET_MASTER_KEY</c> names every deployed pod sets.
     /// Dev fallback + WARN in Development; fail-fast everywhere else.
     /// </summary>
     private void RegisterVariableEncryption(ContainerBuilder builder)
     {
-        var preferred = Environment.GetEnvironmentVariable(Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar);
-        var legacy = Environment.GetEnvironmentVariable(Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar);
-        var envValue = !string.IsNullOrWhiteSpace(preferred) ? preferred : legacy;
+        // Both come through IConfiguration now, so a k8s Secret, a ConfigMap and the legacy flat environment name
+        // are all the same thing to this code. RuntimeSettings.Bind ran at the top of Load, so the value is present.
+        var configured = RuntimeSettings.Current.VariableMasterKey;
 
-        var aspNetCoreEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production";
+        var aspNetCoreEnv = _configuration["ASPNETCORE_ENVIRONMENT"] ?? "Production";
         var isDevelopment = string.Equals(aspNetCoreEnv, "Development", StringComparison.OrdinalIgnoreCase);
 
         byte[] masterKey;
-        if (!string.IsNullOrWhiteSpace(envValue))
+        if (!string.IsNullOrWhiteSpace(configured))
         {
-            masterKey = Convert.FromBase64String(envValue);
+            masterKey = Convert.FromBase64String(configured);
         }
         else if (isDevelopment)
         {
             Serilog.Log.Warning(
-                "VariableEncryption: neither {Preferred} nor {Legacy} set; using DEVELOPMENT-ONLY fallback key. " +
-                "Set {Preferred} in any non-Development deployment.",
-                Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar,
-                Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar,
-                Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar);
+                "VariableEncryption: {Key} is not configured; using a DEVELOPMENT-ONLY fallback key. " +
+                "Set it in any non-Development deployment.", "Variables:MasterKey");
             masterKey = new byte[32];
             for (int i = 0; i < 32; i++) masterKey[i] = (byte)i;
         }
         else
         {
             throw new InvalidOperationException(
-                $"{Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar} must be set to a base64-encoded " +
-                "32-byte AES-256 key in non-Development environments. Generate one with `openssl rand -base64 32`.");
+                "Variables:MasterKey must be set to a base64-encoded 32-byte AES-256 key in non-Development " +
+                "environments (the legacy CODESPACE_VARIABLE_MASTER_KEY name is still read). " +
+                "Generate one with `openssl rand -base64 32`.");
         }
 
         var encryption = new Services.Variables.AesGcmVariableEncryption(masterKey);
