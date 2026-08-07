@@ -38,8 +38,23 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
                     Kind = envelope.Kind,
                     EnvelopeJson = json,
                 });
-            else if (row.EnvelopeJson != json)
-                row.EnvelopeJson = json;   // an amended obligation overwrites its envelope — the ref is the identity
+            else if (row.EnvelopeJson == json)
+                continue;   // unchanged — no amendment, no revision
+            else
+                row.EnvelopeJson = json;   // an amended obligation overwrites its CURRENT envelope — the ref is the identity
+
+            // P1 (v4.3): the append-only history the in-place upsert used to destroy — one revision per first
+            // stake and per amendment. Since #1321 the staked SpecHash is admission's comparand; without this,
+            // the shape an earlier attempt was staked under vanished the moment a retry re-staked.
+            _db.CompletionRequirementRevision.Add(new CompletionRequirementRevision
+            {
+                Id = Guid.NewGuid(),
+                TeamId = teamId,
+                WorkflowRunId = workflowRunId,
+                RequirementRef = envelope.RequirementRef,
+                Kind = envelope.Kind,
+                EnvelopeJson = json,
+            });
         }
 
         try
@@ -49,10 +64,24 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
         catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" })
         {
             // A concurrent producer won the unique index — the obligation exists; upsert semantics hold. Detach
-            // the losers so this context's change tracker stays clean for later saves.
+            // the losers (the revision rows they carried included) so this context's change tracker stays clean
+            // for later saves.
             foreach (var entry in _db.ChangeTracker.Entries<CompletionRequirement>().Where(e => e.State == Microsoft.EntityFrameworkCore.EntityState.Added).ToList())
                 entry.State = Microsoft.EntityFrameworkCore.EntityState.Detached;
+            foreach (var entry in _db.ChangeTracker.Entries<CompletionRequirementRevision>().Where(e => e.State == Microsoft.EntityFrameworkCore.EntityState.Added).ToList())
+                entry.State = Microsoft.EntityFrameworkCore.EntityState.Detached;
         }
+    }
+
+    public async Task<IReadOnlyList<RequirementEnvelope>> ListRequirementRevisionsAsync(Guid workflowRunId, Guid teamId, string requirementRef, string kind, CancellationToken cancellationToken)
+    {
+        var rows = await _db.CompletionRequirementRevision.AsNoTracking()
+            .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.RequirementRef == requirementRef && r.Kind == kind)
+            .OrderBy(r => r.Revision)
+            .Select(r => r.EnvelopeJson)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Select(json => JsonSerializer.Deserialize<RequirementEnvelope>(json, AgentJson.Options)!).ToList();
     }
 
     public async Task AppendReceiptAsync(Guid workflowRunId, Guid teamId, ReceiptEnvelope receipt, CancellationToken cancellationToken)

@@ -43,6 +43,36 @@ public sealed class CompletionContractStoreFlowTests
     }
 
     [Fact]
+    public async Task Amendments_append_to_the_revision_ledger_so_history_survives_the_overwrite()
+    {
+        // P1 (v4.3): the current row is a projection; the revision ledger is the history. Before this ledger, a
+        // revised-instruction retry's re-stake destroyed the SpecHash the original attempt was staked under — the
+        // exact value #1321 made admission's comparand.
+        var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<ICompletionContractStore>();
+
+        var requirement = Requirement("acceptance:s1", specHash: "sha256/canonical-json-v1:aaa");
+
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);   // replay — no amendment, no revision
+
+        (await store.ListRequirementRevisionsAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance, CancellationToken.None))
+            .ShouldHaveSingleItem("the first stake is revision one; an identical replay appends nothing");
+
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement with { SpecHash = "sha256/canonical-json-v1:bbb" } }, CancellationToken.None);
+
+        var history = await store.ListRequirementRevisionsAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance, CancellationToken.None);
+        history.Count.ShouldBe(2, "an amendment overwrites the CURRENT row but APPENDS to the ledger");
+        history[0].SpecHash.ShouldBe("sha256/canonical-json-v1:aaa", "oldest first — the shape the original attempt was staked under is still on record");
+        history[1].SpecHash.ShouldBe("sha256/canonical-json-v1:bbb");
+
+        (await store.ListRequirementsAsync(runId, teamId, CancellationToken.None))
+            .ShouldHaveSingleItem().SpecHash.ShouldBe("sha256/canonical-json-v1:bbb", "the current projection is the ledger's newest entry");
+    }
+
+    [Fact]
     public async Task Receipts_append_exactly_once_per_attempt_and_target()
     {
         var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
