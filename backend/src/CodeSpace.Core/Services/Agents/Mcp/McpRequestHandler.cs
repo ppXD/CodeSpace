@@ -182,8 +182,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         // decision.request is an ASK, not a gated side effect — intercept it BEFORE the autonomy gate (a Confined tier
         // must never DENY a question) and drive the durable decision flow on the SAME tool-ledger spine the approval
-        // flow uses, generalized from binary approve/reject to typed options. The tool is only in the registry when
-        // governance is on (DI-gated), so a governance-OFF run never reaches here (Resolve returned null → Unknown).
+        // flow uses, generalized from binary approve/reject to typed options. Governance is a committed constant now,
+        // so the tool is registered everywhere and every deployment has the ledger + approval surface this rides on.
         if (string.Equals(name, DecisionRequestTool.ToolKind, StringComparison.Ordinal))
         {
             var decisionArgs = prms.TryGetProperty("arguments", out var da) ? da : EmptyObject;

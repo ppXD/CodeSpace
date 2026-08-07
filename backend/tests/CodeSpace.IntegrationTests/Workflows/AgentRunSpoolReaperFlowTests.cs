@@ -25,11 +25,15 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
     private readonly string _spoolRoot;
+    private readonly IDisposable _settings;
 
     public AgentRunSpoolReaperFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
         _spoolRoot = Path.Combine(Path.GetTempPath(), "cs-reaper-it-" + Guid.NewGuid().ToString("N"));
+        // The reaper resolves the spool root through RuntimeSettings now — without this override it reaps the
+        // DEFAULT root while the test seeds under its own temp dir, and nothing is ever reaped.
+        _settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = _spoolRoot });
     }
 
     [Fact]
@@ -183,6 +187,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 
     public void Dispose()
     {
+        _settings.Dispose();
         try { Directory.Delete(_spoolRoot, recursive: true); } catch { /* best-effort */ }
         try { foreach (var d in Directory.GetDirectories(Path.GetTempPath(), "cs-reaper-outside-*")) Directory.Delete(d, recursive: true); } catch { /* best-effort */ }
     }

@@ -32,6 +32,9 @@ public sealed class DurableLaunchCgroupE2ETests
         if (arena is null) return;
         if (!arena.HasPython) { Skip("python3 (the deterministic memory hog) is not installed"); return; }
 
+        // The durable launch resolves the cgroup root through RuntimeSettings now — the operator delegating this
+        // subtree — so without the override no leaf is ever created and CgroupRunKey stays null.
+        using var settings = RuntimeSettings.Override(s => s with { AgentCgroupRoot = arena.Root });
         try
         {
             var runner = new LocalProcessRunner();
