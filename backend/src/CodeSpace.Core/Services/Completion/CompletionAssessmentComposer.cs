@@ -125,7 +125,11 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         var receipts = await _contracts.ListReceiptsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var admission = ReceiptAdmission.Admit(receipts, requirements, executableSet, AttemptSelectors.SelectOperationalActive(attempts));
+        // P1 (revision binding): the ledger's current revision per key — what an acceptance receipt's bound
+        // revision is compared against. The tape mirror has no ledger and passes nothing; absent keys are tolerant.
+        var currentRevisions = await _contracts.GetCurrentRequirementRevisionsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var admission = ReceiptAdmission.Admit(receipts, requirements, executableSet, AttemptSelectors.SelectOperationalActive(attempts), currentRevisions);
 
         return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>());
     }

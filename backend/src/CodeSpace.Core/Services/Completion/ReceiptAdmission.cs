@@ -10,6 +10,7 @@ public static class ReceiptRejectionCodes
     public const string PlanVersionMismatch = "plan-version-mismatch";
     public const string ContractHashMismatch = "contract-hash-mismatch";
     public const string SupersededAttempt = "superseded-attempt";
+    public const string SupersededContract = "superseded-contract";
     public const string DuplicateTarget = "duplicate-target";
     public const string MissingIdentity = "missing-identity";
     public const string MissingEvidence = "missing-evidence";
@@ -39,7 +40,7 @@ public sealed record ReceiptAdmissionResult(IReadOnlyList<ReceiptEnvelope> Admit
 /// </summary>
 public static class ReceiptAdmission
 {
-    public static ReceiptAdmissionResult Admit(IReadOnlyList<ReceiptEnvelope> receipts, IReadOnlyList<RequirementEnvelope> requirements, ExecutableSet? executableSet, IReadOnlyDictionary<UnitKey, AttemptProjection>? operationalActive)
+    public static ReceiptAdmissionResult Admit(IReadOnlyList<ReceiptEnvelope> receipts, IReadOnlyList<RequirementEnvelope> requirements, ExecutableSet? executableSet, IReadOnlyDictionary<UnitKey, AttemptProjection>? operationalActive, IReadOnlyDictionary<(string RequirementRef, string Kind), long>? currentRevisions = null)
     {
         var admitted = new List<ReceiptEnvelope>();
         var rejections = new List<ReceiptRejection>();
@@ -81,6 +82,22 @@ public static class ReceiptAdmission
                 && active.AttemptId != receipt.AttemptId)
             {
                 rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.SupersededAttempt, $"unit '{wu.UnitId}': receipt is from attempt {receipt.AttemptId} but the operational active attempt is {active.AttemptId} (ordinal {active.AttemptOrdinal})"));
+                continue;
+            }
+
+            // P1 (revision binding — identity where the hash check below is value): an acceptance receipt bound
+            // to a revision the ledger has since re-staked answers a SUPERSEDED contract, even when a
+            // revert-shaped amendment (A→B→A) makes the hashes collide. Only the ACCEPTANCE kind binds — the
+            // delivery/output rows of one stake wave share its staleness (WorkUnitRef.RequirementRevision names
+            // the wave by its acceptance row). Tolerant on every absent side: an unstamped receipt (legacy tape,
+            // plan-less dispatch), a caller with no revision view (the tape mirror), and a key the ledger doesn't
+            // know all pass through to the checks below.
+            if (receipt.Kind == ContractKinds.Acceptance
+                && receipt.WorkUnit?.RequirementRevision is { } bound
+                && currentRevisions is not null && currentRevisions.TryGetValue((receipt.RequirementRef, receipt.Kind), out var currentRevision)
+                && bound < currentRevision)
+            {
+                rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.SupersededContract, $"requirement '{receipt.RequirementRef}': receipt is bound to revision {bound} but the requirement has been re-staked at revision {currentRevision} — a receipt answering a superseded contract never reaches a fold"));
                 continue;
             }
 

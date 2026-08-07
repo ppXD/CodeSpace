@@ -195,6 +195,8 @@ public class SupervisorSpawnFlowTests : IDisposable
             recordedRef!.Value.WorkPlanId.ShouldBe(plan.Id);
             recordedRef.Value.Version.ShouldBe(1);
 
+            var stampedRevisions = new Dictionary<string, long>();
+
             foreach (var json in taskJsons)
             {
                 var workUnit = System.Text.Json.JsonDocument.Parse(json!).RootElement.GetProperty("workUnit");
@@ -205,17 +207,28 @@ public class SupervisorSpawnFlowTests : IDisposable
 
                 // P1b: the effective contract's canonical hash rides the ref — self-describing + non-empty.
                 workUnit.GetProperty("contractHash").GetString()!.ShouldStartWith("sha256/canonical-json-v1:");
+
+                // P1 (revision binding): the attempt names the ledger row its own stake produced.
+                stampedRevisions[workUnit.GetProperty("unitId").GetString()!] = workUnit.GetProperty("requirementRevision").GetInt64();
             }
 
             // P2a-2 (R): the staged units' acceptance obligations are durable requirement rows AT AUTHORIZATION,
             // spec-hash-bound to the same effective contract the WorkUnitRef carries.
-            var requirements = await verify.Resolve<Core.Services.Completion.ICompletionContractStore>()
-                .ListRequirementsAsync(runId, teamId, CancellationToken.None);
+            var store = verify.Resolve<Core.Services.Completion.ICompletionContractStore>();
+            var requirements = await store.ListRequirementsAsync(runId, teamId, CancellationToken.None);
             requirements.Count.ShouldBe(6, "each staged unit stakes its acceptance AND (expecting changes by default) its delivery AND its output capture");
             requirements.Count(r => r.Kind == Messages.Contracts.ContractKinds.Acceptance).ShouldBe(2);
             requirements.Count(r => r.Kind == Messages.Contracts.ContractKinds.Delivery).ShouldBe(2);
             requirements.Count(r => r.Kind == Messages.Contracts.ContractKinds.Output).ShouldBe(2);
             requirements.ShouldAllBe(r => r.SpecHash!.StartsWith("sha256/canonical-json-v1:"));
+
+            // P1 (revision binding): every attempt's stamped revision IS the ledger's current acceptance revision
+            // for its unit — the identity a receipt inherits and admission compares against.
+            var currentRevisions = await store.GetCurrentRequirementRevisionsAsync(runId, teamId, CancellationToken.None);
+
+            foreach (var (unitId, stamped) in stampedRevisions)
+                stamped.ShouldBe(currentRevisions[(Core.Services.Supervisor.SupervisorUnitContract.AcceptanceRef(unitId), Messages.Contracts.ContractKinds.Acceptance)],
+                    $"unit '{unitId}': the dispatch stamp and the ledger must name the SAME revision — the join a receipt's binding rides on");
         }
         finally
         {
