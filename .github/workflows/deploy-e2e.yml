@@ -7,7 +7,7 @@ name: Deploy · Compose E2E
 # probes and that the API image carries zero agent-execution machinery. This is the one lane that exercises the
 # images + the API↔worker split end to end; everything else tests the logic in-process on the runner.
 #
-# Confinement is intentionally NOT exercised here (the container won't grant unprivileged userns; CODESPACE_REQUIRE_SANDBOX
+# Confinement is intentionally NOT exercised here (the container won't grant unprivileged userns; Sandbox:RequireConfinement
 # is left unset → the run is unconfined) — real bubblewrap confinement is the Sandbox · Isolation lane's job.
 
 on:

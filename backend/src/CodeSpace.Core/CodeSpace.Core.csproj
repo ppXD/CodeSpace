@@ -64,6 +64,9 @@
     <!-- The gated real-CLI E2E drives the production harness + runner internals (WriteConfigHomeFiles,
          ClaudeTranscriptPath) against the real claude binary's filesystem contract. -->
     <InternalsVisibleTo Include="CodeSpace.E2ETests" />
+    <!-- The isolation lane drives BubblewrapSandbox / CgroupResourceLimit against real kernel primitives, and
+         overrides the bound RuntimeSettings to do it. -->
+    <InternalsVisibleTo Include="CodeSpace.SandboxTests" />
   </ItemGroup>
 
 </Project>

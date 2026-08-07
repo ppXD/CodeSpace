@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -31,8 +32,6 @@ public sealed class DurableLaunchCgroupE2ETests
         if (arena is null) return;
         if (!arena.HasPython) { Skip("python3 (the deterministic memory hog) is not installed"); return; }
 
-        var before = Environment.GetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar);
-        Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, arena.Root);   // operator delegates this subtree
         try
         {
             var runner = new LocalProcessRunner();
@@ -52,7 +51,6 @@ public sealed class DurableLaunchCgroupE2ETests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, before);
         }
     }
 
@@ -66,12 +64,11 @@ public sealed class DurableLaunchCgroupE2ETests
         // never applied, so this can't prove re-rooting — require the sandbox (fail-closed on the required lane).
         if (BubblewrapSandbox.Available is null)
         {
-            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but no bwrap — cannot prove cgroup-namespace re-rooting without the --unshare-cgroup-try flag bwrap applies");
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but no bwrap — cannot prove cgroup-namespace re-rooting without the --unshare-cgroup-try flag bwrap applies");
             return;
         }
 
-        var before = Environment.GetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar);
-        Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, arena.Root);
+        using var settings70 = RuntimeSettings.Override(s => s with { AgentCgroupRoot = arena.Root });
         try
         {
             // A memory cap places the whole supervisor chain (and so the bwrap'd agent) inside a real cgroup leaf
@@ -99,7 +96,6 @@ public sealed class DurableLaunchCgroupE2ETests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, before);
         }
     }
 
@@ -109,8 +105,7 @@ public sealed class DurableLaunchCgroupE2ETests
         var arena = ArenaOrSkip();
         if (arena is null) return;
 
-        var before = Environment.GetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar);
-        Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, arena.Root);
+        using var settings107 = RuntimeSettings.Override(s => s with { AgentCgroupRoot = arena.Root });
         try
         {
             // Default spec (MaxMemoryMb=0, MaxCpuPercent=0): no cap requested → no cgroup leaf, byte-identical to a run
@@ -127,7 +122,6 @@ public sealed class DurableLaunchCgroupE2ETests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, before);
         }
     }
 

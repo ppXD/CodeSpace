@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using System.Text;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
@@ -20,13 +21,10 @@ public sealed class LocalFileArtifactBlobBackendTests : IDisposable
     public LocalFileArtifactBlobBackendTests()
     {
         _root = Path.Combine(Path.GetTempPath(), "cs-artifact-backend-test-" + Guid.NewGuid().ToString("N"));
-        _originalEnv = Environment.GetEnvironmentVariable(LocalFileArtifactBlobBackend.StoreDirEnvVar);
-        Environment.SetEnvironmentVariable(LocalFileArtifactBlobBackend.StoreDirEnvVar, _root);
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(LocalFileArtifactBlobBackend.StoreDirEnvVar, _originalEnv);
         try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
     }
 
@@ -36,12 +34,6 @@ public sealed class LocalFileArtifactBlobBackendTests : IDisposable
         return (new LocalFileArtifactBlobBackend(), ArtifactStore.ComputeSha256Hex(bytes), bytes);
     }
 
-    [Fact]
-    public void Store_dir_env_var_name_pinned_for_operators()
-    {
-        // Rule 8 — operators point this at a durable mount; renaming silently relocates every artifact.
-        LocalFileArtifactBlobBackend.StoreDirEnvVar.ShouldBe("CODESPACE_ARTIFACT_STORE_DIR");
-    }
 
     [Fact]
     public async Task Write_then_read_round_trips_identical_bytes_under_a_file_url()

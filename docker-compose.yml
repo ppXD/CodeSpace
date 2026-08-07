@@ -79,9 +79,9 @@ services:
   #
   # SAFETY: read-only tools are served UNCONDITIONALLY (McpRequestHandler short-circuits IsReadOnly BEFORE the
   # governance ledger); side-effecting tools route through the exactly-once ToolCallLedger + AgentToolGate matrix
-  # (fail-closed). CONFINEMENT: bubblewrap is in the image, but CODESPACE_REQUIRE_SANDBOX is NOT armed here — running
+  # (fail-closed). CONFINEMENT: bubblewrap is in the image, but Sandbox:RequireConfinement is NOT armed here — running
   # bubblewrap inside an unprivileged container needs userns/privileged settings, so a prod k8s pod that grants
-  # user namespaces arms CODESPACE_REQUIRE_SANDBOX=1 (fail-closed); local dev runs agents unconfined-in-container.
+  # user namespaces sets Sandbox__RequireConfinement=true (fail-closed); local dev runs agents unconfined-in-container.
   worker:
     profiles: ["app"]
     build:
@@ -110,8 +110,8 @@ services:
       # The codespace-mcp proxy is published next to the API by the csproj target, so the default path resolves;
       # set this only to point at an air-gapped mirror or a custom location.
       CODESPACE_MCP_PROXY_PATH: "${CODESPACE_MCP_PROXY_PATH:-}"
-      # Prod (userns-capable pod) arms the fail-closed isolation guard; left unset for local dev (see comment above).
-      # CODESPACE_REQUIRE_SANDBOX: "1"
+      # Prod (userns-capable pod) arms the fail-closed isolation guard; left off for local dev (see comment above).
+      # Sandbox__RequireConfinement: "true"
 
 volumes:
   codespace-pgdata:

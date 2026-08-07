@@ -2,6 +2,7 @@ using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Settings;
 using CodeSpace.Core.Settings.Application;
 using CodeSpace.Core.Settings.Database;
 using Serilog;
@@ -19,6 +20,11 @@ public class Program
             .AddJsonFile($"appsettings.{environment}.json", optional: true)
             .AddEnvironmentVariables()
             .Build();
+
+        // The deployment-varying settings that deep static call sites read (sandbox confinement, spool + artifact
+        // roots, the drain budget). Bound here because Main runs BEFORE the host, so CodeSpaceModule's own binding
+        // would be too late for anything on this path.
+        RuntimeSettings.Bind(configuration);
 
         var application = new SerilogApplicationSetting(configuration).Value;
 

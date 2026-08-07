@@ -8,21 +8,12 @@ namespace CodeSpace.Core.Settings;
 /// and recovered by the reconciler, NOT drained — you can't drain a multi-minute run on every deploy
 /// (that's what a decoupled out-of-process runner is for).
 ///
-/// <para>Operator-tunable via env (Rule 8). The deployment's grace period MUST be ≥ this, or the
-/// orchestrator SIGKILLs the process before it drains (k8s: <c>terminationGracePeriodSeconds</c> ≥
-/// <see cref="DrainSecondsEnvVar"/>; the 30s default matches k8s's own default).</para>
+/// <para>Configured as <c>Shutdown:DrainSeconds</c>. The deployment's grace period MUST be at least this,
+/// or the orchestrator SIGKILLs the process before it drains (k8s: <c>terminationGracePeriodSeconds</c>);
+/// the default matches k8s's own default for exactly that reason.</para>
 /// </summary>
 public static class ShutdownSettings
 {
-    public const string DrainSecondsEnvVar = "CODESPACE_SHUTDOWN_DRAIN_SECONDS";
-
-    public const int DefaultDrainSeconds = 30;
-
-    /// <summary>The host's <c>HostOptions.ShutdownTimeout</c> — a positive-integer-seconds env override, or the default.</summary>
-    public static TimeSpan ResolveDrainTimeout()
-    {
-        var raw = System.Environment.GetEnvironmentVariable(DrainSecondsEnvVar);
-
-        return int.TryParse(raw, out var seconds) && seconds > 0 ? TimeSpan.FromSeconds(seconds) : TimeSpan.FromSeconds(DefaultDrainSeconds);
-    }
+    /// <summary>The host's <c>HostOptions.ShutdownTimeout</c>, from the bound <see cref="RuntimeSettings"/>.</summary>
+    public static TimeSpan ResolveDrainTimeout() => TimeSpan.FromSeconds(RuntimeSettings.Current.ShutdownDrainSeconds);
 }

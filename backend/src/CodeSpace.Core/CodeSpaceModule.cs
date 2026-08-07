@@ -33,6 +33,10 @@ public class CodeSpaceModule : Autofac.Module
 
     protected override void Load(ContainerBuilder builder)
     {
+        // Idempotent, and deliberately also done in Program.Main: Main covers the pre-host path (DbUp), this covers
+        // every host that skips Main — notably WebApplicationFactory's in-memory test host.
+        RuntimeSettings.Bind(_configuration);
+
         RegisterSettings(builder);
         RegisterMediator(builder);
         RegisterPersistence(builder);

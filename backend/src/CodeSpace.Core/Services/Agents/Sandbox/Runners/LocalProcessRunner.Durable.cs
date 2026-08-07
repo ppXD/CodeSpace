@@ -20,13 +20,6 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// </summary>
 public sealed partial class LocalProcessRunner
 {
-    /// <summary>
-    /// Operator override for the spool root (where each run's <c>out.log</c> / <c>err.log</c> / <c>exit</c>
-    /// marker live). Default: a <c>codespace/agent-runs</c> dir under the system temp dir. Pinned by a test
-    /// (Rule 8) — an air-gapped operator may need the spool on a specific durable volume.
-    /// </summary>
-    public const string SpoolRootEnvVar = "CODESPACE_AGENT_RUN_SPOOL_DIR";
-
     private const string StdoutFile = "out.log";
     private const string StderrFile = "err.log";
     private const string ExitMarkerFile = "exit";
@@ -514,7 +507,7 @@ public sealed partial class LocalProcessRunner
     /// </summary>
     private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, IReadOnlyList<string> egressExecPrefix, IReadOnlyList<string> cgroupExecPrefix)
     {
-        // Fail-closed: a deployment that mandates isolation (CODESPACE_REQUIRE_SANDBOX) must never run unconfined.
+        // Fail-closed: a deployment that mandates isolation (Sandbox:RequireConfinement) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
 
         // A non-empty prefix means the durable launch already set up a filtered-egress netns (B3.2b): the process runs
@@ -592,8 +585,9 @@ public sealed partial class LocalProcessRunner
     public static string McpProxyBinaryPath() =>
         Environment.GetEnvironmentVariable(McpProxyPathEnvVar) is { Length: > 0 } p ? p : Path.Combine(AppContext.BaseDirectory, McpProxyFile);
 
+    /// <summary>The spool root: <c>Agents:RunSpoolDirectory</c> when configured, else a path under the system temp dir. The temp default is fine for development but does NOT survive a pod restart, so a deployment that wants re-attach to work across one points the setting at a volume.</summary>
     internal static string SpoolRoot() =>
-        Environment.GetEnvironmentVariable(SpoolRootEnvVar) is { Length: > 0 } v ? v : Path.Combine(Path.GetTempPath(), "codespace", "agent-runs");
+        CodeSpace.Core.Settings.RuntimeSettings.Current.AgentRunSpoolDirectory ?? Path.Combine(Path.GetTempPath(), "codespace", "agent-runs");
 
     internal static string SpoolDirectoryFor(string spoolKey) => Path.Combine(SpoolRoot(), spoolKey);
 

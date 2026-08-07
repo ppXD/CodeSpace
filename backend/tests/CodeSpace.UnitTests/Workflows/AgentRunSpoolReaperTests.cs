@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using Shouldly;
@@ -39,12 +40,10 @@ public sealed class AgentRunSpoolReaperTests
     [Fact]
     public void RoundSpoolFamily_finds_every_revise_round_sibling_not_just_the_handles_last_round()
     {
-        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
         var root = Path.Combine(Path.GetTempPath(), "cs-reaper-family-" + Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = root });
         try
         {
-            Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, root);
-
             var runId = Guid.NewGuid();
             Directory.CreateDirectory(Path.Combine(root, runId.ToString("N")));                    // round 0
             Directory.CreateDirectory(Path.Combine(root, $"{runId:N}-r1"));                        // revise round 1
@@ -60,7 +59,6 @@ public sealed class AgentRunSpoolReaperTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original);
             try { Directory.Delete(root, recursive: true); } catch { /* best-effort */ }
         }
     }
@@ -68,19 +66,14 @@ public sealed class AgentRunSpoolReaperTests
     [Fact]
     public void IsUnderSpoolRoot_accepts_only_paths_strictly_under_the_spool_root()
     {
-        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
-        try
-        {
-            var root = Path.Combine(Path.GetTempPath(), "cs-reaper-guard-" + Guid.NewGuid().ToString("N"));
-            Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, root);
+        var root = Path.Combine(Path.GetTempPath(), "cs-reaper-guard-" + Guid.NewGuid().ToString("N"));
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = root });
 
-            AgentRunSpoolReaper.IsUnderSpoolRoot(Path.Combine(root, "abc123")).ShouldBeTrue("a per-run dir under the root");
-            AgentRunSpoolReaper.IsUnderSpoolRoot(root).ShouldBeFalse("never the root directory itself");
-            AgentRunSpoolReaper.IsUnderSpoolRoot(Path.Combine(Path.GetTempPath(), "elsewhere-" + Guid.NewGuid().ToString("N"))).ShouldBeFalse("a sibling outside the root");
-            AgentRunSpoolReaper.IsUnderSpoolRoot("/").ShouldBeFalse("never an arbitrary absolute path");
-            AgentRunSpoolReaper.IsUnderSpoolRoot(null).ShouldBeFalse();
-            AgentRunSpoolReaper.IsUnderSpoolRoot("").ShouldBeFalse();
-        }
-        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+        AgentRunSpoolReaper.IsUnderSpoolRoot(Path.Combine(root, "abc123")).ShouldBeTrue("a per-run dir under the root");
+        AgentRunSpoolReaper.IsUnderSpoolRoot(root).ShouldBeFalse("never the root directory itself");
+        AgentRunSpoolReaper.IsUnderSpoolRoot(Path.Combine(Path.GetTempPath(), "elsewhere-" + Guid.NewGuid().ToString("N"))).ShouldBeFalse("a sibling outside the root");
+        AgentRunSpoolReaper.IsUnderSpoolRoot("/").ShouldBeFalse("never an arbitrary absolute path");
+        AgentRunSpoolReaper.IsUnderSpoolRoot(null).ShouldBeFalse();
+        AgentRunSpoolReaper.IsUnderSpoolRoot("").ShouldBeFalse();
     }
 }

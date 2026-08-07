@@ -10,16 +10,14 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public sealed class PackHostAllowlist : IPackHostAllowlist, ISingletonDependency
 {
-    /// <summary>Operator-configurable EXTRA allowed hosts (comma-separated), ADDED to the github.com/gitlab.com defaults — e.g. a self-hosted GitLab. Pinned by a test (Rule 8): renaming it silently re-closes an operator's configured host.</summary>
-    public const string AllowedHostsEnvVar = "CODESPACE_PACK_ALLOWED_HOSTS";
-
     private static readonly string[] DefaultHosts = { "github.com", "gitlab.com" };
 
     private readonly IReadOnlySet<string> _hosts;
 
-    public PackHostAllowlist() : this(Environment.GetEnvironmentVariable(AllowedHostsEnvVar)) { }
+    /// <summary>Extra hosts come from <c>Agents:PackAllowedHosts</c> (comma-separated), ADDED to the github.com / gitlab.com defaults — e.g. a self-hosted GitLab.</summary>
+    public PackHostAllowlist() : this(CodeSpace.Core.Settings.RuntimeSettings.Current.PackAllowedHosts) { }
 
-    /// <summary>Test/Rule-8 seam — the raw env override is passed explicitly so the allowlist is pinned without mutating process env.</summary>
+    /// <summary>Test seam — the raw override is passed explicitly so the allowlist is pinned without binding process-wide settings.</summary>
     internal PackHostAllowlist(string? rawAllowedHostsOverride) => _hosts = BuildHosts(rawAllowedHostsOverride);
 
     public bool IsAllowed(string url) => TryValidate(url, _hosts, out _);
@@ -60,7 +58,7 @@ public sealed class PackHostAllowlist : IPackHostAllowlist, ISingletonDependency
         // so it matches the allowlist; the trim only ever loosens toward a real host, never widens to a new one.
         if (!hosts.Contains(uri.Host.TrimEnd('.')))
         {
-            reason = $"Host '{uri.Host}' is not in the pack-source allowlist [{string.Join(", ", hosts)}]. An operator can add it via the {AllowedHostsEnvVar} env var.";
+            reason = $"Host '{uri.Host}' is not in the pack-source allowlist [{string.Join(", ", hosts)}]. An operator can add it via the Agents:PackAllowedHosts setting.";
             return false;
         }
 

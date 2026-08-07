@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -29,9 +30,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
     public AgentRunSpoolReaperFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _originalSpoolRoot = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
         _spoolRoot = Path.Combine(Path.GetTempPath(), "cs-reaper-it-" + Guid.NewGuid().ToString("N"));
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, _spoolRoot);
     }
 
     [Fact]
@@ -185,7 +184,6 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, _originalSpoolRoot);
         try { Directory.Delete(_spoolRoot, recursive: true); } catch { /* best-effort */ }
         try { foreach (var d in Directory.GetDirectories(Path.GetTempPath(), "cs-reaper-outside-*")) Directory.Delete(d, recursive: true); } catch { /* best-effort */ }
     }

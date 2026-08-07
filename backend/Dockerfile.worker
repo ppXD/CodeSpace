@@ -32,10 +32,10 @@
 # allowlisted egress; a pod that does not is still correct, it just gets Denied instead of Filtered.
 #
 # CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
-# CODESPACE_REQUIRE_SANDBOX=1 is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
+# Sandbox:RequireConfinement is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
 # namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns
 # is not configured. The non-root user below runs bubblewrap via UNPRIVILEGED user namespaces — validate that the
-# target host/pod permits unprivileged userns for this uid (else arm REQUIRE_SANDBOX only where it does).
+# target host/pod permits unprivileged userns for this uid (else arm RequireConfinement only where it does).
 #
 # global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
 # base-image digest pinning is a deferred follow-up — it needs the manifest-LIST digest + a Renovate bump (a
