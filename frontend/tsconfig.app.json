@@ -23,7 +23,7 @@
 
     /* Path alias — Claude artifacts use @/components/ui/...
        baseUrl is deprecated in TS 6 (removed in TS 7) but shadcn CLI still requires it. */
-    "ignoreDeprecations": "6.0",
+    "ignoreDeprecations": "5.0",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
