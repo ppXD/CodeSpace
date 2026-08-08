@@ -95,7 +95,7 @@ public sealed class SupervisorPublishedBranchResolver : ISupervisorPublishedBran
             .Select(g => g.Key)
             .ToHashSet();
 
-        var rejected = SupervisorOutcome.RejectedAgentRunIds(priorDecisions);
+        var rejected = SupervisorOutcome.WithheldAgentRunIds(priorDecisions);
 
         var eligible = agentManifests
             .Where(m => publishedAgentIds.Contains(m.AgentRunId!.Value) && !rejected.Contains(m.AgentRunId!.Value) && !string.IsNullOrEmpty(m.Branch))

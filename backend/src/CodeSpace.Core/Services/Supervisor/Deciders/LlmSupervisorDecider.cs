@@ -887,6 +887,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// </summary>
     private static void AppendUnitAcceptanceVerdict(StringBuilder builder, SupervisorAgentResult result, bool includeEvidenceTail)
     {
+        // B2 (FATAL-1): the waived line renders BEFORE the bool guard — a waived unit's AcceptancePassed is null,
+        // and silence here would let the decider read it as an ordinary ungraded pass-through.
+        if (SupervisorOutcome.IsWaived(result))
+        {
+            builder.AppendLine("      acceptance WAIVED by a human — NOT objectively verified. Its work is withheld from the reviewable head and does not satisfy dependencies; do not treat this unit as done evidence.");
+            return;
+        }
+
         if (result.AcceptancePassed is not { } passed) return;
 
         if (passed)

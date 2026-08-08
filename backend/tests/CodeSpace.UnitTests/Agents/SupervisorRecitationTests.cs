@@ -88,6 +88,22 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void A_waived_unit_recites_as_waived_never_as_done()
+    {
+        // B2 (FATAL-1): "done" alone would feed the decider a waived unit as ordinary evidence.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, new { agentRunId = Guid.NewGuid(), status = "Succeeded", acceptanceVerdict = "waived" }),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("verification WAIVED by a human", customMessage: "the recitation names the waive");
+        recitation.ShouldNotContain("done (accepted)", customMessage: "WAIVED ≠ PASSED in the model-facing recital too");
+    }
+
+    [Fact]
     public void Staged_but_unfolded_reads_running_and_unstaged_reads_pending()
     {
         var priors = new[]

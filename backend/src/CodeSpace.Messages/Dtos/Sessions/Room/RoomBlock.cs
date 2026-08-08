@@ -255,6 +255,9 @@ public sealed record PlanChecklistItem
     /// <summary>The latest attempt's objective verdict: true = passed (green chip), false = rejected (red chip), null = ungraded (neutral chip).</summary>
     public bool? AcceptancePassed { get; init; }
 
+    /// <summary>The latest attempt's EXPLICIT verdict state (B2): "Waived" = a human forgo-verification — its own chip, never the green one (WAIVED ≠ PASSED). Null → the bool verdict tells the whole story.</summary>
+    public string? AcceptanceVerdict { get; init; }
+
     /// <summary>The grader's one-line verdict detail (shown on hover / expand). Null when ungraded.</summary>
     public string? AcceptanceDetail { get; init; }
 

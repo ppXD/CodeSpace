@@ -40,7 +40,14 @@ public static class SupervisorGradedReceipts
 
             for (var i = 0; i < results.Count && i < unitIds.Count; i++)
             {
-                if (string.IsNullOrEmpty(unitIds[i]) || results[i].AcceptancePassed is not { } passed) continue;
+                // B2: a WAIVED unit attests too — its receipt carries Disposition=Waived under Operator authority
+                // (a human co-signed the forgo-verification; the server graded nothing, so ServerPolicy would lie),
+                // and the completion kernel's existing Waived semantics apply: reducer → Abstained (never Solved),
+                // TerminalDecider → NeedsReview, delivery → WaivedByPolicy → Park. Without this receipt a waived
+                // unit would simply VANISH from the completion story — the zero-waive-trace hole the B0 scan named.
+                var waived = SupervisorOutcome.IsWaived(results[i]);
+
+                if (string.IsNullOrEmpty(unitIds[i]) || (!waived && results[i].AcceptancePassed is null)) continue;
 
                 receipts.Add(new ReceiptEnvelope
                 {
@@ -48,8 +55,10 @@ public static class SupervisorGradedReceipts
                     Kind = ContractKinds.Acceptance,
                     AttemptId = results[i].AgentRunId,
                     WorkUnit = workUnitByAttempt?.GetValueOrDefault(results[i].AgentRunId),
-                    Disposition = VerificationDispositions.Classify(passed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
-                    Authority = ContractAuthority.ServerPolicy,
+                    Disposition = waived
+                        ? VerificationDisposition.Waived
+                        : VerificationDispositions.Classify(results[i].AcceptancePassed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
+                    Authority = waived ? ContractAuthority.Operator : ContractAuthority.ServerPolicy,
                     EvidenceRef = results[i].AcceptanceEvidenceId,
                     EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
                     ContentHashes = contentHashesByAttempt?.GetValueOrDefault(results[i].AgentRunId),

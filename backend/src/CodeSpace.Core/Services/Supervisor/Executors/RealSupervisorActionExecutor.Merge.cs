@@ -76,7 +76,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         var rejected = staging
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .Where(SupervisorOutcome.IsAcceptanceRejected)
+            .Where(SupervisorOutcome.IsWithheldFromHead)
             .Select(r => r.AgentRunId)
             .ToHashSet();
 

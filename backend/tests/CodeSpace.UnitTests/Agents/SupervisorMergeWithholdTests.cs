@@ -45,6 +45,28 @@ public class SupervisorMergeWithholdTests
     }
 
     [Fact]
+    public void A_waived_unit_is_withheld_from_the_merge_exactly_like_a_rejected_one()
+    {
+        // B2 (FATAL-1): a human waived the unit's verification — nothing objectively failed, but nothing was
+        // verified either. Unverified work never reaches the reviewable head without its own co-sign.
+        var passed = Unit(true);
+        var waived = Unit(null) with { AcceptanceVerdict = CodeSpace.Messages.Contracts.VerificationDisposition.Waived };
+
+        RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge(Context(Staging(SupervisorDecisionKinds.Spawn, passed, waived)))
+            .ShouldBe(new[] { passed.AgentRunId }, "WAIVED ≠ PASSED — the merge door withholds a waived unit");
+    }
+
+    [Fact]
+    public void The_resolver_branch_set_withholds_a_waived_units_branch()
+    {
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn,
+            UnitWithBranch("b-passed", true), UnitWithBranch("b-waived", null) with { AcceptanceVerdict = CodeSpace.Messages.Contracts.VerificationDisposition.Waived }));
+
+        RealSupervisorActionExecutor.CollectAgentBranches(context)
+            .ShouldBe(new[] { "b-passed" }, "the resolver door enforces the same waived-withhold as the merge — no second door to the head");
+    }
+
+    [Fact]
     public void An_all_ungraded_wave_keeps_every_id_byte_identical_to_pre_slice()
     {
         var a = Unit(null);

@@ -393,6 +393,7 @@ public static class RoomNarrative
         AcceptanceLabel = it.Item.Acceptance is { } spec ? string.Join(" ", spec.Command ?? Array.Empty<string>()) : null,
         AcceptanceKind = it.Item.Acceptance is { } s ? (s.Kind ?? BenchmarkGradingKind.TestsPass).ToString() : null,
         AcceptancePassed = it.AcceptancePassed,
+        AcceptanceVerdict = it.AcceptanceVerdict?.ToString(),
         AcceptanceDetail = it.AcceptanceDetail,
         AcceptanceCriteria = it.Item.AcceptanceCriteria ?? Array.Empty<string>(),
         AgentRunId = it.AgentRunId,
