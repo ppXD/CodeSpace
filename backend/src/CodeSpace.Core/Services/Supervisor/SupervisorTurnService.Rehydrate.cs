@@ -611,6 +611,15 @@ public sealed partial class SupervisorTurnService
                 Contradiction = ClassifyUnitContradiction(results[i].Status, grade.Passed),
             });
             anyGraded = true;
+
+            // B-pre: the same verdict, written back to the unit's PublishManifest rows. Supervisor units are born
+            // NotApplicable (no AgentTask.Acceptance at completion), so without this the manifest readers — the
+            // unattended scorecard's oracle leg above all — never see the fold's grade. The stamp rides BEFORE the
+            // caller persists the graded tape: a crash between the two replays as re-grade + idempotent re-stamp,
+            // never as a graded tape with an unstamped manifest.
+            await _manifests.StampAcceptanceForAgentRunAsync(results[i].AgentRunId,
+                grade.Passed ? PublishAcceptanceState.Passed : PublishAcceptanceState.Failed,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!anyGraded) return decision;   // no unit in THIS decision carries a contract (the plan's acceptance-bearing subtasks belong to a different decision) → byte-identical; a replay re-attempt is a pure no-op (no grade I/O ran)
