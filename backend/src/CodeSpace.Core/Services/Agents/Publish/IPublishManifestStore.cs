@@ -37,6 +37,20 @@ public interface IPublishManifestStore
     /// <summary>Upsert the <see cref="PublishManifestKind.Integration"/> row for one workflow run's one repository (no owning agent run).</summary>
     Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Stamp ONLY the acceptance verdict onto every <see cref="PublishManifestKind.Agent"/> row of one agent run —
+    /// the supervisor per-unit fold's write-back seam. The executor stamps <c>AcceptanceState</c> at agent
+    /// completion, but a supervisor unit carries no <c>AgentTask.Acceptance</c> (the oracle lives on the planned
+    /// subtask and is graded LATER, by the fold), so its rows are born <see cref="PublishAcceptanceState.NotApplicable"/>
+    /// and — before this seam existed — stayed that way forever, leaving every manifest reader (the unattended
+    /// delivery scorecard's oracle leg, dispositions) blind to the fold's verdict. UPDATE-only, never an insert:
+    /// a run with no manifest rows (nothing was ever published) has nothing to stamp. A multi-repo unit's rows all
+    /// receive the unit's single all-or-nothing verdict (the per-repo stamp is a named follow-up, mirroring the
+    /// fold's own per-repo baseline scope trim). No fence: the run is already terminal when the fold grades it, and
+    /// the write is value-idempotent — a replayed fold re-stamps the same verdict.
+    /// </summary>
+    Task StampAcceptanceForAgentRunAsync(Guid agentRunId, PublishAcceptanceState state, CancellationToken cancellationToken);
+
     /// <summary>Every manifest row for one agent run (one per writable repository), team-scoped.</summary>
     Task<IReadOnlyList<PublishManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
 
@@ -67,6 +81,14 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
 
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) =>
         UpsertAsync(PublishManifestKind.Integration, agentRunId: null, input, expectedFenceEpoch: null, cancellationToken);
+
+    public async Task StampAcceptanceForAgentRunAsync(Guid agentRunId, PublishAcceptanceState state, CancellationToken cancellationToken) =>
+        await _db.PublishManifest
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId == agentRunId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.AcceptanceState, state)
+                .SetProperty(m => m.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
 
     /// <summary>
     /// Never add <c>CreatedBy</c>/<c>CreatedBy</c>-derived fields to either <c>ExecuteUpdateAsync</c>'s

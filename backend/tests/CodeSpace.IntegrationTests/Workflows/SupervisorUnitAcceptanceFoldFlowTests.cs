@@ -74,6 +74,55 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
     }
 
+    // ── B-pre: the fold's verdict is written back to the unit's publish manifest ──────────────────────
+
+    [Theory]
+    [InlineData(true, PublishAcceptanceState.Passed)]
+    [InlineData(false, PublishAcceptanceState.Failed)]
+    public async Task A_folds_verdict_is_stamped_onto_the_units_publish_manifest(bool gradePasses, PublishAcceptanceState expected)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+        await SeedManifestAsync(teamId, agentId, repoId, "codespace/agent/s1", baseSha: null, patchArtifactId: null);
+
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), new RecordingGrader(new BenchmarkGrade { Passed = gradePasses, Detail = "graded" }));
+
+        (await ManifestAcceptanceStateAsync(agentId)).ShouldBe(expected,
+            "supervisor units are born NotApplicable (no AgentTask.Acceptance at completion) — manifest readers like the unattended scorecard's oracle leg see the fold's verdict only through the write-back");
+    }
+
+    [Fact]
+    public async Task A_unit_without_a_contract_never_stamps_its_manifest()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", null)));
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+        await SeedManifestAsync(teamId, agentId, repoId, "codespace/agent/s1", baseSha: null, patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "unused" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(0, "no contract, no grade");
+        (await ManifestAcceptanceStateAsync(agentId)).ShouldBe(PublishAcceptanceState.NotApplicable,
+            "an ungraded unit keeps its birth state — NotApplicable still means UNGRADED, never a laundered verdict");
+    }
+
+    private async Task<PublishAcceptanceState> ManifestAcceptanceStateAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().PublishManifest.AsNoTracking()
+            .Where(m => m.AgentRunId == agentRunId).Select(m => m.AcceptanceState).SingleAsync();
+    }
+
     // ── P5-2 (diagnosis-driven repair): the failed check's OUTPUT TAIL rides the tape ─────────────────
 
     [Theory]
