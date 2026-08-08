@@ -65,10 +65,18 @@ public sealed class FileWritingFakeCli : IDisposable
     /// <summary>The deterministic summary the executor's BuildResult folds for a given branch goal.</summary>
     public static string ExpectedSummaryFor(string goal) => SummaryPrefix + goal;
 
-    /// <summary>The file the script writes for a given goal — the change the captured patch must contain. Mirrors the script's <c>tr -c 'A-Za-z0-9' '_'</c> slug.</summary>
+    /// <summary>
+    /// The file the script writes for a given goal — the change the captured patch must contain. Mirrors the
+    /// script's <c>tr -c 'A-Za-z0-9' '_' | cut -c1-100</c> slug: TRUNCATED because a MODEL-authored goal is a
+    /// multi-sentence instruction whose full slug exceeds the 255-byte filename limit — the write then failed
+    /// silently while the script still exited 0, so every such agent reported Succeeded with ZERO captured files
+    /// (the run-31200742534 "37 succeeded agents, nothing captured" disease). The script now also exits 90 on a
+    /// failed write, so any future overflow reds loudly instead of lying. A scripted short goal ("do alpha") is
+    /// byte-identical to before; distinct model goals differ inside their first 100 slug chars in practice.
+    /// </summary>
     public static string FileFor(string goal)
     {
-        var slug = new string(goal.Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray());
+        var slug = new string(goal.Select(c => char.IsLetterOrDigit(c) ? c : '_').Take(100).ToArray());
         return $"{FilePrefix}{slug}.txt";
     }
 
@@ -97,8 +105,8 @@ public sealed class FileWritingFakeCli : IDisposable
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
-        "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_')\n" +
-        "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\"\n" +
+        "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
+        "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\" || exit 90\n" +
         "if [ \"$1\" = 'exec' ]; then\n" +
         "  printf '{\"type\":\"agent_reasoning\",\"message\":\"Editing for: %s\"}\\n' \"$esc\"\n" +
         "  printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +

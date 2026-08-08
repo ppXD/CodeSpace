@@ -154,6 +154,39 @@ public class SubtaskAwareFakeCliDriftTests
         }
     }
 
+    [Fact]
+    public void A_model_length_goal_still_writes_its_file_and_never_exits_zero_on_a_failed_write()
+    {
+        // The run-31200742534 disease, pinned at the process level: a MODEL-authored goal is a multi-sentence
+        // instruction whose full slug exceeded the 255-byte filename limit — the write failed, the script still
+        // exited 0, and 37 Succeeded agents captured NOTHING (the whole-loop arcs' "did not converge" reds were
+        // this test-infra lie, not model capability). The slug is now truncated to 100 chars AND the write is
+        // fail-loud (exit 90), so this asserts both: the long-goal file lands, and a mutation that removes the
+        // truncation trips the loud exit instead of a silent Succeeded.
+        if (OperatingSystem.IsWindows()) return;
+
+        var goal = string.Concat(Enumerable.Repeat("Implement the primary feature endpoint with validation and error handling following existing conventions. ", 4));
+        var dir = Path.Combine(Path.GetTempPath(), "cs-filewriting-longgoal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        try
+        {
+            var script = Path.Combine(dir, "fake-agent.sh");
+            File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            RunScript(dir, script, "exec", "--json", goal);   // asserts exit 0 internally — a failed write now exits 90 and fails HERE
+
+            var written = Directory.GetFiles(dir, FileWritingFakeCli.FilePrefix + "*.txt");
+            written.ShouldHaveSingleItem("the truncated slug keeps a model-length goal writable — the whole point of the fix");
+            Path.GetFileName(written[0]).ShouldBe(FileWritingFakeCli.FileFor(goal), "the C# mirror and the script must derive the SAME truncated name");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     private static string[] RunScript(string cwd, string script, params string[] args)
     {
         var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
