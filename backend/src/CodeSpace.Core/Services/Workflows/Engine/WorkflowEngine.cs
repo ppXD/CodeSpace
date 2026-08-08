@@ -898,6 +898,31 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
+    /// <summary>
+    /// P2 (v4.3): the terminal COMPARE-AND-SWAP — one conditional UPDATE that stamps an arbitrated terminal only
+    /// while the run is still Running AND the completion-ledger head still reads the version the arbitration
+    /// composed over (<paramref name="ledgerVersionRead"/>; 0 ⇔ no head row, matching the watermark's own read).
+    /// Both predicates are compared INSIDE the statement that writes — never read-then-write — so a fact landing
+    /// after the app-level verify can fail the stamp but can never be terminalized over. Returns false on zero
+    /// rows (the caller parks). Internal for direct pinning: the verify→stamp window has no seam a test could
+    /// inject into, so the CAS is proven at its own boundary instead.
+    /// </summary>
+    internal async Task<bool> TryStampArbitratedTerminalAsync(Guid runId, WorkflowRunStatus status, string? error, string? outcome, long ledgerVersionRead, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        var updated = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running
+                && _db.CompletionLedgerHead.Where(h => h.WorkflowRunId == runId).Select(h => h.Version).FirstOrDefault() == ledgerVersionRead)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, status)
+                .SetProperty(r => r.Error, error)
+                .SetProperty(r => r.Outcome, outcome)
+                .SetProperty(r => r.CompletedAt, now), cancellationToken).ConfigureAwait(false);
+
+        return updated == 1;
+    }
+
     private async Task CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
     {
         // P2b-1 (Lock Clause 1): the terminal SUCCESS claim has ONE production owner — the completion authority.
@@ -933,11 +958,43 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         (status, error) = (arbitration.Status, arbitration.Reason ?? error);
 
-        run.Status = status;
-        run.Error = error;
-        run.Outcome = await HonestOutcomeAsync(run, cancellationToken).ConfigureAwait(false);
-        run.CompletedAt = DateTimeOffset.UtcNow;
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        var outcome = await HonestOutcomeAsync(run, cancellationToken).ConfigureAwait(false);
+
+        // P2 (v4.3, terminal CAS): an ARBITRATED terminal (watermarks present ⇔ the Enforced authority composed
+        // over the ledger at version R) is stamped through ONE conditional UPDATE — status still Running AND the
+        // ledger head still at R, compared inside the statement that writes (the P0-C1 fence discipline). The
+        // app-level verify above narrows the race; this closes it: a fact landing between the verify and the
+        // stamp now fails the stamp instead of terminalizing a stale claim. Zero rows ⇒ park for a human.
+        // Legacy/Shadow terminals (no watermarks) keep the tracked save byte-identically.
+        if (arbitration.Watermarks is { } watermarks)
+        {
+            if (!await TryStampArbitratedTerminalAsync(run.Id, status, error, outcome, watermarks.LedgerVersion, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogWarning("Terminal CAS refused for run {RunId} — the ledger moved at the stamp itself; parking", run.Id);
+
+                run.Status = WorkflowRunStatus.Suspended;
+                run.Error = "completion-authority: the ledger moved at the terminal stamp itself — parked for review";
+                await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            // The row is terminal in the DATABASE; sync the tracked instance for the readers below, then detach it —
+            // a later SaveChanges in this scope re-writing these same properties would trip the row's xmin token
+            // (our own ExecuteUpdate advanced it).
+            run.Status = status;
+            run.Error = error;
+            run.Outcome = outcome;
+            run.CompletedAt = DateTimeOffset.UtcNow;
+            _db.Entry(run).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
+        }
+        else
+        {
+            run.Status = status;
+            run.Error = error;
+            run.Outcome = outcome;
+            run.CompletedAt = DateTimeOffset.UtcNow;
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         // A run reaching Failure/Cancelled with branch waits still parked (a terminate-mode map failure that
         // fails the run, or an operator cancel) would otherwise leave its staged-but-undispatched AgentRun /
