@@ -123,7 +123,7 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
                 .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
-        if (updated > 0) return;
+        if (updated > 0) { await BumpLedgerVersionIfRunBoundAsync(input.WorkflowRunId, cancellationToken).ConfigureAwait(false); return; }
 
         var row = new PublishManifest
         {
@@ -179,7 +179,13 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
                     .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
                 .ConfigureAwait(false);
         }
+
+        await BumpLedgerVersionIfRunBoundAsync(input.WorkflowRunId, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>P2: a manifest write is the count-blind ledger write (state transitions ExecuteUpdate the same row), so every successful write path advances the run's monotonic ledger version. A run-less manifest (a benchmark's bare agent run) has no version to advance.</summary>
+    private Task BumpLedgerVersionIfRunBoundAsync(Guid? workflowRunId, CancellationToken cancellationToken) =>
+        workflowRunId is { } runId ? Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, runId, cancellationToken) : Task.CompletedTask;
 
     public async Task<IReadOnlyList<PublishManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.PublishManifest.AsNoTracking()
