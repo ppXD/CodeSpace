@@ -1240,6 +1240,14 @@ public sealed partial class SupervisorTurnService
         PayloadJson = JsonSerializer.Serialize(new { reason, detail }, AgentJson.Options),
     };
 
+    /// <summary>B5 (MAJOR-5): the retry a stop was rewritten into because its target carries an approved-but-unconsumed oracle amendment — the ServerAuthoredMerge shape (a correctness floor the server enforces, never a model choice). Deterministic given the tape → replay-stable idempotency key.</summary>
+    private static SupervisorDecision ServerAuthoredRetry(string subtaskId) => new()
+    {
+        Kind = SupervisorDecisionKinds.Retry,
+        ServerAuthored = true,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorRetryPayload { SubtaskId = subtaskId }, AgentJson.Options),
+    };
+
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>
     private static string? ReadStopReason(SupervisorDecision decision) => SupervisorOutcome.ReadStopReason(decision.PayloadJson);
 }

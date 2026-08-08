@@ -289,7 +289,13 @@ public sealed partial class RealSupervisorActionExecutor
     {
         if (context.MaxCostUsd is { } cap && context.RunSpendUsd > cap) return (builtTask, null);
 
-        var reason = SupervisorRetryEscalation.EscalationReason(priorResult?.Contradiction, context.NoProgressDecisions, context.MaxNoProgressDecisions);
+        // B5 (A2 ruling): a contradiction graded by an oracle a human has since AMENDED is stale evidence — the
+        // self-report never disagreed with the CO-SIGNED check, only with the dead one. Escalating the retry's
+        // model tier on it would spend real money on a verdict everyone agrees was wrong. The no-progress
+        // proximity trigger stays live (it reads the run's cadence, not the dead oracle's verdict).
+        var contradiction = SupervisorAmendObligation.IsOutstanding(context, builtTask.SubtaskId) ? null : priorResult?.Contradiction;
+
+        var reason = SupervisorRetryEscalation.EscalationReason(contradiction, context.NoProgressDecisions, context.MaxNoProgressDecisions);
 
         if (reason is null) return (builtTask, null);
 

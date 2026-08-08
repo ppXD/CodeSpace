@@ -35,9 +35,7 @@ public static class SupervisorAcceptanceOverlay
 
         foreach (var decision in DecisionsAfterNewestPlan(priorDecisions))
         {
-            if (!SupervisorAmendAcceptance.IsAmendCard(decision)) continue;
-
-            if (!Approves(SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson))) continue;
+            if (!SupervisorAmendAcceptance.IsApprovedAmendCard(decision)) continue;
 
             var amend = SupervisorAmendAcceptance.ReadAmend(decision.PayloadJson)!;
 
@@ -70,7 +68,4 @@ public static class SupervisorAcceptanceOverlay
             yield return priorDecisions[i];
     }
 
-    /// <summary>The card's OWN answer approves — the same reply word every marker card family member reads; a null (unanswered / degraded) or redirecting answer applies nothing.</summary>
-    private static bool Approves(string? answer) =>
-        answer is not null && answer.TrimStart().StartsWith(SupervisorApprovalRequest.ApproveReply, StringComparison.OrdinalIgnoreCase);
 }
