@@ -899,6 +899,87 @@ public class SupervisorTurnServiceTests
     }
 
     [Fact]
+    public void A_stop_owing_an_approved_amendment_is_rewritten_into_its_retry()
+    {
+        // B5 (MAJOR-5): the fold's already-graded guard means an amendment only affects a FUTURE attempt — a stop
+        // before that attempt terminalizes on the dead oracle's verdict, silently dropping what a human co-signed.
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check is broken",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } },
+        });
+
+        var context = GateContext(
+            PlanPrior(1),
+            StagingPrior(2, "s1"),
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.AskHuman, PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""" });
+
+        var gated = service.ApplyPostDecisionGate(context, SupervisorGoalPlan.From(null), new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = """{"outcome":"completed","summary":"done"}""" });
+
+        gated.Kind.ShouldBe(SupervisorDecisionKinds.Retry, "the stop is rewritten into the retry the run owes");
+        gated.ServerAuthored.ShouldBeTrue();
+        gated.PayloadJson.ShouldContain("s1");
+    }
+
+    [Fact]
+    public void A_stop_after_the_owed_retry_ran_passes_the_obligation_gate()
+    {
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check is broken",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } },
+        });
+
+        var context = GateContext(
+            PlanPrior(1),
+            StagingPrior(2, "s1"),
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.AskHuman, PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""" },
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 4, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Retry, PayloadJson = """{"subtaskId":"s1"}""", OutcomeJson = "{}" });
+
+        var gated = service.ApplyPostDecisionGate(context, SupervisorGoalPlan.From(null), new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = """{"outcome":"completed","summary":"done"}""" });
+
+        gated.Kind.ShouldNotBe(SupervisorDecisionKinds.Retry, "the obligation was consumed at staging — the stop proceeds to the ordinary ladder");
+    }
+
+    [Fact]
+    public void A_forced_stop_names_the_obligation_it_drops()
+    {
+        // B5 (A2 ruling): a bound may stop a run before it consumed an approved amendment — the server never spends
+        // into a tripped cap — but the drop is NAMED on the stop, never silent. Driven through the invalid-plan
+        // forced stop (a pure ApplyPostDecisionGate path), the same GateForcedStop every bound routes through.
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check is broken",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } },
+        });
+
+        var context = GateContext(
+            PlanPrior(1),
+            StagingPrior(2, "s1"),
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.AskHuman, PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""" });
+
+        var invalidPlan = new SupervisorDecision { Kind = SupervisorDecisionKinds.Plan, PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"a","instruction":"do","dependsOn":["ghost"]}]}""" };
+
+        var gated = service.ApplyPostDecisionGate(context, SupervisorGoalPlan.From(null), invalidPlan);
+
+        gated.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        gated.PayloadJson.ShouldContain("never consumed", customMessage: "the orphaned obligation is named on the forced stop — the operator sees what the human co-signed for nothing");
+        gated.PayloadJson.ShouldContain("s1");
+    }
+
+    private static SupervisorPriorDecision PlanPrior(long seq) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan, PayloadJson = "{}", OutcomeJson = "{}" };
+
+    private static SupervisorPriorDecision StagingPrior(long seq, string subtaskId) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Spawn, PayloadJson = $$"""{"subtaskIds":["{{subtaskId}}"]}""", OutcomeJson = "{}" };
+
+    [Fact]
     public void A_revised_plan_clears_the_rejected_floor()
     {
         var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
