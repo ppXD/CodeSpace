@@ -337,11 +337,20 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
+        // The ORACLE ANCHOR in the last sentence is load-bearing (P5 finding, run 31230410920): a live model left
+        // free authors its own per-subtask acceptance ("run the tests") that the deterministic fake — which only
+        // writes marker files — can never satisfy. S1 then grades acceptance-REJECTED, the dependency frontier
+        // faithfully reports S2 "blocked (waiting on S1)", and the model rationally retries S1 / replans until the
+        // no-progress stop ("Supervisor merged 0 prior agent result(s)" is the fingerprint: succeeded + captured,
+        // yet nothing mergeable). The arm exists to test the HANDOFF mechanism, not oracle authorship — anchoring
+        // the acceptance to the seeded floor removes the model-luck coin flip that made this arm intermittent.
         const string handoffGoal =
             "Implement a small feature in exactly TWO STRICTLY SEQUENTIAL subtasks: the second subtask BUILDS DIRECTLY "
           + "on the first subtask's committed code and must not start until the first has actually completed. When you "
           + "PLAN, author the second subtask's dependsOn as the first subtask's id, so the platform stages the second "
-          + "agent from the first agent's actual produced branch instead of a fresh clone.";
+          + "agent from the first agent's actual produced branch instead of a fresh clone. For EVERY subtask, author "
+          + "its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) — this "
+          + "repository has NO other test tooling, so any other acceptance command will fail regardless of the work.";
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: handoffGoal);
 
@@ -606,6 +615,21 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             var ledgerAsOfStop = Core.Services.Supervisor.SupervisorTurnService.FoldPublishedAgentRunIds(
                 manifestRows.Where(m => m.CreatedDate <= stopCreatedBySequence[stop.Sequence]).ToList());
             var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop, PublishedAgentRunIds = ledgerAsOfStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson }, requireSummary: !isForcedStop);
+
+            // The ask-once fuse (GateForcedStop, adversarial-scan F1): a FORCED stop whose ask-verdict follows an
+            // UNANSWERED gate card already on the tape persists as a stop BY DESIGN — in a no-surface environment
+            // (exactly this E2E: every ask degrades to a self-advancing null answer) the card can never be answered,
+            // and re-substituting would loop forever. The audit must model the fuse or it indicts the gate for its
+            // own designed degraded terminal (run 31247607245 seq-46 red exactly this way — the tape carried the
+            // degraded I3 card the fuse keyed on). The exemption is the fuse's EXACT triple: forced stop + AskHuman
+            // verdict + a prior unanswered gate-prefixed card — a merge verdict or a MODEL stop still reds, because
+            // neither path is fused in production. Whether a fused stop should read as clean Success at all (the
+            // accepted-unpublished work silently evaporates) is a product question the completion protocol owns,
+            // tracked separately — this audit pins the gate's ACTUAL contract, not that open question.
+            var fuseHeld = isForcedStop && gateVerdict?.Kind == SupervisorDecisionKinds.AskHuman
+                && Core.Services.Supervisor.SupervisorTurnService.HasUnansweredGateCard(new SupervisorTurnContext { PriorDecisions = priorToThisStop });
+
+            if (fuseHeld) continue;
 
             gateVerdict.ShouldBeNull($"a Stop decision (sequence {stop.Sequence}) was actually PERSISTED as a genuine stop, but SupervisorPublishGate.Validate says it should have been rewritten to '{gateVerdict?.Kind}' — I3 did not hold for this real run.");
         }
@@ -1341,7 +1365,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // spawn resets its streak, so a working run never trips it) and this lane's job timeout; a per-call timeout still
         // self-skips as non-gating infra.
         // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
-        var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
+        // The default goal carries the SAME oracle anchor as handoffGoal (P5 finding): "with unit tests" invited the
+        // live model to author "run the tests" per-subtask acceptance, which the marker-file fakes can never satisfy —
+        // every unit graded acceptance-REJECTED, merge withheld them all, the integrated tree carried no agent file,
+        // and the stop floor failed (acceptancePassed=false ×3 with 4/4 agents succeeded, run 31247607245). Arms that
+        // pass their OWN goal keep their own oracle posture (the stop-DoD arm deliberately leaves authorship free).
+        var effectiveGoal = goal ?? ("Add server-side email-format validation to the signup endpoint, with unit tests. "
+                                   + "For EVERY subtask, author its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) — "
+                                   + "this repository has NO other test tooling, so any other acceptance command will fail regardless of the work.");
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
         // A relatedRepo (when set) makes this a MULTI-repo run: the profile mounts a SECOND writable repo under its alias,
         // so every spawned agent's workspace has both repos (cwd = workspace root, each repo at <root>/<alias>/) and the
