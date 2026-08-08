@@ -337,11 +337,20 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
+        // The ORACLE ANCHOR in the last sentence is load-bearing (P5 finding, run 31230410920): a live model left
+        // free authors its own per-subtask acceptance ("run the tests") that the deterministic fake — which only
+        // writes marker files — can never satisfy. S1 then grades acceptance-REJECTED, the dependency frontier
+        // faithfully reports S2 "blocked (waiting on S1)", and the model rationally retries S1 / replans until the
+        // no-progress stop ("Supervisor merged 0 prior agent result(s)" is the fingerprint: succeeded + captured,
+        // yet nothing mergeable). The arm exists to test the HANDOFF mechanism, not oracle authorship — anchoring
+        // the acceptance to the seeded floor removes the model-luck coin flip that made this arm intermittent.
         const string handoffGoal =
             "Implement a small feature in exactly TWO STRICTLY SEQUENTIAL subtasks: the second subtask BUILDS DIRECTLY "
           + "on the first subtask's committed code and must not start until the first has actually completed. When you "
           + "PLAN, author the second subtask's dependsOn as the first subtask's id, so the platform stages the second "
-          + "agent from the first agent's actual produced branch instead of a fresh clone.";
+          + "agent from the first agent's actual produced branch instead of a fresh clone. For EVERY subtask, author "
+          + "its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) — this "
+          + "repository has NO other test tooling, so any other acceptance command will fail regardless of the work.";
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: handoffGoal);
 
