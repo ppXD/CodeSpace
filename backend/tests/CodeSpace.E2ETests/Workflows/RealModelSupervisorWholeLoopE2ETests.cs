@@ -1350,7 +1350,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // spawn resets its streak, so a working run never trips it) and this lane's job timeout; a per-call timeout still
         // self-skips as non-gating infra.
         // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
-        var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
+        // The default goal carries the SAME oracle anchor as handoffGoal (P5 finding): "with unit tests" invited the
+        // live model to author "run the tests" per-subtask acceptance, which the marker-file fakes can never satisfy —
+        // every unit graded acceptance-REJECTED, merge withheld them all, the integrated tree carried no agent file,
+        // and the stop floor failed (acceptancePassed=false ×3 with 4/4 agents succeeded, run 31247607245). Arms that
+        // pass their OWN goal keep their own oracle posture (the stop-DoD arm deliberately leaves authorship free).
+        var effectiveGoal = goal ?? ("Add server-side email-format validation to the signup endpoint, with unit tests. "
+                                   + "For EVERY subtask, author its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) — "
+                                   + "this repository has NO other test tooling, so any other acceptance command will fail regardless of the work.");
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
         // A relatedRepo (when set) makes this a MULTI-repo run: the profile mounts a SECOND writable repo under its alias,
         // so every spawned agent's workspace has both repos (cwd = workspace root, each repo at <root>/<alias>/) and the
