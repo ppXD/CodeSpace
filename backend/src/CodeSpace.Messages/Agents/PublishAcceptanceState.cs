@@ -14,4 +14,7 @@ public enum PublishAcceptanceState
     NotApplicable,
     Passed,
     Failed,
+
+    /// <summary>A human authorized FORGOING this artifact's verification (the amend-acceptance waive, B2/B3). NEVER equal to <see cref="Passed"/> at any objective-truth read — a waived-only run does not read Solved, and a waived artifact never auto-publishes.</summary>
+    Waived,
 }

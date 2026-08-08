@@ -123,6 +123,8 @@ public static class SupervisorRecitation
 
     private static string Describe(SupervisorAgentResult result) => result.Status switch
     {
+        // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
+        _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
         "Succeeded" when result.AcceptancePassed == true => "done (accepted)",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).

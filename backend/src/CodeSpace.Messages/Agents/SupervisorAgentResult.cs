@@ -125,4 +125,17 @@ public sealed record SupervisorAgentResult
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Contradiction { get; init; }
+
+    /// <summary>
+    /// The unit's EXPLICIT verdict state (B2, amend-acceptance arc), carried ALONGSIDE <see cref="AcceptancePassed"/>
+    /// — the Contradiction-field precedent: null-omitted, so every pre-B2 row serializes byte-identical and an
+    /// ungraded unit stays absent-absent. Its one near-term producer is the co-sign overlay's WAIVE (B3):
+    /// <see cref="Contracts.VerificationDisposition.Waived"/> means a human authorized FORGOING verification for
+    /// this unit — NEVER a pass. Every objective-truth read point (the head doors, the dependency gate, the
+    /// scorecard's oracle leg) reads Waived as "not verified": it does not merge, does not satisfy a dependency,
+    /// does not solve. An AMEND (spec rewrite) never writes this field — the retried unit re-grades through
+    /// <see cref="AcceptancePassed"/> as usual.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Contracts.VerificationDisposition? AcceptanceVerdict { get; init; }
 }

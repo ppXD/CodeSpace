@@ -179,7 +179,7 @@ public class SupervisorPublishGateTests
         // A raw push happens BEFORE the per-unit acceptance grade folds (AgentRunExecutor pushes at execution time;
         // FoldUnitAcceptanceGradeAsync grades later) — so a REJECTED unit can still show up as Pushed in the ledger.
         // The published shortcut must exclude it, the same "局部綠≠整合綠" bar the merge + resolver doors already
-        // enforce (SupervisorOutcome.IsAcceptanceRejected) — otherwise I3 lets a run complete with ONLY rejected work.
+        // enforce (SupervisorOutcome.IsWithheldFromHead) — otherwise I3 lets a run complete with ONLY rejected work.
         var agentRunId = Guid.NewGuid();
         var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId, acceptancePassed: false)));
 
@@ -187,6 +187,20 @@ public class SupervisorPublishGateTests
 
         substituted.ShouldNotBeNull();
         substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "the contributor's push does NOT count as published once its own acceptance grade rejected it — I3 falls through to the ordinary ladder");
+    }
+
+    [Fact]
+    public void A_pushed_but_waived_contributor_never_satisfies_i3_via_the_published_shortcut()
+    {
+        // B2 (FATAL-1): a waive is a human's forgo-verification, not a verification — a waived unit's raw push must
+        // not let the run read "published" any more than a rejected unit's does (WAIVED ≠ PASSED at every door).
+        var agentRunId = Guid.NewGuid();
+        var context = Context(published: new[] { agentRunId }, Decision(SupervisorDecisionKinds.Spawn, 1, SpawnOutcome(hasWork: true, agentRunId, acceptanceVerdict: CodeSpace.Messages.Contracts.VerificationDisposition.Waived)));
+
+        var substituted = SupervisorPublishGate.Validate(context, StopDecision("done"));
+
+        substituted.ShouldNotBeNull();
+        substituted!.Kind.ShouldBe(SupervisorDecisionKinds.Merge, "the waived contributor's push does NOT count as published — I3 falls through to the ordinary ladder");
     }
 
     [Fact]
@@ -326,7 +340,7 @@ public class SupervisorPublishGateTests
         }, AgentJson.Options),
     };
 
-    private static string SpawnOutcome(bool hasWork, Guid? agentRunId = null, bool? acceptancePassed = null)
+    private static string SpawnOutcome(bool hasWork, Guid? agentRunId = null, bool? acceptancePassed = null, CodeSpace.Messages.Contracts.VerificationDisposition? acceptanceVerdict = null)
     {
         var result = new SupervisorAgentResult
         {
@@ -334,6 +348,7 @@ public class SupervisorPublishGateTests
             Status = "Succeeded",
             ChangedFiles = hasWork ? new[] { "a.txt" } : Array.Empty<string>(),
             AcceptancePassed = acceptancePassed,
+            AcceptanceVerdict = acceptanceVerdict,
         };
         return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
     }
