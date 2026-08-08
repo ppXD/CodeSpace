@@ -616,6 +616,21 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                 manifestRows.Where(m => m.CreatedDate <= stopCreatedBySequence[stop.Sequence]).ToList());
             var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop, PublishedAgentRunIds = ledgerAsOfStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson }, requireSummary: !isForcedStop);
 
+            // The ask-once fuse (GateForcedStop, adversarial-scan F1): a FORCED stop whose ask-verdict follows an
+            // UNANSWERED gate card already on the tape persists as a stop BY DESIGN — in a no-surface environment
+            // (exactly this E2E: every ask degrades to a self-advancing null answer) the card can never be answered,
+            // and re-substituting would loop forever. The audit must model the fuse or it indicts the gate for its
+            // own designed degraded terminal (run 31247607245 seq-46 red exactly this way — the tape carried the
+            // degraded I3 card the fuse keyed on). The exemption is the fuse's EXACT triple: forced stop + AskHuman
+            // verdict + a prior unanswered gate-prefixed card — a merge verdict or a MODEL stop still reds, because
+            // neither path is fused in production. Whether a fused stop should read as clean Success at all (the
+            // accepted-unpublished work silently evaporates) is a product question the completion protocol owns,
+            // tracked separately — this audit pins the gate's ACTUAL contract, not that open question.
+            var fuseHeld = isForcedStop && gateVerdict?.Kind == SupervisorDecisionKinds.AskHuman
+                && Core.Services.Supervisor.SupervisorTurnService.HasUnansweredGateCard(new SupervisorTurnContext { PriorDecisions = priorToThisStop });
+
+            if (fuseHeld) continue;
+
             gateVerdict.ShouldBeNull($"a Stop decision (sequence {stop.Sequence}) was actually PERSISTED as a genuine stop, but SupervisorPublishGate.Validate says it should have been rewritten to '{gateVerdict?.Kind}' — I3 did not hold for this real run.");
         }
 

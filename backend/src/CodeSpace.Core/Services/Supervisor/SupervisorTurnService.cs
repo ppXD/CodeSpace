@@ -520,8 +520,8 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         return substituted;
     }
 
-    /// <summary>An UNANSWERED card from either stop gate (I3 publish / DC-2b delivery, recognized by their pinned question prefixes) among the decided prior decisions — the degraded-ask signature the fuse above keys on.</summary>
-    private static bool HasUnansweredGateCard(SupervisorTurnContext context) =>
+    /// <summary>An UNANSWERED card from either stop gate (I3 publish / DC-2b delivery, recognized by their pinned question prefixes) among the decided prior decisions — the degraded-ask signature the fuse above keys on. Internal so the I3 E2E audit models the fuse with the PRODUCTION predicate instead of a driftable mirror.</summary>
+    internal static bool HasUnansweredGateCard(SupervisorTurnContext context) =>
         context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman
             && SupervisorOutcome.ReadAskHumanAnswer(d.OutcomeJson) is null
             && ReadAskQuestion(d.PayloadJson) is { } question
