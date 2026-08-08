@@ -522,6 +522,45 @@ public sealed class CompletionComposerFlowTests
     }
 
     [Fact]
+    public async Task A_count_invisible_amendment_still_reaches_reassessment()
+    {
+        // P2 slice 2, end to end: an amendment OVERWRITES its requirement row — every watermark count stays put —
+        // and before the ledger version the revisit pass could only find it inside a 24h CompletedAt window the
+        // amendment might miss entirely. The head version moved, the version predicate finds the run, the
+        // watermark (which now carries the version) refuses to skip, and a second assessment appends.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"i"}]}""", """{"planned":["s1"],"count":1,"workPlanId":"6f1d9c22-77b1-4f0e-9a1e-2c0f6f5a91b3","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        using var scope = _fixture.BeginScope();
+        var shadow = scope.Resolve<ICompletionShadowService>();
+        var store = scope.Resolve<ICompletionContractStore>();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requirement = new RequirementEnvelope { RequirementRef = "acceptance:s1", Kind = ContractKinds.Acceptance, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1", SpecHash = "sha256/canonical-json-v1:aaa" };
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+        var first = await db.CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+        first.LedgerVersion.ShouldNotBeNull("the assessment records the version its compose read — the comparable half of the predicate");
+
+        // The count-invisible late write: SAME (ref, kind), new hash — the row is overwritten, no count moves.
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement with { SpecHash = "sha256/canonical-json-v1:bbb" } }, CancellationToken.None);
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+
+        (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId))
+            .ShouldBe(2, "the head version moved past the recorded one — the amendment reached reassessment with no window to miss");
+
+        // And with nothing new, the version predicate excludes the run entirely — no wasted compose, no third row.
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+        (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId)).ShouldBe(2);
+    }
+
+    [Fact]
     public async Task An_abstaining_stop_composes_Abstained_and_would_be_NeedsClarification()
     {
         // P5-1 end-to-end: the model stopped WITH A QUESTION → the ledger reads Abstained (no objective claim in
