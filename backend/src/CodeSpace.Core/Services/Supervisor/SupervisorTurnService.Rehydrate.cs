@@ -170,17 +170,23 @@ public sealed partial class SupervisorTurnService
     /// posture <c>GradeUnitAcceptanceMultiRepoAsync</c> already applies to grading: a partially-published
     /// multi-repo change is not genuinely published, so a lone pushed repo can never mask an unpublished sibling.
     /// </summary>
-    private async Task<IReadOnlySet<Guid>> FoldPublishedAgentRunIdsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
-    {
-        var manifests = await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+    private async Task<IReadOnlySet<Guid>> FoldPublishedAgentRunIdsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
+        FoldPublishedAgentRunIds(await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false));
 
-        return manifests
+    /// <summary>
+    /// The published-agent fold, PURE over manifest rows — an agent counts as published only when ALL its rows are
+    /// Pushed or carry a PR (all-or-nothing per multi-repo agent). Internal so the I3 auditor re-validates
+    /// historical stops with the SAME predicate the live gate's context was folded with: run 31230410920 red
+    /// "I3 did not hold" against a bare context whose <c>PublishedAgentRunIds</c> was empty, indicting the
+    /// production gate for a ledger-direct publication the auditor simply never looked at.
+    /// </summary>
+    internal static IReadOnlySet<Guid> FoldPublishedAgentRunIds(IReadOnlyList<Persistence.Entities.PublishManifest> manifests) =>
+        manifests
             .Where(m => m.AgentRunId is not null)
             .GroupBy(m => m.AgentRunId!.Value)
             .Where(g => g.All(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber is not null))
             .Select(g => g.Key)
             .ToHashSet();
-    }
 
     /// <summary>The DISTINCT agent-run ids this run's spawn/retry/resolve decisions staged (in recorded spawn order) — the key both the agent-results fold and the pending-decision read fan out over. Lifted so the two reads share ONE id source.</summary>
     private static List<Guid> StagedChildAgentRunIds(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows) =>
