@@ -73,6 +73,35 @@ public sealed class CompletionContractStoreFlowTests
     }
 
     [Fact]
+    public async Task An_amendment_moves_the_watermark_even_though_it_moves_no_count()
+    {
+        // P2 (v4.3, first slice): the watermark's counts are blind to IN-PLACE writes — an amended requirement
+        // overwrites its row, so before the monotonic ledger version the equality gate read "nothing moved" and
+        // a late amendment never reached reassessment. This pins the blindness CLOSED, via a real run row.
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<ICompletionContractStore>();
+        var db = scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+
+        var requirement = Requirement("acceptance:s1", specHash: "sha256/canonical-json-v1:aaa");
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);
+
+        var before = await Core.Services.Completion.CompletionLedgerWatermarks.CaptureAsync(db, runId, teamId, CancellationToken.None);
+
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement }, CancellationToken.None);   // identical replay — nothing written
+        var afterReplay = await Core.Services.Completion.CompletionLedgerWatermarks.CaptureAsync(db, runId, teamId, CancellationToken.None);
+        afterReplay.ShouldBe(before, "an idempotent replay writes nothing — the gate must still be able to skip");
+
+        await store.UpsertRequirementsAsync(runId, teamId, new[] { requirement with { SpecHash = "sha256/canonical-json-v1:bbb" } }, CancellationToken.None);
+        var afterAmend = await Core.Services.Completion.CompletionLedgerWatermarks.CaptureAsync(db, runId, teamId, CancellationToken.None);
+
+        afterAmend.RequirementCount.ShouldBe(before.RequirementCount, "the amendment overwrote its row — the COUNT genuinely cannot see it");
+        afterAmend.ShouldNotBe(before, "the ledger version carried the write the count could not — the reassessment gate sees the amendment");
+    }
+
+    [Fact]
     public async Task The_upsert_returns_the_current_revision_a_dispatcher_can_stamp()
     {
         // P1 (revision binding): a fresh stake returns its appended row's id; an idempotent replay returns the
@@ -141,6 +170,19 @@ public sealed class CompletionContractStoreFlowTests
         read.WorkUnit.PlanVersion.ShouldBe(2);
         read.ContentHashes.ShouldBe(new[] { "deadbeef" });
         read.Disposition.ShouldBe(VerificationDisposition.Passed);
+    }
+
+    private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, CodeSpace.Messages.Constants.Roles.Admin);
+        return await scope.Resolve<MediatR.IMediator>().Send(new CodeSpace.Messages.Commands.Workflows.CreateWorkflowCommand
+        {
+            Name = "ledger-" + Guid.NewGuid().ToString("N")[..8],
+            Description = null,
+            Definition = Infrastructure.WorkflowsTestSeed.MinimalDefinition(),
+            Activations = new List<CodeSpace.Messages.Commands.Workflows.WorkflowActivationInput>(),
+            Enabled = true,
+        });
     }
 
     private static RequirementEnvelope Requirement(string requirementRef, string specHash) => new()

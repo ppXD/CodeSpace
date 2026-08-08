@@ -23,6 +23,8 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
             .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && refs.Contains(r.RequirementRef))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        var wroteAnything = false;
+
         foreach (var envelope in requirements)
         {
             var json = JsonSerializer.Serialize(envelope, AgentJson.Options);
@@ -43,6 +45,8 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
             else
                 row.EnvelopeJson = json;   // an amended obligation overwrites its CURRENT envelope — the ref is the identity
 
+            wroteAnything = true;
+
             // P1 (v4.3): the append-only history the in-place upsert used to destroy — one revision per first
             // stake and per amendment. Since #1321 the staked SpecHash is admission's comparand; without this,
             // the shape an earlier attempt was staked under vanished the moment a retry re-staked.
@@ -60,6 +64,11 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
         try
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+            // P2: a requirement AMENDMENT overwrites its row — the one contract-ledger write a watermark COUNT
+            // cannot see — so a successful write advances the run's monotonic ledger version. The 23505 loser
+            // below persisted nothing from this call and bumps nothing.
+            if (wroteAnything) await CompletionLedgerVersionBump.BumpAsync(_db, workflowRunId, cancellationToken).ConfigureAwait(false);
         }
         catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" })
         {
@@ -131,6 +140,7 @@ public sealed class CompletionContractStore : ICompletionContractStore, IScopedD
         try
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await CompletionLedgerVersionBump.BumpAsync(_db, workflowRunId, cancellationToken).ConfigureAwait(false);
         }
         catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" })
         {
