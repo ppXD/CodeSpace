@@ -118,15 +118,6 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public string? CompletionEnforcementMode { get; set; }
 
     /// <summary>
-    /// P2 (v4.3): the run's MONOTONIC completion-ledger version — bumped (atomic SQL increment, never read-modify-
-    /// write) by every completion-ledger writer whose write a COUNT cannot see: an amended requirement overwrites
-    /// its row and a manifest state transition ExecuteUpdates in place, both leaving every watermark count
-    /// unchanged. Carried inside <c>CompletionLedgerWatermarks</c> so the shadow/terminal equality gates see
-    /// in-place writes too. The full P2 compose/commit/CAS cycle keys on this same column.
-    /// </summary>
-    public long CompletionLedgerVersion { get; set; }
-
-    /// <summary>
     /// A1 (wire honesty): how the work actually ENDED, re-derived at the terminal write from the supervisor tape's
     /// last stop decision — <c>SupervisorOutcome.HonestOutcome</c>, whose vocabulary is <c>SupervisorStopKind</c>
     /// plus <c>AcceptanceFailed</c>. <see cref="Status"/> answers "did the graph finish"; this answers "did the

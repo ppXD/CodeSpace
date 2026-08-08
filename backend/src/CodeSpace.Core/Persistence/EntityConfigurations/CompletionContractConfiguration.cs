@@ -14,6 +14,14 @@ public class CompletionRequirementConfiguration : IEntityTypeConfiguration<Compl
     }
 }
 
+public class CompletionLedgerHeadConfiguration : IEntityTypeConfiguration<CompletionLedgerHead>
+{
+    public void Configure(EntityTypeBuilder<CompletionLedgerHead> builder)
+    {
+        builder.HasKey(h => h.WorkflowRunId);
+    }
+}
+
 public class CompletionRequirementRevisionConfiguration : IEntityTypeConfiguration<CompletionRequirementRevision>
 {
     public void Configure(EntityTypeBuilder<CompletionRequirementRevision> builder)

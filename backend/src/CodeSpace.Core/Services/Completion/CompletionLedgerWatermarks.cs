@@ -36,7 +36,7 @@ public sealed record CompletionLedgerWatermarks
         var decisions = await db.SupervisorDecisionRecord.AsNoTracking().Where(d => d.SupervisorRunId == workflowRunId && d.TeamId == teamId).Select(d => (int?)d.Sequence).ToListAsync(cancellationToken).ConfigureAwait(false);
         var manifestCount = await db.PublishManifest.AsNoTracking().CountAsync(m => m.WorkflowRunId == workflowRunId && m.TeamId == teamId, cancellationToken).ConfigureAwait(false);
         var agentRunCount = await db.AgentRun.AsNoTracking().CountAsync(a => a.WorkflowRunId == workflowRunId && a.TeamId == teamId, cancellationToken).ConfigureAwait(false);
-        var ledgerVersion = await db.WorkflowRun.AsNoTracking().Where(r => r.Id == workflowRunId).Select(r => (long?)r.CompletionLedgerVersion).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? 0;
+        var ledgerVersion = await db.CompletionLedgerHead.AsNoTracking().Where(h => h.WorkflowRunId == workflowRunId).Select(h => (long?)h.Version).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? 0;
 
         return new CompletionLedgerWatermarks
         {
