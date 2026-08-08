@@ -123,7 +123,7 @@ public static class SupervisorDependencyGate
         LatestResultsBySubtask(context).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
 
     /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
-    private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
+    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
     {
         var latest = new Dictionary<string, SupervisorAgentResult>();
 
