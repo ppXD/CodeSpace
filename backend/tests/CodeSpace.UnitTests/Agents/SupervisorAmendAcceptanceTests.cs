@@ -131,16 +131,20 @@ public class SupervisorAmendAcceptanceTests
         SupervisorAmendAcceptance.IsAmendCard(Prior(escalation.PayloadJson!, outcome: "{}")).ShouldBeFalse();
     }
 
-    // ── the schema stays amend-blind until B3 ─────────────────────────────────────────────────────────
+    // ── the schema offers the verb (B3's deliberate flip of B1's negative pin) ────────────────────────
 
     [Fact]
-    public void The_model_facing_schema_does_not_offer_the_amend_verb_yet()
+    public void The_model_facing_schema_offers_the_amend_verb_with_its_payload()
     {
         var kinds = SupervisorDecisionSchema.ResponseSchema.GetProperty("properties").GetProperty("kind").GetProperty("enum")
             .EnumerateArray().Select(k => k.GetString()).ToArray();
 
-        kinds.ShouldNotContain(SupervisorDecisionKinds.AmendAcceptance,
-            "B1 is schema-hidden — offering the verb to a live model is B3's deliberate flip, never a rider");
+        kinds.ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "B3 goes live: the verb is model-facing now that the Waived state (B2) closed the doors and the overlay applies only co-signed amendments");
+
+        var payload = SupervisorDecisionSchema.ResponseSchema.GetProperty("properties").GetProperty("amendAcceptance");
+        payload.GetProperty("required").EnumerateArray().Select(r => r.GetString())
+            .ShouldBe(new[] { "subtaskId", "reason" }, "the payload demands the target and the evidence; waive-vs-replacement is enforced by the coherence gate");
     }
 
     // ── the payload round-trips byte-stable ───────────────────────────────────────────────────────────

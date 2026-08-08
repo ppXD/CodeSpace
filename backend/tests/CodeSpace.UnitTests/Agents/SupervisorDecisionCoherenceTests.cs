@@ -21,6 +21,7 @@ public class SupervisorDecisionCoherenceTests
     [InlineData(SupervisorDecisionKinds.Retry, "retry")]
     [InlineData(SupervisorDecisionKinds.AskHuman, "askHuman")]
     [InlineData(SupervisorDecisionKinds.Stop, "stop")]
+    [InlineData(SupervisorDecisionKinds.AmendAcceptance, "amendAcceptance")]
     public void A_kind_whose_payload_sub_object_is_missing_is_named_incoherent(string kind, string property)
     {
         var defect = SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = kind });
@@ -28,6 +29,37 @@ public class SupervisorDecisionCoherenceTests
         defect.ShouldNotBeNull($"kind '{kind}' without its payload is unexecutable and must be repairable before projection substitutes an empty payload");
         defect.ShouldContain($"'{property}'", customMessage: "the defect names the exact sub-object the payload must ride in, so the repair prompt tells the model where to nest it");
         defect.ShouldContain("anywhere else", Case.Insensitive, "the defect warns against the live-observed flattening (fields at the top level are never read)");
+    }
+
+    [Theory]
+    [InlineData("", "r", true, "subtaskId")]       // blank target
+    [InlineData("s1", "", true, "reason")]         // blank evidence
+    [InlineData("s1", "r", false, "neither")]      // no waive and no replacement — unexecutable proposal
+    public void An_amendment_missing_its_target_evidence_or_proposal_is_named_incoherent(string subtaskId, string reason, bool waive, string expectedFragment)
+    {
+        var model = new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.AmendAcceptance,
+            AmendAcceptance = new SupervisorAmendAcceptancePayload { SubtaskId = subtaskId, Reason = reason, Waive = waive },
+        };
+
+        SupervisorDecisionCoherence.MissingPayload(model).ShouldNotBeNull().ShouldContain(expectedFragment);
+    }
+
+    [Fact]
+    public void A_coherent_waive_and_a_coherent_replacement_amendment_pass()
+    {
+        SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.AmendAcceptance,
+            AmendAcceptance = new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "r", Waive = true },
+        }).ShouldBeNull();
+
+        SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.AmendAcceptance,
+            AmendAcceptance = new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "r", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } },
+        }).ShouldBeNull();
     }
 
     [Fact]
@@ -94,7 +126,12 @@ public class SupervisorDecisionCoherenceTests
         foreach (var kindElement in properties.GetProperty("kind").GetProperty("enum").EnumerateArray())
         {
             var kind = kindElement.GetString()!;
-            var property = kind == SupervisorDecisionKinds.AskHuman ? "askHuman" : kind;
+            var property = kind switch
+            {
+                SupervisorDecisionKinds.AskHuman => "askHuman",
+                SupervisorDecisionKinds.AmendAcceptance => "amendAcceptance",
+                _ => kind,
+            };
 
             var schemaDemandsPayload = properties.TryGetProperty(property, out var sub) && sub.TryGetProperty("required", out var required) && required.GetArrayLength() > 0;
             var coherenceDemandsPayload = SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = kind }) is not null;

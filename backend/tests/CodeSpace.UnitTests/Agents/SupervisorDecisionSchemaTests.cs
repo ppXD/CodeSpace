@@ -26,12 +26,13 @@ public class SupervisorDecisionSchemaTests
     }
 
     [Fact]
-    public void The_kind_enum_is_exactly_the_seven_verbs()
+    public void The_kind_enum_is_exactly_the_eight_verbs()
     {
         var kinds = Schema.GetProperty("properties").GetProperty("kind").GetProperty("enum")
             .EnumerateArray().Select(e => e.GetString()!).ToList();
 
-        // The seven-verb vocabulary, in order (resolver loop #379 added 'resolve') — a drift here is a contract change a reviewer must see.
+        // The eight-verb vocabulary, in order (resolver loop #379 added 'resolve'; amend-acceptance B3 added
+        // 'amend_acceptance') — a drift here is a contract change a reviewer must see.
         kinds.ShouldBe(new[]
         {
             SupervisorDecisionKinds.Plan,
@@ -41,6 +42,7 @@ public class SupervisorDecisionSchemaTests
             SupervisorDecisionKinds.Merge,
             SupervisorDecisionKinds.Resolve,
             SupervisorDecisionKinds.Stop,
+            SupervisorDecisionKinds.AmendAcceptance,
         });
     }
 

@@ -123,6 +123,83 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .Where(m => m.AgentRunId == agentRunId).Select(m => m.AcceptanceState).SingleAsync();
     }
 
+    // ── B3: the co-sign overlay — approved amendments change what the fold grades by ──────────────────
+
+    [Fact]
+    public async Task An_approved_amendment_regrades_the_unit_against_the_replacement_oracle()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedAmendCardAsync(runId, teamId, sequence: 2,
+            new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "check.sh invokes missing tooling", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } } },
+            answer: "approve — the replacement is right");
+        await SeedSpawnAsync(runId, teamId, sequence: 3, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "verified" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.LastCall!.Value.Command.ShouldBe(new[] { "sh", "verify.sh" },
+            "the fold grades by the co-signed EFFECTIVE oracle — the human-approved replacement, not the plan's superseded original");
+    }
+
+    [Fact]
+    public async Task An_unanswered_amend_card_changes_nothing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedAmendCardAsync(runId, teamId, sequence: 2,
+            new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "r", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } } },
+            answer: null);
+        await SeedSpawnAsync(runId, teamId, sequence: 3, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "graded" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.LastCall!.Value.Command.ShouldBe(Check, "FATAL-2: a proposal without its own approving answer carries no authority");
+    }
+
+    [Fact]
+    public async Task An_approved_waive_stamps_the_unit_and_its_manifest_without_grading()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedAmendCardAsync(runId, teamId, sequence: 2,
+            new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Reason = "no objective check is possible here", Waive = true },
+            answer: "approve");
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 3, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+        await SeedManifestAsync(teamId, agentId, repoId, "codespace/agent/s1", baseSha: null, patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "unused" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(0, "a waived unit is never graded — there is no oracle to run");
+
+        var folded = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        folded.AcceptanceVerdict.ShouldBe(CodeSpace.Messages.Contracts.VerificationDisposition.Waived, "the tape carries the DISTINCT waived state — never a pass, never silence");
+        folded.AcceptancePassed.ShouldBeNull();
+
+        (await ManifestAcceptanceStateAsync(agentId)).ShouldBe(PublishAcceptanceState.Waived,
+            "the manifest mirror keeps the scorecard's oracle leg honest — a waived-only run never reads Solved (B2)");
+    }
+
+    private async Task SeedAmendCardAsync(Guid runId, Guid teamId, int sequence, SupervisorAmendAcceptancePayload payload, string? answer)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(payload);
+        var outcome = answer is null ? "{}" : JsonSerializer.Serialize(new { question = "q", answer }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+
+        await SeedDecisionAsync(runId, teamId, sequence, SupervisorDecisionKinds.AskHuman, card.PayloadJson!, outcome);
+    }
+
     // ── P5-2 (diagnosis-driven repair): the failed check's OUTPUT TAIL rides the tape ─────────────────
 
     [Theory]

@@ -610,8 +610,8 @@ public sealed partial class RealSupervisorActionExecutor
         });
     }
 
-    /// <summary>Fold the most recent prior <c>plan</c> decision's subtasks into a lookup so spawn/retry can build each agent's instruction from the plan-local id.</summary>
-    private static IReadOnlyDictionary<string, SupervisorPlannedSubtask> ResolvePlannedSubtasks(SupervisorTurnContext context)
+    /// <summary>Fold the most recent prior <c>plan</c> decision's subtasks into a lookup so spawn/retry can build each agent's instruction from the plan-local id. B3: each subtask's <c>Acceptance</c> is the EFFECTIVE spec through the co-sign overlay — the SAME chokepoint the fold grades by, so an approved amendment that ADDS a spec forces the push opt-in on (F4) for the very retry that will be graded against it, and a waived subtask stops forcing it.</summary>
+    internal static IReadOnlyDictionary<string, SupervisorPlannedSubtask> ResolvePlannedSubtasks(SupervisorTurnContext context)
     {
         var lookup = new Dictionary<string, SupervisorPlannedSubtask>();
 
@@ -625,6 +625,16 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var subtask in plan.Subtasks)
             lookup[subtask.Id] = subtask;
+
+        var effective = SupervisorAcceptanceOverlay.Resolve(context.PriorDecisions,
+            lookup.Where(kv => kv.Value.Acceptance is not null).ToDictionary(kv => kv.Key, kv => kv.Value.Acceptance!));
+
+        foreach (var id in lookup.Keys.ToList())
+        {
+            var spec = effective.WaivedSubtaskIds.Contains(id) ? null : effective.BySubtask.GetValueOrDefault(id);
+
+            if (!ReferenceEquals(lookup[id].Acceptance, spec)) lookup[id] = lookup[id] with { Acceptance = spec };
+        }
 
         return lookup;
     }
