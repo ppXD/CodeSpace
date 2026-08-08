@@ -21,7 +21,7 @@ public class SupervisorAskQuestionClampTests
     // ── The reserved token list is sourced from the owning consts — pin the membership so a new gate card remembers to enroll ──
 
     [Fact]
-    public void The_reserved_tokens_are_exactly_the_five_server_card_identities()
+    public void The_reserved_tokens_are_exactly_the_six_server_card_identities()
     {
         SupervisorAskQuestionClamp.ReservedTokens.ShouldBe(new[]
         {
@@ -30,6 +30,7 @@ public class SupervisorAskQuestionClampTests
             SupervisorPlanConfirmation.ConfirmationMarker,
             SupervisorApprovalRequest.ApprovalMarker,
             SupervisorGateEscalation.EscalationMarker,
+            SupervisorAmendAcceptance.AmendMarker,
         });
     }
 
