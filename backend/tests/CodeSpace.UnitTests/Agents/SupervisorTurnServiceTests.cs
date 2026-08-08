@@ -237,6 +237,28 @@ public class SupervisorTurnServiceTests
     }
 
     [Fact]
+    public void An_answered_amend_card_resets_the_no_progress_streak()
+    {
+        // B1: a human RULING on an oracle-amendment proposal is engagement, not a stall — the fourth card in the
+        // family, same guarantee as its siblings (the counted state requires a server-written answer off a
+        // resolved wait, so a model minting marker text unattended gains nothing).
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Waive = true, Reason = "oracle names missing tooling" });
+
+        var priors = new[]
+        {
+            PlanPrior(1), PlanPrior(2), PlanPrior(3),
+            AskPrior(4, card.PayloadJson!, """{"question":"q","answer":"approve"}"""),
+            PlanPrior(5), PlanPrior(6),
+        };
+
+        SupervisorTurnService.FoldNoProgressDecisions(priors)
+            .ShouldBe(2, "the answered amend card resets the streak; only the two later plans count");
+
+        SupervisorTurnService.FoldNoProgressDecisions(new[] { PlanPrior(1), AskPrior(2, card.PayloadJson!, """{"question":"q"}""") })
+            .ShouldBe(2, "an UNANSWERED amend card is still a stall — only the human's ruling counts");
+    }
+
+    [Fact]
     public void An_answered_content_ask_resets_the_no_progress_streak()
     {
         // P1.5-A: a human answering the model's plain clarifying question (no gate marker) is engagement, not a

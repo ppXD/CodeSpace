@@ -33,4 +33,7 @@ public sealed record SupervisorModelDecision
     public SupervisorResolvePayload? Resolve { get; init; }
 
     public SupervisorStopPayload? Stop { get; init; }
+
+    /// <summary>B1: bindable so the projector's rewrite is testable end-to-end, but the verb is ABSENT from the model-facing schema until the co-sign overlay lands (B3) — a live model cannot emit it.</summary>
+    public SupervisorAmendAcceptancePayload? AmendAcceptance { get; init; }
 }

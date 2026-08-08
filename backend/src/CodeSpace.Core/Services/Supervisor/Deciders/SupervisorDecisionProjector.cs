@@ -32,6 +32,9 @@ public static class SupervisorDecisionProjector
         SupervisorDecisionKinds.AskHuman => Canonical(SupervisorDecisionKinds.AskHuman, model.AskHuman ?? new SupervisorAskHumanPayload { Question = "" }, model.Rationale),
         SupervisorDecisionKinds.Merge => Canonical(SupervisorDecisionKinds.Merge, model.Merge ?? new SupervisorMergePayload(), model.Rationale),
         SupervisorDecisionKinds.Resolve => Canonical(SupervisorDecisionKinds.Resolve, model.Resolve ?? new SupervisorResolvePayload(), model.Rationale),
+        // B1: an amend proposal NEVER executes directly — it is rewritten into the parked ask card here, so the
+        // tape only ever carries an AskHuman-kind decision and the wait/fold machinery is inherited verbatim.
+        SupervisorDecisionKinds.AmendAcceptance => SupervisorAmendAcceptance.IntoAskHuman(model.AmendAcceptance ?? new SupervisorAmendAcceptancePayload { SubtaskId = "", Reason = "" }, model.Rationale),
         SupervisorDecisionKinds.Stop => Canonical(SupervisorDecisionKinds.Stop, model.Stop ?? new SupervisorStopPayload { Outcome = "completed" }, model.Rationale),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "unknown-decision", Summary = $"The decider emitted an unrecognized kind '{model.Kind}'." }, model.Rationale),
     };

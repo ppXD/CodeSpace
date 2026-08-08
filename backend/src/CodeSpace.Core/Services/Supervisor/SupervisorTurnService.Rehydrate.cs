@@ -289,9 +289,9 @@ public sealed partial class SupervisorTurnService
         if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
             return MergedNewWork(decision, everMerged);
 
-        // ALL THREE gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer
-        // RULES on a blocked decision, and a plain CONTENT answer means the human just walked the model through a
-        // clarification it needed. The confirmation/escalation markers are text-matchable (a model could mint a
+        // ALL FOUR gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer
+        // RULES on a blocked decision, an amend answer RULES on an oracle proposal, and a plain CONTENT answer
+        // means the human just walked the model through a clarification it needed. The confirmation/escalation markers are text-matchable (a model could mint a
         // marker-carrying ask), but the counted state requires a server-written ANSWER off a resolved wait — every
         // streak reset costs a real human interaction, so a walk-away run gains nothing; a model looping UNANSWERED
         // content asks to itself still marches toward the stall bound (only a genuine human reply resets it, exactly
@@ -301,14 +301,16 @@ public sealed partial class SupervisorTurnService
         // kill purely for talking to its operator.
         return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision)
             || SupervisorGateEscalation.IsAnsweredEscalationCard(decision)
+            || SupervisorAmendAcceptance.IsAnsweredAmendCard(decision)
             || IsAnsweredContentAsk(decision);
     }
 
-    /// <summary>An ANSWERED plain content ask_human — the residual shape once the confirmation and escalation markers are ruled out. Its own dedicated check (rather than folding into the generic "any answered ask_human" test) keeps the three gate shapes independently readable + independently testable, mirroring <see cref="SupervisorPlanConfirmation.IsAnsweredConfirmationCard"/> / <see cref="SupervisorGateEscalation.IsAnsweredEscalationCard"/>.</summary>
+    /// <summary>An ANSWERED plain content ask_human — the residual shape once the confirmation, escalation, and amend markers are ruled out. Its own dedicated check (rather than folding into the generic "any answered ask_human" test) keeps the gate shapes independently readable + independently testable, mirroring <see cref="SupervisorPlanConfirmation.IsAnsweredConfirmationCard"/> / <see cref="SupervisorGateEscalation.IsAnsweredEscalationCard"/> / <see cref="SupervisorAmendAcceptance.IsAnsweredAmendCard"/>.</summary>
     private static bool IsAnsweredContentAsk(SupervisorPriorDecision decision) =>
         decision.DecisionKind == SupervisorDecisionKinds.AskHuman
         && !SupervisorPlanConfirmation.IsConfirmationCard(decision)
         && !SupervisorGateEscalation.IsEscalationCard(decision)
+        && !SupervisorAmendAcceptance.IsAmendCard(decision)
         && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) != null;
 
     /// <summary>
