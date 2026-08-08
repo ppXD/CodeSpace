@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -85,6 +86,28 @@ public sealed class SupervisorRecitationTests
         recitation.ShouldNotContain("Old item", customMessage: "a re-plan supersedes — the recitation restates the CURRENT plan only");
         recitation.ShouldContain("REJECTED by its acceptance check (rubric 0.50 < 1.00)");
         recitation.ShouldContain("Unfinished: s1.");
+    }
+
+    [Fact]
+    public void The_authoring_lint_validates_the_effective_spec_not_the_superseded_one()
+    {
+        // B3: a human approved a replacement for the plan's broken judge-without-rubric — nagging the model about
+        // the superseded bytes would tell it to re-plan a check that is already fixed.
+        var brokenPlan = Prior(1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"First","instruction":"do","acceptance":{"command":["report.md"],"kind":"LlmJudge"}}]}""", "{}");
+
+        SupervisorRecitation.Render(new[] { brokenPlan })!
+            .ShouldContain("INVALID as authored", customMessage: "baseline: the broken spec is linted before any amendment");
+
+        var fix = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "judge has no rubric",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        });
+        var approvedFix = Prior(2, SupervisorDecisionKinds.AskHuman, fix.PayloadJson!, """{"question":"q","answer":"approve"}""");
+
+        SupervisorRecitation.Render(new[] { brokenPlan, approvedFix })!
+            .ShouldNotContain("INVALID as authored", customMessage: "the lint reads the co-signed EFFECTIVE spec");
     }
 
     [Fact]

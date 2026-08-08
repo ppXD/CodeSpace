@@ -32,6 +32,10 @@ internal static class SupervisorDecisionCoherence
         SupervisorDecisionKinds.AskHuman when model.AskHuman is null => Missing(model.Kind, "askHuman", "a 'question'"),
         SupervisorDecisionKinds.AskHuman when string.IsNullOrWhiteSpace(model.AskHuman!.Question) => "the 'askHuman' object's 'question' is BLANK — ask_human must carry the question a human should answer inside 'askHuman.question'",
         SupervisorDecisionKinds.Stop when model.Stop is null => Missing(model.Kind, "stop", "'outcome' and 'summary'"),
+        SupervisorDecisionKinds.AmendAcceptance when model.AmendAcceptance is null => Missing(model.Kind, "amendAcceptance", "a 'subtaskId', a 'reason', and either 'waive: true' or a replacement 'acceptance'"),
+        SupervisorDecisionKinds.AmendAcceptance when string.IsNullOrWhiteSpace(model.AmendAcceptance!.SubtaskId) => "the 'amendAcceptance' object's 'subtaskId' is BLANK — an amendment must name the one plan-declared subtask whose check it targets inside 'amendAcceptance.subtaskId'",
+        SupervisorDecisionKinds.AmendAcceptance when string.IsNullOrWhiteSpace(model.AmendAcceptance!.Reason) => "the 'amendAcceptance' object's 'reason' is BLANK — an amendment must carry the evidence that the current check is wrong inside 'amendAcceptance.reason' (it is quoted onto the human approval card)",
+        SupervisorDecisionKinds.AmendAcceptance when !model.AmendAcceptance!.Waive && model.AmendAcceptance!.Acceptance is null => "the 'amendAcceptance' object proposes neither a replacement 'acceptance' nor 'waive: true' — an amendment must either carry the replacement check or explicitly waive verification",
         _ => null,
     };
 

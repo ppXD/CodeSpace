@@ -31,8 +31,8 @@ public static class SupervisorDecisionSchema
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve", "stop"],
-              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'resolve' spawns ONE agent to reconcile a CONFLICTED integration (choose it only after a merge reported INTEGRATION CONFLICTED — the server assembles the resolver task from the conflict); 'ask_human' asks a question; 'stop' ends the run."
+              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve", "stop", "amend_acceptance"],
+              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'resolve' spawns ONE agent to reconcile a CONFLICTED integration (choose it only after a merge reported INTEGRATION CONFLICTED — the server assembles the resolver task from the conflict); 'ask_human' asks a question; 'amend_acceptance' proposes to fix or waive ONE subtask's acceptance check when the CHECK ITSELF is provably wrong (parks for a human approval — never retry into a check that cannot pass); 'stop' ends the run."
             },
             "rationale": {
               "type": "object",
@@ -208,6 +208,31 @@ public static class SupervisorDecisionSchema
               },
               "required": ["outcome", "summary"],
               "description": "Required when kind == 'stop'."
+            },
+            "amendAcceptance": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "subtaskId": { "type": "string", "description": "The ONE plan-declared subtask whose acceptance check this proposal targets." },
+                "waive": { "type": "boolean", "description": "true = propose to FORGO verification for this subtask entirely. A human must approve; the unit is then recorded WAIVED — never as passed: it will not merge, will not satisfy dependencies, and never counts as objectively verified. Prefer a replacement 'acceptance' over a waive whenever ANY objective check is possible." },
+                "acceptance": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "For kind=TestsPass (default): an argv the server runs to OBJECTIVELY verify this subtask is done. For every other kind: the repo-relative DELIVERABLE file paths the oracle reads." },
+                    "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema"], "description": "Which objective oracle verifies this. Omit for TestsPass." },
+                    "rubric": { "type": "object", "additionalProperties": false, "properties": { "criteria": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string" }, "requirement": { "type": "string" }, "weight": { "type": "number" } }, "required": ["id", "requirement"] } }, "threshold": { "type": "number" } }, "required": ["criteria"], "description": "REQUIRED for kind=LlmJudge." },
+                    "schema": { "type": "object", "additionalProperties": true, "description": "REQUIRED for kind=ArtifactSchema." },
+                    "protectedPaths": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative paths whose bytes belong to the ORACLE, not the worker." },
+                    "description": { "type": "string", "description": "Optional human-readable description of the replacement check." }
+                  },
+                  "required": ["command"],
+                  "description": "The REPLACEMENT check (required unless waive=true) — same shape as a plan subtask's acceptance."
+                },
+                "reason": { "type": "string", "description": "REQUIRED: the concrete evidence that the CURRENT check is wrong (e.g. its failing detail shows it invokes test tooling this repository does not have) — quoted onto the human approval card." }
+              },
+              "required": ["subtaskId", "reason"],
+              "description": "Required when kind == 'amend_acceptance'. Propose to REWRITE or WAIVE one subtask's acceptance check when evidence shows the CHECK ITSELF cannot pass regardless of the work (wrong tooling, impossible assertion, broken rubric). It never executes directly: the server parks it on a human approval card, and only the approved proposal changes the oracle. Use it INSTEAD of retrying a unit whose grade detail proves the check is broken."
             }
           },
           "required": ["kind"]

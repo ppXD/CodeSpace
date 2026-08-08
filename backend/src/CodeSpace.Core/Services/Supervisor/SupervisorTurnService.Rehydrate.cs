@@ -528,11 +528,14 @@ public sealed partial class SupervisorTurnService
 
         if (results.Count == 0) return decision;
 
-        if (results.Any(r => r.AcceptancePassed.HasValue)) return decision;   // already graded — durable on the tape; never re-clone+grade
+        if (results.Any(r => r.AcceptancePassed.HasValue || SupervisorOutcome.IsWaived(r))) return decision;   // already graded/waived — durable on the tape; never re-clone+grade
 
-        var acceptanceBySubtask = ResolvePlannedAcceptance(priorDecisions);
+        // B3: the co-sign overlay resolves the EFFECTIVE oracle view — approved amendments replace the newest
+        // plan's specs, approved waives remove them (the unit is stamped Waived below instead of graded).
+        var effective = SupervisorAcceptanceOverlay.Resolve(priorDecisions, ResolvePlannedAcceptance(priorDecisions));
+        var acceptanceBySubtask = effective.BySubtask;
 
-        if (acceptanceBySubtask.Count == 0) return decision;   // no subtask authored a contract → byte-identical (the dominant case)
+        if (acceptanceBySubtask.Count == 0 && effective.WaivedSubtaskIds.Count == 0) return decision;   // no subtask carries a contract or a waive → byte-identical (the dominant case)
 
         var expectsChangesBySubtask = ResolvePlannedExpectsChanges(priorDecisions);
         var unitSubtaskIds = UnitSubtaskIds(decision);
@@ -557,6 +560,25 @@ public sealed partial class SupervisorTurnService
         for (var i = 0; i < results.Count; i++)
         {
             var subtaskId = i < unitSubtaskIds.Count ? unitSubtaskIds[i] : null;
+
+            // B3: a human waived this subtask's verification — stamp the unit WAIVED instead of grading it. The
+            // stamp rides the same crash-ordering as a grade (before the caller persists the tape → a crash replays
+            // as re-stamp, idempotent), and the manifest mirror keeps the scorecard's oracle leg honest (B2: a
+            // waived-only run never reads Solved). WAIVED is not a pass: the B2 doors withhold it everywhere.
+            if (subtaskId is not null && effective.WaivedSubtaskIds.Contains(subtaskId))
+            {
+                graded.Add(results[i] with
+                {
+                    AcceptanceVerdict = Messages.Contracts.VerificationDisposition.Waived,
+                    AcceptanceDetail = "verification waived by a human co-sign",
+                });
+                anyGraded = true;
+
+                await _manifests.StampAcceptanceForAgentRunAsync(results[i].AgentRunId, PublishAcceptanceState.Waived, cancellationToken).ConfigureAwait(false);
+
+                continue;
+            }
+
             var spec = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var found) ? found : null;
             var command = spec is not null ? NormalizeCommand(spec.Command) : null;
 
