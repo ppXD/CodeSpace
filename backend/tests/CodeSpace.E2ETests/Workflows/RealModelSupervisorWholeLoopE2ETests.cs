@@ -586,11 +586,26 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // A FORCED stop (its payload carries a `reason` — model stops carry outcome/summary instead) re-validates
         // with the SAME requireSummary:false the runtime gate applies to it: a bound authored it, so "no summary"
         // is legal for it by design, and auditing it at the model-stop bar would red a legalized behaviour.
+        //
+        // The audit context must carry the SAME ledger the live gate's context was folded with: the P0-5
+        // ledger-direct shortcut reads PublishedAgentRunIds (rehydrate folds it from the publish manifests), so a
+        // run published WITHOUT a tape-visible merge is legal to stop — a bare context indicts the gate for a
+        // publication the auditor never looked at (run 31230410920 red exactly this way). Rows are filtered to
+        // those CREATED by the stop's own timestamp: an agent's manifest row is created at its completion, so this
+        // is what the gate could have seen — folding today's full ledger instead would let a post-stop publication
+        // retroactively launder a genuinely bad stop.
+        var manifestRows = await db.PublishManifest.AsNoTracking().Where(m => m.WorkflowRunId == runId && m.TeamId == teamId).ToListAsync();
+        var stopCreatedBySequence = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .ToDictionaryAsync(d => d.Sequence, d => d.CreatedDate);
+
         foreach (var stop in stops)
         {
             var priorToThisStop = priorDecisions.Where(d => d.Sequence < stop.Sequence).ToList();
             var isForcedStop = SupervisorOutcome.ReadStopReason(stop.PayloadJson) is not null;
-            var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson }, requireSummary: !isForcedStop);
+            var ledgerAsOfStop = Core.Services.Supervisor.SupervisorTurnService.FoldPublishedAgentRunIds(
+                manifestRows.Where(m => m.CreatedDate <= stopCreatedBySequence[stop.Sequence]).ToList());
+            var gateVerdict = SupervisorPublishGate.Validate(new SupervisorTurnContext { PriorDecisions = priorToThisStop, PublishedAgentRunIds = ledgerAsOfStop }, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stop.PayloadJson }, requireSummary: !isForcedStop);
 
             gateVerdict.ShouldBeNull($"a Stop decision (sequence {stop.Sequence}) was actually PERSISTED as a genuine stop, but SupervisorPublishGate.Validate says it should have been rewritten to '{gateVerdict?.Kind}' — I3 did not hold for this real run.");
         }
