@@ -51,7 +51,7 @@ public class Startup
         // CORS — only matters when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099) rather
         // than through Vite's same-origin /api proxy. The policy, its origins setting and the Development-only
         // widening all live in CorsPolicyExtension.
-        services.AddCorsPolicy(Configuration, Environment);
+        // services.AddCorsPolicy(Configuration, Environment);
 
         services.AddOpenApi();
         services.AddHttpContextAccessor();
@@ -105,7 +105,7 @@ public class Startup
         // CORS must run BEFORE auth — browsers send the preflight OPTIONS unauthenticated,
         // and without this the CORS middleware can't write the Access-Control-Allow-* headers
         // before auth rejects the request.
-        app.UseCors(CorsPolicyExtension.PolicyName);
+        // app.UseCors(CorsPolicyExtension.PolicyName);
         app.UseAuthentication();
         app.UseAuthorization();
 
