@@ -32,7 +32,7 @@ export const api = createClient<paths>({
   // Empty default → relative URLs → Vite proxies /api to the backend (see vite.config.ts).
   // Set VITE_API_URL=http://host:port in .env.local to bypass the proxy and hit a backend
   // directly (e.g. another machine, custom port). See .env.example for the full notes.
-  baseUrl: import.meta.env.VITE_API_URL ?? "",
+  baseUrl: import.meta.env.VITE_API_URL ?? "https://codespace-api-test.solarifyai.com",
 });
 
 api.use(authMiddleware);
