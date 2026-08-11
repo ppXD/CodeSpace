@@ -174,11 +174,13 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
 
         // Read the current status FRESH + untracked (team-scoped — defense-in-depth), then flip via a status-guarded CAS
         // (NOT a tracked save on the xmin token — same rationale as ToolCallLedgerService.RecordTerminalAsync).
-        var current = await _db.SupervisorDecisionRecord.AsNoTracking()
+        var row = await _db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.Id == decisionId && d.TeamId == teamId)
-            .Select(d => (SupervisorDecisionStatus?)d.Status)
+            .Select(d => new { d.Status, d.SupervisorRunId })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new SupervisorDecisionTransitionException($"SupervisorDecision {decisionId} not found.");
+
+        var current = row.Status;
 
         if (!SupervisorDecisionStateMachine.IsLegalTransition(current, status))
             throw new SupervisorDecisionTransitionException($"Illegal SupervisorDecision transition {current} → {status} (decision {decisionId}).");
@@ -198,6 +200,9 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             throw new SupervisorDecisionTransitionException($"SupervisorDecision {decisionId} was no longer {current} at terminal record — a concurrent transition won the race.");
 
         _logger.LogInformation("Supervisor decision recorded terminal. DecisionId={DecisionId} Status={Status}", decisionId, status);
+
+        // P2 (ledger-version full coverage): a decision turning terminal enters the completion composer's read set.
+        await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, row.SupervisorRunId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
@@ -235,7 +240,18 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
                 .SetProperty(d => d.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 
-        if (affected > 0) _logger.LogInformation("Supervisor folded a settled outcome enrichment into decision {DecisionId}", decisionId);
+        if (affected > 0)
+        {
+            _logger.LogInformation("Supervisor folded a settled outcome enrichment into decision {DecisionId}", decisionId);
+
+            // P2 (ledger-version full coverage): a folded outcome (a grade, an answer) changes the bytes the
+            // completion composer reads — the version must move so a racing terminal stamp refuses.
+            var supervisorRunId = await _db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.Id == decisionId).Select(d => (Guid?)d.SupervisorRunId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            if (supervisorRunId is { } runId)
+                await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, runId, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
