@@ -126,6 +126,24 @@ public class GlobalExceptionFilterTests
         body.GetProperty("message").GetString()!.ShouldContain("CODESPACE_PACK_ALLOWED_HOSTS");
     }
 
+    [Fact]
+    public void Password_rotation_required_maps_to_403_with_the_code_the_spa_redirects_on()
+    {
+        // PasswordRotationRequiredBehavior throws this on EVERY request from a password_must_change
+        // user. With no arm it fell to the masked 500 default, so the SPA's interceptor never saw
+        // code=password_rotation_required and never routed to /change-password — a flagged user got
+        // an opaque "unexpected error" on every page instead of the rotation form. The literal
+        // string is the wire contract with frontend/src/api/request.ts (which branches on
+        // status 403 && code === "password_rotation_required"); changing it breaks the redirect
+        // silently, so pin it here.
+        var result = Run(new PasswordRotationRequiredException());
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status403Forbidden);
+        body.GetProperty("code").GetString().ShouldBe("password_rotation_required");
+        body.GetProperty("message").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
     private static ObjectResult Run(Exception exception)
     {
         var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);
