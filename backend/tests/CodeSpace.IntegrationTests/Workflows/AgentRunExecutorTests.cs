@@ -80,7 +80,8 @@ public class AgentRunExecutorTests
             .SingleAsync(i => i.AgentRunId == runId);
 
         intent.Status.ShouldBe(CodeSpace.Messages.Agents.CaptureIntentStatus.Committed, "the capture sequence ran to its persist — the promise settles before the terminal");
-        intent.FactsJson.ShouldNotBeNull().ShouldContain("\"empty\":true", customMessage: "a confirmed empty is a recorded fact");
+        System.Text.Json.JsonDocument.Parse(intent.FactsJson.ShouldNotBeNull()).RootElement.GetProperty("empty").GetBoolean()
+            .ShouldBeTrue("a confirmed empty is a recorded fact (parsed, not substring — jsonb normalizes stored formatting)");
     }
 
     [Fact]
