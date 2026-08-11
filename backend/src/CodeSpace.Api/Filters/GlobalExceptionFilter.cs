@@ -35,6 +35,17 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildProblemResult(StatusCodes.Status403Forbidden, "forbidden", "Access denied for this tenant.");
                 break;
 
+            case PasswordRotationRequiredException:
+                // 403 + code=password_rotation_required is the signal the SPA's global interceptor
+                // branches on to route the user to /change-password. Authenticated-but-blocked, so
+                // NOT a 401 (that would sign them out instead of sending them to the rotation form),
+                // and NOT the masked 500 default arm (that stranded the flagged user on every page).
+                // Information, not Warning: the rotation guard throws on EVERY request until the
+                // password is rotated, and that's the designed state — not an anomaly worth alerting.
+                _logger.LogInformation("Password rotation required at {Path}", path);
+                context.Result = BuildProblemResult(StatusCodes.Status403Forbidden, "password_rotation_required", "Your password must be changed before continuing.");
+                break;
+
             case UnauthorizedAccessException:
                 _logger.LogWarning("Unauthorized at {Path}: {Message}", path, context.Exception.Message);
                 context.Result = BuildProblemResult(StatusCodes.Status401Unauthorized, "unauthorized", "Authentication required.");
