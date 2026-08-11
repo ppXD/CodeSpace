@@ -84,8 +84,12 @@ public class ArtifactStoreFlowTests
     }
 
     [Fact]
-    public async Task A_mutated_inline_row_refuses_to_read()
+    public async Task The_immutability_trigger_blocks_an_inline_mutation_at_the_database()
     {
+        // The inline surface's REAL defense (discovered by this slice's first CI round): workflow_artifact carries
+        // an immutability trigger — an UPDATE is rejected at the database, so a mutated inline row is structurally
+        // unreachable through SQL. The read-back verification remains as defense-in-depth (and as the ONLY guard
+        // for the offloaded blob surface, where no trigger can reach the filesystem).
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var content = Encoding.UTF8.GetBytes("small inline content");
 
@@ -98,12 +102,10 @@ public class ArtifactStoreFlowTests
             var db = scope.Resolve<CodeSpaceDbContext>();
             var row = await db.WorkflowArtifact.SingleAsync(a => a.Id == artifactId);
             row.InlineBytes = Encoding.UTF8.GetBytes("small inline CONTENT");
-            await db.SaveChangesAsync();
-        }
 
-        using (var scope = _fixture.BeginScope())
-            await Should.ThrowAsync<InvalidOperationException>(
-                scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
+            var ex = await Should.ThrowAsync<DbUpdateException>(db.SaveChangesAsync());
+            ex.InnerException.ShouldNotBeNull().Message.ShouldContain("immutable", customMessage: "the database itself refuses to rewrite an artifact's identity");
+        }
     }
 
     [Fact]
