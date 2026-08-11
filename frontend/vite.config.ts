@@ -7,6 +7,14 @@ import react from "@vitejs/plugin-react";
 // defineConfig) gives correct type-checking on the `test:` block below
 // without a wildcard ambient type declaration.
 import { defineConfig } from "vitest/config";
+import htmlPlugin from "vite-plugin-html-config";
+import ImportMetaEnvPlugin from "@import-meta-env/unplugin";
+
+const htmlPluginOpt = {
+  headScripts: [
+    "globalThis.import_meta_env = JSON.parse('\"import_meta_env_placeholder\"')",
+  ],
+};
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -17,6 +25,11 @@ export default defineConfig({
     TanStackRouterVite({ target: "react", autoCodeSplitting: true, routeFileIgnorePattern: "\\.test\\.[tj]sx?$" }),
     react(),
     tailwindcss(),
+    ImportMetaEnvPlugin.vite({
+      example: ".env.example",
+      env: ".env",
+    }),
+    htmlPlugin(htmlPluginOpt),
   ],
   resolve: {
     alias: {

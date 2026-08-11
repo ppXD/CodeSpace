@@ -56,3 +56,5 @@ jobs:
 
       - name: Unit tests (vitest)
         run: pnpm run test
+        env:
+          VITE_API_URL: http://localhost:5099
