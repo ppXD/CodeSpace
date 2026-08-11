@@ -71,9 +71,40 @@ public sealed partial class RealSupervisorActionExecutor
         }
 
         if (!await CanPostToConversationAsync(context, cancellationToken).ConfigureAwait(false))
-            return DegradeNoSurface(ask.Question);
+            return IsGateCard(ask.Question)
+                ? await ParkWithoutCardAsync(ask.Question, context, cancellationToken).ConfigureAwait(false)
+                : DegradeNoSurface(ask.Question);
 
         return await PostQuestionAndParkAsync(ask.Question, context, cancellationToken, displaySuffix).ConfigureAwait(false);
+    }
+
+    /// <summary>An I3 publish / DC-2b delivery gate card — the two server-authored asks whose QUESTION is a correctness obligation, recognized by the same pinned prefixes the ask-once fuse keys on.</summary>
+    private static bool IsGateCard(string question) =>
+        question.StartsWith(SupervisorPublishGate.QuestionPrefix, StringComparison.Ordinal)
+        || question.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The vacuous-Success fix (publish-or-park's park half, made REAL): a GATE card in a no-surface run used to
+    /// degrade into a self-advancing null answer — the model re-stopped, the gate re-substituted, and after the
+    /// ask-loop burned the no-progress bound the fuse let a forced stop terminalize the run as clean SUCCESS with
+    /// the accepted work silently evaporated (run 31250002048: plan→spawn→spawn→merge→ask×9→stop, Success, zero
+    /// delivery). A gate card is a correctness OBLIGATION — no surface does not dissolve it. Park the run on the
+    /// Action wait WITHOUT posting a card: the wait is durable, the run suspends honestly, and the answer path
+    /// (<see cref="ISupervisorAskAnswerService"/> / the Room) resolves by token off the tape — no conversation was
+    /// ever required to answer. A model's CONTENT ask keeps degrading (hanging an unattended run on a clarifying
+    /// question would be worse than proceeding); the crash-recovery re-entry above re-parks on the existing wait.
+    /// </summary>
+    private async Task<SupervisorExecution> ParkWithoutCardAsync(string question, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var token = Guid.NewGuid().ToString("N");
+
+        StageAskWait(context, token);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        _logger.LogWarning("Supervisor gate card has no usable conversation surface — PARKING the run on its wait anyway at turn {Turn} on node {NodeId} (the obligation holds; answer via the run's ask API or the Room): {Question}", context.TurnNumber, context.NodeId, question);
+
+        return SupervisorExecution.ParkedOnHuman(AskOutcome(question, token, answer: null), token);
     }
 
     /// <summary>Post the question card (single "Answer" button requiring the human's free-text comment) + stage the per-turn Action wait, then record the token + question in the outcome. The node parks on the one wait; the human's answer resumes it. <paramref name="displaySuffix"/> (B4: an amend card's raw server verdict) enriches the POSTED body only — the tape payload, the parked question, and every marker read stay canonical.</summary>
