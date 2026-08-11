@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 using CodeSpace.Messages.Enums;
@@ -16,8 +17,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// this body. <see cref="RepositoryId"/> grounds the plan in the repo's top-level layout, resolved TEAM-SCOPED
 /// against the caller's team — a repo outside the team yields no grounding (fail-closed, never a cross-team read).</para>
 /// </summary>
-public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTaskResult>, IRequireTeamMembership
+public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTaskResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.WorkflowsWrite;
+
     /// <summary>The operator's free-text task to plan.</summary>
     public required string TaskText { get; init; }
 

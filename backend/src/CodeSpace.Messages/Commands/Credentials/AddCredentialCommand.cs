@@ -1,12 +1,15 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Credentials;
 
-public sealed record AddCredentialCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AddCredentialCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.CredentialsManage;
+
     public required Guid ProviderInstanceId { get; init; }
     public Guid? OwnerUserId { get; init; }
     public required string DisplayName { get; init; }

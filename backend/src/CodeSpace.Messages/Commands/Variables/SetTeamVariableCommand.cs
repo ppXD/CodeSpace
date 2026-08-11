@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 using MediatR;
@@ -13,8 +14,10 @@ namespace CodeSpace.Messages.Commands.Variables;
 /// is stored verbatim in <c>variable.value_plain</c>.
 /// <para>Team comes from <c>X-Team-Id</c> header — not in the body.</para>
 /// </summary>
-public sealed record SetTeamVariableCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record SetTeamVariableCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.VariablesWrite;
+
     public required string Name { get; init; }
     public required VariableValueType ValueType { get; init; }
     public required JsonElement Value { get; init; }

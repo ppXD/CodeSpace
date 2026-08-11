@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -16,8 +17,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// side-effecting / suspendable / nested-container node (v1 supports pure-compute branch bodies only). Returns
 /// the new <c>WorkflowRun.Id</c>.</para>
 /// </summary>
-public sealed record RerunMapBranchCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record RerunMapBranchCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     public Guid OriginalRunId { get; init; }
 
     /// <summary>The top-level flow.map node whose branch to re-run.</summary>

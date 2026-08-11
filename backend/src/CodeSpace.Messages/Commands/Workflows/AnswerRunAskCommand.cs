@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -10,8 +11,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// conversation card's Answer button — first answer wins. Team-scoped; a foreign / absent run or a run with no
 /// pending ask resolves to <c>null</c> → the controller 404-conflates (no existence leak).
 /// </summary>
-public sealed record AnswerRunAskCommand : ICommand<SupervisorAskAnswerOutcome?>, IRequireTeamMembership
+public sealed record AnswerRunAskCommand : ICommand<SupervisorAskAnswerOutcome?>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsDecide;
+
     public Guid RunId { get; init; }
 
     /// <summary>The operator's answer text — required non-blank.</summary>

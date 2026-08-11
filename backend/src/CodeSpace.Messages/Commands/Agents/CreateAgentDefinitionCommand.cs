@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// and <see cref="AgentDefinitionOrigin.Authored"/> is set server-side. On a slug collision the service
 /// throws a typed error and the operator picks a different name (we never silently mangle into "foo-2").
 /// </summary>
-public sealed record CreateAgentDefinitionCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record CreateAgentDefinitionCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required string Name { get; init; }
     public string? Description { get; init; }
     public string? SystemPrompt { get; init; }

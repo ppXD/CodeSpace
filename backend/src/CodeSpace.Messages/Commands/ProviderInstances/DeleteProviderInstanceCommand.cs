@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -18,8 +19,10 @@ namespace CodeSpace.Messages.Commands.ProviderInstances;
 /// Active credentials are always cascade-revoked in the same transaction — they're
 /// useless once the provider is gone, and leaving them as Active would lie to the UI.
 /// </summary>
-public sealed record DeleteProviderInstanceCommand : ICommand<DeleteProviderInstanceResult>, IRequireTeamMembership
+public sealed record DeleteProviderInstanceCommand : ICommand<DeleteProviderInstanceResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ReposManage;
+
     public required Guid ProviderInstanceId { get; init; }
 
     /// <summary>When true, cascade-unbind every bound repository before deleting. Default false (refuse if any repo is bound).</summary>

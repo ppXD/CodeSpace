@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -8,7 +9,9 @@ namespace CodeSpace.Messages.Commands.Variables;
 /// Soft-delete a team-scoped variable by name. Idempotent — no-op if the name has no
 /// active row. Team comes from <c>X-Team-Id</c> header.
 /// </summary>
-public sealed record DeleteTeamVariableCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record DeleteTeamVariableCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.VariablesWrite;
+
     public required string Name { get; init; }
 }

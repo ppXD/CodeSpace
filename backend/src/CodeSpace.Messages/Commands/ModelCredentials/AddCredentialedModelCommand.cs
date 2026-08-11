@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.ModelCredentials;
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.ModelCredentials;
 /// <see cref="ModelCredentialId"/> is the route's authoritative credential id (merged in by the controller,
 /// Rule 17). Returns the new row id.
 /// </summary>
-public sealed record AddCredentialedModelCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AddCredentialedModelCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ModelsManage;
+
     public Guid ModelCredentialId { get; init; }
     public required string ModelId { get; init; }
     public string? DisplayName { get; init; }

@@ -9,133 +9,96 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Architecture;
 
 /// <summary>
-/// Makes the UNFINISHED half of the team-permission tier visible.
+/// Every team-scoped write declares a permission, or is named below as one that mutates only the
+/// caller's own state.
 ///
-/// <para>The tier is adopted by a handful of commands; every other team-scoped write still passes on
-/// membership alone, which means a Viewer can perform it. That is a deliberate staging decision, but
-/// staged work that nothing counts is indistinguishable from finished work — the adopted commands
-/// read like enforcement is live, and a reviewer of a later diff has no way to see the remainder.</para>
-///
-/// <para>So the remainder is named here. Adopting a command means deleting its line; adding a NEW
-/// team write without a permission fails this test until the author either declares one or admits
-/// the omission by adding the name. The count in <see cref="Adoption_is_visible"/> is the honest
-/// headline: it is the number of team writes a Viewer can still perform.</para>
+/// <para>Why the exemption list is explicit rather than implied: "membership is enough here" is a
+/// judgement about blast radius, and the difference between a read cursor and a team credential is
+/// invisible in a diff. Naming each one with its reason makes adding a 4th an argument someone has
+/// to make, instead of a marker someone forgot.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class TeamWritePermissionAdoptionTests
 {
     /// <summary>
-    /// Team-scoped writes still gated by membership alone. NOT an exemption list — a work list.
-    /// Every entry is a capability the matrix intends to gate and does not yet.
+    /// Writes that touch only the row belonging to the caller. A Viewer performing one of these
+    /// changes nothing another member can observe, so gating them would deny people their own state.
     /// </summary>
-    private static readonly IReadOnlySet<string> AwaitingPermission = new HashSet<string>
+    private static readonly IReadOnlyDictionary<string, string> SelfServiceByDesign = new Dictionary<string, string>
     {
-        "AddConversationMemberCommand",
-        "AddCredentialCommand",
-        "AddCredentialedModelCommand",
-        "AddProviderInstanceCommand",
-        "AnswerRunAskCommand",
-        "AuthorStoreAgentCommand",
-        "AuthorStoreSkillCommand",
-        "BindRepositoriesBulkCommand",
-        "BindRepositoryCommand",
-        "CompileTaskSpecCommand",
-        "ConfirmRunPlanCommand",
-        "ContinueRunCommand",
-        "CreateAgentDefinitionCommand",
-        "CreateChannelCommand",
-        "CreateGroupConversationCommand",
-        "CreateProjectCommand",
-        "DeleteAgentDefinitionCommand",
-        "DeleteMessageCommand",
-        "DeleteProjectCommand",
-        "DeleteProjectVariableCommand",
-        "DeleteProviderInstanceCommand",
-        "DeleteSkillCommand",
-        "DeleteTeamVariableCommand",
-        "DeleteWorkflowCommand",
-        "DeleteWorkflowVariableCommand",
-        "EditMessageCommand",
-        "ImportAgentPackCommand",
-        "ImportPackFromUrlCommand",
-        "InitCredentialOAuthCommand",
-        "InstantiateAgentFromStoreCommand",
-        "InstantiateSkillFromStoreCommand",
-        "LaunchTaskCommand",
-        "LinkProviderIdentityByPatCommand",
-        "MarkConversationReadCommand",
-        "MoveRepositoryToProjectCommand",
-        "OpenRunPullRequestCommand",
-        "PlanWorkflowFromTaskCommand",
-        "PostMessageCommand",
-        "RefreshCredentialedModelsCommand",
-        "ReissueWaitCommand",
-        "RemoveCredentialedModelCommand",
-        "RenameSessionCommand",
-        "ReplayRunCommand",
-        "RerunMapBranchCommand",
-        "RerunMapBranchesCommand",
-        "RerunRunFromNodeCommand",
-        "RespondToMessageCommand",
-        "ResumeRunCommand",
-        "RevokeModelCredentialCommand",
-        "SetAgentSkillsCommand",
-        "SetDefaultCredentialedModelCommand",
-        "SetProjectVariableCommand",
-        "SetTeamVariableCommand",
-        "SetWorkflowEnabledCommand",
-        "SetWorkflowVariableCommand",
-        "SyncPackCommand",
-        "UnlinkProviderIdentityCommand",
-        "UpdateAgentDefinitionCommand",
-        "UpdateModelCredentialCommand",
-        "UpdateProjectCommand",
-        "UpdateProviderInstanceCommand",
-        "UpdateWorkflowCommand",
+        ["MarkConversationReadCommand"] = "advances the caller's own read cursor; unread counts are per-member and the cursor only moves forward.",
+        ["LinkProviderIdentityByPatCommand"] = "links the caller's own GitHub/GitLab account; the service scopes by ICurrentUser.Id, never by team.",
+        ["UnlinkProviderIdentityCommand"] = "unlinks the caller's own provider identity, same scoping.",
     };
 
     [Fact]
-    public void Every_team_write_declares_a_permission_or_is_named_as_pending()
+    public void Every_team_write_declares_a_permission_or_is_self_service()
     {
-        var unaccounted = TeamWriteCommands()
+        var ungated = TeamWriteCommands()
             .Where(t => !typeof(IRequireTeamPermission).IsAssignableFrom(t))
-            .Where(t => !AwaitingPermission.Contains(t.Name))
+            .Where(t => !SelfServiceByDesign.ContainsKey(t.Name))
             .Select(t => t.FullName!)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        unaccounted.ShouldBeEmpty(
+        ungated.ShouldBeEmpty(
             "these team-scoped writes are gated by membership alone, so any Viewer can perform them. Declare the " +
-            "permission from TeamPermissions that fits, or add the name to AwaitingPermission to record that the gap " +
-            "is known:\n  " + string.Join("\n  ", unaccounted));
+            "permission from TeamPermissions that fits — or, if it mutates only the caller's own state, add it to " +
+            "SelfServiceByDesign with the reason:\n  " + string.Join("\n  ", ungated));
     }
 
     [Fact]
-    public void The_pending_list_does_not_rot()
+    public void The_self_service_list_does_not_rot()
     {
-        // A name that has since adopted a permission, or that no longer exists, must leave the list —
-        // otherwise the headline count below overstates the remaining work and stops meaning anything.
-        foreach (var name in AwaitingPermission)
+        foreach (var name in SelfServiceByDesign.Keys)
         {
             var type = TeamWriteCommands().SingleOrDefault(t => t.Name == name);
 
-            type.ShouldNotBeNull($"pending write '{name}' no longer exists — remove it from AwaitingPermission");
-            typeof(IRequireTeamPermission).IsAssignableFrom(type!).ShouldBeFalse($"pending write '{name}' now declares a permission — remove it from AwaitingPermission");
+            type.ShouldNotBeNull($"self-service write '{name}' no longer exists — remove it from SelfServiceByDesign");
+            typeof(IRequireTeamPermission).IsAssignableFrom(type!).ShouldBeFalse($"self-service write '{name}' now declares a permission — remove it from SelfServiceByDesign");
         }
     }
 
     [Fact]
-    public void Adoption_is_visible()
+    public void Every_permission_in_the_matrix_gates_at_least_one_write()
     {
-        var writes = TeamWriteCommands().ToList();
-        var adopted = writes.Count(t => typeof(IRequireTeamPermission).IsAssignableFrom(t));
+        // A row nothing declares is policy that cannot be violated, which reads as enforcement and is
+        // not. members.manage and team.manage are the honest exceptions: the commands they will gate
+        // do not exist yet, and inventing them to satisfy a test would be worse than naming the gap.
+        var unenforceable = new[] { TeamPermissions.MembersManage, TeamPermissions.TeamManage };
 
-        // Pinned so the number moves only when someone means it to. Raise the adopted count as the
-        // sweep lands; when AwaitingPermission empties, delete this test along with it.
-        adopted.ShouldBe(5);
-        AwaitingPermission.Count.ShouldBe(62);
-        writes.Count.ShouldBe(67, "every team write is either adopted or pending — no third state");
+        var declared = TeamWriteCommands()
+            .Where(t => typeof(IRequireTeamPermission).IsAssignableFrom(t))
+            .Select(t => Probe(t).RequiredPermission)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var orphans = TeamPermissionMatrix.All
+            .Where(p => !declared.Contains(p) && !unenforceable.Contains(p))
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+
+        orphans.ShouldBeEmpty("these permissions gate nothing, so the matrix promises access control it does not apply:\n  " + string.Join("\n  ", orphans));
     }
+
+    [Fact]
+    public void No_write_is_gated_by_a_permission_the_matrix_does_not_know()
+    {
+        var unknown = TeamWriteCommands()
+            .Where(t => typeof(IRequireTeamPermission).IsAssignableFrom(t))
+            .Select(t => new { t.Name, Permission = Probe(t).RequiredPermission })
+            .Where(x => !TeamPermissionMatrix.All.Contains(x.Permission))
+            .Select(x => $"{x.Name} → '{x.Permission}'")
+            .ToList();
+
+        unknown.ShouldBeEmpty("these writes declare a permission with no matrix row, so every call throws at runtime:\n  " + string.Join("\n  ", unknown));
+    }
+
+    /// <summary>
+    /// RequiredPermission returns a constant and touches no state, so an uninitialized instance can be
+    /// asked for it — these records have required members and cannot otherwise be constructed here.
+    /// </summary>
+    private static IRequireTeamPermission Probe(Type type) =>
+        (IRequireTeamPermission)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
 
     private static IEnumerable<Type> TeamWriteCommands()
     {

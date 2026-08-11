@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -11,7 +12,9 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// (<c>-2</c>, <c>-3</c>…) only when a bench persona already owns it, so picking a library item never dead-ends
 /// (the editor opens after for renaming). The snapshot itself is untouched, so it stays in the Library.
 /// </summary>
-public sealed record InstantiateAgentFromStoreCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record InstantiateAgentFromStoreCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required Guid SourceDefinitionId { get; init; }
 }

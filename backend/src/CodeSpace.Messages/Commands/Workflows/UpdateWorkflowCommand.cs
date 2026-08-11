@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Mediation;
 using MediatR;
@@ -10,8 +11,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// snapshots the prior live JSON into <c>workflow_version</c> so already-running runs stay
 /// pinned. Activations are wiped + re-created under the workflow id.
 /// </summary>
-public sealed record UpdateWorkflowCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record UpdateWorkflowCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.WorkflowsWrite;
+
     // NOT `required` — the URL is the source of truth for WorkflowId
     // (`PUT /api/workflows/{workflowId}`); the controller does
     // `command with { WorkflowId = routeId }` before dispatch. If we marked this required,

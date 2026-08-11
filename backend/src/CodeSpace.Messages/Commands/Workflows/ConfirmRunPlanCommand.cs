@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using CodeSpace.Messages.Plans;
 
@@ -12,8 +13,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// wins. Team-scoped (<see cref="IRequireTeamMembership"/>); a foreign / absent run or a run with no pending
 /// confirmation resolves to <c>null</c> → the controller 404-conflates (no existence leak).
 /// </summary>
-public sealed record ConfirmRunPlanCommand : ICommand<WorkPlanConfirmationOutcome?>, IRequireTeamMembership
+public sealed record ConfirmRunPlanCommand : ICommand<WorkPlanConfirmationOutcome?>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsDecide;
+
     public Guid RunId { get; init; }
 
     public bool Approve { get; init; }

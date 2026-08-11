@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 using CodeSpace.Messages.Tasks;
@@ -22,8 +23,10 @@ namespace CodeSpace.Messages.Commands.Tasks;
 /// <c>CapsOverride</c> seam, which TIGHTENS the effort preset's caps (a cost cap force-stops the run via the
 /// supervisor's bounds). ApprovalPolicy still rides <see cref="Autonomy"/> separately.</para>
 /// </summary>
-public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTeamMembership
+public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     /// <summary>The operator's free-text task. Required by the chat surface; another surface may derive the goal from <see cref="LaunchContext"/> instead.</summary>
     public required string TaskText { get; init; }
 

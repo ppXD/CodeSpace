@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// member set is the distinct union of <see cref="MemberUserIds"/> + the caller. Requires at
 /// least two distinct members total.
 /// </summary>
-public sealed record CreateGroupConversationCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record CreateGroupConversationCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ChatWrite;
+
     public string? Name { get; init; }
     public required IReadOnlyList<Guid> MemberUserIds { get; init; }
 }

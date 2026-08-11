@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -10,7 +11,9 @@ namespace CodeSpace.Messages.Commands.Projects;
 /// as part of the same SaveChanges (cascade).
 /// <para>The "default" slug cannot be deleted — every team must have at least one project.</para>
 /// </summary>
-public sealed record DeleteProjectCommand : ICommand<MediatR.Unit>, IRequireTeamMembership
+public sealed record DeleteProjectCommand : ICommand<MediatR.Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ReposManage;
+
     public required Guid ProjectId { get; init; }
 }

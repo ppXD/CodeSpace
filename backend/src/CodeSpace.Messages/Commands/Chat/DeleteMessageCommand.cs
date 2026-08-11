@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -9,7 +10,9 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// threads stay continuous) but its reference rows are dropped so the deleted message stops
 /// appearing as a backlink on whatever it mentioned.
 /// </summary>
-public sealed record DeleteMessageCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record DeleteMessageCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ChatWrite;
+
     public Guid MessageId { get; init; }
 }

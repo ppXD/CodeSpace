@@ -1,11 +1,14 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.ProviderInstances;
 
-public sealed record AddProviderInstanceCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AddProviderInstanceCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ReposManage;
+
     public required ProviderKind Provider { get; init; }
     public required string DisplayName { get; init; }
     public required string BaseUrl { get; init; }
