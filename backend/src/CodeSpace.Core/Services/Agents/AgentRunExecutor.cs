@@ -120,12 +120,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     // The publish-or-park ledger: upserted at the end of every verification pass, regardless of the run's status.
     private readonly IPublishManifestStore _manifests;
+    private readonly Capture.ICaptureIntentService _captureIntents;
     // The publish guard chain (Order ascending) — see EvaluatePublishGuardsAsync. Sorted once at construction so
     // production reads a stable sequence regardless of DI registration order.
     private readonly IReadOnlyList<IPublishGuard> _publishGuards;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -141,6 +142,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _offloader = offloader;
         _artifacts = artifacts;
         _manifests = manifests;
+        _captureIntents = captureIntents;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -284,6 +286,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, ReviseSpoolKey(agentRunId, round: 0), workspaceDirectory, workspaceBaseSha, cancellationToken).ConfigureAwait(false);
 
+            // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
+            // individually best-effort side effects (diff, offload, push, manifest). A crash inside the window
+            // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
+            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, expectationsJson: null, cancellationToken).ConfigureAwait(false);
+
             result = await VerifyProducedWorkAsync(agentRunId, run, harness, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
             // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
@@ -329,6 +336,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 priorReason = reason;
             }
+
+            // The capture sequence ran to its persist (a CONFIRMED empty included) — commit the promise with the
+            // observed facts before the terminal CAS, so a crash between the two replays as re-verify + idempotent
+            // re-commit, never as a terminal run with an unresolved promise.
+            await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -412,6 +424,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
 
+            // P2 (capture-intent saga): the re-attach observed a finished process — ITS capture window opens here,
+            // under the reclaim-bumped epoch this pass runs at (one promise per attempt).
+            await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, expectedEpoch, expectationsJson: null, cancellationToken).ConfigureAwait(false);
+
             result = await EnrichWithReattachWorkspaceChangesAsync(agentRunId, run.TeamId, handle, result, cancellationToken).ConfigureAwait(false);
 
             result = await MintPublishEvidenceAsync(agentRunId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
@@ -423,6 +439,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
+
+            await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result), cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -1139,6 +1157,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             _logger.LogWarning(ex, "Agent run {RunId}: failed to record the publish manifest; the captured diff is still on the result row", runId);
         }
     }
+
+    /// <summary>The capture promise's commit-time observation (P2 saga) — the compact JSON facts of what the capture sequence actually persisted, INCLUDING the explicit empty (a confirmed fact, never an absence). Pure + internal so it is unit-pinned without a database.</summary>
+    internal static string CaptureFactsOf(AgentRunResult result) => JsonSerializer.Serialize(new
+    {
+        changedFiles = result.ChangedFiles.Count,
+        patchInline = !string.IsNullOrEmpty(result.Patch),
+        patchArtifactId = result.PatchArtifactId,
+        branch = result.ProducedBranch,
+        pushedCommitSha = result.PushedCommitSha,
+        repos = result.RepositoryResults.Count,
+        empty = result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch) && result.PatchArtifactId is null && result.RepositoryResults.Count == 0,
+    }, AgentJson.Options);
 
     /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: <see cref="PublishState.Pushed"/> is a CONFIRMED claim (review hole 2) — it requires BOTH the produced branch AND the readback-confirmed remote tip (P3b-2's <paramref name="pushedCommitSha"/>); a branch whose readback failed or mismatched maps PatchOnly with a named PublishError, because a push command that RAN proves intent, not arrival — and Pushed flows straight into Delivered/Delivery-Passed. Everything else unchanged: no branch means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
     internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null) => new()

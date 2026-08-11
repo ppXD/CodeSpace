@@ -62,6 +62,29 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task The_capture_promise_commits_with_the_run()
+    {
+        // P2 (capture-intent saga, slice 1): the wiring pin — a run that executes end-to-end opens its promise at
+        // harness exit and COMMITS it before the terminal CAS. This scripted run changes nothing, so the committed
+        // facts record the CONFIRMED empty — a fact, never an absence (the state a swallowed capture failure can
+        // no longer impersonate).
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'one\n'"));
+
+        using var scope = _fixture.BeginScope();
+        var intent = await scope.Resolve<CodeSpaceDbContext>().CaptureIntent.AsNoTracking()
+            .SingleAsync(i => i.AgentRunId == runId);
+
+        intent.Status.ShouldBe(CodeSpace.Messages.Agents.CaptureIntentStatus.Committed, "the capture sequence ran to its persist — the promise settles before the terminal");
+        System.Text.Json.JsonDocument.Parse(intent.FactsJson.ShouldNotBeNull()).RootElement.GetProperty("empty").GetBoolean()
+            .ShouldBeTrue("a confirmed empty is a recorded fact (parsed, not substring — jsonb normalizes stored formatting)");
+    }
+
+    [Fact]
     public async Task Durable_runner_executes_via_the_spool_and_persists_a_recoverable_handle()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1088,7 +1111,7 @@ public class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
-            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
@@ -1237,7 +1260,7 @@ public class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
-            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
@@ -1269,7 +1292,7 @@ public class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
-            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance);
 
