@@ -3,9 +3,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { isAuthenticated } from "@/api/auth";
 import { ApiError } from "@/api/request";
+import { AuthShell } from "@/components/auth/AuthShell";
 import { useChangePassword } from "@/hooks/use-change-password";
-
-import "@/styles/tui.css";
 
 /**
  * Password rotation page. Reached:
@@ -14,7 +13,8 @@ import "@/styles/tui.css";
  *   • Reactively when any API call returns 403 password_rotation_required.
  *   • Voluntarily from the sidebar menu (future enhancement).
  *
- * Three fields — current, new, confirm — with the same TUI keyboard contract as /signin.
+ * Three fields — current, new, confirm — in the same shell as /signin, because it is reached
+ * directly from it and a change of visual language mid-flow reads as a different application.
  */
 
 const MIN_PASSWORD_LENGTH = 12;
@@ -76,97 +76,67 @@ function ChangePassword() {
       : change.error instanceof Error ? change.error.message
         : null);
 
+  const rules = [
+    { met: next.length >= MIN_PASSWORD_LENGTH, label: `At least ${MIN_PASSWORD_LENGTH} characters` },
+    { met: confirm.length > 0 && next === confirm, label: "New and confirm match" },
+    { met: next.length > 0 && next !== current, label: "New differs from current" },
+  ];
+
   return (
-    <div className="tui-root">
-      <div className="tui-scanlines" aria-hidden />
+    <AuthShell context={<>Your account needs a new password before you can continue.</>}>
+      <h1 className="auth-title">Rotate your password</h1>
+      <p className="auth-lede">This account is still on a password that must be changed.</p>
 
-      <main className="tui-frame">
-        <header className="tui-banner">
-          <pre className="tui-ascii" aria-label="rotate password">
-{` ┌─┐┌─┐┌┬┐┌─┐┌┬┐┌─┐
- ├┬┘│ │ │ ├─┤ │ ├┤
- ┴└─└─┘ ┴ ┴ ┴ ┴ └─┘`}
-          </pre>
-        </header>
+      <form className="auth-form" onSubmit={submit}>
+        <label className="auth-field">
+          <span className="auth-label">Current password</span>
+          <input
+            ref={currentRef}
+            type="password"
+            className="auth-input"
+            autoComplete="current-password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            disabled={change.isPending}
+          />
+        </label>
 
-        <form className="tui-form" onSubmit={submit}>
-          <div className="tui-prompt">
-            <span className="tui-prompt-host">codespace</span>
-            <span className="tui-prompt-sep">:</span>
-            <span className="tui-prompt-path">~/auth</span>
-            <span className="tui-prompt-sep">$</span>
-            <span className="tui-prompt-cmd"> passwd</span>
-          </div>
+        <label className="auth-field">
+          <span className="auth-label">New password</span>
+          <input
+            type="password"
+            className="auth-input"
+            autoComplete="new-password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            disabled={change.isPending}
+          />
+        </label>
 
-          <label className="tui-field">
-            <span className="tui-field-label">current</span>
-            <span className="tui-field-arrow">›</span>
-            <input
-              ref={currentRef}
-              type="password"
-              className="tui-field-input"
-              autoComplete="current-password"
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Escape") setCurrent(""); }}
-              disabled={change.isPending}
-            />
-            <span className="tui-caret" aria-hidden>█</span>
-          </label>
+        <label className="auth-field">
+          <span className="auth-label">Confirm new password</span>
+          <input
+            type="password"
+            className="auth-input"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            disabled={change.isPending}
+          />
+        </label>
 
-          <label className="tui-field">
-            <span className="tui-field-label">new</span>
-            <span className="tui-field-arrow">›</span>
-            <input
-              type="password"
-              className="tui-field-input"
-              autoComplete="new-password"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Escape") setNext(""); }}
-              disabled={change.isPending}
-            />
-            <span className="tui-caret" aria-hidden>█</span>
-          </label>
+        <ul className="auth-rules">
+          {rules.map((rule) => (
+            <li key={rule.label} data-met={rule.met}>{rule.met ? "\u2713" : "\u00b7"} {rule.label}</li>
+          ))}
+        </ul>
 
-          <label className="tui-field">
-            <span className="tui-field-label">confirm</span>
-            <span className="tui-field-arrow">›</span>
-            <input
-              type="password"
-              className="tui-field-input"
-              autoComplete="new-password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Escape") setConfirm(""); }}
-              disabled={change.isPending}
-            />
-            <span className="tui-caret" aria-hidden>█</span>
-          </label>
+        <button type="submit" className="auth-submit" disabled={!current || !next || !confirm || change.isPending}>
+          {change.isPending ? "Rotating\u2026" : "Rotate password"}
+        </button>
 
-          <div className="tui-rules">
-            <div data-met={next.length >= MIN_PASSWORD_LENGTH}>{next.length >= MIN_PASSWORD_LENGTH ? "✓" : "·"} at least {MIN_PASSWORD_LENGTH} characters</div>
-            <div data-met={confirm.length > 0 && next === confirm}>{confirm.length > 0 && next === confirm ? "✓" : "·"} new and confirm match</div>
-            <div data-met={next.length > 0 && next !== current}>{next.length > 0 && next !== current ? "✓" : "·"} new differs from current</div>
-          </div>
-
-          <div className="tui-actions">
-            <button
-              type="submit"
-              className="tui-submit"
-              disabled={!current || !next || !confirm || change.isPending}
-            >
-              {change.isPending ? "[ ······ ] rotating" : "[ ENTER ] rotate"}
-            </button>
-          </div>
-
-          {errorMessage && (
-            <div className="tui-error" role="alert">
-              ! {errorMessage}
-            </div>
-          )}
-        </form>
-      </main>
-    </div>
+        {errorMessage && <div className="auth-error" role="alert">{errorMessage}</div>}
+      </form>
+    </AuthShell>
   );
 }
