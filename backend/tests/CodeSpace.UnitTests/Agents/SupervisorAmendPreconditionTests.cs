@@ -85,6 +85,46 @@ public class SupervisorAmendPreconditionTests
     }
 
     [Fact]
+    public void A_second_amend_while_one_awaits_its_retry_rejects()
+    {
+        // B6 (the re-enactment arm's live finding): the target's latest verdict is still the dead oracle's failure
+        // — which passes the infra arm and let a live brain re-amend the same subtask five times without ever
+        // retrying. One signed repair at a time.
+        var context = Context(Unit(passed: false, detail: "grade-error: npm: command not found"));
+        var approvedCard = ApprovedAmendCard(sequence: 2);
+        context = context with { PriorDecisions = context.PriorDecisions.Append(approvedCard).ToList() };
+
+        SupervisorAmendPrecondition.Reject(context, Amend())
+            .ShouldNotBeNull().ShouldContain("already carries an approved amendment");
+    }
+
+    [Fact]
+    public void A_retry_that_consumed_the_amendment_reopens_the_ordinary_arms()
+    {
+        var context = Context(Unit(passed: false, detail: "grade-error: npm: command not found"));
+        var retried = Unit(passed: false, detail: "grade-error: still broken");
+        var retry = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Retry,
+            PayloadJson = """{"subtaskId":"s1"}""", OutcomeJson = Outcome(retried),
+        };
+        context = context with { PriorDecisions = context.PriorDecisions.Append(ApprovedAmendCard(sequence: 2)).Append(retry).ToList() };
+
+        SupervisorAmendPrecondition.Reject(context, Amend())
+            .ShouldBeNull("the retry consumed the prior amendment and re-graded infra-classed — a fresh proposal is legitimate again");
+    }
+
+    private static SupervisorPriorDecision ApprovedAmendCard(long sequence)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "r", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        });
+
+        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = sequence, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.AskHuman, PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""" };
+    }
+
+    [Fact]
     public void The_latest_attempt_rules_a_retried_unit()
     {
         // The original failed work-classed; a retry re-graded infra-classed — the LATEST verdict decides (the same

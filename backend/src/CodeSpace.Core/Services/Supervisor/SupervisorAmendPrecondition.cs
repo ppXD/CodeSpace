@@ -26,6 +26,12 @@ public static class SupervisorAmendPrecondition
     /// <summary>Why this proposal must not reach a human, or null when it may — the target's latest verdict is a genuinely infra-classed failure.</summary>
     public static string? Reject(SupervisorTurnContext context, SupervisorAmendAcceptancePayload amend)
     {
+        // B6 (the re-enactment arm's live finding): after an approved amendment, the target's LATEST verdict is
+        // still the dead oracle's failure — which passes the infra check below and let a live brain re-amend the
+        // same subtask five times without ever retrying. One signed repair at a time: consume it first.
+        if (SupervisorAmendObligation.IsOutstanding(context, amend.SubtaskId))
+            return $"subtask '{amend.SubtaskId}' already carries an approved amendment awaiting its retry — RETRY the subtask to re-grade under the co-signed check; do not amend it again";
+
         var latest = SupervisorDependencyGate.LatestResultsBySubtask(context).GetValueOrDefault(amend.SubtaskId);
 
         if (latest is null)
