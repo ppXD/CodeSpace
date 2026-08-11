@@ -31,6 +31,28 @@ public class AgentRunExecutorManifestTests
     }
 
     [Fact]
+    public void An_unconfirmed_push_never_claims_Pushed()
+    {
+        // Review hole 2: the branch name proves the push command RAN, not that the remote holds the tip — a failed
+        // or mismatched readback leaves pushedCommitSha null, and Pushed flows straight into Delivered. Intent is
+        // not arrival.
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: null, publishSkipReason: null, acceptancePassed: null, pushedCommitSha: null);
+
+        upsert.PublishStateValue.ShouldBe(PublishState.PatchOnly, "Pushed is a CONFIRMED claim — no readback, no Pushed");
+        upsert.Branch.ShouldBe("codespace/agent/deadbeef", "the attempted branch stays recorded for recovery");
+        upsert.PublishError.ShouldNotBeNull().ShouldContain("push-unconfirmed");
+    }
+
+    [Fact]
+    public void An_unconfirmed_push_keeps_an_existing_publish_error_verbatim()
+    {
+        var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", Guid.NewGuid(), "abc123", null, new[] { "a.cs" }, "codespace/agent/deadbeef", publishError: "push failed after retries: connection reset", publishSkipReason: null, acceptancePassed: null, pushedCommitSha: null);
+
+        upsert.PublishStateValue.ShouldBe(PublishState.PatchOnly);
+        upsert.PublishError.ShouldBe("push failed after retries: connection reset", "a real diagnosed failure is more specific than the generic unconfirmed note");
+    }
+
+    [Fact]
     public void No_branch_and_no_error_resolves_to_PatchOnly_by_choice()
     {
         var upsert = AgentRunExecutor.BuildManifestUpsert(Run(), "primary", null, "abc123", Guid.NewGuid(), new[] { "a.cs" }, producedBranch: null, publishError: null, publishSkipReason: null, acceptancePassed: null);
