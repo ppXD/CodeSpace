@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Mediation;
 using MediatR;
@@ -11,8 +12,10 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// tokens are parsed server-side into reference rows for reverse lookup, with zero hardcoded
 /// reference types. Returns the rendered message including its parsed reference chips.
 /// </summary>
-public sealed record PostMessageCommand : ICommand<MessageView>, IRequireTeamMembership
+public sealed record PostMessageCommand : ICommand<MessageView>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ChatWrite;
+
     public Guid ConversationId { get; init; }
     public required string Body { get; init; }
 

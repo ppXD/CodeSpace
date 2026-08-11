@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -11,8 +12,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// imported persona's prompt or model leaves its imported skills + re-sync provenance intact. The slug
 /// is immutable post-create (it's the @-mention handle other definitions / chats reference).
 /// </summary>
-public sealed record UpdateAgentDefinitionCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record UpdateAgentDefinitionCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required Guid AgentDefinitionId { get; init; }
     public required string Name { get; init; }
     public string? Description { get; init; }

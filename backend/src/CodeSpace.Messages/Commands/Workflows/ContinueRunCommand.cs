@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -14,7 +15,9 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// Suspended one — it is terminal / Running, or still parked on a pending wait (approval / timer / callback), which
 /// resumes via <c>/resume</c> or its wait signal, not here.</para>
 /// </summary>
-public sealed record ContinueRunCommand : ICommand<bool>, IRequireTeamMembership
+public sealed record ContinueRunCommand : ICommand<bool>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsControl;
+
     public Guid RunId { get; init; }
 }

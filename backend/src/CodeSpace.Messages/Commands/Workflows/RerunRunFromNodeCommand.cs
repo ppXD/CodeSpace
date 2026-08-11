@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -17,8 +18,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// reject to skip). A node that is BOTH side-effecting and suspendable is refused via the suspendable arm.
 /// Returns the new <c>WorkflowRun.Id</c>.</para>
 /// </summary>
-public sealed record RerunRunFromNodeCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record RerunRunFromNodeCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     public Guid OriginalRunId { get; init; }
 
     /// <summary>The top-level node to re-run from. It + everything forward-reachable from it re-runs; everything else is reused.</summary>

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Mediation;
 
@@ -17,8 +18,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// completes (faking their payload here would corrupt the node). Every genuine reissue writes a <c>wait.reissued</c>
 /// audit record naming the operator.</para>
 /// </summary>
-public sealed record ReissueWaitCommand : ICommand<ReissueWaitOutcome>, IRequireTeamMembership
+public sealed record ReissueWaitCommand : ICommand<ReissueWaitOutcome>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsControl;
+
     public Guid RunId { get; init; }
 
     public Guid WaitId { get; init; }

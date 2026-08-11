@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.ModelCredentials;
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.ModelCredentials;
 /// semantics: null/blank = keep the existing key; a value = rotate to it. The service scopes the row to the
 /// caller's team, so a foreign id is not updatable.
 /// </summary>
-public sealed record UpdateModelCredentialCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record UpdateModelCredentialCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ModelsManage;
+
     public Guid Id { get; init; }
     public required string DisplayName { get; init; }
     public string? ApiKey { get; init; }

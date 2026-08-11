@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.ProviderInstances;
 /// secret is treated as null (no rotate) so an empty form field doesn't accidentally wipe
 /// a stored secret. Provider kind cannot change post-creation — that's a delete + re-add.
 /// </summary>
-public sealed record UpdateProviderInstanceCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record UpdateProviderInstanceCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ReposManage;
+
     // Not marked `required` because the HTTP body never carries it — the controller reads
     // the id from the route segment and rewrites the command via `body with { ... }`. The
     // handler still receives a non-empty Guid for every legitimate call; tests should set

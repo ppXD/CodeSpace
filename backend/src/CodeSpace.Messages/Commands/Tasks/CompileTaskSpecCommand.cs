@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using CodeSpace.Messages.Tasks;
 
@@ -15,8 +16,10 @@ namespace CodeSpace.Messages.Commands.Tasks;
 /// body. <see cref="RepositoryId"/> grounds the suggestions in the repo's top-level layout, resolved TEAM-SCOPED —
 /// a repo outside the team yields no grounding (fail-closed, never a cross-team read).</para>
 /// </summary>
-public sealed record CompileTaskSpecCommand : ICommand<CompileTaskSpecResult>, IRequireTeamMembership
+public sealed record CompileTaskSpecCommand : ICommand<CompileTaskSpecResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     /// <summary>The operator's free-text goal to compile.</summary>
     public required string Goal { get; init; }
 

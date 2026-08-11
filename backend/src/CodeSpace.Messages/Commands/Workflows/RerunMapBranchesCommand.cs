@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -14,8 +15,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// retry returns the SAME fork); the active-rerun lease refuses a concurrent rerun that overlaps an in-flight one.
 /// Returns the new <c>WorkflowRun.Id</c>.</para>
 /// </summary>
-public sealed record RerunMapBranchesCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record RerunMapBranchesCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     public Guid OriginalRunId { get; init; }
 
     /// <summary>The top-level flow.map node whose branches to re-run.</summary>

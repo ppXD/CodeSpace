@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// <see cref="Slug"/> is normalized server-side (lowercase, url-safe) and must be unique per
 /// team — the service throws a typed error on collision so the operator picks another.
 /// </summary>
-public sealed record CreateChannelCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record CreateChannelCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ChatWrite;
+
     public required string Name { get; init; }
     public required string Slug { get; init; }
 

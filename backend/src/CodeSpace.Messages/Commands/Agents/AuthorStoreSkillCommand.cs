@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -8,8 +9,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// sets Origin=Authored, Scope=Store, and the Custom pack. It's not bindable as-is — you instantiate a working copy
 /// (via <c>InstantiateSkillFromStoreCommand</c>) to bind it to an agent. Returns the new id.
 /// </summary>
-public sealed record AuthorStoreSkillCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AuthorStoreSkillCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required string Name { get; init; }
     public string? Description { get; init; }
     public string? Body { get; init; }

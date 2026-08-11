@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -11,8 +12,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// never trusted at commit). Idempotent: re-running resolves to the same pack and upserts on (pack, source-path)
 /// rather than duplicating. Returns a per-path outcome.
 /// </summary>
-public sealed record ImportPackFromUrlCommand : ICommand<PackImportResult>, IRequireTeamMembership
+public sealed record ImportPackFromUrlCommand : ICommand<PackImportResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required string Url { get; init; }
     public string? Reference { get; init; }
 

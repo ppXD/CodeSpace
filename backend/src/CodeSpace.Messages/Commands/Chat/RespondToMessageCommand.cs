@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -17,8 +18,13 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// card resolution is stamped atomically — so concurrent responders can't diverge the card from the
 /// workflow decision, and a crash can't resume the run while leaving the card open.
 /// </summary>
-public sealed record RespondToMessageCommand : ICommand<Unit>, IRequireTeamMembership
+public sealed record RespondToMessageCommand : ICommand<Unit>, IRequireTeamPermission
 {
+    // Not chat.write: every InteractionTarget this can resolve to resumes a parked run, answers a
+    // decision, or approves an agent tool call the autonomy tier flagged. A card click is a decision
+    // wearing a chat surface, and AnswerDecisionCommand reaches the same grain under runs.decide.
+    public string RequiredPermission => TeamPermissions.RunsDecide;
+
     public Guid MessageId { get; init; }
 
     /// <summary>The chosen option — a button key from the card, or "submit" for a form (e.g. "approve").</summary>

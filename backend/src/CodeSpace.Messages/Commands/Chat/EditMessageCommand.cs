@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Mediation;
 using MediatR;
@@ -10,8 +11,10 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// reference rows are re-derived from the new body in the same transaction, so editing a mention
 /// in or out keeps the reverse index exact. Sets the "(edited)" marker. Returns the updated view.
 /// </summary>
-public sealed record EditMessageCommand : ICommand<MessageView>, IRequireTeamMembership
+public sealed record EditMessageCommand : ICommand<MessageView>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ChatWrite;
+
     public Guid MessageId { get; init; }
     public required string Body { get; init; }
 }

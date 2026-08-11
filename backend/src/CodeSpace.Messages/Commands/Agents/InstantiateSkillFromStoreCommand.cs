@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -10,7 +11,9 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// Library), and gets a team-unique handle auto-suffixed only when a bench skill already owns it. This is how binding
 /// a Library skill to an agent works: instantiate a working copy, then bind it. The snapshot itself is untouched.
 /// </summary>
-public sealed record InstantiateSkillFromStoreCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record InstantiateSkillFromStoreCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required Guid SourceDefinitionId { get; init; }
 }

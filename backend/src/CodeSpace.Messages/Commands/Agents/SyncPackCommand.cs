@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -9,7 +10,9 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// every already-imported artifact in place (handles kept), and return what changed plus the discovered-but-not-
 /// imported artifacts as a preview to add. New artifacts are NOT auto-imported.
 /// </summary>
-public sealed record SyncPackCommand : ICommand<PackSyncResult>, IRequireTeamMembership
+public sealed record SyncPackCommand : ICommand<PackSyncResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required Guid PackId { get; init; }
 }

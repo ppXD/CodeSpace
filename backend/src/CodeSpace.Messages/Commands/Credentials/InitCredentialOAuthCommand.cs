@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Credentials;
@@ -7,8 +8,10 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// Begins a provider-credential OAuth flow. Returns the authorize URL the SPA should open
 /// in a popup or full redirect. The provider's callback hits <c>CompleteCredentialOAuthCommand</c>.
 /// </summary>
-public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthResult>, IRequireTeamMembership
+public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.CredentialsManage;
+
     /// <summary>Provider instance we're authorising against. Must belong to the current team.</summary>
     public required Guid ProviderInstanceId { get; init; }
 

@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -8,8 +9,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// onto the runnable bench. Same editable surface as <see cref="CreateAgentDefinitionCommand"/>; the server sets
 /// Origin=Authored, Scope=Store, and the Custom pack. You instantiate a working copy to run it. Returns the new id.
 /// </summary>
-public sealed record AuthorStoreAgentCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AuthorStoreAgentCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required string Name { get; init; }
     public string? Description { get; init; }
     public string? SystemPrompt { get; init; }

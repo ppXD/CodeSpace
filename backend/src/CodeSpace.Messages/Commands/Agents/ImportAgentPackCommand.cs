@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Agents;
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// re-parse keeps the verbatim-frontmatter guarantee server-authoritative) and persist each as an imported
 /// persona, skipping handle collisions. Returns a per-path outcome.
 /// </summary>
-public sealed record ImportAgentPackCommand : ICommand<IReadOnlyList<AgentImportResult>>, IRequireTeamMembership
+public sealed record ImportAgentPackCommand : ICommand<IReadOnlyList<AgentImportResult>>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.AgentsWrite;
+
     public required Guid RepositoryId { get; init; }
     public string? Reference { get; init; }
     public string? RootPath { get; init; }

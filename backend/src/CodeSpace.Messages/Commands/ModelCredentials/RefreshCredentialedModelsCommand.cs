@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.ModelCredentials;
@@ -9,7 +10,9 @@ namespace CodeSpace.Messages.Commands.ModelCredentials;
 /// <see cref="ModelCredentialId"/> comes from the route (Rule 17). Returns the count of models reflected (0 for a
 /// non-reflectable, manual-only credential).
 /// </summary>
-public sealed record RefreshCredentialedModelsCommand : ICommand<int>, IRequireTeamMembership
+public sealed record RefreshCredentialedModelsCommand : ICommand<int>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ModelsManage;
+
     public Guid ModelCredentialId { get; init; }
 }
