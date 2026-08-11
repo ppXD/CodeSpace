@@ -387,7 +387,7 @@ public class AgentRunExecutorAcceptanceTests
     private static (AgentRunExecutor Executor, FakeGrader Grader) NewExecutor(BenchmarkGrade grade)
     {
         var grader = new FakeGrader { Grade = grade };
-        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, null!, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
         return (executor, grader);
     }
 
@@ -396,7 +396,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var grader = new FakeGrader { Grade = grade };
         var manifests = new FakePublishManifestStore(grader);
-        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, manifests, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, new FakeScopeFactory(grader), null!, null!, null!, null!, manifests, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
         return (executor, manifests);
     }
 

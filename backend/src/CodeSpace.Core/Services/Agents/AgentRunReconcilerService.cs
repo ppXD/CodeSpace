@@ -83,9 +83,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly ICodeSpaceBackgroundJobClient _jobs;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IToolCallLedgerService _ledger;
+    private readonly Capture.ICaptureIntentService _captureIntents;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
         _runs = runs;
@@ -93,6 +94,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _jobs = jobs;
         _runners = runners;
         _ledger = ledger;
+        _captureIntents = captureIntents;
         _logger = logger;
     }
 
@@ -105,6 +107,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         var parentlessOrphansCancelled = await SweepOrphanedParentlessQueuedAsync(cancellationToken).ConfigureAwait(false);
 
         var (abandoned, recovered, reattached) = await SweepStaleRunningAsync(cancellationToken).ConfigureAwait(false);
+
+        // P2 (capture-intent saga): dangling promises of already-terminal runs — any ordering the per-run
+        // recovery marks below missed — become INDETERMINATE here, the same safety-net shape as the tool-call reaper.
+        await _captureIntents.SweepDanglingForTerminalRunsAsync(batchSize: 50, cancellationToken).ConfigureAwait(false);
 
         var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
@@ -368,6 +374,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 
+        // P2 (capture-intent saga): an abandoned attempt died inside (or before) its capture window — every open
+        // promise it holds is now permanently unknown. Visible, never silent.
+        if (transitioned > 0)
+            await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
+
         if (transitioned == 0) return StaleOutcome.LeftAlone;
 
         if (durable is not null && handle is not null)
@@ -487,6 +498,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
                 .SetProperty(r => r.Error, error)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
+
+        // P2 (capture-intent saga): the spool recovery terminalizes with NO capture of its own — any promise the
+        // dead attempt opened can never be resolved by it. Mark, don't silence.
+        await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;   // a worker (or another replica) landed it first
 

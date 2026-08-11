@@ -64,6 +64,8 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<ModelCredential> ModelCredential => Set<ModelCredential>();
     public DbSet<ModelCredentialModel> ModelCredentialModel => Set<ModelCredentialModel>();
     public DbSet<ToolCallLedger> ToolCallLedger => Set<ToolCallLedger>();
+
+    public DbSet<CaptureIntent> CaptureIntent => Set<CaptureIntent>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
     public DbSet<SupervisorTapeSummaryRecord> SupervisorTapeSummaryRecord => Set<SupervisorTapeSummaryRecord>();
     public DbSet<WorkSession> WorkSession => Set<WorkSession>();
