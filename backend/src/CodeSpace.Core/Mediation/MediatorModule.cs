@@ -33,6 +33,8 @@ public class MediatorModule : Autofac.Module
         //                             the user has password_must_change=true
         //   GlobalAdmin            — for IRequireGlobalAdmin commands, no DB hit
         //   TeamMembership / Repo / Credential — DB-backed tenancy checks
+        //   TeamPermission         — inside TeamMembership (whose marker it extends): the team is
+        //                             already vetted, this adds the role check for write/action requests
         //   BotVisibility          — opts the request into seeing bot users (IBotInclusive); default excludes
         //   Transactional          — innermost, wraps DB writes only after auth has passed
         builder.RegisterGeneric(typeof(LoggingBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
@@ -40,6 +42,7 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(PasswordRotationRequiredBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(GlobalAdminAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TeamMembershipAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(TeamPermissionAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(RepositoryAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(BotVisibilityBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();

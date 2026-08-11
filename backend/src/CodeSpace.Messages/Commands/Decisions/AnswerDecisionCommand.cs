@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Mediation;
 
@@ -14,8 +15,10 @@ namespace CodeSpace.Messages.Commands.Decisions;
 /// from <c>ICurrentUser</c> in the handler — NEVER this body (fail-closed). A decision outside the team is a clean
 /// not-found, never a cross-team leak. <see cref="DecisionId"/> is bound from the route (Rule 17), not the body.</para>
 /// </summary>
-public sealed record AnswerDecisionCommand : ICommand<AnswerDecisionResult>, IRequireTeamMembership
+public sealed record AnswerDecisionCommand : ICommand<AnswerDecisionResult>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsDecide;
+
     /// <summary>The decision to answer — the queue item id (the ledger row id for an agent decision, the workflow-wait id for a node decision). Bound from the route.</summary>
     public Guid DecisionId { get; init; }
 

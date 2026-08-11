@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.ModelCredentials;
@@ -9,8 +10,10 @@ namespace CodeSpace.Messages.Commands.ModelCredentials;
 /// <see cref="BaseUrl"/>). Bound directly from the request body (Rule 17): the key is a single string, so no
 /// structured-payload translation is needed.
 /// </summary>
-public sealed record AddModelCredentialCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record AddModelCredentialCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ModelsManage;
+
     public required string Provider { get; init; }
     public required string DisplayName { get; init; }
     public string? ApiKey { get; init; }
