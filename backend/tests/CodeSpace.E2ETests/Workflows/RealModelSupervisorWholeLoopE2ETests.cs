@@ -210,6 +210,22 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     /// <summary>Approve the run's newest parked ask IFF it is an amend co-sign card (payload carries the structured amend node) — the test playing the human. False = nothing parked, or the parked ask is not an amend card (never blind-approve a content ask).</summary>
+    /// <summary>An ask payload whose question carries either stop-gate prefix (I3 publish / DC-2b delivery) — the park-half detector the no-stop arm of the I3 audit keys on.</summary>
+    private static bool IsGateCardQuestion(string? payloadJson)
+    {
+        try
+        {
+            var question = System.Text.Json.JsonDocument.Parse(payloadJson ?? "{}").RootElement.TryGetProperty("question", out var q) ? q.GetString() : null;
+
+            return question is not null
+                && (question.StartsWith(SupervisorPublishGate.QuestionPrefix, StringComparison.Ordinal) || question.StartsWith(SupervisorDeliveryGate.QuestionPrefix, StringComparison.Ordinal));
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
     private async Task<bool> ApproveParkedAmendCardAsync(Guid runId, Guid teamId, Guid userId)
     {
         using var scope = _fixture.BeginScope();
@@ -708,7 +724,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
         if (stops.Count == 0)
+        {
+            // The park half of publish-or-park, made real (the vacuous-Success fix): a run holding on an UNANSWERED
+            // gate card with no terminal stop IS the honest outcome for accepted-unpublishable work in a no-surface
+            // environment — before the fix this exact shape burned an ask×9 loop into a forced stop and terminalized
+            // SUCCESS with zero delivery.
+            var lastAsk = priorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+
+            if (lastAsk is not null && SupervisorOutcome.ReadAskHumanAnswer(lastAsk.OutcomeJson) is null && IsGateCardQuestion(lastAsk.PayloadJson))
+                return (RealModelOutcome.Drove, $"status={run.Status}, no stop — the run PARKED on the gate card (publish-or-park chose park; the accepted work awaits a human instead of evaporating into a vacuous Success)");
+
             return (Classify(run.Status, drove: false), $"status={run.Status}, no stop decision was recorded this attempt — I3 was not exercised");
+        }
 
         // Check 1: re-validate EVERY persisted stop against the tape as it stood immediately before that row. A
         // real violation here means the LIVE production gate let an accepted-unpublished stop through for real.
