@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Settings.CorsPolicy;
+using Serilog;
 
 namespace CodeSpace.Api.Extensions;
 
@@ -20,6 +21,12 @@ public static class CorsPolicyExtension
     public static IServiceCollection AddCorsPolicy(this IServiceCollection services, IConfiguration configuration, IHostEnvironment environment)
     {
         var origins = ResolveOrigins(configuration, environment);
+
+        Log.Information(
+            "CORS policy {CorsPolicyName} resolved for {EnvironmentName}; allowed origins: {@AllowedOrigins}",
+            PolicyName,
+            environment.EnvironmentName,
+            origins);
 
         services.AddCors(options => options.AddPolicy(PolicyName, policy => policy
             .WithOrigins(origins)

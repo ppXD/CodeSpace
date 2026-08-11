@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Net.Http.Headers;
 using Serilog;
 
 namespace CodeSpace.Api;
@@ -51,7 +52,7 @@ public class Startup
         // CORS — only matters when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099) rather
         // than through Vite's same-origin /api proxy. The policy, its origins setting and the Development-only
         // widening all live in CorsPolicyExtension.
-        // services.AddCorsPolicy(Configuration, Environment);
+        services.AddCorsPolicy(Configuration, Environment);
 
         services.AddOpenApi();
         services.AddHttpContextAccessor();
@@ -105,7 +106,34 @@ public class Startup
         // CORS must run BEFORE auth — browsers send the preflight OPTIONS unauthenticated,
         // and without this the CORS middleware can't write the Access-Control-Allow-* headers
         // before auth rejects the request.
-        // app.UseCors(CorsPolicyExtension.PolicyName);
+        app.Use(async (context, next) =>
+        {
+            var isPreflight = HttpMethods.IsOptions(context.Request.Method)
+                && context.Request.Headers.ContainsKey(HeaderNames.Origin)
+                && context.Request.Headers.ContainsKey(HeaderNames.AccessControlRequestMethod);
+
+            if (!isPreflight)
+            {
+                await next().ConfigureAwait(false);
+                return;
+            }
+
+            var origin = context.Request.Headers[HeaderNames.Origin].ToString();
+            var requestedMethod = context.Request.Headers[HeaderNames.AccessControlRequestMethod].ToString();
+            var requestedHeaders = context.Request.Headers[HeaderNames.AccessControlRequestHeaders].ToString();
+
+            await next().ConfigureAwait(false);
+
+            Log.Information(
+                "CORS preflight result for {Path}: origin {Origin}, requested method {RequestedMethod}, requested headers {RequestedHeaders}, status {StatusCode}, response allow-origin {AllowOrigin}",
+                context.Request.Path,
+                origin,
+                requestedMethod,
+                requestedHeaders,
+                context.Response.StatusCode,
+                context.Response.Headers[HeaderNames.AccessControlAllowOrigin].ToString());
+        });
+        app.UseCors(CorsPolicyExtension.PolicyName);
         app.UseAuthentication();
         app.UseAuthorization();
 
