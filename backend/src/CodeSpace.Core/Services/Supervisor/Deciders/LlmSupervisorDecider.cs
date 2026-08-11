@@ -595,6 +595,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 AppendPriorDecision(builder, rendered[i], isLatestSpawn: i == latestSpawnIndex, isSupersededPlan: rendered[i].DecisionKind == SupervisorDecisionKinds.Plan && i != latestPlanIndex, includeEvidenceTails: true, resolveExhausted: SupervisorActionMask.IsResolveCapSpent(context));
 
             AppendDependencyFrontier(builder, context);
+            AppendOutstandingAmendments(builder, context);
         }
 
         // S8 RECITATION (the Manus lesson): restate the CURRENT plan with live per-item states at the prompt TAIL —
@@ -654,6 +655,22 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// subtasks READY to spawn now (every dependency accepted) and those still BLOCKED on a dependency, so the model
     /// spawns in DAG order rather than racing. Nothing for a flat plan (no <c>DependsOn</c>) — byte-identical to before.
     /// </summary>
+    /// <summary>
+    /// B6 (the re-enactment arm's live finding): after a human APPROVED an oracle amendment, the model kept
+    /// re-amending — every render still showed the unit's STALE failed verdict (graded by the dead oracle), and
+    /// nothing said "the repair is signed; now retry". Three live rounds, identical shape: amendCards=5, zero
+    /// retries. This banner is the missing hand-off: name the amended subtask, say the verdict is stale, and say
+    /// the ONE next action. The amend precondition independently rejects a re-amend of the same subtask, so the
+    /// loop is closed structurally even if the model ignores prose.
+    /// </summary>
+    private static void AppendOutstandingAmendments(StringBuilder builder, SupervisorTurnContext context)
+    {
+        if (SupervisorAmendObligation.FirstOutstanding(context) is not { } subtaskId) return;
+
+        builder.AppendLine();
+        builder.AppendLine($"OUTSTANDING ORACLE AMENDMENT: subtask '{subtaskId}''s acceptance check was AMENDED by an approved human co-sign. Its recorded verdict is STALE (graded by the OLD check). RETRY '{subtaskId}' now — the retry re-grades under the co-signed check. Do NOT amend it again; do NOT stop before the retry.");
+    }
+
     private static void AppendDependencyFrontier(StringBuilder builder, SupervisorTurnContext context)
     {
         var (ready, blocked) = SupervisorDependencyGate.Frontier(context);

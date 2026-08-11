@@ -198,6 +198,37 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("codespace/agent/foo", Case.Insensitive, "the decider sees the produced branch");
     }
 
+    [Fact]
+    public void The_user_prompt_banners_an_outstanding_amendment()
+    {
+        // B6: after a human approved an oracle amendment, three live rounds re-amended five times each instead of
+        // retrying — every render still showed the dead oracle's verdict. The banner is the missing hand-off.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[] { new SupervisorAgentResult { AgentRunId = agentId, Status = "Succeeded", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = "grade-error: npm not found" } });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "missing tooling", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        });
+        var approved = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""",
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, spawn, approved));
+
+        prompt.ShouldContain("OUTSTANDING ORACLE AMENDMENT", customMessage: "the model is told the repair is signed");
+        prompt.ShouldContain("RETRY 's1'", customMessage: "and the one next action");
+    }
+
     [Theory]
     [InlineData(true, "acceptance PASSED", "objectively verified")]
     [InlineData(false, "acceptance FAILED", "RETRY this exact subtask")]
@@ -306,6 +337,7 @@ public class SupervisorDeciderTests
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
 
         prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
+        prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", customMessage: "no amendment on this tape — the banner never renders spuriously");
         prompt.ShouldContain("even though the agent itself reported failure", Case.Insensitive, "the under-claim must be called out, not silently rendered as a clean pass");
         prompt.ShouldContain("do NOT retry", Case.Insensitive, "the work is objectively fine — retrying it wastes a round-trip");
     }

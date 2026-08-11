@@ -80,6 +80,12 @@ public static class SupervisorRecitation
     /// </summary>
     internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
     {
+        // B6: an approved-but-unconsumed oracle amendment makes the recorded verdict STALE — reciting "REJECTED by
+        // its acceptance check" here is what drove a live brain to re-amend five times instead of retrying (the
+        // re-enactment arm's finding). The override also keeps the subtask on the unfinished list.
+        if (SupervisorAmendObligation.IsOutstanding(priors, subtaskId))
+            return "its check was AMENDED by an approved co-sign — the recorded verdict is STALE; RETRY this subtask to re-grade under the new check (do not amend again)";
+
         if (FindCoveringDecision(subtaskId, priors) is not { } decision) return "pending";
 
         var index = IndexOf(UnitSubtaskIds(decision), subtaskId);

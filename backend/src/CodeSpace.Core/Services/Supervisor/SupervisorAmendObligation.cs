@@ -18,29 +18,35 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorAmendObligation
 {
     /// <summary>The first outstanding obligation's target subtask id (sequence order — deterministic), or null when every approved amendment has been consumed.</summary>
-    public static string? FirstOutstanding(SupervisorTurnContext context)
+    public static string? FirstOutstanding(SupervisorTurnContext context) => FirstOutstanding(context.PriorDecisions);
+
+    /// <summary>The priors-only overload — the recitation and other pure renderers resolve the SAME walk without a context.</summary>
+    public static string? FirstOutstanding(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
-        foreach (var (subtaskId, cardSequence) in ApprovedReplacementsAfterNewestPlan(context))
-            if (LatestStagingSequence(context, subtaskId) < cardSequence)
+        foreach (var (subtaskId, cardSequence) in ApprovedReplacementsAfterNewestPlan(priorDecisions))
+            if (LatestStagingSequence(priorDecisions, subtaskId) < cardSequence)
                 return subtaskId;
 
         return null;
     }
 
     /// <summary>Whether THIS subtask's latest attempt predates an approved amendment for it — its recorded verdict and contradiction were graded by the dead oracle, so retry escalation must not treat them as live evidence.</summary>
-    public static bool IsOutstanding(SupervisorTurnContext context, string? subtaskId) =>
+    public static bool IsOutstanding(SupervisorTurnContext context, string? subtaskId) => IsOutstanding(context.PriorDecisions, subtaskId);
+
+    /// <summary>The priors-only overload of <see cref="IsOutstanding(SupervisorTurnContext, string?)"/>.</summary>
+    public static bool IsOutstanding(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId) =>
         subtaskId is not null
-        && ApprovedReplacementsAfterNewestPlan(context).Any(a => a.SubtaskId == subtaskId && LatestStagingSequence(context, subtaskId) < a.CardSequence);
+        && ApprovedReplacementsAfterNewestPlan(priorDecisions).Any(a => a.SubtaskId == subtaskId && LatestStagingSequence(priorDecisions, subtaskId) < a.CardSequence);
 
     /// <summary>Every approved REPLACEMENT amendment after the newest plan, in sequence order: (target subtask, the card's sequence).</summary>
-    private static IEnumerable<(string SubtaskId, long CardSequence)> ApprovedReplacementsAfterNewestPlan(SupervisorTurnContext context)
+    private static IEnumerable<(string SubtaskId, long CardSequence)> ApprovedReplacementsAfterNewestPlan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var planSequence = -1L;
 
-        foreach (var decision in context.PriorDecisions)
+        foreach (var decision in priorDecisions)
             if (decision.DecisionKind == SupervisorDecisionKinds.Plan) planSequence = decision.Sequence;
 
-        foreach (var decision in context.PriorDecisions)
+        foreach (var decision in priorDecisions)
         {
             if (decision.Sequence <= planSequence) continue;
 
@@ -55,11 +61,11 @@ public static class SupervisorAmendObligation
     }
 
     /// <summary>The sequence of the LATEST staging decision (spawn/retry) that named this subtask, or -1 when it was never staged.</summary>
-    private static long LatestStagingSequence(SupervisorTurnContext context, string subtaskId)
+    private static long LatestStagingSequence(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string subtaskId)
     {
         var latest = -1L;
 
-        foreach (var decision in context.PriorDecisions)
+        foreach (var decision in priorDecisions)
         {
             if (!SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) continue;
 

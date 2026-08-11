@@ -111,6 +111,33 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void An_outstanding_amendment_overrides_the_stale_rejected_recital()
+    {
+        // B6: reciting the dead oracle's REJECTED verdict after a human approved its replacement drove a live brain
+        // to re-amend five times instead of retrying. The override names the one next action and keeps the subtask
+        // unfinished.
+        var amend = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check invokes missing tooling",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        });
+
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "grade-error: npm not found")),
+            Prior(3, SupervisorDecisionKinds.AskHuman, amend.PayloadJson!, """{"question":"q","answer":"approve"}"""),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("AMENDED by an approved co-sign", customMessage: "the stale verdict is named stale");
+        recitation.ShouldContain("RETRY this subtask", customMessage: "the one next action is spelled out");
+        recitation.ShouldNotContain("REJECTED by its acceptance check", customMessage: "the dead oracle's verdict no longer drives the loop");
+        recitation.ShouldContain("Unfinished: s1", customMessage: "the amended subtask stays on the unfinished list");
+    }
+
+    [Fact]
     public void A_waived_unit_recites_as_waived_never_as_done()
     {
         // B2 (FATAL-1): "done" alone would feed the decider a waived unit as ordinary evidence.
