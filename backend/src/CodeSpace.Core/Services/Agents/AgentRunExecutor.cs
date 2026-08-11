@@ -1140,7 +1140,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: a produced branch means Pushed, its absence means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
+    /// <summary>Pure mapping from a run's produced-artifact facts to the manifest upsert shape — the PublishState/AcceptanceState derivation this pins: <see cref="PublishState.Pushed"/> is a CONFIRMED claim (review hole 2) — it requires BOTH the produced branch AND the readback-confirmed remote tip (P3b-2's <paramref name="pushedCommitSha"/>); a branch whose readback failed or mismatched maps PatchOnly with a named PublishError, because a push command that RAN proves intent, not arrival — and Pushed flows straight into Delivered/Delivery-Passed. Everything else unchanged: no branch means PatchOnly (PublishError distinguishes an intentional FAILED attempt from a BY-CHOICE guard skip, whose reason lands on Summary); acceptance mirrors the grader's tri-state verbatim. Internal so it's unit-pinned without a database.</summary>
     internal static PublishManifestUpsert BuildManifestUpsert(AgentRun run, string alias, Guid? repositoryId, string? baseSha, Guid? patchArtifactId, IReadOnlyList<string> changedFiles, string? producedBranch, string? publishError, string? publishSkipReason, bool? acceptancePassed, string? pushedCommitSha = null) => new()
     {
         CommitSha = pushedCommitSha,
@@ -1153,8 +1153,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         ChangedFileCount = changedFiles.Count,
         ChangedFilesJson = changedFiles.Count > 0 ? JsonSerializer.Serialize(changedFiles, AgentJson.Options) : null,
         AcceptanceState = acceptancePassed switch { true => PublishAcceptanceState.Passed, false => PublishAcceptanceState.Failed, null => PublishAcceptanceState.NotApplicable },
-        PublishStateValue = producedBranch is { Length: > 0 } ? PublishState.Pushed : PublishState.PatchOnly,
-        PublishError = publishError,
+        PublishStateValue = producedBranch is { Length: > 0 } && pushedCommitSha is { Length: > 0 } ? PublishState.Pushed : PublishState.PatchOnly,
+        PublishError = producedBranch is { Length: > 0 } && pushedCommitSha is not { Length: > 0 }
+            ? publishError ?? "push-unconfirmed: the remote readback did not confirm the pushed tip — the branch may exist, but Delivered must not be claimed on intent alone"
+            : publishError,
         Branch = producedBranch,
         Summary = publishSkipReason,
     };
