@@ -73,6 +73,49 @@ public sealed class CaptureIntentSagaFlowTests
     }
 
     [Fact]
+    public async Task A_confirmed_observation_supersedes_the_earlier_indeterminate_promise()
+    {
+        // P2 slice 2: an exactly-once guard must not eat a late truth — the first attempt died mid-window
+        // (Indeterminate), the re-attach at a bumped epoch ran the capture to its persist; the confirmed commit
+        // formally resolves the unknown with a POINTER, never a rewrite.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var saga = scope.Resolve<ICaptureIntentService>();
+
+        await saga.OpenAsync(agentRunId, teamId, null, fenceEpoch: 1, null, CancellationToken.None);
+        await saga.MarkIndeterminateForRunAsync(agentRunId, CancellationToken.None);
+
+        await saga.OpenAsync(agentRunId, teamId, null, fenceEpoch: 2, null, CancellationToken.None);
+        (await saga.CommitAsync(agentRunId, fenceEpoch: 2, """{"empty":false}""", CancellationToken.None)).ShouldBeTrue();
+
+        var rows = await RowsAsync(agentRunId);
+        var confirmed = rows.Single(r => r.FenceEpoch == 2);
+        var unknown = rows.Single(r => r.FenceEpoch == 1);
+
+        unknown.Status.ShouldBe(CaptureIntentStatus.Indeterminate, "the supersede is a pointer, never a rewrite — history intact");
+        unknown.SupersededByIntentId.ShouldBe(confirmed.Id, "the run's capture state now reads resolved-by, not permanently unknown");
+        confirmed.SupersededByIntentId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task An_unsuperseded_indeterminate_stays_a_visible_unknown()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var saga = scope.Resolve<ICaptureIntentService>();
+
+        await saga.OpenAsync(agentRunId, teamId, null, fenceEpoch: 1, null, CancellationToken.None);
+        await saga.MarkIndeterminateForRunAsync(agentRunId, CancellationToken.None);
+
+        (await RowsAsync(agentRunId)).Single().SupersededByIntentId
+            .ShouldBeNull("no confirmed observation ever arrived — the unknown stays visible");
+    }
+
+    [Fact]
     public async Task The_reaper_marks_dangling_promises_of_terminal_runs_only()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
