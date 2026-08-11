@@ -40,74 +40,50 @@ public class PlannerGroundingFlowTests
     [Fact]
     public async Task A_repo_in_the_callers_team_grounds_the_plan_with_its_top_level_layout()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var seed = await SeedTeamWithBoundRepoAsync();
+        var seed = await SeedTeamWithBoundRepoAsync();
 
-            var recorder = await PlanWithRecordingPlannerAsync(seed.TeamId, seed.UserId, seed.RepositoryId);
+        var recorder = await PlanWithRecordingPlannerAsync(seed.TeamId, seed.UserId, seed.RepositoryId);
 
-            recorder.LastRequest.ShouldNotBeNull();
-            recorder.LastRequest!.GroundingContext.ShouldNotBeNull("the bound repo is in the caller's team, so the service must assemble grounding");
-            recorder.LastRequest.GroundingContext!.ShouldContain("top-level layout");
-            recorder.LastRequest.GroundingContext.ShouldContain(TestRepositoryProvider.RootEntryNames[0], Case.Sensitive, "the real root tree's first entry must surface in the grounding");
+        recorder.LastRequest.ShouldNotBeNull();
+        recorder.LastRequest!.GroundingContext.ShouldNotBeNull("the bound repo is in the caller's team, so the service must assemble grounding");
+        recorder.LastRequest.GroundingContext!.ShouldContain("top-level layout");
+        recorder.LastRequest.GroundingContext.ShouldContain(TestRepositoryProvider.RootEntryNames[0], Case.Sensitive, "the real root tree's first entry must surface in the grounding");
 
-            // Honesty guard end-to-end: the assembled string never over-claims.
-            recorder.LastRequest.GroundingContext.ShouldNotContain("analyzed your codebase", Case.Insensitive);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        // Honesty guard end-to-end: the assembled string never over-claims.
+        recorder.LastRequest.GroundingContext.ShouldNotContain("analyzed your codebase", Case.Insensitive);
     }
 
     [Fact]
     public async Task A_repo_in_another_team_yields_no_grounding_and_the_planner_runs_task_only()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var seed = await SeedTeamWithBoundRepoAsync();
+        var seed = await SeedTeamWithBoundRepoAsync();
 
-            // A SECOND team the caller is in — but the repo belongs to seed.TeamId. Planning AS this other team must
-            // NOT resolve the repo: the team-scoped load finds nothing (no cross-team read), grounding degrades to null.
-            var (otherTeamId, otherUserId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        // A SECOND team the caller is in — but the repo belongs to seed.TeamId. Planning AS this other team must
+        // NOT resolve the repo: the team-scoped load finds nothing (no cross-team read), grounding degrades to null.
+        var (otherTeamId, otherUserId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-            var recorder = await PlanWithRecordingPlannerAsync(otherTeamId, otherUserId, seed.RepositoryId);
+        var recorder = await PlanWithRecordingPlannerAsync(otherTeamId, otherUserId, seed.RepositoryId);
 
-            recorder.LastRequest.ShouldNotBeNull();
-            recorder.LastRequest!.GroundingContext.ShouldBeNull("a repo in another team must yield no grounding — fail-closed, never a cross-team read");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        recorder.LastRequest.ShouldNotBeNull();
+        recorder.LastRequest!.GroundingContext.ShouldBeNull("a repo in another team must yield no grounding — fail-closed, never a cross-team read");
     }
 
     [Fact]
     public async Task A_provider_read_failure_degrades_grounding_to_null_and_the_planner_still_runs_task_only()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            // The repo IS in the caller's team — the team-scoped DB load succeeds and the real RepoGroundingProvider
-            // proceeds to the provider read. We then make that read THROW (scope check) to prove the catch-block
-            // degrade-to-null path: grounding becomes null, but planning never fails.
-            var seed = await SeedTeamWithBoundRepoAsync();
+        // The repo IS in the caller's team — the team-scoped DB load succeeds and the real RepoGroundingProvider
+        // proceeds to the provider read. We then make that read THROW (scope check) to prove the catch-block
+        // degrade-to-null path: grounding becomes null, but planning never fails.
+        var seed = await SeedTeamWithBoundRepoAsync();
 
-            var recorder = await PlanWithRecordingPlannerAsync(seed.TeamId, seed.UserId, seed.RepositoryId, configure: b =>
-                b.RegisterInstance(new ThrowingScopeChecker()).As<IScopeChecker>().SingleInstance());
+        var recorder = await PlanWithRecordingPlannerAsync(seed.TeamId, seed.UserId, seed.RepositoryId, configure: b =>
+            b.RegisterInstance(new ThrowingScopeChecker()).As<IScopeChecker>().SingleInstance());
 
-            // The planner STILL ran (the provider failure degraded grounding, it did not fail the planning call)...
-            recorder.LastRequest.ShouldNotBeNull("a provider read failure must degrade grounding, never fail planning");
+        // The planner STILL ran (the provider failure degraded grounding, it did not fail the planning call)...
+        recorder.LastRequest.ShouldNotBeNull("a provider read failure must degrade grounding, never fail planning");
 
-            // ...with NO grounding folded in (the catch returned null).
-            recorder.LastRequest!.GroundingContext.ShouldBeNull("a provider/scope read failure must degrade grounding to null");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        // ...with NO grounding folded in (the catch returned null).
+        recorder.LastRequest!.GroundingContext.ShouldBeNull("a provider/scope read failure must degrade grounding to null");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

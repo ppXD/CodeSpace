@@ -6,7 +6,9 @@
 # because it carries the agent-execution + isolation dependencies the internet-facing API must NOT:
 #   • git           — the workspace layer clones bound repos with the git CLI;
 #   • bubblewrap    — per-run filesystem + namespace confinement (BubblewrapSandbox);
-#   • util-linux    — prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits);
+#   • util-linux    — prlimit (ProcessRlimits' RLIMIT_NPROC / RLIMIT_FSIZE caps) and setsid (the durable launch);
+#   • iproute2 + nftables + procps — ip / nft / sysctl, the argv FilteredEgressPlan emits for the per-run egress
+#                     allowlist (see the EGRESS FILTERING note below for what else it needs to actually work);
 #   • codespace-mcp — the tool-fabric proxy, published next to CodeSpace.Api.dll by the csproj target;
 #   • node + codex + claude — the agent harness CLIs (Node programs) + their runtime, baked in (see below).
 # Deploy this as its own deployment so it scales (replica) independently of the API.
@@ -20,11 +22,20 @@
 # CodexHarness / ClaudeCodeHarness default to `codex` / `claude` on PATH, so no env wiring is needed; an operator
 # can still repoint CODESPACE_CODEX_CLI_PATH / CODESPACE_CLAUDE_CODE_PATH at a different binary.
 #
+# EGRESS FILTERING needs more than these packages. FilteredEgressNetns probes `ip -Version` + `nft --version` and,
+# when either is missing, reports IsSupported=false — at which point SandboxEgressPolicy.Derive turns a run that asked
+# for an EGRESS ALLOWLIST into Denied (NO network at all), never into Full. That is fail-closed and safe, but it means
+# a worker image without these packages silently makes the allowlist feature unusable rather than loud. Installing
+# them is necessary, NOT sufficient: `ip netns add` and `sysctl -w net.ipv4.ip_forward=1` need root + CAP_NET_ADMIN,
+# and the runtime user below is non-root — so on a pod without those the probe may pass while setup fails. Grant
+# CAP_NET_ADMIN (and run the egress path privileged enough to write the sysctl) on any deployment that relies on
+# allowlisted egress; a pod that does not is still correct, it just gets Denied instead of Filtered.
+#
 # CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
-# CODESPACE_REQUIRE_SANDBOX=1 is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
+# Sandbox:RequireConfinement is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
 # namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns
 # is not configured. The non-root user below runs bubblewrap via UNPRIVILEGED user namespaces — validate that the
-# target host/pod permits unprivileged userns for this uid (else arm REQUIRE_SANDBOX only where it does).
+# target host/pod permits unprivileged userns for this uid (else arm RequireConfinement only where it does).
 #
 # global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
 # base-image digest pinning is a deferred follow-up — it needs the manifest-LIST digest + a Renovate bump (a
@@ -59,12 +70,28 @@ WORKDIR /app
 #   ca-certificates → managed CA bundle for the outbound TLS the worker makes (git remotes, model gateways, the
 #                  CLIs' provider APIs); also lets an operator drop in a private CA via update-ca-certificates
 #   bubblewrap   → per-run filesystem + namespace confinement (BubblewrapSandbox)
-#   util-linux   → prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits)
-# (Deliberately NOT installed: openssh-client — clone is HTTPS not SSH; GPG — commits pass -c commit.gpgsign=false.)
+#   util-linux   → prlimit (ProcessRlimits' RLIMIT_NPROC / RLIMIT_FSIZE caps) AND setsid, which the durable launch
+#                  runs its /bin/sh supervisor under so the run outlives a pod restart for the reconciler to re-attach
+#   iproute2     → `ip`, every netns/veth/route argv in FilteredEgressPlan.SetupCommands + the `ip netns exec` prefix
+#   nftables     → `nft`, the NAT masquerade + default-drop forward ruleset that IS the egress allowlist
+#   procps       → `sysctl`, for the `net.ipv4.ip_forward=1` step of that same setup (and `ps` for diagnosis)
+#   curl         → the one general-purpose fetch tool an agent's shell commands reach for constantly; without it a
+#                  routine "curl the API and check the response" step dies on 127 inside an otherwise healthy run
+# (Deliberately NOT installed: openssh-client — clone is HTTPS not SSH; GPG — commits pass -c commit.gpgsign=false;
+#  a language toolchain — an agent that must BUILD a repo needs that repo's SDK, which is a per-workspace concern,
+#  not something this image can guess. tar/gzip/sh come with the base.)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git git-lfs ca-certificates bubblewrap util-linux \
+    && apt-get install -y --no-install-recommends git git-lfs ca-certificates bubblewrap util-linux iproute2 nftables procps curl \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
+
+# Prove every externally-spawned binary resolves, at BUILD time. Each of these is invoked by name from C# (git,
+# bwrap, prlimit, setsid, ip, nft, sysctl, sh), so a Debian package rename or a dropped dependency would otherwise
+# ship green and fail at runtime as an exit-127 deep inside an agent run — or, worse for the egress path, as a
+# silently-Denied network. Cheap, and it fails the build loud instead.
+RUN for b in git git-lfs bwrap prlimit setsid ip nft sysctl curl sh; do \
+      command -v "$b" >/dev/null || { echo "MISSING: $b is spawned by name from C# but is absent from the worker image"; exit 1; }; \
+    done
 
 # The Node runtime + the globally-installed harness CLI packages from the agent-cli stage. node_modules carries
 # each CLI's nested platform binary (e.g. @openai/codex/node_modules/@openai/codex-linux-*); `node` (on PATH at

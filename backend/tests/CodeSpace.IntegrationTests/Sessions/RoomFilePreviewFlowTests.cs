@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using System.IO;
 using System.Text.Json;
 using Autofac;
@@ -169,7 +170,7 @@ public class RoomFilePreviewFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var sha = Convert.ToHexString(Guid.NewGuid().ToByteArray().Concat(Guid.NewGuid().ToByteArray()).ToArray()).ToLowerInvariant();   // 64 hex, unique → never on disk
-        var root = Path.GetFullPath(Environment.GetEnvironmentVariable(LocalFileArtifactBlobBackend.StoreDirEnvVar) is { Length: > 0 } d ? d : Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
+        var root = Path.GetFullPath(RuntimeSettings.Current.ArtifactStoreDirectory ?? Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
         var missing = Path.Combine(root, sha[..2], sha.Substring(2, 2), sha);
 
         var id = Guid.NewGuid();

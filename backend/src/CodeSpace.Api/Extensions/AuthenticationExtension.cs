@@ -11,19 +11,11 @@ public static class AuthenticationExtension
     /// <summary>Minimum entropy for the JWT symmetric key. Below this, HS256 is brute-forceable. Pinned by unit test.</summary>
     public const int MinKeyByteLength = 32;
 
-    /// <summary>If you really want to run without auth in Development, set this env var to true. Production ignores it.</summary>
-    public const string AllowAnonymousFallbackEnvVar = "CODESPACE_ALLOW_ANONYMOUS_FALLBACK";
-
     public static void AddCustomAuthentication(this IServiceCollection services, IConfiguration configuration, IHostEnvironment environment)
     {
         var jwtKey = new JwtSymmetricKeySetting(configuration).Value;
 
-        if (string.IsNullOrWhiteSpace(jwtKey))
-        {
-            EnsureMissingKeyIsAllowed(environment);
-            return;
-        }
-
+        EnsureKeyIsPresent(jwtKey);
         EnsureKeyIsStrong(jwtKey);
 
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -50,15 +42,17 @@ public static class AuthenticationExtension
         });
     }
 
-    private static void EnsureMissingKeyIsAllowed(IHostEnvironment environment)
+    /// <summary>
+    /// A missing key is fatal in EVERY environment. There used to be an env escape hatch that let a non-Production
+    /// host boot with every endpoint anonymous; it is gone, because a run-with-no-auth switch is exactly the kind of
+    /// deployment-time toggle this codebase does not keep — and it was never needed, since appsettings.json ships a
+    /// committed development key. Blanking that key is now a loud failure rather than a silent slide into anonymous.
+    /// </summary>
+    private static void EnsureKeyIsPresent(string jwtKey)
     {
-        if (environment.IsProduction()) throw new InvalidOperationException("Authentication:Jwt:SymmetricKey is required in Production. Set the configuration value or environment variable.");
+        if (!string.IsNullOrWhiteSpace(jwtKey)) return;
 
-        var allowAnonymous = Environment.GetEnvironmentVariable(AllowAnonymousFallbackEnvVar);
-        if (!string.Equals(allowAnonymous, "true", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Authentication:Jwt:SymmetricKey is missing. Set the key, or export {AllowAnonymousFallbackEnvVar}=true to explicitly run anonymous in {environment.EnvironmentName}.");
-
-        Console.WriteLine($"[WARN] {AllowAnonymousFallbackEnvVar}=true — every endpoint is anonymous. NEVER set this in Production.");
+        throw new InvalidOperationException("Authentication:Jwt:SymmetricKey is required. Set it in appsettings, a ConfigMap, or the Authentication__Jwt__SymmetricKey environment variable.");
     }
 
     private static void EnsureKeyIsStrong(string jwtKey)

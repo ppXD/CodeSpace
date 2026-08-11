@@ -51,20 +51,39 @@ public sealed partial class RealSupervisorActionExecutor
         if (string.IsNullOrWhiteSpace(ask.Question))
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(RejectedAskHumanOutcome, AgentJson.Options));
 
+        // B4 (the MAJOR-3 rung): an amend card must clear the HARD infra precondition before it is even posted —
+        // the target's latest SERVER verdict decides eligibility, never the model's claim, and a rejection spends
+        // no human interruption. Checked BEFORE the tenancy/surface step deliberately: a dodge-work amend in a
+        // no-surface run must REJECT with its named reason, not degrade into a self-advancing null answer.
+        string? displaySuffix = null;
+
+        if (SupervisorAmendAcceptance.ReadAmend(decision.PayloadJson) is { } amend && SupervisorAmendAcceptance.QuestionCarriesMarker(decision.PayloadJson))
+        {
+            if (SupervisorAmendPrecondition.Reject(context, amend) is { } rejection)
+            {
+                _logger.LogWarning("Supervisor amend_acceptance for subtask {SubtaskId} rejected at turn {Turn} on node {NodeId}: {Reason}", amend.SubtaskId, context.TurnNumber, context.NodeId, rejection);
+
+                return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { askHuman = "rejected", reason = rejection }, AgentJson.Options));
+            }
+
+            // MAJOR-3's third leg: the co-signer rules on the server's own raw verdict, never only the model's framing.
+            displaySuffix = SupervisorAmendPrecondition.RawVerdictSuffix(context, amend.SubtaskId);
+        }
+
         if (!await CanPostToConversationAsync(context, cancellationToken).ConfigureAwait(false))
             return DegradeNoSurface(ask.Question);
 
-        return await PostQuestionAndParkAsync(ask.Question, context, cancellationToken).ConfigureAwait(false);
+        return await PostQuestionAndParkAsync(ask.Question, context, cancellationToken, displaySuffix).ConfigureAwait(false);
     }
 
-    /// <summary>Post the question card (single "Answer" button requiring the human's free-text comment) + stage the per-turn Action wait, then record the token + question in the outcome. The node parks on the one wait; the human's answer resumes it.</summary>
-    private async Task<SupervisorExecution> PostQuestionAndParkAsync(string question, SupervisorTurnContext context, CancellationToken cancellationToken)
+    /// <summary>Post the question card (single "Answer" button requiring the human's free-text comment) + stage the per-turn Action wait, then record the token + question in the outcome. The node parks on the one wait; the human's answer resumes it. <paramref name="displaySuffix"/> (B4: an amend card's raw server verdict) enriches the POSTED body only — the tape payload, the parked question, and every marker read stay canonical.</summary>
+    private async Task<SupervisorExecution> PostQuestionAndParkAsync(string question, SupervisorTurnContext context, CancellationToken cancellationToken, string? displaySuffix = null)
     {
         var token = Guid.NewGuid().ToString("N");
 
         var interaction = BuildQuestionCard(token);
 
-        var posted = await _bot.PostAsBotAsync(context.ConversationId!.Value, QuestionBody(question), interaction, cancellationToken).ConfigureAwait(false);
+        var posted = await _bot.PostAsBotAsync(context.ConversationId!.Value, QuestionBody(question + displaySuffix), interaction, cancellationToken).ConfigureAwait(false);
 
         StageAskWait(context, token);
 

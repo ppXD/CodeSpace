@@ -189,6 +189,30 @@ public sealed record SupervisorAskHumanPayload
     public required string Question { get; init; }
 }
 
+/// <summary>
+/// The <c>amend_acceptance</c> proposal (B1): rewrite or waive ONE subtask's acceptance oracle, pending a human
+/// co-sign. <see cref="Waive"/> forgoes verification entirely (a waived unit is NEVER laundered into a pass —
+/// the FATAL-1 invariant); a non-waive amend carries the replacement oracle in <see cref="Acceptance"/>. This record
+/// rides INSIDE the rewritten ask card's payload (root <c>amend</c> node, server-attached only — a model-authored
+/// <c>ask_human</c> cannot smuggle one because binding erases undeclared fields), so the co-sign overlay reads the
+/// STRUCTURED proposal back from the approved card, never re-parsing prose.
+/// </summary>
+public sealed record SupervisorAmendAcceptancePayload
+{
+    /// <summary>The plan subtask whose oracle this proposal targets.</summary>
+    public required string SubtaskId { get; init; }
+
+    /// <summary>True = forgo verification for this unit entirely; false = replace its oracle with <see cref="Acceptance"/>.</summary>
+    public bool Waive { get; init; }
+
+    /// <summary>The replacement oracle (full spec — kind, rubric/schema payloads, timeout). Null when <see cref="Waive"/> is true.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
+    /// <summary>Why the current oracle should not bind — quoted onto the human card, so the co-signer rules on evidence.</summary>
+    public required string Reason { get; init; }
+}
+
 /// <summary>The <c>stop</c> payload: the terminal outcome label + a short summary, plus an optional model-authored acceptance check.</summary>
 public sealed record SupervisorStopPayload
 {

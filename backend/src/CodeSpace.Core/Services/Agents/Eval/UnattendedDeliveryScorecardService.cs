@@ -148,6 +148,13 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     {
         if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Failed)) return false;
 
+        // B2 (FATAL-1): a WAIVED artifact means a human authorized forgoing verification — no objective claim in
+        // either direction, so it must neither solve (a fully-waived Success run counted Solved with zero waive
+        // trace before this arm) nor be silently absorbed by a passing sibling. Checked BEFORE Passed, mirroring
+        // CompletionReducer's severity order (Failed > Waived > Passed): any waived work ⇒ the run's completion is
+        // not fully verified ⇒ never Solved via the oracle leg or the status fallback.
+        if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Waived)) return false;
+
         if (manifests.Any(m => m.AcceptanceState == PublishAcceptanceState.Passed)) return true;
 
         // P2b-prep (metric-shift, its own pinned PR): a DEGRADED supervisor stop (forced bound / model give-up)

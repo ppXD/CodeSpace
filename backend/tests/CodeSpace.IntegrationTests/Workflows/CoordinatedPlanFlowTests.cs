@@ -51,41 +51,32 @@ public class CoordinatedPlanFlowTests
     [Fact]
     public async Task Coordinated_plan_re_decides_across_two_rounds_reworks_then_terminates_on_done()
     {
-        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
-        try
-        {
-            var fake = ResetSharedFake();
-            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var fake = ResetSharedFake();
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-            // ── Plan a COORDINATED workflow from a task (max 5 rounds; the coordinator stops it at 2). ──
-            var result = await PlanCoordinatedAsync(teamId, userId, "Improve the module across rounds", maxRounds: 5);
+        // ── Plan a COORDINATED workflow from a task (max 5 rounds; the coordinator stops it at 2). ──
+        var result = await PlanCoordinatedAsync(teamId, userId, "Improve the module across rounds", maxRounds: 5);
 
-            result.PlannerEnabled.ShouldBeTrue();
-            result.Definition.ShouldNotBeNull();
-            result.Definition!.Nodes.ShouldContain(n => n.TypeKey == "flow.loop", "the coordinated projection emits a loop");
+        result.Definition.ShouldNotBeNull();
+        result.Definition!.Nodes.ShouldContain(n => n.TypeKey == "flow.loop", "the coordinated projection emits a loop");
 
-            // The projection validates independently of the service's own pre-return validation.
-            Validate(result.Definition!).IsValid.ShouldBeTrue();
+        // The projection validates independently of the service's own pre-return validation.
+        Validate(result.Definition!).IsValid.ShouldBeTrue();
 
-            // ── Persist + run. Retarget the llm.complete nodes (body + coordinator + synth) to the fake. ──
-            var runnable = RetargetLlmToFake(result.Definition!);
-            var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
-            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        // ── Persist + run. Retarget the llm.complete nodes (body + coordinator + synth) to the fake. ──
+        var runnable = RetargetLlmToFake(result.Definition!);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, runnable);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-            // ── Pass 1: suspends on the plan-review approval wait. ──
-            await RunEngineAsync(runId);
-            await AssertSuspendedOnApprovalAsync(runId);
+        // ── Pass 1: suspends on the plan-review approval wait. ──
+        await RunEngineAsync(runId);
+        await AssertSuspendedOnApprovalAsync(runId);
 
-            // ── Approve → run to completion: round 1 (rework) → round 2 (done) → synth → Success. ──
-            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
-            await RunEngineAsync(runId);
+        // ── Approve → run to completion: round 1 (rework) → round 2 (done) → synth → Success. ──
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
 
-            await AssertCoordinatedSuccessAsync(runId, fake);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
-        }
+        await AssertCoordinatedSuccessAsync(runId, fake);
     }
 
     // ─── Assertions ──────────────────────────────────────────────────────────

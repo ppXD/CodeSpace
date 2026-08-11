@@ -9,7 +9,7 @@ name: Sandbox · Isolation E2E
 # AppArmor policy — exactly the `docker run --privileged dotnet/sdk:10.0 + apt install bubblewrap`
 # environment these tests were validated against locally.
 #
-# CODESPACE_REQUIRE_SANDBOX=1 is the fail-closed guarantee: if bubblewrap / userns is NOT working,
+# Sandbox__RequireConfinement=true is the fail-closed guarantee: if bubblewrap / userns is NOT working,
 # the tests do NOT silently skip — their gate asserts IsRequired==false and so fails HARD. Green here
 # therefore means "confinement was actually exercised", never "the environment couldn't sandbox".
 
@@ -33,6 +33,9 @@ permissions:
   contents: read
 
 env:
+  # The DI container fail-fasts without a Variables master key outside Development (the settings arc's
+  # guard). Same committed local-dev test key docker-compose.yml carries — a committed value, not a toggle.
+  CODESPACE_VARIABLE_MASTER_KEY: 'bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE='
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
@@ -50,7 +53,7 @@ jobs:
     env:
       # Fail-closed: a degraded sandbox (no bwrap / no userns) becomes a HARD test failure, so
       # confinement can never silently no-op into a green run.
-      CODESPACE_REQUIRE_SANDBOX: '1'
+      Sandbox__RequireConfinement: 'true'
       # Same fail-closed contract for the cgroup-v2 resource cap (B4): if the privileged container can't delegate
       # cgroups, the cgroup E2E FAILS HARD instead of skipping — a real cap was exercised, never "couldn't, so green".
       CODESPACE_REQUIRE_CGROUP: '1'

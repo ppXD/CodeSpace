@@ -169,13 +169,12 @@ public sealed record AgentTask
     public Guid? ApprovalConversationId { get; init; }
 
     /// <summary>
-    /// Per-run opt-in to the in-process MCP tool-fabric endpoint, layered OVER the deployment-wide
-    /// <c>CODESPACE_AGENT_MCP_ENDPOINT_ENABLED</c> env flag: <c>true</c> forces the endpoint open for THIS run even
-    /// when the ambient flag is off; <c>null</c> (default) defers to the ambient flag, so an ordinary run is unchanged.
-    /// The executor's single gate ORs the two (<c>AgentRunExecutor.ShouldOpenMcpEndpoint</c>), so two runs in the SAME
-    /// process can genuinely differ on whether the fabric is reachable — which is what the benchmark instrument's
-    /// CLI-vs-CLI+MCP comparison requires (one mode sets this true, the other leaves it null). There is no per-run way
-    /// to force the endpoint OFF when the ambient flag is on — fail-open toward the operator's deployment intent.
+    /// This run's choice of tool catalog: <c>true</c> serves the full side-effecting fabric, <c>false</c> holds the
+    /// run to the read-only slice, and <c>null</c> takes the committed default
+    /// (<c>AgentRunExecutor.FullToolCatalogByDefault</c>, currently full). It NARROWS as well as widens — there used
+    /// to be a deployment-wide environment flag this could only OR with, so no run could opt out of an operator's
+    /// choice. Two runs in the same process still differ freely, which is what the benchmark instrument's
+    /// CLI-vs-CLI+MCP comparison requires (one arm true, the other false).
     /// </summary>
     public bool? EnableMcpEndpoint { get; init; }
 

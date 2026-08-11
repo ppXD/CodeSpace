@@ -11,13 +11,6 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class PackHostAllowlistTests
 {
-    [Fact]
-    public void AllowedHostsEnvVar_name_is_pinned()
-    {
-        // Rule 8: an operator pins extra hosts via this env var; renaming it silently re-closes their configured host.
-        PackHostAllowlist.AllowedHostsEnvVar.ShouldBe("CODESPACE_PACK_ALLOWED_HOSTS");
-    }
-
     [Theory]
     [InlineData("https://github.com/wshobson/agents")]
     [InlineData("https://gitlab.com/team/pack.git")]

@@ -109,9 +109,9 @@ public static class SupervisorDependencyGate
             .ToList();
     }
 
-    /// <summary>A dependency counts as satisfied iff its latest attempt SUCCEEDED and was not objectively acceptance-rejected — the single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
+    /// <summary>A dependency counts as satisfied iff its latest attempt SUCCEEDED and was not objectively acceptance-rejected NOR human-waived (B2: a dependent must never build on unverified work — WAIVED ≠ PASSED, the FATAL-1 invariant) — the single definition <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> share so they can never drift.</summary>
     private static bool IsSatisfied(SupervisorAgentResult result) =>
-        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false;
+        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) && result.AcceptancePassed != false && !SupervisorOutcome.IsWaived(result);
 
     /// <summary>
     /// The AgentRunId of a subtask's LATEST attempt (retry-resume's world-state continuity), UNFILTERED on success —
@@ -123,7 +123,7 @@ public static class SupervisorDependencyGate
         LatestResultsBySubtask(context).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
 
     /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
-    private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
+    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context)
     {
         var latest = new Dictionary<string, SupervisorAgentResult>();
 

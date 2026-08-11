@@ -3,10 +3,8 @@ using CodeSpace.Api.Extensions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
-using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
@@ -24,8 +22,6 @@ public class Startup
         Configuration = configuration;
         Environment = environment;
     }
-
-    private const string CorsPolicyName = "CodeSpaceSpa";
 
     public void ConfigureServices(IServiceCollection services)
     {
@@ -52,31 +48,10 @@ public class Startup
         // (stops receiving traffic) while its DB is unreachable, without being killed. Mapped anonymous below.
         services.AddHealthChecks().AddDbContextCheck<CodeSpaceDbContext>("db", tags: new[] { "ready" });
 
-        // CORS — needed when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099)
-        // instead of going through Vite's /api proxy. The Vite-proxy path is same-origin so CORS
-        // is a no-op there; this only matters when an operator wires the SPA at the API host.
-        //
-        // Allow-list comes from configuration (`Cors:AllowedOrigins`, array of strings). In
-        // Development we also accept the Vite dev port out of the box so the common
-        // "fresh clone → npm run dev → dotnet run" workflow doesn't need extra setup.
-        // The port (5180) is pinned by vite.config.ts server.port — keep these in sync.
-        services.AddCors(options => options.AddPolicy(CorsPolicyName, builder =>
-        {
-            var configured = Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
-            var origins = configured.ToList();
-
-            if (Environment.IsDevelopment())
-            {
-                if (!origins.Contains("http://localhost:5180")) origins.Add("http://localhost:5180");
-                if (!origins.Contains("http://127.0.0.1:5180")) origins.Add("http://127.0.0.1:5180");
-            }
-
-            builder
-                .WithOrigins(origins.ToArray())
-                .AllowAnyHeader()    // SPA sends Authorization + X-Team-Id + Content-Type
-                .AllowAnyMethod()    // GET/POST/PATCH/DELETE/OPTIONS preflight
-                .AllowCredentials(); // no cookies today, but keeps the door open for refresh-cookie flows
-        }));
+        // CORS — only matters when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099) rather
+        // than through Vite's same-origin /api proxy. The policy, its origins setting and the Development-only
+        // widening all live in CorsPolicyExtension.
+        services.AddCorsPolicy(Configuration, Environment);
 
         services.AddOpenApi();
         services.AddHttpContextAccessor();
@@ -94,13 +69,11 @@ public class Startup
         // generation, no connection-lifetime tuning, no transient resilience. Register the hardened, resilient named
         // clients (generous tunable budget + SocketsHttpHandler + retry/Retry-After) — shared with the resilience test.
         services.AddLlmHttpClients();
-        // Background janitor that sweeps expired oauth_pending_state rows every 5 minutes.
-        // ConsumeAsync drops a row on successful flow, but abandoned flows (user closed tab)
-        // would accumulate without this.
-        services.AddHostedService<OAuthStateCleanupHostedService>();
-        // Loud warning whenever a user still has the bootstrap password flag set — operators
-        // running with the committed default credentials see this every 30 minutes.
-        services.AddHostedService<UnrotatedBootstrapPasswordWarningHostedService>();
+        // Periodic background work is uniformly IRecurringJob (Rule 14) — there is deliberately no AddHostedService
+        // here. A hosted service runs its own timer on EVERY pod including the public API, outside the mediator
+        // pipeline and invisible to the dashboard; a recurring job runs only where a Hangfire server does (the Worker
+        // role), gets UnitOfWork/logging middleware, and is inspectable + manually triggerable. The OAuth-state
+        // janitor and the unrotated-bootstrap-password auditor both live in Jobs/RecurringJobs now.
         // Hangfire wiring. Storage (Postgres, own schema) + worker pool. The dashboard +
         // recurring-job registration happen in Configure() below via UseCodeSpaceHangfire
         // because RecurringJob.AddOrUpdate needs a live IServiceProvider.
@@ -111,7 +84,7 @@ public class Startup
         // before exiting — so a deploy doesn't sever short jobs mid-flight (they'd otherwise be
         // re-claimed ~5 min later via the invisibility timeout). The deployment's grace period MUST
         // be >= this (k8s: terminationGracePeriodSeconds); long agent runs that exceed it are
-        // recovered by the reconciler, not drained. Tunable via CODESPACE_SHUTDOWN_DRAIN_SECONDS.
+        // recovered by the reconciler, not drained. Configured as Shutdown:DrainSeconds.
         services.Configure<HostOptions>(o => o.ShutdownTimeout = ShutdownSettings.ResolveDrainTimeout());
 
         services.AddCustomAuthentication(Configuration, Environment);
@@ -132,7 +105,7 @@ public class Startup
         // CORS must run BEFORE auth — browsers send the preflight OPTIONS unauthenticated,
         // and without this the CORS middleware can't write the Access-Control-Allow-* headers
         // before auth rejects the request.
-        app.UseCors(CorsPolicyName);
+        app.UseCors(CorsPolicyExtension.PolicyName);
         app.UseAuthentication();
         app.UseAuthorization();
 

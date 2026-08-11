@@ -22,7 +22,6 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <see cref="ProfileOptOutPublishGuard"/> can ever fire without a resolved <c>Repository</c> row).
 /// </summary>
 [Trait("Category", "Unit")]
-[Collection("McpEndpointEnvMutation")]   // serialize with McpCatalogModeTests — both mutate CODESPACE_AGENT_MCP_ENDPOINT_ENABLED
 public sealed class AgentRunExecutorPushTests
 {
     private const long ClaimedEpoch = 7;
@@ -30,157 +29,73 @@ public sealed class AgentRunExecutorPushTests
     // ─── Branch-integration gate (per-run opt-in OR ambient flag — unlike push, integration stays env-gated) ──
 
     [Fact]
-    public void IntegrateBranchEnabledEnvVar_name_is_pinned() =>
-        // Renaming this silently turns on-disk integration OFF for any operator who enabled it via env (Rule 8).
-        AgentRunExecutor.IntegrateBranchEnabledEnvVar.ShouldBe("CODESPACE_AGENT_INTEGRATE_BRANCH_ENABLED");
+    public void On_disk_integration_is_on_by_default() =>
+        // K parallel agents that each publish their own branch and leave the human to merge them is the hand-back
+        // this arc removes. Flipping this back must be a visible decision, not a deployment variable.
+        AgentRunExecutor.IntegrateBranchByDefault.ShouldBeTrue();
 
     [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" true ", true)]   // trimmed
-    [InlineData(null, false)]
-    [InlineData("", false)]
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("garbage", false)]
-    public void IsIntegrateEnabled_is_true_only_for_explicit_enable_values(string? value, bool expected)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, value);
-
-            AgentRunExecutor.IsIntegrateEnabled().ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, original);
-        }
-    }
-
-    [Theory]
-    // ambient flag value × per-run opt-in → resolved gate. The OR shape mirrors push exactly: a per-run opt-in turns
-    // integration ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it.
-    [InlineData(null, false, false)]   // neither → off (byte-identical to today: the merge produces only the side-by-side fold)
-    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off
-    [InlineData("1", false, true)]     // ambient on → on regardless of the per-run signal
-    [InlineData("1", true, true)]
-    public void ShouldIntegrate_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool perRunOptIn, bool expected)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, envValue);
-
-            AgentRunExecutor.ShouldIntegrate(perRunOptIn).ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, original);
-        }
-    }
+    [InlineData(null, true)]    // no profile choice → the committed default
+    [InlineData(true, true)]    // the profile asked for it
+    [InlineData(false, false)]  // the profile declined — which it could not do while an ambient flag could force it on
+    public void ShouldIntegrate_takes_the_profile_choice_else_the_committed_default(bool? perRunChoice, bool expected) =>
+        AgentRunExecutor.ShouldIntegrate(perRunChoice).ShouldBe(expected);
 
     // ─── MCP endpoint gate (per-run opt-in OR ambient flag) ──────────────────
 
     [Fact]
     public void McpEndpointEnabledEnvVar_name_is_pinned() =>
-        // Renaming this silently turns the fabric OFF for any operator who enabled it via env (Rule 8).
-        AgentRunExecutor.McpEndpointEnabledEnvVar.ShouldBe("CODESPACE_AGENT_MCP_ENDPOINT_ENABLED");
+        // The full side-effecting catalog is served by default; a run narrows out of it explicitly.
+        AgentRunExecutor.FullToolCatalogByDefault.ShouldBeTrue();
 
     [Theory]
-    // ambient flag value × per-run opt-in → resolved gate. The gate is the OR of the two: a per-run opt-in can
-    // turn the fabric ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it.
-    [InlineData(null, null, false)]    // neither → off (byte-identical to today)
-    [InlineData(null, false, false)]   // explicit per-run false ≠ on (still defers to ambient)
-    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off — the benchmark cli-mcp case
-    [InlineData("1", null, true)]      // ambient on → on regardless of the per-run signal
-    [InlineData("1", false, true)]     // ambient wins (no per-run OFF override)
-    [InlineData("1", true, true)]
-    public void ShouldOpenMcpEndpoint_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool? perRunOptIn, bool expected)
+    // per-run choice → resolved gate. The per-run field now NARROWS as well as widens: false holds a run to the
+    // read-only slice, and null takes the committed default. There is no ambient environment flag any more.
+    [InlineData(null, true)]    // no per-run choice → the committed default (full)
+    [InlineData(true, true)]    // explicit opt-in → full
+    [InlineData(false, false)]  // explicit opt-OUT → read-only, which the benchmark cli-only arm needs
+    public void ShouldOpenMcpEndpoint_takes_the_per_run_choice_else_the_committed_default(bool? perRunChoice, bool expected)
     {
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, envValue);
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunChoice };
 
-            var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunOptIn };
-
-            AgentRunExecutor.ShouldOpenMcpEndpoint(task).ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, original);
-        }
+        AgentRunExecutor.ShouldOpenMcpEndpoint(task).ShouldBe(expected);
     }
 
     // ─── Health / graceful degradation: the boot readiness diagnostic ────────
 
     [Fact]
-    public void LogMcpProxyReadiness_warns_clearly_when_the_endpoint_is_on_but_the_proxy_is_missing()
+    public void LogMcpProxyReadiness_warns_clearly_when_the_proxy_is_missing()
     {
-        WithMcpEnv(endpoint: "true", proxyPath: "/nonexistent/codespace-mcp", () =>
+        // The endpoint opens for EVERY run, so a missing proxy makes every run tool-less — including the read-only
+        // get_context. The boot diagnostic has to say so at deploy time, not leave it to be discovered hours later.
+        WithMcpEnv(proxyPath: "/nonexistent/codespace-mcp", () =>
         {
             var logger = new CapturingLogger();
 
             AgentRunExecutor.LogMcpProxyReadiness(logger);
 
             var warning = logger.Entries.ShouldHaveSingleItem();
-            warning.Level.ShouldBe(LogLevel.Warning, customMessage: "a missing proxy under an enabled endpoint must be a clear fail-closed Warning, not silent");
+            warning.Level.ShouldBe(LogLevel.Warning, customMessage: "a missing proxy must be a clear fail-closed Warning, not silent");
             warning.Message.ShouldContain("/nonexistent/codespace-mcp", customMessage: "the diagnostic names the resolved path the operator must fix");
             warning.Message.ShouldContain("TOOL-LESS", customMessage: "the diagnostic states the consequence (runs fail closed to a tool-less run)");
         });
     }
 
     [Fact]
-    public void LogMcpProxyReadiness_confirms_at_information_when_the_endpoint_is_on_and_the_proxy_resolves()
+    public void LogMcpProxyReadiness_confirms_at_information_when_the_proxy_resolves()
     {
         // /bin/sh always exists on the POSIX CI; on Windows fall back to any present file so the test is cross-host.
         var presentBinary = OperatingSystem.IsWindows() ? Environment.ProcessPath! : "/bin/sh";
 
-        WithMcpEnv(endpoint: "true", proxyPath: presentBinary, () =>
-        {
-            var logger = new CapturingLogger();
-
-            AgentRunExecutor.LogMcpProxyReadiness(logger);
-
-            logger.Entries.ShouldHaveSingleItem().Level.ShouldBe(LogLevel.Information, customMessage: "a present proxy under an enabled endpoint is a confirming Information line");
-        });
-    }
-
-    [Fact]
-    public void LogMcpProxyReadiness_warns_when_the_proxy_is_missing_even_with_the_full_fabric_off()
-    {
-        // The endpoint now opens for EVERY run (read-only tools by default), so a missing proxy makes EVERY run tool-less
-        // — including the read-only get_context. The boot diagnostic must warn even when the full-fabric flag is off.
-        WithMcpEnv(endpoint: null, proxyPath: "/nonexistent/codespace-mcp", () =>
-        {
-            var logger = new CapturingLogger();
-
-            AgentRunExecutor.LogMcpProxyReadiness(logger);
-
-            var warning = logger.Entries.ShouldHaveSingleItem();
-            warning.Level.ShouldBe(LogLevel.Warning, customMessage: "the read-only endpoint opens by default, so a missing proxy is a fail-closed Warning even with the full fabric off");
-            warning.Message.ShouldContain("TOOL-LESS");
-        });
-    }
-
-    [Fact]
-    public void LogMcpProxyReadiness_confirms_at_information_with_the_proxy_present_and_the_full_fabric_off()
-    {
-        // The full-fabric flag off is the DEFAULT: read-only tools serve, the side-effecting fabric is opt-in. A present
-        // proxy is a confirming Information line (not silent) since the read-only endpoint will open.
-        var presentBinary = OperatingSystem.IsWindows() ? Environment.ProcessPath! : "/bin/sh";
-
-        WithMcpEnv(endpoint: null, proxyPath: presentBinary, () =>
+        WithMcpEnv(proxyPath: presentBinary, () =>
         {
             var logger = new CapturingLogger();
 
             AgentRunExecutor.LogMcpProxyReadiness(logger);
 
             var info = logger.Entries.ShouldHaveSingleItem();
-            info.Level.ShouldBe(LogLevel.Information);
-            info.Message.ShouldContain("opt-in", customMessage: "the line notes the full side-effecting fabric is opt-in per run when the ambient flag is off");
+            info.Level.ShouldBe(LogLevel.Information, customMessage: "a present proxy is a confirming Information line, not silence");
+            info.Message.ShouldContain("ENABLED by default", customMessage: "the line states the committed catalog posture an operator is running under");
         });
     }
 
@@ -208,20 +123,17 @@ public sealed class AgentRunExecutorPushTests
         }
     }
 
-    private static void WithMcpEnv(string? endpoint, string? proxyPath, Action body)
+    private static void WithMcpEnv(string? proxyPath, Action body)
     {
-        var prevEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
         var prevProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
         try
         {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, endpoint);
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPath);
 
             body();
         }
         finally
         {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, prevEndpoint);
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, prevProxy);
         }
     }

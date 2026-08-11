@@ -581,27 +581,33 @@ public static class SupervisorOutcome
         || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
 
     /// <summary>
-    /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4): its
-    /// per-unit acceptance grade objectively REJECTED it (<see cref="SupervisorAgentResult.AcceptancePassed"/> == false).
-    /// Shared by every door to the head — the merge (<c>RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge</c>),
-    /// the resolver's branch collection (<c>RealSupervisorActionExecutor.Resolve.cs</c>), AND the I3 publish gate's
-    /// already-published shortcut (<see cref="SupervisorPublishGate"/>) — so none of the three can ever drift on
-    /// which units a rejection withholds. An ungraded unit (<c>null</c> — no per-unit contract, or a deferred
-    /// multi-repo unit) is NOT withheld (byte-identical to pre-slice).
+    /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4; B2
+    /// widened): its per-unit acceptance grade objectively REJECTED it (<see cref="SupervisorAgentResult.AcceptancePassed"/>
+    /// == false), OR a human WAIVED its verification (<see cref="IsWaived"/> — WAIVED ≠ PASSED at every
+    /// objective-truth read, the FATAL-1 invariant: unverified work never reaches the reviewable head without its
+    /// own co-sign). Shared by every door to the head — the merge (<c>RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge</c>),
+    /// the resolver's branch collection (<c>RealSupervisorActionExecutor.Resolve.cs</c>), the I3 publish gate's
+    /// already-published shortcut (<see cref="SupervisorPublishGate"/>), AND the run-wide
+    /// <see cref="WithheldAgentRunIds"/> aggregate — so none of them can ever drift on which units are withheld.
+    /// An ungraded unit (<c>null</c> — no per-unit contract, or a deferred multi-repo unit) is NOT withheld
+    /// (byte-identical to pre-slice).
     /// </summary>
-    public static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
+    public static bool IsWithheldFromHead(SupervisorAgentResult result) => result.AcceptancePassed == false || IsWaived(result);
+
+    /// <summary>A human authorized FORGOING this unit's verification (the co-sign overlay's waive, B3) — carried DISTINCTLY from the pass/fail bool so no reader can launder it into a green. Waived is not rejected (nothing objectively failed) and not passed (nothing was verified).</summary>
+    public static bool IsWaived(SupervisorAgentResult result) => result.AcceptanceVerdict == Messages.Contracts.VerificationDisposition.Waived;
 
     /// <summary>
-    /// EVERY agent-run id this run's staging (spawn/retry/resolve) decisions folded an objectively REJECTED
-    /// (<see cref="IsAcceptanceRejected"/>) result for, across the WHOLE tape — DC-3's ledger-direct branch resolver
-    /// needs the run-wide set (not one frontier's), since it can surface a contributor from any earlier round that
-    /// never went through a later merge. Pure + replay-deterministic.
+    /// EVERY agent-run id this run's staging (spawn/retry/resolve) decisions folded a WITHHELD
+    /// (<see cref="IsWithheldFromHead"/> — rejected or waived) result for, across the WHOLE tape — DC-3's
+    /// ledger-direct branch resolver needs the run-wide set (not one frontier's), since it can surface a
+    /// contributor from any earlier round that never went through a later merge. Pure + replay-deterministic.
     /// </summary>
-    public static IReadOnlySet<Guid> RejectedAgentRunIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+    public static IReadOnlySet<Guid> WithheldAgentRunIds(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         priorDecisions
             .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => ReadAgentResults(d.OutcomeJson))
-            .Where(IsAcceptanceRejected)
+            .Where(IsWithheldFromHead)
             .Select(r => r.AgentRunId)
             .ToHashSet();
 

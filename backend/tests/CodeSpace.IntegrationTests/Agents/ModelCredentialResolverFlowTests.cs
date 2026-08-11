@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Settings;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
@@ -134,22 +135,15 @@ public class ModelCredentialResolverFlowTests
     {
         var teamId = await SeedTeamAsync();   // no team credential
 
-        var original = Environment.GetEnvironmentVariable(ModelCredentialResolver.OpenAIOperatorKeyEnvVar);
-        try
-        {
-            // CODESPACE_OPENAI_API_KEY is read by nothing else, so setting it here can't pollute parallel tests.
-            Environment.SetEnvironmentVariable(ModelCredentialResolver.OpenAIOperatorKeyEnvVar, "sk-operator-global");
+        // The operator key arrives through RuntimeSettings now — a late environment write is invisible to the
+        // already-bound configuration, so the test overrides the bound settings the way production never does.
+        using var settings = RuntimeSettings.Override(s => s with { OpenAIOperatorApiKey = "sk-operator-global" });
 
-            var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
 
-            resolved.ShouldNotBeNull();
-            resolved!.Provider.ShouldBe("OpenAI");
-            resolved.ApiKey.ShouldBe("sk-operator-global", "single-tenant last resort — superseded by any team credential");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(ModelCredentialResolver.OpenAIOperatorKeyEnvVar, original);
-        }
+        resolved.ShouldNotBeNull();
+        resolved!.Provider.ShouldBe("OpenAI");
+        resolved.ApiKey.ShouldBe("sk-operator-global", "single-tenant last resort — superseded by any team credential");
     }
 
     [Fact]

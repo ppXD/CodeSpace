@@ -36,4 +36,13 @@ public sealed record RequirementEnvelope
 
     /// <summary>The envelope's own schema version — a protocol change must be explicit, never a silent shape drift (the M1a suite-version discipline).</summary>
     public required string ContractSchemaVersion { get; init; }
+
+    /// <summary>
+    /// P1 (v4.3): WHICH unit of WHICH plan version staked this obligation — the same coordinates receipts already
+    /// carry, so the requirement side of the ledger finally names its unit instead of encoding it in the ref
+    /// string. Null on legacy rows and on stakes with no plan identity (null-omitted: a unit-less envelope
+    /// serializes byte-identical to before this field existed).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorkUnitRef? WorkUnit { get; init; }
 }

@@ -79,6 +79,40 @@ public sealed class SupervisorRetryEscalationFlowTests
     }
 
     [Fact]
+    public async Task A_contradiction_graded_by_an_amended_oracle_never_escalates()
+    {
+        // B5 (A2 ruling): the self-report never disagreed with the CO-SIGNED check, only with the dead one —
+        // escalating the retry's model tier on that stale verdict spends real money on evidence everyone agrees
+        // was wrong. The retry still runs (it consumes the amendment); only the tier bump is suppressed.
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId);
+        await SeedModelAsync(credentialId, "claude-haiku-4-5", ModelCapabilityTier.Basic);
+        await SeedModelAsync(credentialId, "claude-sonnet-4-5", ModelCapabilityTier.Strong);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var amend = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check invokes missing tooling",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "verify.sh" } },
+        });
+        var approvedCard = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = amend.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""",
+        };
+
+        var context = Context(runId, teamId,
+            Plan("s1"),
+            SpawnResult(2, "s1", Guid.NewGuid(), contradiction: "over_claim", model: "claude-haiku-4-5"),
+            approvedCard);
+
+        var (task, outcomeJson) = await ExecuteRetryAsync(context, "s1");
+
+        task.Model.ShouldBeNull("the stale contradiction is suppressed — no tier bump, the ordinary resolution stands");
+        SupervisorOutcome.ReadEscalation(outcomeJson).ShouldBeNull();
+    }
+
+    [Fact]
     public async Task An_ordinary_retry_with_no_trigger_never_escalates()
     {
         var teamId = await SeedTeamAsync();

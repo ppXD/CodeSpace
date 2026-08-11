@@ -34,21 +34,29 @@ public static class SupervisorUnitContract
     /// NA rows stay ServerPolicy regardless — the EXEMPTION is the server's policy whoever authored the contract.
     /// Pure so the whole table pins without a database.
     /// </summary>
-    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units, Messages.Contracts.ContractAuthority requiredAuthority)
+    /// <summary>The acceptance requirement ref for one unit — THE literal <see cref="BuildStakedRequirements"/> stakes and the dispatch stamp joins its revision on; one builder so the two can never drift.</summary>
+    public static string AcceptanceRef(string subtaskId) => $"acceptance:{subtaskId}";
+
+    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units, Messages.Contracts.ContractAuthority requiredAuthority, (Guid WorkPlanId, int Version)? planRef = null)
     {
         var requirements = new List<Messages.Contracts.RequirementEnvelope>();
 
         foreach (var (subtaskId, contractHash, owesDelivery) in units)
         {
-            requirements.Add(Stake($"acceptance:{subtaskId}", Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true, requiredAuthority));
-            requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery, requiredAuthority));
-            requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery, requiredAuthority));
+            // P1 (v4.3): a caller that knows its plan identity stamps the SAME WorkUnitRef coordinates receipts
+            // carry, so both sides of the ledger name their unit. A plan-less caller (legacy tests, a unit-tier
+            // context) stakes exactly as before — the envelope stays byte-identical without the field.
+            var workUnit = planRef is { } plan ? new Messages.Contracts.WorkUnitRef { WorkPlanId = plan.WorkPlanId, PlanVersion = plan.Version, UnitId = subtaskId, ContractHash = contractHash } : null;
+
+            requirements.Add(Stake(AcceptanceRef(subtaskId), Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true, requiredAuthority, workUnit));
+            requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery, requiredAuthority, workUnit));
+            requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery, requiredAuthority, workUnit));
         }
 
         return requirements;
     }
 
-    private static Messages.Contracts.RequirementEnvelope Stake(string requirementRef, string kind, string contractHash, bool required, Messages.Contracts.ContractAuthority requiredAuthority) => new()
+    private static Messages.Contracts.RequirementEnvelope Stake(string requirementRef, string kind, string contractHash, bool required, Messages.Contracts.ContractAuthority requiredAuthority, Messages.Contracts.WorkUnitRef? workUnit) => new()
     {
         RequirementRef = requirementRef,
         Kind = kind,
@@ -56,6 +64,7 @@ public static class SupervisorUnitContract
         Authority = required ? requiredAuthority : Messages.Contracts.ContractAuthority.ServerPolicy,
         SpecHash = contractHash,
         ContractSchemaVersion = "1",
+        WorkUnit = workUnit,
     };
 
     public static string Hash(SupervisorPlannedSubtask planned, string? effectiveInstruction, Guid? repositoryOverride) =>

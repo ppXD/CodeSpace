@@ -29,9 +29,9 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
     {
         if (BubblewrapSandbox.Available is null)
         {
-            // The validation environment (Docker/Linux) sets CODESPACE_REQUIRE_SANDBOX=1 — there, an unavailable
+            // The validation environment (Docker/Linux) sets Sandbox__RequireConfinement=true — there, an unavailable
             // sandbox is a HARD FAILURE, so this confinement assertion can never silently no-op into a green run.
-            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove confinement here");
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove confinement here");
             return;
         }
 
@@ -73,7 +73,7 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
     {
         if (BubblewrapSandbox.Available is null)
         {
-            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns)");
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns)");
             return;
         }
 
@@ -101,7 +101,7 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
     {
         if (BubblewrapSandbox.Available is null)
         {
-            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove the capability drop here");
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove the capability drop here");
             return;
         }
 

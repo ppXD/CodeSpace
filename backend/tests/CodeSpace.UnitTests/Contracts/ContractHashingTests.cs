@@ -150,6 +150,30 @@ public class ContractHashingTests
     }
 
     [Fact]
+    public void A_plan_aware_stake_stamps_the_same_unit_coordinates_receipts_carry()
+    {
+        // P1 (v4.3): the requirement side of the ledger names its unit — WorkPlanId/PlanVersion/UnitId plus the
+        // contract hash, mirroring the receipt's own WorkUnitRef so a future revision↔receipt join is symmetric.
+        var planId = Guid.NewGuid();
+
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true) }, ContractAuthority.ModelProposal, (planId, 3));
+
+        rows.Count.ShouldBe(3);
+        rows.ShouldAllBe(r => r.WorkUnit != null && r.WorkUnit.WorkPlanId == planId && r.WorkUnit.PlanVersion == 3 && r.WorkUnit.UnitId == "w" && r.WorkUnit.ContractHash == "h1");
+    }
+
+    [Fact]
+    public void A_plan_less_stake_serializes_byte_identical_to_the_pre_WorkUnit_shape()
+    {
+        // Null-omitted: envelopes staked with no plan identity (legacy callers, unit-tier contexts) must not
+        // change bytes — envelope JSON equality is the store's own no-amendment/no-revision discriminator.
+        var row = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true) }, ContractAuthority.ModelProposal).First();
+
+        row.WorkUnit.ShouldBeNull();
+        System.Text.Json.JsonSerializer.Serialize(row, CodeSpace.Core.Services.Agents.AgentJson.Options).ShouldNotContain("workUnit");
+    }
+
+    [Fact]
     public void A_blank_override_falls_back_to_the_planned_instruction()
     {
         var planned = Planned("do it");

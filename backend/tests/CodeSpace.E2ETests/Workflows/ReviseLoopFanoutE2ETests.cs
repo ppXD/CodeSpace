@@ -69,8 +69,6 @@ public sealed class ReviseLoopFanoutE2ETests
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
         if (!await GitAvailableAsync()) return;    // real git required for clone/push/grade
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
         using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorContract = true;
 
         try
@@ -150,7 +148,6 @@ public sealed class ReviseLoopFanoutE2ETests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
             using var reset = _fixture.BeginScope();
             reset.Resolve<WorkPlanPlanScript>().Reset();
             reset.Resolve<CriticReviewScript>().Reset();

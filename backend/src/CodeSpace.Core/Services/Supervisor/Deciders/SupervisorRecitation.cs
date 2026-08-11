@@ -26,6 +26,12 @@ public static class SupervisorRecitation
 
         if (subtasks.Count == 0) return null;
 
+        // B3: the authoring lint below validates the EFFECTIVE spec — an approved amendment supersedes the plan's
+        // broken original (nagging about superseded bytes would tell the model to re-plan a check a human already
+        // fixed), and a waived subtask carries no oracle to lint at all.
+        var effective = SupervisorAcceptanceOverlay.Resolve(priorDecisions,
+            subtasks.Where(s => s.Acceptance is not null).ToDictionary(s => s.Id, s => s.Acceptance!));
+
         var builder = new StringBuilder(Header);
         var unfinished = new List<string>();
 
@@ -39,7 +45,8 @@ public static class SupervisorRecitation
             // never got): a half-authored acceptance spec (judge without rubric, schema check without schema) can
             // NEVER pass at grade time — telling the model NOW turns a paid clone + a fail-closed verdict + a retry
             // temptation into one re-plan. Pure over the authored spec; a valid/absent spec adds nothing.
-            if (subtask.Acceptance is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
+            if (!effective.WaivedSubtaskIds.Contains(subtask.Id)
+                && effective.BySubtask.GetValueOrDefault(subtask.Id) is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
                 builder.Append($" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check.");
 
             // An under-claim (P4-1) reads its own guidance line ("do not retry, merge it") — it is objectively DONE,
@@ -123,6 +130,8 @@ public static class SupervisorRecitation
 
     private static string Describe(SupervisorAgentResult result) => result.Status switch
     {
+        // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
+        _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
         "Succeeded" when result.AcceptancePassed == true => "done (accepted)",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).

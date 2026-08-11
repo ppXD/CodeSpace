@@ -475,6 +475,20 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         if (postBound != null) return GateForcedStop(context, postBound);
 
+        // B5 (MAJOR-5, retry-after-amend): an APPROVED spec amendment must be CONSUMED — the fold's already-graded
+        // guard means it only ever affects a future attempt, so a stop before that attempt terminalizes on a
+        // verdict the DEAD oracle graded, silently dropping what a human co-signed. The stop is rewritten into the
+        // retry the run owes (the ServerAuthoredMerge precedent: a correctness floor, not a model choice) — one
+        // substitution by construction, since the staged retry consumes the obligation whatever its outcome.
+        // Bounds run FIRST (above): an over-cap run is never forced to spend into its own cap — its forced stop
+        // NAMES the dropped obligation instead (GateForcedStop).
+        if (decision.Kind == SupervisorDecisionKinds.Stop && SupervisorAmendObligation.FirstOutstanding(context) is { } owedSubtask)
+        {
+            _logger.LogInformation("Supervisor stop at turn {Turn} on node {NodeId} rewritten into the retry it owes: subtask {SubtaskId} carries an approved-but-unconsumed oracle amendment", context.TurnNumber, context.NodeId, owedSubtask);
+
+            return ServerAuthoredRetry(owedSubtask);
+        }
+
         // I3 (publish-or-park): a stop that would terminalize accepted-but-unpublished work is rejected and
         // substituted BEFORE governance — the substitution (a server-authored merge, or an ask_human park) is not
         // a model choice governance should evaluate, it is the server enforcing a correctness floor.
@@ -502,6 +516,18 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     private SupervisorDecision GateForcedStop(SupervisorTurnContext context, string reason, string? detail = null)
     {
+        // B5 (A2 ruling): a bound may legitimately stop a run before it consumed an approved amendment — the server
+        // never spends into a tripped cap — but the drop must be NAMED, never silent: the stop's detail carries the
+        // orphaned obligation so the operator (and the journal) see exactly what the human co-signed for nothing.
+        if (SupervisorAmendObligation.FirstOutstanding(context) is { } owedSubtask)
+        {
+            var orphaned = $"an approved oracle amendment for subtask '{owedSubtask}' was never consumed — the bound stopped the run before its retry could re-grade under the co-signed check";
+
+            detail = detail is null ? orphaned : $"{detail} | {orphaned}";
+
+            _logger.LogWarning("Supervisor forced stop ({Reason}) at turn {Turn} on node {NodeId} drops an unconsumed amendment for subtask {SubtaskId}", reason, context.TurnNumber, context.NodeId, owedSubtask);
+        }
+
         var stop = ForcedStop(reason, detail);
 
         // requireSummary: false — a bound authored this stop, not the model; its recorded reason IS the explanation.
@@ -520,8 +546,8 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         return substituted;
     }
 
-    /// <summary>An UNANSWERED card from either stop gate (I3 publish / DC-2b delivery, recognized by their pinned question prefixes) among the decided prior decisions — the degraded-ask signature the fuse above keys on.</summary>
-    private static bool HasUnansweredGateCard(SupervisorTurnContext context) =>
+    /// <summary>An UNANSWERED card from either stop gate (I3 publish / DC-2b delivery, recognized by their pinned question prefixes) among the decided prior decisions — the degraded-ask signature the fuse above keys on. Internal so the I3 E2E audit models the fuse with the PRODUCTION predicate instead of a driftable mirror.</summary>
+    internal static bool HasUnansweredGateCard(SupervisorTurnContext context) =>
         context.PriorDecisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman
             && SupervisorOutcome.ReadAskHumanAnswer(d.OutcomeJson) is null
             && ReadAskQuestion(d.PayloadJson) is { } question

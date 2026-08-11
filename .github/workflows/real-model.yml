@@ -22,6 +22,10 @@ permissions:
 
 env:
   DOTNET_NOLOGO: 'true'
+  # The DI container fail-fasts without a Variables master key outside Development (the settings arc's
+  # guard). CI hosts get the SAME committed local-dev test key docker-compose.yml already carries —
+  # a committed value, not a toggle; production deployments still supply their own real key.
+  CODESPACE_VARIABLE_MASTER_KEY: 'bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE='
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
 

@@ -88,8 +88,8 @@ public static class SupervisorPublishGate
         // AcceptancePassed==false is excluded even when pushed: a raw push happens BEFORE the per-unit grade folds
         // (AgentRunExecutor pushes at execution time; FoldUnitAcceptanceGradeAsync grades later), so a REJECTED unit
         // can still show up as Pushed in the ledger — the same "局部綠≠整合綠" bar every other door to the head already
-        // enforces (SupervisorOutcome.IsAcceptanceRejected, shared with the merge + resolver doors) must apply here too.
-        if (frontierResults.Any(r => !SupervisorOutcome.IsAcceptanceRejected(r) && context.PublishedAgentRunIds.Contains(r.AgentRunId)))
+        // enforces (SupervisorOutcome.IsWithheldFromHead, shared with the merge + resolver doors) must apply here too.
+        if (frontierResults.Any(r => !SupervisorOutcome.IsWithheldFromHead(r) && context.PublishedAgentRunIds.Contains(r.AgentRunId)))
             return !requireSummary || HasSummary(decision) ? null : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
         if (attemptedMerge is null) return ServerAuthoredMerge();   // first attempt — auto-integrate-at-stop

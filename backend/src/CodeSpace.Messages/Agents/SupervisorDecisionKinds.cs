@@ -55,6 +55,17 @@ public static class SupervisorDecisionKinds
     public const string Publish = "publish";
 
     /// <summary>
+    /// B1 (amend-acceptance arc) — propose to rewrite or waive ONE subtask's acceptance oracle, pending a human
+    /// co-sign. NEVER persists as its own kind: the projector immediately rewrites it into an <see cref="AskHuman"/>-kind
+    /// decision carrying the amend marker + the structured proposal (<c>SupervisorAmendAcceptance</c>), so the
+    /// wait/token/fold/crash-repark machinery is inherited verbatim and <see cref="ClosesTurn"/> needs no new arm
+    /// (the tape only ever sees <see cref="AskHuman"/>). Deliberately ABSENT from the model-facing decision schema
+    /// until the co-sign overlay lands (B3) — schema-hidden beats flag-OFF: the verb cannot be emitted at all, not
+    /// merely ignored.
+    /// </summary>
+    public const string AmendAcceptance = "amend_acceptance";
+
+    /// <summary>
     /// Whether a verb STAGES real <c>agent.run</c> child runs (<see cref="Spawn"/> / <see cref="Retry"/> /
     /// <see cref="Resolve"/> — all create agent runs + park on them, recording <c>{agentRunIds, agentCount}</c>).
     /// The SINGLE classifier every "did this verb produce agents" path shares — the rehydrate folds (spend / total

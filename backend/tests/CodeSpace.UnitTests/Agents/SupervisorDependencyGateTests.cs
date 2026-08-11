@@ -202,6 +202,28 @@ public class SupervisorDependencyGateTests
     }
 
     [Fact]
+    public void A_waived_producer_never_satisfies_its_dependents()
+    {
+        // B2 (FATAL-1): a dependent must never be staged on UNVERIFIED work — a waive is a human's forgo-verification,
+        // not a verification. The blast radius of the old null-passes-all read: a waived producer silently unblocked
+        // its dependents exactly like a passed one.
+        var waivedProducer = Spawn(("a", "Succeeded", null));
+        var waived = SupervisorOutcome.ReadAgentResults(waivedProducer.OutcomeJson).Single() with { AcceptanceVerdict = CodeSpace.Messages.Contracts.VerificationDisposition.Waived };
+        waivedProducer = waivedProducer with { OutcomeJson = SupervisorOutcome.FoldAgentResults(waivedProducer.OutcomeJson, new[] { waived }) };
+
+        var ctx = Context(Plan(("a", null), ("b", new[] { "a" })), waivedProducer);
+
+        var (ready, blocked) = SupervisorDependencyGate.Frontier(ctx);
+
+        ready.ShouldBe(new[] { "a" }, "a waived unit is NOT done — it re-enters the ready frontier (a retry can still earn a genuine verdict)");
+        blocked.Single().Id.ShouldBe("b");
+
+        var (admitted, deferred) = SupervisorDependencyGate.Partition(ctx, new[] { "b" });
+        admitted.ShouldBeEmpty();
+        deferred.ShouldBe(new[] { "b" }, "spawn requests for the dependent are deferred, same as an unrun producer");
+    }
+
+    [Fact]
     public void The_frontier_is_empty_for_a_flat_plan()
     {
         var (ready, blocked) = SupervisorDependencyGate.Frontier(Context(Plan(("a", null), ("b", null))));

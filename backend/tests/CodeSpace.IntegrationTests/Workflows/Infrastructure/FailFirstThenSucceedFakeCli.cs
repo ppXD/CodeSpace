@@ -64,7 +64,7 @@ public sealed class FailFirstThenSucceedFakeCli : IDisposable
         "goal=\"\"\n" +
         "for goal in \"$@\"; do :; done\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
-        "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_')\n" +
+        "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "case \"$goal\" in\n" +
         "  *" + RetryMarker + "*) ;;                                  # a retried run always succeeds (falls through)\n" +
         "  *" + FailMarker + "*)\n" +
@@ -73,7 +73,7 @@ public sealed class FailFirstThenSucceedFakeCli : IDisposable
         "    exit 1\n" +
         "    ;;\n" +
         "esac\n" +
-        "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\"\n" +
+        "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\" || exit 90\n" +
         "printf '{\"type\":\"agent_reasoning\",\"message\":\"Editing for: %s\"}\\n' \"$esc\"\n" +
         "printf '{\"type\":\"agent_message\",\"message\":\"" + SummaryPrefix + "%s\"}\\n' \"$esc\"\n" +
         "printf '{\"type\":\"task_complete\",\"message\":\"completed\"}\\n'\n" +

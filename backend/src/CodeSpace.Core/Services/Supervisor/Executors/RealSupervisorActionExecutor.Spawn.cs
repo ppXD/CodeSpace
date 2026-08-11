@@ -289,7 +289,13 @@ public sealed partial class RealSupervisorActionExecutor
     {
         if (context.MaxCostUsd is { } cap && context.RunSpendUsd > cap) return (builtTask, null);
 
-        var reason = SupervisorRetryEscalation.EscalationReason(priorResult?.Contradiction, context.NoProgressDecisions, context.MaxNoProgressDecisions);
+        // B5 (A2 ruling): a contradiction graded by an oracle a human has since AMENDED is stale evidence — the
+        // self-report never disagreed with the CO-SIGNED check, only with the dead one. Escalating the retry's
+        // model tier on it would spend real money on a verdict everyone agrees was wrong. The no-progress
+        // proximity trigger stays live (it reads the run's cadence, not the dead oracle's verdict).
+        var contradiction = SupervisorAmendObligation.IsOutstanding(context, builtTask.SubtaskId) ? null : priorResult?.Contradiction;
+
+        var reason = SupervisorRetryEscalation.EscalationReason(contradiction, context.NoProgressDecisions, context.MaxNoProgressDecisions);
 
         if (reason is null) return (builtTask, null);
 
@@ -467,13 +473,22 @@ public sealed partial class RealSupervisorActionExecutor
             var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
                 .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
                 .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
-                Messages.Contracts.ContractAuthority.ModelProposal);
+                Messages.Contracts.ContractAuthority.ModelProposal, planRef);
 
             if (requirements.Count > 0)
             {
                 try
                 {
-                    await _contracts.UpsertRequirementsAsync(context.SupervisorRunId, context.TeamId, requirements, cancellationToken).ConfigureAwait(false);
+                    var revisions = await _contracts.UpsertRequirementsAsync(context.SupervisorRunId, context.TeamId, requirements, cancellationToken).ConfigureAwait(false);
+
+                    // P1 (v4.3, receipt↔revision binding): the attempt is dispatched UNDER the acceptance revision
+                    // this very stake produced — or, on a crash-replayed staging, the identical one the idempotent
+                    // upsert left standing — stamped BEFORE the agent rows are created so every receipt the attempt
+                    // ever mints inherits the binding through its WorkUnitRef. A reclaimed orphan keeps its crashed
+                    // pass's persisted stamp, which the replayed no-op stake resolves to the same revision.
+                    tasks = tasks.Select(t => t.Task.WorkUnit is { } wu && t.Task.SubtaskId is { Length: > 0 } id && revisions.TryGetValue((SupervisorUnitContract.AcceptanceRef(id), Messages.Contracts.ContractKinds.Acceptance), out var revision)
+                        ? (t.Task with { WorkUnit = wu with { RequirementRevision = revision } }, t.Spec)
+                        : t).ToList();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -518,10 +533,14 @@ public sealed partial class RealSupervisorActionExecutor
 
         var outcome = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Count, escalation }, AgentJson.Options);
 
-        _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s))", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count));
+        _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s)); units: {Units}", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count), DescribeStagedUnits(tasks));
 
         return SupervisorExecution.ParkedOnAgents(outcome, agentRunIds.Count);
     }
+
+    /// <summary>The plan-local unit ids this staging dispatches, comma-joined ("s1,s2"); a task with no subtask key (a free-form spawn under no plan) reads "(unkeyed)". Pure + pinned — the other half of the plan log's edges↔units join.</summary>
+    internal static string DescribeStagedUnits(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks) =>
+        string.Join(",", tasks.Select(t => string.IsNullOrEmpty(t.Task.SubtaskId) ? "(unkeyed)" : t.Task.SubtaskId));
 
     /// <summary>The crash-recovery correction for <see cref="StageAgentsAndParkAsync"/>: reads the reclaimed orphan's OWN persisted <see cref="AgentTask.Model"/> back off its TaskJson — never re-derived — and stamps it as the escalation's <c>To</c>, since that row's dispatch was fixed by the crashed pass, not by this replay. Falls back to the original guess only if the row/model can't be read (best-effort, never throws) — a slightly-stale note is still better than a hard failure over purely informational metadata.</summary>
     private async Task<SupervisorRetryEscalationOutcome> ReconcileEscalationWithDispatchedModelAsync(SupervisorRetryEscalationOutcome escalation, Guid dispatchedAgentRunId, CancellationToken cancellationToken)
@@ -597,8 +616,8 @@ public sealed partial class RealSupervisorActionExecutor
         });
     }
 
-    /// <summary>Fold the most recent prior <c>plan</c> decision's subtasks into a lookup so spawn/retry can build each agent's instruction from the plan-local id.</summary>
-    private static IReadOnlyDictionary<string, SupervisorPlannedSubtask> ResolvePlannedSubtasks(SupervisorTurnContext context)
+    /// <summary>Fold the most recent prior <c>plan</c> decision's subtasks into a lookup so spawn/retry can build each agent's instruction from the plan-local id. B3: each subtask's <c>Acceptance</c> is the EFFECTIVE spec through the co-sign overlay — the SAME chokepoint the fold grades by, so an approved amendment that ADDS a spec forces the push opt-in on (F4) for the very retry that will be graded against it, and a waived subtask stops forcing it.</summary>
+    internal static IReadOnlyDictionary<string, SupervisorPlannedSubtask> ResolvePlannedSubtasks(SupervisorTurnContext context)
     {
         var lookup = new Dictionary<string, SupervisorPlannedSubtask>();
 
@@ -612,6 +631,16 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var subtask in plan.Subtasks)
             lookup[subtask.Id] = subtask;
+
+        var effective = SupervisorAcceptanceOverlay.Resolve(context.PriorDecisions,
+            lookup.Where(kv => kv.Value.Acceptance is not null).ToDictionary(kv => kv.Key, kv => kv.Value.Acceptance!));
+
+        foreach (var id in lookup.Keys.ToList())
+        {
+            var spec = effective.WaivedSubtaskIds.Contains(id) ? null : effective.BySubtask.GetValueOrDefault(id);
+
+            if (!ReferenceEquals(lookup[id].Acceptance, spec)) lookup[id] = lookup[id] with { Acceptance = spec };
+        }
 
         return lookup;
     }

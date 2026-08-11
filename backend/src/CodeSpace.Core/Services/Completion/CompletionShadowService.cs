@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -56,12 +57,11 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         // settling a manifest, a grade landing late — could never move the record. A run's ledger keeps moving after
         // it terminalizes, so "assessed once" was being read as "assessed correctly".
         //
-        // Bounded by TIME rather than by assessment count. Widening the first query instead would make every sweep
-        // re-examine the newest batchSize terminal runs forever while older ones were never reached again — the
-        // exact starvation this split avoids. A precise staleness predicate (one indexed comparison instead of a
-        // window) needs a monotonic per-run ledger revision, which is P2's work and not worth pre-empting here.
-        var revisitAfter = DateTimeOffset.UtcNow - RevisitWindow;
-
+        // The second pass is the P2 precise predicate the original window stood in for: ONE indexed comparison —
+        // the run's ledger-head version moved past what its latest assessment recorded. Exact in both directions
+        // the 24h CompletedAt window was not: no re-examining every recent run each sweep, and no silent horizon
+        // (a manifest settling on day 3 used to be out of reach forever). A latest record with a NULL version
+        // (pre-slice) compares stale once and converges; a run whose head never moved is not a candidate at all.
         var unassessed = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.CompletionPolicyVersion != null
                         && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
@@ -74,8 +74,9 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var revisit = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.CompletionPolicyVersion != null
                         && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
-                        && r.CompletedAt != null && r.CompletedAt >= revisitAfter
-                        && _db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id))
+                        && _db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id)
+                        && _db.CompletionLedgerHead.Any(h => h.WorkflowRunId == r.Id
+                            && h.Version > (_db.CompletionAssessmentRecord.Where(a => a.WorkflowRunId == r.Id).Max(a => a.LedgerVersion) ?? -1)))
             .OrderByDescending(r => r.CompletedAt)
             .Take(batchSize)
             .Select(r => new { r.Id, r.TeamId, r.Status })
@@ -97,14 +98,6 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
 
         return appended;
     }
-
-    /// <summary>
-    /// How long after a run terminalizes its assessment stays open to revision. Evidence does arrive late — a
-    /// reconciler settling a manifest, a grade folding after the terminal — and a window is what makes revisiting
-    /// affordable without re-examining every terminal run this deployment has ever produced. A committed value, not
-    /// a toggle: changing how long the protocol keeps looking is a code change with a diff, never an operator knob.
-    /// </summary>
-    public static readonly TimeSpan RevisitWindow = TimeSpan.FromHours(24);
 
     private async Task<bool> RecordAsync(Guid runId, Guid teamId, WorkflowRunStatus status, CancellationToken cancellationToken)
     {
@@ -140,6 +133,20 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var handoffReachable = await _handoff.IsHandoffReachableAsync(runId, teamId, receipts, cancellationToken).ConfigureAwait(false);
         var wouldBe = TerminalDecider.Decide(composed.Assessment, handoffReachable);
 
+        // P1 (fail-close mirror): the authority refuses a CleanSuccess built over integrity violations, so the
+        // recorded would-be decision must apply the SAME predicate — parity evidence that says "would have been
+        // CleanSuccess" for a run Enforced would in fact park is evidence about a rule that doesn't exist.
+        if (wouldBe == TerminalDecision.CleanSuccess)
+        {
+            var requirements = await _contracts.ListRequirementsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 }) wouldBe = TerminalDecision.Park;
+        }
+
+        // Captured AFTER composing, on purpose (the A2 discipline): ComposeAsync write-throughs receipts, so a
+        // pre-compose snapshot would leave every later sweep seeing a difference that was its own doing.
+        var after = await CompletionLedgerWatermarks.CaptureAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false);
+
         _db.CompletionAssessmentRecord.Add(new CompletionAssessmentRecord
         {
             Id = Guid.NewGuid(),
@@ -153,10 +160,8 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             // The legacy ladder's verdict AT COMPOSE TIME — the delta query's other half.
             LegacyIsSolved = UnattendedDeliveryScorecardService.IsSolved(manifests, status, degradedStop),
             WouldBeTerminalDecision = wouldBe.ToString(),
-            // Captured AFTER composing, on purpose. ComposeAsync is NOT read-only — it write-throughs the receipts
-            // it derives from the tape, so storing the pre-compose snapshot would leave every later sweep seeing a
-            // difference that was its own doing, and the gate would never skip anything.
-            LedgerWatermarkJson = JsonSerializer.Serialize(await CompletionLedgerWatermarks.CaptureAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false), AgentJson.Options),
+            LedgerWatermarkJson = JsonSerializer.Serialize(after, AgentJson.Options),
+            LedgerVersion = after.LedgerVersion,
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });

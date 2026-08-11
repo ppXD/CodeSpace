@@ -124,6 +124,96 @@ public sealed class CompletionTerminalAuthorityFlowTests
         arbitration.Status.ShouldBe(WorkflowRunStatus.Success);
     }
 
+    // ── P1 fail-close: a CleanSuccess built over integrity violations parks instead ──
+
+    [Fact]
+    public async Task An_enforced_success_claim_over_an_identity_less_receipt_parks()
+    {
+        // The FULL CleanSuccess predicate holds — and one identity-less receipt was folded into it under the
+        // admission's Shadow tolerance. Lock Clause 3 names that Enforced-fatal; this is the refusal existing.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+        await AppendIdentitylessReceiptAsync(runId, teamId, "acceptance:s1");
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Suspended, "evidence with no WorkUnitRef cannot back an Enforced Success — park for a human, never a silent green");
+        arbitration.Decision.ShouldBe(TerminalDecision.Park);
+        arbitration.Reason!.ShouldContain("integrity violations");
+        arbitration.Reason!.ShouldContain("WorkUnitRef");
+    }
+
+    [Fact]
+    public async Task An_enforced_success_claim_over_an_unsupported_requirement_schema_parks()
+    {
+        // The fold itself is untouched (the reducer never reads the version) — the VOCABULARY is what cannot be
+        // verified: an obligation staked in a schema this code does not speak can never back a Success.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance, schemaVersion: "2038-draft");
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        arbitration.Decision.ShouldBe(TerminalDecision.Park);
+        arbitration.Reason!.ShouldContain("2038-draft");
+    }
+
+    [Fact]
+    public async Task A_failure_over_tainted_evidence_still_stamps_failure_never_park()
+    {
+        // Only the SUCCESS claim is gated: failure is already the conservative direction, and re-labeling an
+        // honest failure as a park would hide the failure signal behind a review queue.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        await SeedGradedTapeAsync(runId, teamId, acceptancePassed: false);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await AppendIdentitylessReceiptAsync(runId, teamId, "acceptance:s1");
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Failure);
+        arbitration.Decision.ShouldBe(TerminalDecision.HonestFailure);
+    }
+
+    [Fact]
+    public async Task The_shadow_would_be_decision_mirrors_the_success_fail_close()
+    {
+        // Parity evidence exists to predict what Enforced WILL do — a recorded "would have been CleanSuccess" for
+        // a run the authority would in fact refuse is evidence about a rule that doesn't exist. Same seeding as
+        // the identity-less park above, driven through the shadow sweep instead of the authority.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Shadow");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+        await AppendIdentitylessReceiptAsync(runId, teamId, "acceptance:s1");
+        await FlipRunToAsync(runId, WorkflowRunStatus.Success);
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
+
+        var record = await scope.Resolve<CodeSpaceDbContext>().CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+        record.WouldBeTerminalDecision.ShouldBe(TerminalDecision.Park.ToString(), "the shadow's would-be decision must apply the authority's OWN fail-close, or the parity evidence lies about Enforced");
+    }
+
     [Fact]
     public async Task Watermarks_bind_the_arbitration_to_the_ledgers_it_read()
     {
@@ -292,12 +382,33 @@ public sealed class CompletionTerminalAuthorityFlowTests
         }, CancellationToken.None);
     }
 
-    private async Task StakeAsync(Guid runId, Guid teamId, string requirementRef, string kind)
+    private async Task StakeAsync(Guid runId, Guid teamId, string requirementRef, string kind, string schemaVersion = "1")
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
         {
-            new RequirementEnvelope { RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+            new RequirementEnvelope { RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = schemaVersion },
         }, CancellationToken.None);
+    }
+
+    /// <summary>A Passed, EVIDENCED receipt with NO WorkUnitRef — the exact shape admission flags MissingIdentity yet folds under Shadow tolerance. Evidenced on purpose: an unevidenced pass would be capped at InfraUnknown and the scenario would stop being a CleanSuccess for reasons unrelated to identity.</summary>
+    private async Task AppendIdentitylessReceiptAsync(Guid runId, Guid teamId, string requirementRef)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<ICompletionContractStore>().AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+        {
+            RequirementRef = requirementRef, Kind = ContractKinds.Acceptance, AttemptId = Guid.NewGuid(), WorkUnit = null,
+            Disposition = VerificationDisposition.Passed, Authority = ContractAuthority.ServerPolicy, EvidenceRef = Guid.NewGuid(), ObservedAt = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+    }
+
+    private async Task FlipRunToAsync(Guid runId, WorkflowRunStatus status)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.Status = status;
+        run.CompletedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
     }
 }

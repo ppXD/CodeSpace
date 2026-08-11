@@ -27,13 +27,6 @@ public static class BubblewrapSandbox
     /// <summary>Operator override for the bwrap binary (absolute path or a PATH name). Pinned by a test (Rule 8).</summary>
     public const string CommandEnvVar = "CODESPACE_BWRAP_PATH";
 
-    /// <summary>
-    /// Set to <c>1</c>/<c>true</c> to FAIL-CLOSED: when sandboxing is unavailable the runner refuses to launch the
-    /// agent unconfined (rather than silently degrading). A multi-tenant / untrusted-input deployment sets this so a
-    /// missing primitive surfaces as a failed run, never a silent isolation hole. Pinned by a test (Rule 8).
-    /// </summary>
-    public const string RequireSandboxEnvVar = "CODESPACE_REQUIRE_SANDBOX";
-
     private const string DefaultCommand = "bwrap";
 
     private const int ProbeTimeoutMs = 5000;
@@ -54,8 +47,8 @@ public static class BubblewrapSandbox
     /// <summary>The resolved <c>bwrap</c> path when this host can confine (Linux + bwrap + working userns), else <c>null</c>.</summary>
     public static string? Available => LazyAvailable.Value;
 
-    /// <summary>Whether this deployment mandates confinement (<see cref="RequireSandboxEnvVar"/>) — read live so an operator can flip it without a code change.</summary>
-    public static bool IsRequired => Environment.GetEnvironmentVariable(RequireSandboxEnvVar) is "1" or "true" or "TRUE";
+    /// <summary>Whether this deployment mandates confinement (<c>Sandbox:RequireConfinement</c>) — read live off the bound settings so it tracks configuration, not a captured copy.</summary>
+    public static bool IsRequired => CodeSpace.Core.Settings.RuntimeSettings.Current.RequireSandboxConfinement;
 
     /// <summary>
     /// Fail-closed guard: throws when confinement is <paramref name="required"/> but <paramref name="available"/> is
@@ -66,7 +59,7 @@ public static class BubblewrapSandbox
     {
         if (required && available is null)
             throw new InvalidOperationException(
-                $"Sandbox isolation is required ({RequireSandboxEnvVar}=1) but bubblewrap is unavailable on this host " +
+                "Sandbox isolation is required (Sandbox:RequireConfinement) but bubblewrap is unavailable on this host " +
                 "(not Linux, bwrap not installed, or unprivileged user namespaces denied). Refusing to run the agent unconfined.");
     }
 

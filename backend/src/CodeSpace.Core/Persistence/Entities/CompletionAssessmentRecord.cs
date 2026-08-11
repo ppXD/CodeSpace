@@ -29,6 +29,9 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
     /// recompose. Null on rows written before the column existed; those re-assess once and then carry one.</para>
     /// </summary>
     public string? LedgerWatermarkJson { get; set; }
+
+    /// <summary>P2 (v4.3): the run's monotonic ledger version this assessment's compose actually read — captured AFTER the compose so its own write-through receipts are inside it. The revisit pass compares the head against the run's LATEST recorded value in SQL; null (a pre-slice row) compares stale once and converges.</summary>
+    public long? LedgerVersion { get; set; }
     public int RejectionCount { get; set; }
     public int ContractErrorCount { get; set; }
     public DateTimeOffset CreatedDate { get; set; }

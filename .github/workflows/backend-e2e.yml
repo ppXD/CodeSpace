@@ -14,7 +14,7 @@ name: Backend · E2E
 #      codex CLI process under REAL bubblewrap confinement → real completion → resume) → a synthesizer
 #      that reduces the per-branch results. These engine-tier tests reuse the shared Postgres fixture +
 #      seed infra from CodeSpace.IntegrationTests (referenced as a project). bubblewrap is installed +
-#      CODESPACE_REQUIRE_SANDBOX=1 so the agent runs CONFINED (the production posture) and a degraded
+#      Sandbox__RequireConfinement=true so the agent runs CONFINED (the production posture) and a degraded
 #      sandbox fails HARD rather than silently running unconfined. It runs in a PRIVILEGED container
 #      (mirroring sandbox-isolation.yml) so unprivileged user namespaces work despite ubuntu-latest's
 #      AppArmor restriction — and so reaches Postgres by the service ALIAS (postgres:5432), overridden
@@ -41,6 +41,10 @@ permissions:
 
 env:
   DOTNET_NOLOGO: 'true'
+  # The DI container fail-fasts without a Variables master key outside Development (the settings arc's
+  # guard). CI hosts get the SAME committed local-dev test key docker-compose.yml already carries —
+  # a committed value, not a toggle; production deployments still supply their own real key.
+  CODESPACE_VARIABLE_MASTER_KEY: 'bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE='
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
 
@@ -133,7 +137,7 @@ jobs:
       # which confines it under bubblewrap. With REQUIRE_SANDBOX=1 a host that can't sandbox (no bwrap /
       # no unprivileged userns) makes the run fail HARD instead of silently executing the agent unconfined
       # — so green here means the agent really ran AND was really confined.
-      CODESPACE_REQUIRE_SANDBOX: '1'
+      Sandbox__RequireConfinement: 'true'
       # Inside a job container the Postgres SERVICE container is reachable by its network ALIAS (`postgres`),
       # NOT via the host port mapping (`localhost:5432` is the job container itself). Override the test
       # admin connection string (TestPostgres:AdminConnectionString → env double-underscore form) to target

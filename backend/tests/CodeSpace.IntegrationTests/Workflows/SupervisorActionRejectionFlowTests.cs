@@ -117,6 +117,64 @@ public sealed class SupervisorActionRejectionFlowTests
         execution.ParkedAgentWaitCount.ShouldBe(0, "zero agents staged — including for the ids that WERE valid");
     }
 
+    // ── B4 (MAJOR-3): the amend card clears the hard infra precondition before it is even posted ──────
+
+    [Fact]
+    public async Task An_amend_targeting_a_work_classed_failure_is_rejected_and_posts_no_card()
+    {
+        using var scope = _fixture.BeginScope();
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(AmendDecision(), ContextWithGradedUnit(detail: "tests-failed-exit-1"), CancellationToken.None);
+
+        var outcome = JsonDocument.Parse(execution.OutcomeJson!).RootElement;
+        outcome.GetProperty("askHuman").GetString().ShouldBe("rejected", "the check RAN and rejected the WORK — amending the judge away is the mark-its-own-homework channel");
+        outcome.GetProperty("reason").GetString()!.ShouldContain("evidence against the WORK");
+        execution.HumanWaitToken.ShouldBeNull("no card was posted — no human interruption is spent on an ineligible proposal");
+    }
+
+    [Fact]
+    public async Task An_amend_targeting_an_infra_classed_failure_clears_the_precondition()
+    {
+        // The bare context has no conversation, so a CLEARED proposal degrades on the surface step — the outcome
+        // proves the precondition let it through (no-conversation, never "rejected").
+        using var scope = _fixture.BeginScope();
+
+        var execution = await scope.Resolve<ISupervisorActionExecutor>()
+            .ExecuteAsync(AmendDecision(), ContextWithGradedUnit(detail: "grade-error: npm: command not found"), CancellationToken.None);
+
+        JsonDocument.Parse(execution.OutcomeJson!).RootElement.GetProperty("askHuman").GetString()
+            .ShouldBe("no-conversation", "an infra-classed failure is exactly the broken-oracle evidence the verb exists for");
+    }
+
+    private static SupervisorDecision AmendDecision() =>
+        SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.AmendAcceptance,
+            AmendAcceptance = new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Waive = true, Reason = "the check is broken" },
+        });
+
+    private static SupervisorTurnContext ContextWithGradedUnit(string detail)
+    {
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            JsonSerializer.Serialize(new { agentRunIds = new[] { agentId }, agentCount = 1 }, AgentJson.Options),
+            new[] { new SupervisorAgentResult { AgentRunId = agentId, Status = "Succeeded", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = detail } });
+
+        return new SupervisorTurnContext
+        {
+            Goal = "ship the feature", NodeId = "sup", TurnNumber = 2,
+            PriorDecisions = new[]
+            {
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+                    PayloadJson = JsonSerializer.Serialize(new { subtaskIds = new[] { "s1" } }, AgentJson.Options), OutcomeJson = outcome,
+                },
+            },
+        };
+    }
+
     private static SupervisorTurnContext ContextWithPlan(params string[] subtaskIds) => new()
     {
         Goal = "ship the feature", NodeId = "sup", TurnNumber = 2,

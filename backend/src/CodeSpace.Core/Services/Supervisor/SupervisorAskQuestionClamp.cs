@@ -25,6 +25,7 @@ public static class SupervisorAskQuestionClamp
         SupervisorPlanConfirmation.ConfirmationMarker,
         SupervisorApprovalRequest.ApprovalMarker,
         SupervisorGateEscalation.EscalationMarker,
+        SupervisorAmendAcceptance.AmendMarker,
     };
 
     /// <summary>What a question that consisted ONLY of reserved tokens collapses to — legible to the human and the decider, never a blank (a blank question is the rejected-ask path).</summary>

@@ -56,6 +56,19 @@ $COMPOSE exec -T api sh -c '
   command -v git >/dev/null 2>&1 || { echo "MISSING: git absent from API — launch base-vector resolution (git ls-remote) cannot work"; exit 1; }
   echo "    API carries zero agent-execution machinery; git present for ls-remote only"' || fail "API image is not clean"
 
+# The mirror of the leanness check: the worker must carry EVERY binary the agent-execution path spawns by name from
+# C#. The Dockerfile asserts this at build time too; asserting it again on the RUNNING container catches anything a
+# later stage strips (a COPY that overwrites /usr/local/bin, a squash step). The egress trio is the reason this
+# matters beyond exit-127: with ip/nft/sysctl absent, SandboxEgressPolicy fails CLOSED and an allowlisted run gets
+# NO network instead of a filtered one — correct, but the feature is silently unusable.
+echo "==> the WORKER image is COMPLETE (every spawned binary resolves)"
+$COMPOSE exec -T worker sh -c '
+  for b in git git-lfs bwrap prlimit setsid ip nft sysctl curl node codex claude; do
+    command -v "$b" >/dev/null 2>&1 || { echo "MISSING: $b — the worker spawns it by name"; exit 1; }
+  done
+  [ -x ./codespace-mcp ] || { echo "MISSING: codespace-mcp — the MCP endpoint would fail closed to tool-less runs"; exit 1; }
+  echo "    worker carries every agent-execution binary + the MCP proxy"' || fail "worker image is missing a dependency"
+
 echo "==> seed a team + user + membership"
 $COMPOSE exec -T postgres psql -U codespace -d codespace -v ON_ERROR_STOP=1 -q < seed.sql || fail "seed failed"
 echo "    seeded"

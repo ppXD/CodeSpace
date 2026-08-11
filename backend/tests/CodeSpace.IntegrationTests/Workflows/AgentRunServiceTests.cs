@@ -1357,8 +1357,6 @@ public class AgentRunServiceTests
     {
         // Slice A2 (opt-in best-effort net): a would-be success whose FINAL message ends on an unresolved question is
         // re-graded to NeedsReview(NeedsReview) — carrying NO decision id (it's a heuristic, not a raised decision).
-        using var review = WithFinalOutputReview(true);
-
         var teamId = await SeedTeamAsync();
 
         Guid runId;
@@ -1385,37 +1383,10 @@ public class AgentRunServiceTests
     }
 
     [Fact]
-    public async Task With_review_disabled_a_question_ending_success_stays_succeeded()
-    {
-        // Default-OFF: the heuristic must not change behaviour unless an operator opts in.
-        using var review = WithFinalOutputReview(false);
-
-        var teamId = await SeedTeamAsync();
-
-        Guid runId;
-        using (var scope = _fixture.BeginScope())
-        {
-            var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
-            await svc.MarkRunningAsync(runId, CancellationToken.None);
-        }
-
-        using (var scope = _fixture.BeginScope())
-            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
-                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Should I apply it?" }, CancellationToken.None);
-
-        using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
-                .ShouldBe(AgentRunStatus.Succeeded, "with the net off (default), a question-ending success is unchanged");
-    }
-
-    [Fact]
     public async Task A_pending_decision_outranks_the_final_output_heuristic()
     {
         // Precedence: when BOTH a real unanswered decision AND a question-ending summary are present, A1 wins — the run
         // is NeedsReview(NeedsDecision) carrying the decision id, not the weaker NeedsReview(NeedsReview).
-        using var review = WithFinalOutputReview(true);
-
         var teamId = await SeedTeamAsync();
 
         Guid runId;
@@ -1442,15 +1413,6 @@ public class AgentRunServiceTests
         }
     }
 
-    private static IDisposable WithFinalOutputReview(bool enabled) => new FinalOutputReviewFlag(enabled);
-
-    /// <summary>Scope the A2 opt-in flag for one test; restores the prior value on Dispose (the shared-process env stays isolated — the PostgresCollection runs these sequentially).</summary>
-    private sealed class FinalOutputReviewFlag : IDisposable
-    {
-        private readonly string? _prior = Environment.GetEnvironmentVariable(FinalOutputReview.EnabledEnvVar);
-        public FinalOutputReviewFlag(bool enabled) => Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, enabled ? "true" : null);
-        public void Dispose() => Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, _prior);
-    }
 
     private const string ZeroHash = "0000000000000000000000000000000000000000000000000000000000000000";
 

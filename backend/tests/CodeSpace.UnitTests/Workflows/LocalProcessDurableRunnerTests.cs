@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
@@ -410,12 +411,6 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         withEmptyCgroup.ArgumentList.ShouldBe(before.ArgumentList);
     }
 
-    [Fact]
-    public void CgroupRoot_env_var_constant_is_pinned()
-    {
-        // Rule 8: renaming this breaks an operator who pinned a delegated cgroup root via env. Hard-pin the literal.
-        CodeSpace.Core.Services.Agents.Sandbox.Isolation.CgroupResourceLimit.CgroupRootEnvVar.ShouldBe("CODESPACE_AGENT_CGROUP_ROOT");
-    }
 
     [Fact]
     public void BuildDurableStartInfo_keeps_the_spool_env_vars_through_a_scrub()
@@ -769,15 +764,6 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     public void TryReadExitCode_is_false_when_the_marker_is_absent() =>
         LocalProcessRunner.TryReadExitCode(Path.Combine(TempDir(), "no-such-exit"), out _).ShouldBeFalse();
 
-    [Fact]
-    public void Spool_root_defaults_under_temp_and_the_env_var_name_is_pinned()
-    {
-        LocalProcessRunner.SpoolRoot().ShouldContain("agent-runs");
-        LocalProcessRunner.SpoolRoot().ShouldContain("codespace");
-
-        // Renaming this breaks an air-gapped operator who pinned a durable spool volume via env — pin it (Rule 8).
-        LocalProcessRunner.SpoolRootEnvVar.ShouldBe("CODESPACE_AGENT_RUN_SPOOL_DIR");
-    }
 
     [Fact]
     public void Mcp_socket_path_constants_are_pinned()
@@ -800,36 +786,26 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     [Fact]
     public void Mcp_socket_path_is_under_the_spool_dir_for_a_short_root()
     {
-        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/tmp/cs");
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/tmp/cs" });
 
-        try
-        {
-            var key = Guid.NewGuid().ToString("N");
-            var path = LocalProcessRunner.McpSocketPathFor(key);
+        var key = Guid.NewGuid().ToString("N");
+        var path = LocalProcessRunner.McpSocketPathFor(key);
 
-            // FIX 1: the socket lives in the DEDICATED <spool>/mcp/ subdir, not directly in the spool dir.
-            path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp", "mcp.sock"));
-            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
-        }
-        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+        // FIX 1: the socket lives in the DEDICATED <spool>/mcp/ subdir, not directly in the spool dir.
+        path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp", "mcp.sock"));
+        path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
     }
 
     [Fact]
     public void Mcp_socket_path_falls_back_to_a_short_unique_path_when_the_canonical_path_overflows_the_cap()
     {
-        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/" + new string('x', 120));
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/" + new string('x', 120) });
 
-        try
-        {
-            var key = Guid.NewGuid().ToString("N");
-            var path = LocalProcessRunner.McpSocketPathFor(key);
+        var key = Guid.NewGuid().ToString("N");
+        var path = LocalProcessRunner.McpSocketPathFor(key);
 
-            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, customMessage: "an overflowing canonical path must fall back to a short path that fits the sun_path cap");
-            path.ShouldContain(key, customMessage: "the fallback must stay unique per run via the FULL run key (matching the canonical path's uniqueness)");
-        }
-        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+        path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, customMessage: "an overflowing canonical path must fall back to a short path that fits the sun_path cap");
+        path.ShouldContain(key, customMessage: "the fallback must stay unique per run via the FULL run key (matching the canonical path's uniqueness)");
     }
 
     [Fact]
@@ -875,38 +851,33 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // The fallback branch (sun_path overflow) must yield a path that BINDS, not merely a short string. Force the
         // fallback with a long spool root, then bind a real listener, connect a client, and round-trip one byte.
-        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/" + new string('x', 120));
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/" + new string('x', 120) });
+
+        var key = Guid.NewGuid().ToString("N");
+        var path = LocalProcessRunner.McpSocketPathFor(key);
+        path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, "the fallback must fit the sun_path cap");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         try
         {
-            var key = Guid.NewGuid().ToString("N");
-            var path = LocalProcessRunner.McpSocketPathFor(key);
-            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, "the fallback must fit the sun_path cap");
+            using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            listener.Bind(new UnixDomainSocketEndPoint(path));
+            listener.Listen(backlog: 1);
 
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
 
-            try
-            {
-                using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                listener.Bind(new UnixDomainSocketEndPoint(path));
-                listener.Listen(backlog: 1);
+            using var server = await listener.AcceptAsync();
 
-                using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
+            await client.SendAsync(new byte[] { 0x42 }, SocketFlags.None);
+            var buf = new byte[1];
+            var n = await server.ReceiveAsync(buf, SocketFlags.None);
 
-                using var server = await listener.AcceptAsync();
-
-                await client.SendAsync(new byte[] { 0x42 }, SocketFlags.None);
-                var buf = new byte[1];
-                var n = await server.ReceiveAsync(buf, SocketFlags.None);
-
-                n.ShouldBe(1, "the fallback socket carried the byte");
-                buf[0].ShouldBe((byte)0x42, "the byte round-tripped over the genuinely-bound fallback socket");
-            }
-            finally { try { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); } catch { /* best-effort */ } }
+            n.ShouldBe(1, "the fallback socket carried the byte");
+            buf[0].ShouldBe((byte)0x42, "the byte round-tripped over the genuinely-bound fallback socket");
         }
-        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+        finally { try { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); } catch { /* best-effort */ } }
     }
 
     private string TempDir()

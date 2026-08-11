@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Workflows.Planning.Planners;
 /// <summary>
 /// The first application of the generic <see cref="IStructuredCritic"/> primitive — an adversarial-review decorator over
 /// any <see cref="IWorkflowPlanner"/> (the owner's "send my plan to another model and combine the critique" pattern). It
-/// is DOUBLY-OFF by default (per-request <see cref="ReviewMode.None"/> + the <see cref="CriticToggle"/> kill-switch), so
+/// is OFF by default (per-request <see cref="ReviewMode.None"/>), so
 /// an unconfigured plan is byte-identical to the bare planner. When on, it reviews the plan with an INDEPENDENT model and
 /// either IMPROVES it (re-plans once with the critique) or GATES it (annotates the plan with the reviewer's verdict — it
 /// never discards a usable plan at this stage). Fails OPEN: a failed review returns the original plan, so review is never
@@ -33,8 +33,8 @@ public sealed class CriticPlannerDecorator : IWorkflowPlanner
     {
         var plan = await _inner.PlanAsync(request, cancellationToken).ConfigureAwait(false);
 
-        // Doubly-off ⇒ byte-identical: no per-request review requested, OR the operator killed the critic globally.
-        if (request.Review == ReviewMode.None || !CriticToggle.Enabled) return plan;
+        // Off ⇒ byte-identical: no per-request review requested.
+        if (request.Review == ReviewMode.None) return plan;
 
         // D① reviewer ladder: an opted-in GROUNDED review first — a real read-only agent clones the plan's target
         // repository and verifies the plan against the actual tree (assumptions, feasibility, already-done work) —
@@ -118,21 +118,5 @@ public sealed class CriticPlannerDecorator : IWorkflowPlanner
         }
 
         return b.ToString();
-    }
-}
-
-/// <summary>The planner-critic kill-switch — a global operator off (default ON, like the planner flag); the per-request <see cref="ReviewMode.None"/> is the real default-off. Set <c>CODESPACE_PLANNER_CRITIC_ENABLED=0</c> to disable the critic entirely.</summary>
-public static class CriticToggle
-{
-    public const string EnabledEnvVar = "CODESPACE_PLANNER_CRITIC_ENABLED";
-
-    public static bool Enabled => IsEnabled(Environment.GetEnvironmentVariable(EnabledEnvVar));
-
-    /// <summary>Default ON; disabled only for an explicit "0" / "false" (parity with the planner's enable flag). Internal for direct unit testing.</summary>
-    internal static bool IsEnabled(string? raw)
-    {
-        var value = raw?.Trim();
-
-        return !string.Equals(value, "0", StringComparison.Ordinal) && !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
     }
 }

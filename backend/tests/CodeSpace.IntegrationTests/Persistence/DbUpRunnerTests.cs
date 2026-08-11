@@ -21,6 +21,49 @@ public class DbUpRunnerTests
         act.ShouldNotThrow();
     }
 
+    [Fact]
+    public void The_advisory_lock_key_is_pinned()
+    {
+        // Every process that migrates this database has to agree on this number — a pod running a different value
+        // does not serialise against the others, which is the entire failure the lock exists to prevent. Changing it
+        // must be a deliberate, visible decision, and one that cannot be rolled out incrementally.
+        DbUpRunner.MigrationAdvisoryLockKey.ShouldBe(6_183_402_115_774_301L);
+    }
+
+    /// <summary>
+    /// The api and worker pods run the same assembly and both migrate at startup, so a rolling deploy routinely
+    /// starts them together. This proves the gate is real: while another session holds the lock, Run() WAITS rather
+    /// than reading the journal and racing a second copy of the same script — and it proceeds the moment the holder
+    /// lets go. Driven through the real lock, not a mock, because the serialisation IS the Postgres primitive.
+    /// </summary>
+    [Fact]
+    public async Task Migration_waits_while_another_session_holds_the_lock()
+    {
+        await using var holder = new NpgsqlConnection(_fixture.ConnectionString);
+        await holder.OpenAsync();
+        await AdvisoryAsync(holder, "SELECT pg_advisory_lock(@key)");
+
+        var migration = Task.Run(() => new DbUpRunner(_fixture.ConnectionString).Run());
+
+        // Long enough that a runner ignoring the lock would have finished a no-op upgrade many times over.
+        var finishedEarly = await Task.WhenAny(migration, Task.Delay(TimeSpan.FromSeconds(3))) == migration;
+        finishedEarly.ShouldBeFalse(
+            customMessage: "Run() completed while another session held the advisory lock — the migration gate is not " +
+                           "actually taking it, so two pods starting together can both apply the same script. Check " +
+                           "DbUpRunner.Acquire and that MigrationAdvisoryLockKey matches on both sides.");
+
+        await AdvisoryAsync(holder, "SELECT pg_advisory_unlock(@key)");
+
+        await migration.WaitAsync(TimeSpan.FromSeconds(30));   // released → the waiter must now get through
+    }
+
+    private static async Task AdvisoryAsync(NpgsqlConnection connection, string sql)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("key", DbUpRunner.MigrationAdvisoryLockKey);
+        await command.ExecuteNonQueryAsync();
+    }
+
     [Theory]
     [InlineData("app_user")]
     [InlineData("team")]

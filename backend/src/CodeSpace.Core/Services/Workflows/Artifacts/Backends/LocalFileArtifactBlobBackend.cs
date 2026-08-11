@@ -16,21 +16,15 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 /// </summary>
 public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingletonDependency
 {
-    /// <summary>
-    /// Env var: the durable root directory for offloaded artifact bytes. Operators point this at a persistent
-    /// volume (the default lives under the temp dir, fine for dev/test but NOT durable across a host wipe).
-    /// </summary>
-    public const string StoreDirEnvVar = "CODESPACE_ARTIFACT_STORE_DIR";
-
     private readonly string _root;
 
+    /// <summary>Roots the store at <c>Artifacts:StoreDirectory</c> when configured, else under the system temp dir — fine for dev/test, but NOT durable across a host wipe, so a deployment whose artifacts must outlive the pod points the setting at a persistent volume.</summary>
     public LocalFileArtifactBlobBackend()
-    {
-        var configured = Environment.GetEnvironmentVariable(StoreDirEnvVar);
-        _root = Path.GetFullPath(string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(Path.GetTempPath(), "codespace-artifact-store")
-            : configured);
-    }
+        : this(CodeSpace.Core.Settings.RuntimeSettings.Current.ArtifactStoreDirectory) { }
+
+    /// <summary>Test seam — the root is passed explicitly so a test pins behaviour without binding process-wide settings.</summary>
+    internal LocalFileArtifactBlobBackend(string? configuredRoot) =>
+        _root = Path.GetFullPath(configuredRoot ?? Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
 
     public async Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {

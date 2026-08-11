@@ -103,7 +103,9 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             TimeoutSeconds = task.TimeoutSeconds,
-            EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp ? true : null,
+            // Both arms are EXPLICIT. The cli-only arm used to leave this null and rely on the ambient flag being
+            // off; the default is now on, so null would silently give both arms the fabric and flatten the A/B.
+            EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp,
             OutputReviewMode = selection?.OutputReviewMode ?? ReviewMode.None,
             ReviewerModelId = selection?.ReviewerModelId,
             MaxReviseRounds = selection?.MaxReviseRounds,

@@ -131,18 +131,6 @@ public sealed class BubblewrapSandboxTests
     public void CommandEnvVar_is_pinned() =>
         BubblewrapSandbox.CommandEnvVar.ShouldBe("CODESPACE_BWRAP_PATH");
 
-    [Fact]
-    public void RequireSandboxEnvVar_is_pinned() =>
-        // A fail-closed deployment pins this name to mandate isolation — renaming it silently disarms the guard (Rule 8).
-        BubblewrapSandbox.RequireSandboxEnvVar.ShouldBe("CODESPACE_REQUIRE_SANDBOX");
-
-    [Fact]
-    public void EnsureSatisfiable_fails_closed_only_when_isolation_is_required_but_unavailable()
-    {
-        Should.Throw<InvalidOperationException>(() => BubblewrapSandbox.EnsureSatisfiable(available: null, required: true));
-        Should.NotThrow(() => BubblewrapSandbox.EnsureSatisfiable(available: null, required: false));
-        Should.NotThrow(() => BubblewrapSandbox.EnsureSatisfiable(available: "bwrap", required: true));
-    }
 
     private static bool Adjacent(IReadOnlyList<string> a, string flag, string value)
     {

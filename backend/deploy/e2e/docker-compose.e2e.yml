@@ -53,7 +53,6 @@ services:
       Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
       CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
       HangfireHosting: "Worker"
-      CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "true"
       CODESPACE_CODEX_CLI_PATH: "/opt/fake-codex"
     volumes:
       - ./fake-codex:/opt/fake-codex:ro

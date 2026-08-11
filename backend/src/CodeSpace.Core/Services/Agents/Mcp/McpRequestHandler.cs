@@ -45,12 +45,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     public const string ServerVersion = "0.1.0";
 
     /// <summary>
-    /// Env flag that opts a run into tool governance (the ToolCallLedger: exactly-once + audit for side-effecting
-    /// tools). Default-OFF, opt-in ("1"/"true"/"TRUE" only — mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/>):
-    /// flag-OFF writes NO ledger rows and the handler is byte-identical to its pre-governance behavior. Rule 8: pinned
-    /// by a unit test, read in production only through <see cref="IsGovernanceEnabled"/>.
+    /// Whether side-effecting tool calls route through governance — the ToolCallLedger's exactly-once record plus the
+    /// durable human-approval surface. Committed here rather than read from the environment, and ON, which is the
+    /// posture the worker deployment already ran: the full tool catalog is served by default
+    /// (<see cref="AgentRunExecutor.FullToolCatalogByDefault"/>), and serving it ungoverned is a combination no
+    /// deployment ever chose. Read-only tools never reach this path at all. Changing it is a one-line reviewed edit.
     /// </summary>
-    public const string GovernanceEnabledEnvVar = "CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED";
+    public const bool GovernanceEnabled = true;
 
     /// <summary>
     /// Env override for how long a side-effecting tool call BLOCKS awaiting a human approval before it returns the
@@ -121,14 +122,6 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return int.TryParse(raw, out var seconds) && seconds > 0 ? seconds : DefaultApprovalBoundSeconds;
     }
 
-    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/> exactly (Rule 8). Production reads governance opt-in through this single gate.</summary>
-    public static bool IsGovernanceEnabled()
-    {
-        var raw = Environment.GetEnvironmentVariable(GovernanceEnabledEnvVar)?.Trim();
-
-        return raw is "1" or "true" or "TRUE";
-    }
-
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)
     {
         if (request.ValueKind != JsonValueKind.Object) return Serialize(JsonRpcResponse.Fail(NullId, Error(JsonRpcError.InvalidRequest, "Request must be a single JSON-RPC 2.0 object (batch arrays are not supported).")));
@@ -189,8 +182,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         // decision.request is an ASK, not a gated side effect — intercept it BEFORE the autonomy gate (a Confined tier
         // must never DENY a question) and drive the durable decision flow on the SAME tool-ledger spine the approval
-        // flow uses, generalized from binary approve/reject to typed options. The tool is only in the registry when
-        // governance is on (DI-gated), so a governance-OFF run never reaches here (Resolve returned null → Unknown).
+        // flow uses, generalized from binary approve/reject to typed options. Governance is a committed constant now,
+        // so the tool is registered everywhere and every deployment has the ledger + approval surface this rides on.
         if (string.Equals(name, DecisionRequestTool.ToolKind, StringComparison.Ordinal))
         {
             var decisionArgs = prms.TryGetProperty("arguments", out var da) ? da : EmptyObject;

@@ -1,3 +1,4 @@
+using CodeSpace.Core.Settings;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -23,15 +24,16 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _originalSpoolRoot;
     private readonly string _spoolRoot;
+    private readonly IDisposable _settings;
 
     public AgentRunSpoolReaperFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _originalSpoolRoot = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
         _spoolRoot = Path.Combine(Path.GetTempPath(), "cs-reaper-it-" + Guid.NewGuid().ToString("N"));
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, _spoolRoot);
+        // The reaper resolves the spool root through RuntimeSettings now — without this override it reaps the
+        // DEFAULT root while the test seeds under its own temp dir, and nothing is ever reaped.
+        _settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = _spoolRoot });
     }
 
     [Fact]
@@ -185,7 +187,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, _originalSpoolRoot);
+        _settings.Dispose();
         try { Directory.Delete(_spoolRoot, recursive: true); } catch { /* best-effort */ }
         try { foreach (var d in Directory.GetDirectories(Path.GetTempPath(), "cs-reaper-outside-*")) Directory.Delete(d, recursive: true); } catch { /* best-effort */ }
     }

@@ -47,14 +47,11 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
     private const string Goal = "ship the feature";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorMergeIntegrateFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
         // Drive the gate purely by the per-run profile opt-in: ensure the ambient flag is OFF so the gate-OFF test is deterministic.
-        _flagBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, null);
     }
 
     // Restore ALL shared/process-global state in Dispose (xUnit runs it even on a test-body throw), so the composition
@@ -62,7 +59,6 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
     // Postgres collection — the convention SupervisorSpawnFlowTests / SupervisorMergeFoldFlowTests follow.
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _flagBefore);
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
@@ -817,7 +813,6 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
 
         // Enable the integrate gate + the merge script for this run. ALL of these (+ AutoExecute) are restored
         // by Dispose (which xUnit runs even on a throw), so nothing leaks to the shared collection — no per-test finally.
-        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnMergeStop();
 
         var jobClient = ResolveJobClient();

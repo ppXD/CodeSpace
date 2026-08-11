@@ -25,6 +25,8 @@ internal sealed class FakePublishManifestStore : IPublishManifestStore
 
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) => Task.CompletedTask;
 
+    public Task StampAcceptanceForAgentRunAsync(Guid agentRunId, PublishAcceptanceState state, CancellationToken cancellationToken) => Task.CompletedTask;
+
     public Task<IReadOnlyList<PublishManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PublishManifest>>(Array.Empty<PublishManifest>());
 

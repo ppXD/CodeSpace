@@ -63,6 +63,10 @@ public sealed record WorkPlanChecklistItem
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AcceptanceDetail { get; init; }
 
+    /// <summary>The latest attempt's EXPLICIT verdict state (B2): <c>Waived</c> = a human forgo-verification — distinct from passed (green) and rejected (red), so the chip never launders an unverified item into a green. Null = the bool verdict (or ungraded) tells the whole story.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Contracts.VerificationDisposition? AcceptanceVerdict { get; init; }
+
     /// <summary>How many execution attempts this item has had (0 = never staged).</summary>
     public int Attempts { get; init; }
 }

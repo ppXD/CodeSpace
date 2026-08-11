@@ -24,15 +24,24 @@ public class CodeSpaceModule : Autofac.Module
     private readonly IConfiguration _configuration;
     private readonly Assembly[] _assemblies;
 
-    public CodeSpaceModule(ILogger logger, IConfiguration configuration)
+    /// <summary>
+    /// <paramref name="assemblies"/> are the assemblies the mediator scans for handlers. It defaults to this one when
+    /// none is passed, which is every caller today; it is a parameter so a host that composes an EXTRA assembly of
+    /// handlers (a plugin pack, a test double set) states that at the call site rather than editing this constructor.
+    /// </summary>
+    public CodeSpaceModule(ILogger logger, IConfiguration configuration, params Assembly[] assemblies)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _assemblies = new[] { typeof(CodeSpaceModule).Assembly };
+        _assemblies = assemblies is { Length: > 0 } ? assemblies : new[] { typeof(CodeSpaceModule).Assembly };
     }
 
     protected override void Load(ContainerBuilder builder)
     {
+        // Idempotent, and deliberately also done in Program.Main: Main covers the pre-host path (DbUp), this covers
+        // every host that skips Main — notably WebApplicationFactory's in-memory test host.
+        RuntimeSettings.Bind(_configuration);
+
         RegisterSettings(builder);
         RegisterMediator(builder);
         RegisterPersistence(builder);
@@ -49,41 +58,38 @@ public class CodeSpaceModule : Autofac.Module
 
     /// <summary>
     /// Singleton AES-GCM encryption for the unified <c>variable</c> subsystem.
-    /// Master key sourced from <see cref="Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar"/>
-    /// (preferred), falling back to <see cref="Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar"/>
-    /// so existing dev / test environments don't break during the transition.
+    /// Master key from <c>Variables:MasterKey</c>, still honouring the legacy flat
+    /// <c>CODESPACE_VARIABLE_MASTER_KEY</c> / <c>CODESPACE_TEAM_SECRET_MASTER_KEY</c> names every deployed pod sets.
     /// Dev fallback + WARN in Development; fail-fast everywhere else.
     /// </summary>
     private void RegisterVariableEncryption(ContainerBuilder builder)
     {
-        var preferred = Environment.GetEnvironmentVariable(Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar);
-        var legacy = Environment.GetEnvironmentVariable(Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar);
-        var envValue = !string.IsNullOrWhiteSpace(preferred) ? preferred : legacy;
+        // Both come through IConfiguration now, so a k8s Secret, a ConfigMap and the legacy flat environment name
+        // are all the same thing to this code. RuntimeSettings.Bind ran at the top of Load, so the value is present.
+        var configured = RuntimeSettings.Current.VariableMasterKey;
 
-        var aspNetCoreEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production";
+        var aspNetCoreEnv = _configuration["ASPNETCORE_ENVIRONMENT"] ?? "Production";
         var isDevelopment = string.Equals(aspNetCoreEnv, "Development", StringComparison.OrdinalIgnoreCase);
 
         byte[] masterKey;
-        if (!string.IsNullOrWhiteSpace(envValue))
+        if (!string.IsNullOrWhiteSpace(configured))
         {
-            masterKey = Convert.FromBase64String(envValue);
+            masterKey = Convert.FromBase64String(configured);
         }
         else if (isDevelopment)
         {
             Serilog.Log.Warning(
-                "VariableEncryption: neither {Preferred} nor {Legacy} set; using DEVELOPMENT-ONLY fallback key. " +
-                "Set {Preferred} in any non-Development deployment.",
-                Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar,
-                Services.Variables.VariableEncryptionConfig.LegacyMasterKeyEnvVar,
-                Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar);
+                "VariableEncryption: {Key} is not configured; using a DEVELOPMENT-ONLY fallback key. " +
+                "Set it in any non-Development deployment.", "Variables:MasterKey");
             masterKey = new byte[32];
             for (int i = 0; i < 32; i++) masterKey[i] = (byte)i;
         }
         else
         {
             throw new InvalidOperationException(
-                $"{Services.Variables.VariableEncryptionConfig.MasterKeyEnvVar} must be set to a base64-encoded " +
-                "32-byte AES-256 key in non-Development environments. Generate one with `openssl rand -base64 32`.");
+                "Variables:MasterKey must be set to a base64-encoded 32-byte AES-256 key in non-Development " +
+                "environments (the legacy CODESPACE_VARIABLE_MASTER_KEY name is still read). " +
+                "Generate one with `openssl rand -base64 32`.");
         }
 
         var encryption = new Services.Variables.AesGcmVariableEncryption(masterKey);
@@ -213,27 +219,24 @@ public class CodeSpaceModule : Autofac.Module
     ///   UNCONDITIONALLY: it touches neither the ledger nor the approval surface, so it has no governance dependency and
     ///   is useful in any run whose MCP endpoint is open (the endpoint gate is separate from governance). A run with no
     ///   session simply gets a clean "nothing to retrieve".</item>
-    ///   <item><see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2) — gated on tool
-    ///   governance: the decision flow needs the ledger + approval surface, which only exist when governance is on.
-    ///   Gating at REGISTRATION (not just at the handler) keeps a governance-OFF process byte-identical to pre-D2 — the
-    ///   tool is absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c>, so the catalog and <c>tools/list</c> never
-    ///   mention it. Read through the single <see cref="Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled"/>
-    ///   gate (Rule 8).</item>
+    ///   <item><see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2) — needs the ledger +
+    ///   approval surface, which exist whenever governance does. That used to be an environment flag read here, so the
+    ///   tool could be absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c> and missing from <c>tools/list</c>
+    ///   depending on a deployment variable; governance is now a committed constant
+    ///   (<see cref="Services.Agents.Mcp.McpRequestHandler.GovernanceEnabled"/>), so the catalog is the same
+    ///   everywhere.</item>
     /// </list>
     /// </summary>
     private void RegisterFirstPartyAgentTools(ContainerBuilder builder)
     {
         builder.RegisterType<Services.Agents.Tools.GetContextTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
-
-        if (!Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled()) return;
-
         builder.RegisterType<Services.Agents.Tools.DecisionRequestTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
     }
 
     /// <summary>
     /// Decorators wrap a convention-registered service AFTER <see cref="RegisterDependency"/> has registered the
     /// implementation. The critic planner decorator wraps <c>IWorkflowPlanner</c> with the generic adversarial-review
-    /// primitive — inert by default (per-request <c>ReviewMode.None</c> + the <c>CriticToggle</c> kill-switch), so an
+    /// primitive — inert by default (per-request <c>ReviewMode.None</c>), so an
     /// unconfigured plan is byte-identical to the bare planner.
     /// </summary>
     private static void RegisterDecorators(ContainerBuilder builder)

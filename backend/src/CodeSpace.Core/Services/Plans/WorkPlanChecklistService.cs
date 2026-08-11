@@ -81,6 +81,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
             AgentRunId = attempt?.AgentRunId,
             AcceptancePassed = attempt?.AcceptancePassed,
             AcceptanceDetail = attempt?.AcceptanceDetail,
+            AcceptanceVerdict = attempt?.AcceptanceVerdict,
             Attempts = attempt?.Count ?? 0,
         };
     }
@@ -115,7 +116,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
             var (passed, detail) = ReadAcceptanceVerdict(row.ResultJson);
             var prior = attempts.TryGetValue(itemId, out var p) ? p : null;
 
-            attempts[itemId] = new WorkPlanItemAttempt(row.Id, row.Status.ToString(), passed, detail, (prior?.Count ?? 0) + 1);
+            attempts[itemId] = new WorkPlanItemAttempt(row.Id, row.Status.ToString(), passed, detail, null, (prior?.Count ?? 0) + 1);
         }
 
         return attempts;
@@ -190,7 +191,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
                 var status = folds?.Status ?? (liveStatuses.TryGetValue(staged[i], out var live) ? live : null);
 
                 var prior = attempts.TryGetValue(subtaskIds[i], out var existing) ? existing.Count : 0;
-                attempts[subtaskIds[i]] = new WorkPlanItemAttempt(staged[i], status, folds?.AcceptancePassed, folds?.AcceptanceDetail, prior + 1);
+                attempts[subtaskIds[i]] = new WorkPlanItemAttempt(staged[i], status, folds?.AcceptancePassed, folds?.AcceptanceDetail, folds?.AcceptanceVerdict, prior + 1);
             }
         }
 
@@ -244,7 +245,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
 }
 
 /// <summary>The latest attempt view for one item id: who ran it last, its status, its acceptance verdict, and how many attempts it has had. Internal — the unit tier pins the fold through it.</summary>
-internal sealed record WorkPlanItemAttempt(Guid AgentRunId, string? LatestStatus, bool? AcceptancePassed, string? AcceptanceDetail, int Count);
+internal sealed record WorkPlanItemAttempt(Guid AgentRunId, string? LatestStatus, bool? AcceptancePassed, string? AcceptanceDetail, CodeSpace.Messages.Contracts.VerificationDisposition? AcceptanceVerdict, int Count);
 
 /// <summary>One spawn/retry decision's tape view (kind + frozen payload + recorded outcome) — the fold's input row.</summary>
 internal sealed record SupervisorTapeDecision(string Kind, string PayloadJson, string? OutcomeJson);

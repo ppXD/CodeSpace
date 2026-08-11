@@ -51,63 +51,54 @@ public sealed class AgentReviewerLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
+        using var reviewerCli = new ReviewVerdictFakeCli();   // the REVIEWER binary (codex-cli lane)
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // Improve + ReviewerAgent: the disapproving AGENT verdict buys the S6 revise round (implicit 1 under Improve).
+        var task = new AgentTask
         {
-            using var reviewerCli = new ReviewVerdictFakeCli();   // the REVIEWER binary (codex-cli lane)
+            Goal = "make feature.txt clean",
+            Harness = "scripted",
+            Model = "test-model",
+            RepositoryId = repoId,
+            PushProducedBranch = true,   // the reviewer clones the PRODUCED branch — publish is the review's precondition
+            OutputReviewMode = ReviewMode.Improve,
+            ReviewerAgent = true,
+        };
 
-            var teamId = await SeedTeamAsync();
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync();
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, task);
 
-            // Improve + ReviewerAgent: the disapproving AGENT verdict buys the S6 revise round (implicit 1 under Improve).
-            var task = new AgentTask
-            {
-                Goal = "make feature.txt clean",
-                Harness = "scripted",
-                Model = "test-model",
-                RepositoryId = repoId,
-                PushProducedBranch = true,   // the reviewer clones the PRODUCED branch — publish is the review's precondition
-                OutputReviewMode = ReviewMode.Improve,
-                ReviewerAgent = true,
-            };
+        await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
 
-            var runId = await CreateRunAsync(teamId, task);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
+        var producer = await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        producer.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision removed the flaw and the SECOND review agent approved it");
 
-            using var scope = _fixture.BeginScope();
-            var db = scope.Resolve<CodeSpaceDbContext>();
+        var result = JsonSerializer.Deserialize<AgentRunResult>(producer.ResultJson!, AgentJson.Options)!;
+        result.ReviseRounds.ShouldBe(1, "the agent reviewer's disapproval bought exactly one revise round");
+        result.ReviewFeedback.ShouldBeNull("the final review APPROVED — no flag stands");
 
-            var producer = await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-            producer.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision removed the flaw and the SECOND review agent approved it");
+        (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt"))
+            .ShouldContain("revised clean", customMessage: "the re-pushed branch tip carries the healed work the reviewer approved");
 
-            var result = JsonSerializer.Deserialize<AgentRunResult>(producer.ResultJson!, AgentJson.Options)!;
-            result.ReviseRounds.ShouldBe(1, "the agent reviewer's disapproval bought exactly one revise round");
-            result.ReviewFeedback.ShouldBeNull("the final review APPROVED — no flag stands");
+        // TWO first-class reviewer runs on the tape — one per round — each on the DISTINCT harness the ladder picked.
+        var reviewRuns = await db.AgentRun.AsNoTracking().Where(r => r.TeamId == teamId && r.IterationKey.EndsWith("#review")).OrderBy(r => r.CreatedDate).ToListAsync();
+        reviewRuns.Count.ShouldBe(2, "each verification round ran its own real review agent");
+        reviewRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded);
+        reviewRuns.ShouldAllBe(r => r.Harness == "codex-cli", "the distinct-first ladder picked a harness DIFFERENT from the producer's");
 
-            (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt"))
-                .ShouldContain("revised clean", customMessage: "the re-pushed branch tip carries the healed work the reviewer approved");
-
-            // TWO first-class reviewer runs on the tape — one per round — each on the DISTINCT harness the ladder picked.
-            var reviewRuns = await db.AgentRun.AsNoTracking().Where(r => r.TeamId == teamId && r.IterationKey.EndsWith("#review")).OrderBy(r => r.CreatedDate).ToListAsync();
-            reviewRuns.Count.ShouldBe(2, "each verification round ran its own real review agent");
-            reviewRuns.ShouldAllBe(r => r.Status == AgentRunStatus.Succeeded);
-            reviewRuns.ShouldAllBe(r => r.Harness == "codex-cli", "the distinct-first ladder picked a harness DIFFERENT from the producer's");
-
-            // The revise instruction carried the reviewer's rationale + grep evidence — the agent revised against a
-            // REAL inspection of its own tree, not a diff-string opinion.
-            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, afterSequence: 0, CancellationToken.None);
-            var revise = events.Single(e => e.Text.Contains("revising (round 1 of 1)"));
-            revise.Text.ShouldContain(ReviewVerdictFakeCli.DisapproveRationale);
-            revise.Text.ShouldContain("grep found", customMessage: "the evidence rides the fed-back critique");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        // The revise instruction carried the reviewer's rationale + grep evidence — the agent revised against a
+        // REAL inspection of its own tree, not a diff-string opinion.
+        var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, afterSequence: 0, CancellationToken.None);
+        var revise = events.Single(e => e.Text.Contains("revising (round 1 of 1)"));
+        revise.Text.ShouldContain(ReviewVerdictFakeCli.DisapproveRationale);
+        revise.Text.ShouldContain("grep found", customMessage: "the evidence rides the fed-back critique");
     }
 
     [Fact]
@@ -116,56 +107,47 @@ public sealed class AgentReviewerLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var priorToggle = Environment.GetEnvironmentVariable(CriticToggle.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, "1");
-        try
+        using var reviewerCli = new ReviewVerdictFakeCli();
+
+        var teamId = await SeedTeamAsync();
+        var criticRowId = (await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag)).RowId;
+        ResetCriticScript();
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // Explicit opt-out → no produced branch → nothing for an agent to clone → the ladder must fall to the
+        // model critic. Push is default-ON now (PR-2), so this must be an explicit PushProducedBranch = false,
+        // not an absent flag — the test's premise ("no produced branch") no longer holds by default.
+        var task = new AgentTask
         {
-            using var reviewerCli = new ReviewVerdictFakeCli();
+            Goal = "make feature.txt clean",
+            Harness = "scripted",
+            Model = "test-model",
+            RepositoryId = repoId,
+            PushProducedBranch = false,
+            OutputReviewMode = ReviewMode.Gate,
+            ReviewerAgent = true,
+            ReviewerModelId = criticRowId,
+        };
 
-            var teamId = await SeedTeamAsync();
-            var criticRowId = (await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag)).RowId;
-            ResetCriticScript();
+        var runId = await CreateRunAsync(teamId, task);
 
-            using var remote = new BareRemote();
-            await remote.SeedBaseAsync();
-            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
 
-            // Explicit opt-out → no produced branch → nothing for an agent to clone → the ladder must fall to the
-            // model critic. Push is default-ON now (PR-2), so this must be an explicit PushProducedBranch = false,
-            // not an absent flag — the test's premise ("no produced branch") no longer holds by default.
-            var task = new AgentTask
-            {
-                Goal = "make feature.txt clean",
-                Harness = "scripted",
-                Model = "test-model",
-                RepositoryId = repoId,
-                PushProducedBranch = false,
-                OutputReviewMode = ReviewMode.Gate,
-                ReviewerAgent = true,
-                ReviewerModelId = criticRowId,
-            };
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
 
-            var runId = await CreateRunAsync(teamId, task);
+        run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the MODEL critic (the ladder's fallback) flagged the flawed diff");
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ReviewFeedback
+            .ShouldContain(DeterministicCriticLlmClient.Critique);
 
-            await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
+        CriticCalls().ShouldBe(1, "the fallback billed the model critic exactly once");
 
-            using var scope = _fixture.BeginScope();
-            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-
-            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "the MODEL critic (the ladder's fallback) flagged the flawed diff");
-            JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ReviewFeedback
-                .ShouldContain(DeterministicCriticLlmClient.Critique);
-
-            CriticCalls().ShouldBe(1, "the fallback billed the model critic exactly once");
-
-            var db = scope.Resolve<CodeSpaceDbContext>();
-            (await db.AgentRun.AsNoTracking().CountAsync(r => r.TeamId == teamId && r.IterationKey.EndsWith("#review")))
-                .ShouldBe(0, "no branch ⇒ no review agent was ever staged — the ladder skipped straight to the model");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CriticToggle.EnabledEnvVar, priorToggle);
-        }
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.TeamId == teamId && r.IterationKey.EndsWith("#review")))
+            .ShouldBe(0, "no branch ⇒ no review agent was ever staged — the ladder skipped straight to the model");
     }
 
     // ─── plumbing (the S6 revise-loop test's proven fixtures) ────────────────

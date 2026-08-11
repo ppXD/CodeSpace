@@ -91,36 +91,13 @@ public class FinalOutputReviewTests
         FinalOutputReview.ReGrade(result).ShouldBeSameAs(result);
     }
 
-    // ── Enabled flag (Rule 8: opt-in, pinned) ────────────────────────────────────
+    // ── The gate ─────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void Enabled_env_var_name_is_pinned()
+    public void The_review_is_on_by_default()
     {
-        // A rename silently disables the net for any operator who opted in. Hard-pin (Rule 8).
-        FinalOutputReview.EnabledEnvVar.ShouldBe("CODESPACE_AGENT_FINAL_OUTPUT_REVIEW_ENABLED");
-    }
-
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" true ", true)]   // trimmed
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("yes", false)]
-    [InlineData("", false)]
-    [InlineData(null, false)]      // unset → default-OFF
-    public void Enabled_is_opt_in_only_for_truthy_values(string? raw, bool expected)
-    {
-        var prior = Environment.GetEnvironmentVariable(FinalOutputReview.EnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, raw);
-            FinalOutputReview.Enabled.ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, prior);
-        }
+        // A run that ends by asking the human a question and is filed as a green Succeeded is the dishonest
+        // completion this layer exists to catch. Turning the net back off must be a visible decision.
+        FinalOutputReview.Enabled.ShouldBeTrue();
     }
 }

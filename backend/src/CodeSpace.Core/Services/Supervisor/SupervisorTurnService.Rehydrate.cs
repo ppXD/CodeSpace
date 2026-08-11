@@ -170,17 +170,23 @@ public sealed partial class SupervisorTurnService
     /// posture <c>GradeUnitAcceptanceMultiRepoAsync</c> already applies to grading: a partially-published
     /// multi-repo change is not genuinely published, so a lone pushed repo can never mask an unpublished sibling.
     /// </summary>
-    private async Task<IReadOnlySet<Guid>> FoldPublishedAgentRunIdsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
-    {
-        var manifests = await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+    private async Task<IReadOnlySet<Guid>> FoldPublishedAgentRunIdsAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
+        FoldPublishedAgentRunIds(await _manifests.ListForWorkflowRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false));
 
-        return manifests
+    /// <summary>
+    /// The published-agent fold, PURE over manifest rows — an agent counts as published only when ALL its rows are
+    /// Pushed or carry a PR (all-or-nothing per multi-repo agent). Internal so the I3 auditor re-validates
+    /// historical stops with the SAME predicate the live gate's context was folded with: run 31230410920 red
+    /// "I3 did not hold" against a bare context whose <c>PublishedAgentRunIds</c> was empty, indicting the
+    /// production gate for a ledger-direct publication the auditor simply never looked at.
+    /// </summary>
+    internal static IReadOnlySet<Guid> FoldPublishedAgentRunIds(IReadOnlyList<Persistence.Entities.PublishManifest> manifests) =>
+        manifests
             .Where(m => m.AgentRunId is not null)
             .GroupBy(m => m.AgentRunId!.Value)
             .Where(g => g.All(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber is not null))
             .Select(g => g.Key)
             .ToHashSet();
-    }
 
     /// <summary>The DISTINCT agent-run ids this run's spawn/retry/resolve decisions staged (in recorded spawn order) — the key both the agent-results fold and the pending-decision read fan out over. Lifted so the two reads share ONE id source.</summary>
     private static List<Guid> StagedChildAgentRunIds(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows) =>
@@ -283,9 +289,9 @@ public sealed partial class SupervisorTurnService
         if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
             return MergedNewWork(decision, everMerged);
 
-        // ALL THREE gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer
-        // RULES on a blocked decision, and a plain CONTENT answer means the human just walked the model through a
-        // clarification it needed. The confirmation/escalation markers are text-matchable (a model could mint a
+        // ALL FOUR gate cards count once ANSWERED — a confirmation answer steers the plan, an escalation answer
+        // RULES on a blocked decision, an amend answer RULES on an oracle proposal, and a plain CONTENT answer
+        // means the human just walked the model through a clarification it needed. The confirmation/escalation markers are text-matchable (a model could mint a
         // marker-carrying ask), but the counted state requires a server-written ANSWER off a resolved wait — every
         // streak reset costs a real human interaction, so a walk-away run gains nothing; a model looping UNANSWERED
         // content asks to itself still marches toward the stall bound (only a genuine human reply resets it, exactly
@@ -295,14 +301,16 @@ public sealed partial class SupervisorTurnService
         // kill purely for talking to its operator.
         return SupervisorPlanConfirmation.IsAnsweredConfirmationCard(decision)
             || SupervisorGateEscalation.IsAnsweredEscalationCard(decision)
+            || SupervisorAmendAcceptance.IsAnsweredAmendCard(decision)
             || IsAnsweredContentAsk(decision);
     }
 
-    /// <summary>An ANSWERED plain content ask_human — the residual shape once the confirmation and escalation markers are ruled out. Its own dedicated check (rather than folding into the generic "any answered ask_human" test) keeps the three gate shapes independently readable + independently testable, mirroring <see cref="SupervisorPlanConfirmation.IsAnsweredConfirmationCard"/> / <see cref="SupervisorGateEscalation.IsAnsweredEscalationCard"/>.</summary>
+    /// <summary>An ANSWERED plain content ask_human — the residual shape once the confirmation, escalation, and amend markers are ruled out. Its own dedicated check (rather than folding into the generic "any answered ask_human" test) keeps the gate shapes independently readable + independently testable, mirroring <see cref="SupervisorPlanConfirmation.IsAnsweredConfirmationCard"/> / <see cref="SupervisorGateEscalation.IsAnsweredEscalationCard"/> / <see cref="SupervisorAmendAcceptance.IsAnsweredAmendCard"/>.</summary>
     private static bool IsAnsweredContentAsk(SupervisorPriorDecision decision) =>
         decision.DecisionKind == SupervisorDecisionKinds.AskHuman
         && !SupervisorPlanConfirmation.IsConfirmationCard(decision)
         && !SupervisorGateEscalation.IsEscalationCard(decision)
+        && !SupervisorAmendAcceptance.IsAmendCard(decision)
         && SupervisorOutcome.ReadAskHumanAnswer(decision.OutcomeJson) != null;
 
     /// <summary>
@@ -520,11 +528,14 @@ public sealed partial class SupervisorTurnService
 
         if (results.Count == 0) return decision;
 
-        if (results.Any(r => r.AcceptancePassed.HasValue)) return decision;   // already graded — durable on the tape; never re-clone+grade
+        if (results.Any(r => r.AcceptancePassed.HasValue || SupervisorOutcome.IsWaived(r))) return decision;   // already graded/waived — durable on the tape; never re-clone+grade
 
-        var acceptanceBySubtask = ResolvePlannedAcceptance(priorDecisions);
+        // B3: the co-sign overlay resolves the EFFECTIVE oracle view — approved amendments replace the newest
+        // plan's specs, approved waives remove them (the unit is stamped Waived below instead of graded).
+        var effective = SupervisorAcceptanceOverlay.Resolve(priorDecisions, ResolvePlannedAcceptance(priorDecisions));
+        var acceptanceBySubtask = effective.BySubtask;
 
-        if (acceptanceBySubtask.Count == 0) return decision;   // no subtask authored a contract → byte-identical (the dominant case)
+        if (acceptanceBySubtask.Count == 0 && effective.WaivedSubtaskIds.Count == 0) return decision;   // no subtask carries a contract or a waive → byte-identical (the dominant case)
 
         var expectsChangesBySubtask = ResolvePlannedExpectsChanges(priorDecisions);
         var unitSubtaskIds = UnitSubtaskIds(decision);
@@ -549,6 +560,25 @@ public sealed partial class SupervisorTurnService
         for (var i = 0; i < results.Count; i++)
         {
             var subtaskId = i < unitSubtaskIds.Count ? unitSubtaskIds[i] : null;
+
+            // B3: a human waived this subtask's verification — stamp the unit WAIVED instead of grading it. The
+            // stamp rides the same crash-ordering as a grade (before the caller persists the tape → a crash replays
+            // as re-stamp, idempotent), and the manifest mirror keeps the scorecard's oracle leg honest (B2: a
+            // waived-only run never reads Solved). WAIVED is not a pass: the B2 doors withhold it everywhere.
+            if (subtaskId is not null && effective.WaivedSubtaskIds.Contains(subtaskId))
+            {
+                graded.Add(results[i] with
+                {
+                    AcceptanceVerdict = Messages.Contracts.VerificationDisposition.Waived,
+                    AcceptanceDetail = "verification waived by a human co-sign",
+                });
+                anyGraded = true;
+
+                await _manifests.StampAcceptanceForAgentRunAsync(results[i].AgentRunId, PublishAcceptanceState.Waived, cancellationToken).ConfigureAwait(false);
+
+                continue;
+            }
+
             var spec = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var found) ? found : null;
             var command = spec is not null ? NormalizeCommand(spec.Command) : null;
 
@@ -605,6 +635,15 @@ public sealed partial class SupervisorTurnService
                 Contradiction = ClassifyUnitContradiction(results[i].Status, grade.Passed),
             });
             anyGraded = true;
+
+            // B-pre: the same verdict, written back to the unit's PublishManifest rows. Supervisor units are born
+            // NotApplicable (no AgentTask.Acceptance at completion), so without this the manifest readers — the
+            // unattended scorecard's oracle leg above all — never see the fold's grade. The stamp rides BEFORE the
+            // caller persists the graded tape: a crash between the two replays as re-grade + idempotent re-stamp,
+            // never as a graded tape with an unstamped manifest.
+            await _manifests.StampAcceptanceForAgentRunAsync(results[i].AgentRunId,
+                grade.Passed ? PublishAcceptanceState.Passed : PublishAcceptanceState.Failed,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (!anyGraded) return decision;   // no unit in THIS decision carries a contract (the plan's acceptance-bearing subtasks belong to a different decision) → byte-identical; a replay re-attempt is a pure no-op (no grade I/O ran)
@@ -1199,6 +1238,14 @@ public sealed partial class SupervisorTurnService
     {
         Kind = SupervisorDecisionKinds.Stop,
         PayloadJson = JsonSerializer.Serialize(new { reason, detail }, AgentJson.Options),
+    };
+
+    /// <summary>B5 (MAJOR-5): the retry a stop was rewritten into because its target carries an approved-but-unconsumed oracle amendment — the ServerAuthoredMerge shape (a correctness floor the server enforces, never a model choice). Deterministic given the tape → replay-stable idempotency key.</summary>
+    private static SupervisorDecision ServerAuthoredRetry(string subtaskId) => new()
+    {
+        Kind = SupervisorDecisionKinds.Retry,
+        ServerAuthored = true,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorRetryPayload { SubtaskId = subtaskId }, AgentJson.Options),
     };
 
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed) — delegates to the shared <see cref="SupervisorOutcome.ReadStopReason"/> so the forced-stop reason has ONE reader.</summary>
