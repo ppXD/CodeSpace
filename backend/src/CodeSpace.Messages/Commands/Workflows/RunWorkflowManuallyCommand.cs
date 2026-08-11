@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -10,8 +11,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// actor and an operator-supplied payload (defaults to empty object). Returns the new run
 /// id so the UI can navigate to /runs/{id}.
 /// </summary>
-public sealed record RunWorkflowManuallyCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record RunWorkflowManuallyCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsLaunch;
+
     /// <summary>Route-merged; non-required to keep body-only JSON binding from 400-failing. See <see cref="UpdateWorkflowCommand"/> note.</summary>
     public Guid WorkflowId { get; init; }
     public JsonElement? Payload { get; init; }

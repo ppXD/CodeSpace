@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Mediation;
 
@@ -10,8 +11,10 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// errors list. The first version is persisted to <c>workflow_version</c> + the live
 /// <c>definition_jsonb</c> on the workflow row.
 /// </summary>
-public sealed record CreateWorkflowCommand : ICommand<Guid>, IRequireTeamMembership
+public sealed record CreateWorkflowCommand : ICommand<Guid>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.WorkflowsWrite;
+
     public required string Name { get; init; }
     public string? Description { get; init; }
     public required WorkflowDefinition Definition { get; init; }

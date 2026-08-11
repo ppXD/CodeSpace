@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Mediation;
 
@@ -16,7 +17,9 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// kill-wave aborted on a successful flip, or <c>Cancelled=false</c> + the existing terminal status on
 /// an already-terminal idempotent no-op.</para>
 /// </summary>
-public sealed record CancelRunCommand : ICommand<CancelRunOutcome?>, IRequireTeamMembership
+public sealed record CancelRunCommand : ICommand<CancelRunOutcome?>, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.RunsControl;
+
     public Guid RunId { get; init; }
 }
