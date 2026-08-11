@@ -2,15 +2,12 @@ import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router"
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/api/request";
+import { AuthShell } from "@/components/auth/AuthShell";
 import { useSignIn } from "@/hooks/use-sign-in";
 
-import "@/styles/tui.css";
-
 /**
- * Sign-in page. TUI styling — box-drawing borders, $-prompt, blinking caret. Stripped
- * to the bare minimum: ASCII logo + prompt + two fields + the submit button. No tagline,
- * no version tag, no keyboard hint footer — the keyboard contract is implicit (Tab
- * cycles fields, Enter submits, Esc clears the focused field).
+ * Sign-in page. The only way into the product: there is no public sign-up, so the note under the
+ * form says where an account comes from instead of offering a link that would 404.
  */
 
 export const Route = createFileRoute("/signin")({
@@ -52,76 +49,45 @@ function SignIn() {
         : null;
 
   return (
-    <div className="tui-root">
-      <div className="tui-scanlines" aria-hidden />
+    <AuthShell>
+      <h1 className="auth-title">Sign in</h1>
+      <p className="auth-lede">Use the email or name your workspace owner invited.</p>
 
-      <main className="tui-frame">
-        <header className="tui-banner">
-          <pre className="tui-ascii" aria-label="CodeSpace">
-{` ┌─┐┌─┐┌┬┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐
- │  │ │ ││├┤ └─┐├─┘├─┤│  ├┤
- └─┘└─┘─┴┘└─┘└─┘┴  ┴ ┴└─┘└─┘`}
-          </pre>
-        </header>
+      <form className="auth-form" onSubmit={submit}>
+        <label className="auth-field">
+          <span className="auth-label">Email or name</span>
+          <input
+            ref={nameRef}
+            type="text"
+            className="auth-input"
+            autoComplete="username"
+            spellCheck={false}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={signIn.isPending}
+          />
+        </label>
 
-        <form className="tui-form" onSubmit={submit}>
-          <div className="tui-prompt">
-            <span className="tui-prompt-host">codespace</span>
-            <span className="tui-prompt-sep">:</span>
-            <span className="tui-prompt-path">~/auth</span>
-            <span className="tui-prompt-sep">$</span>
-            <span className="tui-prompt-cmd"> login</span>
-          </div>
+        <label className="auth-field">
+          <span className="auth-label">Password</span>
+          <input
+            type="password"
+            className="auth-input"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={signIn.isPending}
+          />
+        </label>
 
-          <label className="tui-field">
-            <span className="tui-field-label">name</span>
-            <span className="tui-field-arrow">›</span>
-            <input
-              ref={nameRef}
-              type="text"
-              className="tui-field-input"
-              autoComplete="username"
-              spellCheck={false}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Escape") setName(""); }}
-              disabled={signIn.isPending}
-            />
-            <span className="tui-caret" aria-hidden>█</span>
-          </label>
+        <button type="submit" className="auth-submit" disabled={!name || !password || signIn.isPending}>
+          {signIn.isPending ? "Signing in…" : "Sign in"}
+        </button>
 
-          <label className="tui-field">
-            <span className="tui-field-label">passwd</span>
-            <span className="tui-field-arrow">›</span>
-            <input
-              type="password"
-              className="tui-field-input"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Escape") setPassword(""); }}
-              disabled={signIn.isPending}
-            />
-            <span className="tui-caret" aria-hidden>█</span>
-          </label>
+        {errorMessage && <div className="auth-error" role="alert">{errorMessage}</div>}
+      </form>
 
-          <div className="tui-actions">
-            <button
-              type="submit"
-              className="tui-submit"
-              disabled={!name || !password || signIn.isPending}
-            >
-              {signIn.isPending ? "[ ······ ] verifying" : "[ ENTER ] sign in"}
-            </button>
-          </div>
-
-          {errorMessage && (
-            <div className="tui-error" role="alert">
-              ! {errorMessage}
-            </div>
-          )}
-        </form>
-      </main>
-    </div>
+      <p className="auth-note">No public sign-up. Ask a workspace owner for an invite link.</p>
+    </AuthShell>
   );
 }

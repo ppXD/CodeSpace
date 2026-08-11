@@ -3,8 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Raster fallback: Safari before 16 and every "add to home screen" / bookmark surface
+         ignore an SVG icon and fall back to a generic glyph without these. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Chrome requests /favicon.ico implicitly whatever the link tags say; serving a real one
+         is also what dislodges a stale empty favicon a browser has already cached for an origin. -->
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <title>CodeSpace</title>
+    <meta name="theme-color" content="#1B1916" />
   </head>
   <body>
     <div id="root"></div>

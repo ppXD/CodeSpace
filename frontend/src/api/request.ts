@@ -53,19 +53,29 @@ export async function fetchJson<T>(path: string, init: RequestInit = {}): Promis
     const message = (parsed as { message?: string })?.message ?? response.statusText;
 
     // 401 means our JWT is invalid / expired / missing. Wipe it so the auth guard
-    // sends the user to /signin. Sign-in itself returns 401 on bad creds — exclude
-    // /api/auth/* so the sign-in form shows the inline error without bouncing the page.
-    if (response.status === 401 && !path.startsWith("/api/auth/")) handleUnauthorized();
+    // sends the user to /signin — except on the endpoints a signed-out visitor is
+    // SUPPOSED to call, where a 401 is the answer to what they asked, not a broken
+    // session (bad password; dead invite token). Bouncing those replaces the page's
+    // own message with a redirect the visitor can do nothing with.
+    if (response.status === 401 && !isAnonymousSurface(path)) handleUnauthorized();
 
     // 403 with password_rotation_required → user must rotate before continuing. Same
-    // exemption pattern as 401: /api/auth/change-password is the rotation itself, so
-    // don't bounce on its own response.
-    if (response.status === 403 && code === "password_rotation_required" && !path.startsWith("/api/auth/")) redirectToPasswordRotation();
+    // exemption: /api/auth/change-password is the rotation itself, so don't bounce on
+    // its own response.
+    if (response.status === 403 && code === "password_rotation_required" && !isAnonymousSurface(path)) redirectToPasswordRotation();
 
     throw new ApiError(response.status, code, message, parsed);
   }
 
   return parsed as T;
+}
+
+/**
+ * Endpoints reachable without a session: sign-in / rotation, and invitation preview + accept, where
+ * the credential is the token in the URL rather than a stored JWT.
+ */
+function isAnonymousSurface(path: string): boolean {
+  return path.startsWith("/api/auth/") || path.startsWith("/api/invitations/");
 }
 
 function safeJsonParse(text: string): unknown {

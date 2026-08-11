@@ -14,6 +14,7 @@ import { Route as OauthCallbackRouteImport } from './routes/oauth-callback'
 import { Route as ChangePasswordRouteImport } from './routes/change-password'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
+import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppRepositoriesRouteImport } from './routes/_app.repositories'
 import { Route as AppTeamsTeamSlugRouteImport } from './routes/_app.teams.$teamSlug'
 import { Route as AppTeamsTeamSlugIndexRouteImport } from './routes/_app.teams.$teamSlug.index'
@@ -72,6 +73,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => AppRoute,
+} as any)
+const InviteTokenRoute = InviteTokenRouteImport.update({
+  id: '/invite/$token',
+  path: '/invite/$token',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const AppRepositoriesRoute = AppRepositoriesRouteImport.update({
   id: '/repositories',
@@ -279,6 +285,7 @@ export interface FileRoutesByFullPath {
   '/oauth-callback': typeof OauthCallbackRoute
   '/signin': typeof SigninRoute
   '/repositories': typeof AppRepositoriesRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
@@ -318,6 +325,7 @@ export interface FileRoutesByTo {
   '/oauth-callback': typeof OauthCallbackRoute
   '/signin': typeof SigninRoute
   '/repositories': typeof AppRepositoriesRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/': typeof AppIndexRoute
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugIndexRoute
@@ -350,6 +358,7 @@ export interface FileRoutesById {
   '/oauth-callback': typeof OauthCallbackRoute
   '/signin': typeof SigninRoute
   '/_app/repositories': typeof AppRepositoriesRoute
+  '/invite/$token': typeof InviteTokenRoute
   '/_app/': typeof AppIndexRoute
   '/_app/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/_app/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
@@ -393,6 +402,7 @@ export interface FileRouteTypes {
     | '/oauth-callback'
     | '/signin'
     | '/repositories'
+    | '/invite/$token'
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/library'
@@ -432,6 +442,7 @@ export interface FileRouteTypes {
     | '/oauth-callback'
     | '/signin'
     | '/repositories'
+    | '/invite/$token'
     | '/'
     | '/teams/$teamSlug/library'
     | '/teams/$teamSlug'
@@ -463,6 +474,7 @@ export interface FileRouteTypes {
     | '/oauth-callback'
     | '/signin'
     | '/_app/repositories'
+    | '/invite/$token'
     | '/_app/'
     | '/_app/teams/$teamSlug'
     | '/_app/teams/$teamSlug/agents'
@@ -504,6 +516,7 @@ export interface RootRouteChildren {
   ChangePasswordRoute: typeof ChangePasswordRoute
   OauthCallbackRoute: typeof OauthCallbackRoute
   SigninRoute: typeof SigninRoute
+  InviteTokenRoute: typeof InviteTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -542,6 +555,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
+    }
+    '/invite/$token': {
+      id: '/invite/$token'
+      path: '/invite/$token'
+      fullPath: '/invite/$token'
+      preLoaderRoute: typeof InviteTokenRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/_app/repositories': {
       id: '/_app/repositories'
@@ -1005,6 +1025,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChangePasswordRoute: ChangePasswordRoute,
   OauthCallbackRoute: OauthCallbackRoute,
   SigninRoute: SigninRoute,
+  InviteTokenRoute: InviteTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
