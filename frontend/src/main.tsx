@@ -12,9 +12,6 @@ import { DialogProvider } from "./components/dialog";
 import "./index.css";
 import { routeTree } from "./routeTree.gen";
 
-console.log("ENV:", import.meta.env);
-console.log("VITE_API_URL:", import.meta.env.VITE_API_URL);
-
 const router = createRouter({
   routeTree,
   defaultPreload: "intent",
@@ -51,5 +48,5 @@ createRoot(document.getElementById("root")!).render(
         </DialogProvider>
       </ActorIdentityProvider>
     </QueryClientProvider>
-  </StrictMode>
+  </StrictMode>,
 );

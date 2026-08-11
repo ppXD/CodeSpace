@@ -1,6 +1,6 @@
 import type { RunRecordView } from "@/api/workflows";
 
-const baseUrl = import.meta.env.VITE_API_URL ?? "https://codespace-api-test.solarifyai.com";
+const baseUrl = import.meta.env.VITE_API_URL ?? "";
 
 /**
  * Subscribe to a run's LIVE ledger tail over Server-Sent Events (the backend `/records/stream` endpoint). Uses

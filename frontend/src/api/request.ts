@@ -10,7 +10,7 @@
 // Empty default → relative URLs → Vite proxies /api to the backend. Set
 // VITE_API_URL=http://host:port in .env.local to hit the backend directly (cross-origin,
 // requires CORS allow-list on the backend). See frontend/.env.example.
-const baseUrl: string = import.meta.env.VITE_API_URL ?? "https://codespace-api-test.solarifyai.com";
+const baseUrl: string = import.meta.env.VITE_API_URL ?? "";
 
 export class ApiError extends Error {
   readonly status: number;
