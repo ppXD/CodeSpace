@@ -82,13 +82,27 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
     public Task UpsertForIntegrationAsync(PublishManifestUpsert input, CancellationToken cancellationToken) =>
         UpsertAsync(PublishManifestKind.Integration, agentRunId: null, input, expectedFenceEpoch: null, cancellationToken);
 
-    public async Task StampAcceptanceForAgentRunAsync(Guid agentRunId, PublishAcceptanceState state, CancellationToken cancellationToken) =>
-        await _db.PublishManifest
+    public async Task StampAcceptanceForAgentRunAsync(Guid agentRunId, PublishAcceptanceState state, CancellationToken cancellationToken)
+    {
+        var stamped = await _db.PublishManifest
             .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId == agentRunId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(m => m.AcceptanceState, state)
                 .SetProperty(m => m.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
+
+        if (stamped == 0) return;
+
+        // P2 (ledger-version full coverage — a B-pre gap): the fold's verdict write-back changes what the
+        // scorecard's oracle leg and the composer read; without a bump a compose racing the fold could stamp a
+        // terminal on pre-verdict facts and the CAS would not refuse.
+        var runIds = await _db.PublishManifest.AsNoTracking()
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId == agentRunId && m.WorkflowRunId != null)
+            .Select(m => m.WorkflowRunId!.Value).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var runId in runIds)
+            await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, runId, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Never add <c>CreatedBy</c>/<c>CreatedBy</c>-derived fields to either <c>ExecuteUpdateAsync</c>'s

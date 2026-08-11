@@ -402,7 +402,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // keeps the status-only guard.
         var snapshot = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => new { r.Status, r.TeamId })
+            .Select(r => new { r.Status, r.TeamId, r.WorkflowRunId })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
@@ -452,6 +452,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current}{(expectedEpoch is { } e ? $" at epoch {e}" : "")} at completion — a concurrent transition or reclaim won the race.");
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
+
+        // P2 (ledger-version full coverage): the terminal result is in the completion composer's read set — a
+        // completion landing between a compose read and its terminal stamp must move the version so the CAS refuses.
+        if (snapshot.WorkflowRunId is { } boundRunId)
+            await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, boundRunId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
