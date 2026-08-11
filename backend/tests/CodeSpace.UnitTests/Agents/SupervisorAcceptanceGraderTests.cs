@@ -382,6 +382,10 @@ public class SupervisorAcceptanceGraderTests
     [InlineData("repo 'api': setup-failed: npm ERR!", true)]
     [InlineData("repo 'api': tests-timed-out", true)]
     [InlineData("repo 'web': tests-failed-exit-1", false)]                   // genuine failure stays genuine under the tag
+    [InlineData("tests-failed-exit-127", true)]                              // B6: POSIX command-not-found — the check could not run (bwrap's shape of a missing gate binary)
+    [InlineData("tests-failed-exit-126", true)]                              // B6: found but not executable — same class
+    [InlineData("repo 'web': tests-failed-exit-127", true)]                  // and the tag never defeats it
+    [InlineData("tests-failed-exit-2", false)]                               // an ordinary non-zero exit stays genuine
     public void A_repo_tag_never_defeats_the_infra_classification(string detail, bool expected)
     {
         // The multi-repo grade paths wrap the classifiable detail in a uniform "repo 'alias': " tag for display —

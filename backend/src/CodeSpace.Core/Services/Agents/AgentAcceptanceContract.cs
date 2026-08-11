@@ -123,6 +123,12 @@ public static class AgentAcceptanceContract
                    || effective.StartsWith("setup-failed:", StringComparison.Ordinal)
                    || effective.StartsWith("oracle-restore-failed:", StringComparison.Ordinal)
                    || effective is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
+                   // POSIX "cannot run the command" codes (B6): 127 = command not found, 126 = found but not
+                   // executable — the CHECK ITSELF could not run, exactly like a grader start-throw. The two must
+                   // classify identically across runners or the same broken oracle reads infra locally (direct exec
+                   // throws → grade-error) and Genuine under bubblewrap (bwrap starts fine, execvp fails inside,
+                   // exit 127) — the concrete leak the amend precondition would otherwise trip over.
+                   || effective is "tests-failed-exit-127" or "tests-failed-exit-126"
                    || (effective == "no-branch-or-repo" && workPresent));
     }
 

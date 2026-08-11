@@ -144,6 +144,126 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task The_real_model_repairs_a_broken_oracle_through_the_cosign_loop()
+    {
+        // B6 — the run-96695645 re-enactment, the amend-acceptance arc's end-to-end proof: a live brain meets a
+        // unit whose acceptance check CANNOT RUN (a missing gate binary — the deterministic broken oracle; exit-127
+        // classifies infra since B6's POSIX-code fix, and a local direct-exec start-throw lands grade-error — both
+        // infra, so the arm behaves identically under bubblewrap and bare runners), proposes amend_acceptance
+        // instead of retrying into it (B3 verb, B4 precondition), the TEST plays the human co-signer on the parked
+        // card, and the retry the run then owes (B5 obligation) re-grades under the co-signed fallback and drives
+        // the arc to a green accept head. GATING best-of-N — the whole repair loop, not any single rung.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);   // the surface the amend co-sign card parks on
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        // The goal PLANTS the broken oracle (a gate binary this repository does not have) and names the honest
+        // repair channel — re-enacting 96695645's shape: the oracle, not the work, is the binding constraint.
+        const string reenactGoal =
+            "Implement a small feature in ONE subtask. Author its acceptance check as exactly the command `run-quality-gate` "
+          + "(the repository's standard gate binary). If the server's grade later reports that the gate itself CANNOT RUN "
+          + "(a grade-error or command-not-found failure), the repository's fallback gate is `sh check.sh` — propose an "
+          + "acceptance amendment (kind amend_acceptance) switching this subtask's check to the fallback, and never retry "
+          + "a unit into a check that cannot run.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, reenactGoal, conversationId);
+
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
+        {
+            jobClient.Clear();
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            // The co-sign loop — the test is the human: approve each parked AMEND card (and only amend cards — a
+            // content ask is the model converging some other way, which the evaluator below reads honestly).
+            // Bounded: a live brain that keeps amending past this is a miss, not a hang.
+            for (var round = 0; round < 4 && await ApproveParkedAmendCardAsync(runId, teamId, userId); round++)
+                await jobClient.WaitForPendingAsync();
+
+            var (outcome, note) = await EvaluateOracleRepairAsync(runId, teamId, FileWritingFakeCli.StubbedHarnessKinds);
+            return (outcome, $"{Provider} model '{model}' oracle-repair — {note}");
+        });
+    }
+
+    /// <summary>Approve the run's newest parked ask IFF it is an amend co-sign card (payload carries the structured amend node) — the test playing the human. False = nothing parked, or the parked ask is not an amend card (never blind-approve a content ask).</summary>
+    private async Task<bool> ApproveParkedAmendCardAsync(Guid runId, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var lastAsk = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .OrderByDescending(d => d.Sequence).FirstOrDefaultAsync();
+
+        if (lastAsk is null || SupervisorAmendAcceptance.ReadAmend(lastAsk.PayloadJson) is null) return false;
+
+        var outcome = await scope.Resolve<ISupervisorAskAnswerService>()
+            .AnswerAsync(runId, teamId, userId, "approve — the fallback gate is the right check", CancellationToken.None);
+
+        return outcome is { Resumed: true };
+    }
+
+    /// <summary>The oracle-repair verdict: Drove = the model USED the co-sign channel (an approved amend card on the tape) AND the arc still reached the green accept head (the stop floor graded PASSED on the integrated tree). A run that converged without ever amending is a miss for THIS arm (it tests the repair loop, not general convergence).</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateOracleRepairAsync(Guid runId, Guid teamId, IReadOnlyList<string> stubbedHarnessKinds)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        await ThrowIfGatewayInfraFailureAsync(db, runId);
+
+        var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
+            .Select(r => new { r.Status, r.Error, r.ResultJson, r.Harness }).ToListAsync();
+
+        var (lostControl, harnessCensus) = RealModelGate.ClassifyHarnessControl(agentRuns.Select(r => r.Harness).ToList(), stubbedHarnessKinds);
+        if (lostControl)
+            return (RealModelOutcome.CodeFault, $"the arm lost control of its agents: it arms [{string.Join(", ", stubbedHarnessKinds)}] but the run dispatched {harnessCensus}.");
+
+        var (executionInfraFault, agentSummary) = RealModelGate.ClassifyAgentExecution(agentRuns.Select(r => r.Status).ToList());
+        if (executionInfraFault)
+        {
+            var firstDetail = agentRuns.Select(r => AgentFailureDetail(r.Error, r.ResultJson)).FirstOrDefault(d => !string.IsNullOrWhiteSpace(d));
+            throw new AgentExecutionInfraException($"the spawned agents could not EXECUTE on this runner — {agentSummary}; first agent failure: {Truncate(firstDetail) ?? "(none captured)"}.");
+        }
+
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+
+        var amendCards = priorDecisions.Count(SupervisorAmendAcceptance.IsAmendCard);
+        var approvedAmends = priorDecisions.Count(SupervisorAmendAcceptance.IsApprovedAmendCard);
+
+        var stop = priorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
+        var acceptancePassed = stop is not null && SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson) == true;
+
+        var kindTrail = string.Join("→", priorDecisions.Select(d => d.DecisionKind));
+        var note = $"amendCards={amendCards}, approved={approvedAmends}, acceptancePassed={acceptancePassed}, agents={agentSummary}, trajectory=[{kindTrail}]";
+
+        return (approvedAmends > 0 && acceptancePassed ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss, note);
+    }
+
+    [Fact]
     public async Task The_real_model_authors_heterogeneous_per_agent_dispatch_when_the_goal_invites_distinct_roles()
     {
         // L4 ARC B — the model-authored DIVISION OF LABOUR proof: given a goal that invites two DISTINCT roles, does a live
