@@ -125,25 +125,7 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             }
         }
 
-        var updated = await _db.PublishManifest
-            .Where(m => m.Kind == kind && m.AgentRunId == agentRunId && m.WorkflowRunId == input.WorkflowRunId && m.RepositoryAlias == input.RepositoryAlias
-                     && (expectedFenceEpoch == null || _db.AgentRun.Any(r => r.Id == agentRunId && r.FenceEpoch == expectedFenceEpoch)))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(m => m.RepositoryId, input.RepositoryId)
-                .SetProperty(m => m.BaseSha, input.BaseSha)
-                .SetProperty(m => m.Branch, input.Branch)
-                .SetProperty(m => m.CommitSha, input.CommitSha)
-                .SetProperty(m => m.PatchArtifactId, input.PatchArtifactId)
-                .SetProperty(m => m.ChangedFileCount, input.ChangedFileCount)
-                .SetProperty(m => m.ChangedFilesJson, input.ChangedFilesJson)
-                .SetProperty(m => m.AcceptanceState, input.AcceptanceState)
-                .SetProperty(m => m.PublishStateValue, input.PublishStateValue)
-                .SetProperty(m => m.PublishError, input.PublishError)
-                .SetProperty(m => m.Summary, input.Summary)
-                .SetProperty(m => m.PullRequestNumber, input.PullRequestNumber)
-                .SetProperty(m => m.PullRequestUrl, input.PullRequestUrl)
-                .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
-            .ConfigureAwait(false);
+        var updated = await FencedUpdateAsync(kind, agentRunId, input, expectedFenceEpoch, now, cancellationToken).ConfigureAwait(false);
 
         if (updated > 0) { await BumpLedgerVersionIfRunBoundAsync(input.WorkflowRunId, cancellationToken).ConfigureAwait(false); return; }
 
@@ -172,6 +154,50 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
 
         _db.PublishManifest.Add(row);
 
+        // The FIRST write must carry the fence too (review hole 1): the UPDATE above compares the epoch inside the
+        // writing statement, but a genuinely-first INSERT was a plain SaveChanges and the unique-race fallback
+        // UPDATE dropped the predicate — a reclaimed worker whose key had no row yet could still stamp its stale
+        // claim durably. Under a fence, the INSERT locks the run's fence row (FOR SHARE) for its transaction: a
+        // reclaimer's epoch bump (an UPDATE on that row) either already committed — the locked read sees it and
+        // refuses — or blocks until this commit, making the row legitimately pre-reclaim (the reclaimed attempt's
+        // own upsert then refreshes the same key). The comparison is no longer a read-then-write race.
+        if (expectedFenceEpoch is { } fencedEpoch && agentRunId is { } fencedInsertRunId)
+        {
+            var lostInsertRace = false;
+
+            await using (var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var lockedEpoch = (await _db.Database.SqlQuery<long>(
+                        $"SELECT fence_epoch AS \"Value\" FROM agent_run WHERE id = {fencedInsertRunId} FOR SHARE")
+                    .ToListAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+
+                if (!AgentRunFence.StillOwns(lockedEpoch, fencedEpoch))
+                {
+                    _db.ChangeTracker.Clear();
+                    _logger.LogWarning("Agent run {RunId}: {Note}", fencedInsertRunId, AgentRunFence.RefusalNote("publish-manifest first write", lockedEpoch, fencedEpoch));
+                    return;
+                }
+
+                try
+                {
+                    await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                    await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+                {
+                    await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    _db.ChangeTracker.Clear();
+                    lostInsertRace = true;
+                }
+            }
+
+            if (lostInsertRace)
+                await FencedUpdateAsync(kind, agentRunId, input, expectedFenceEpoch, now, cancellationToken).ConfigureAwait(false);
+
+            await BumpLedgerVersionIfRunBoundAsync(input.WorkflowRunId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         try
         {
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -182,28 +208,33 @@ public sealed class PublishManifestStore : IPublishManifestStore, IScopedDepende
             // run) — fold into the same UPDATE the common path takes, so this call still leaves the row refreshed.
             _db.ChangeTracker.Clear();
 
-            await _db.PublishManifest
-                .Where(m => m.Kind == kind && m.AgentRunId == agentRunId && m.WorkflowRunId == input.WorkflowRunId && m.RepositoryAlias == input.RepositoryAlias)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(m => m.RepositoryId, input.RepositoryId)
-                    .SetProperty(m => m.BaseSha, input.BaseSha)
-                    .SetProperty(m => m.Branch, input.Branch)
-                    .SetProperty(m => m.CommitSha, input.CommitSha)
-                    .SetProperty(m => m.PatchArtifactId, input.PatchArtifactId)
-                    .SetProperty(m => m.ChangedFileCount, input.ChangedFileCount)
-                    .SetProperty(m => m.ChangedFilesJson, input.ChangedFilesJson)
-                    .SetProperty(m => m.AcceptanceState, input.AcceptanceState)
-                    .SetProperty(m => m.PublishStateValue, input.PublishStateValue)
-                    .SetProperty(m => m.PublishError, input.PublishError)
-                    .SetProperty(m => m.Summary, input.Summary)
-                    .SetProperty(m => m.PullRequestNumber, input.PullRequestNumber)
-                    .SetProperty(m => m.PullRequestUrl, input.PullRequestUrl)
-                    .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
-                .ConfigureAwait(false);
+            await FencedUpdateAsync(kind, agentRunId, input, expectedFenceEpoch: null, now, cancellationToken).ConfigureAwait(false);
         }
 
         await BumpLedgerVersionIfRunBoundAsync(input.WorkflowRunId, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>THE claim-refresh statement — the epoch predicate rides inside the statement that writes, and every refresh path (the common update-first, the lost-insert-race fold) is this ONE method, so no path can drop the fence again (review hole 1's second half: the race fallback used to carry no predicate, letting a zombie that lost the insert race overwrite the reclaimer's row a statement later).</summary>
+    private async Task<int> FencedUpdateAsync(PublishManifestKind kind, Guid? agentRunId, PublishManifestUpsert input, long? expectedFenceEpoch, DateTimeOffset now, CancellationToken cancellationToken) =>
+        await _db.PublishManifest
+            .Where(m => m.Kind == kind && m.AgentRunId == agentRunId && m.WorkflowRunId == input.WorkflowRunId && m.RepositoryAlias == input.RepositoryAlias
+                     && (expectedFenceEpoch == null || _db.AgentRun.Any(r => r.Id == agentRunId && r.FenceEpoch == expectedFenceEpoch)))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.RepositoryId, input.RepositoryId)
+                .SetProperty(m => m.BaseSha, input.BaseSha)
+                .SetProperty(m => m.Branch, input.Branch)
+                .SetProperty(m => m.CommitSha, input.CommitSha)
+                .SetProperty(m => m.PatchArtifactId, input.PatchArtifactId)
+                .SetProperty(m => m.ChangedFileCount, input.ChangedFileCount)
+                .SetProperty(m => m.ChangedFilesJson, input.ChangedFilesJson)
+                .SetProperty(m => m.AcceptanceState, input.AcceptanceState)
+                .SetProperty(m => m.PublishStateValue, input.PublishStateValue)
+                .SetProperty(m => m.PublishError, input.PublishError)
+                .SetProperty(m => m.Summary, input.Summary)
+                .SetProperty(m => m.PullRequestNumber, input.PullRequestNumber)
+                .SetProperty(m => m.PullRequestUrl, input.PullRequestUrl)
+                .SetProperty(m => m.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
 
     /// <summary>P2: a manifest write is the count-blind ledger write (state transitions ExecuteUpdate the same row), so every successful write path advances the run's monotonic ledger version. A run-less manifest (a benchmark's bare agent run) has no version to advance.</summary>
     private Task BumpLedgerVersionIfRunBoundAsync(Guid? workflowRunId, CancellationToken cancellationToken) =>
