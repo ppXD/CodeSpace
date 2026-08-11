@@ -19,8 +19,8 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// are GENUINELY differentiated within a SINGLE process: the runner stamps the per-run opt-in
 /// <c>AgentTask.EnableMcpEndpoint</c> from the mode, so the cli-mcp run opens the run-scoped MCP tool-fabric endpoint
 /// while the cli run does not — they execute observably differently, not merely under different scorecard labels. The
-/// resolved gate state (the SAME <c>AgentRunExecutor.ShouldOpenMcpEndpoint</c> the executor consults) is recorded on
-/// <see cref="BenchmarkResult.McpEndpointEnabled"/>, so a row can never be mislabeled relative to what the executor did.
+/// resolved gate state (the SAME <c>AgentRunExecutor.UsesFullToolCatalog</c> the executor consults) is recorded on
+/// <see cref="BenchmarkResult.McpFullCatalog"/>, so a row can never be mislabeled relative to what the executor did.
 /// <see cref="BenchmarkMode.WorkflowMap"/> is RESERVED, not wired in this slice: it would run through the composed
 /// planner→<c>flow.map</c>→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner
 /// does not orchestrate — requesting it throws a clear "not yet wired" so the boundary is explicit, never a silent fake.
@@ -58,7 +58,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         // The SAME gate the executor will consult to decide whether to open the run's MCP endpoint — recorded on the
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
-        var mcpEnabled = AgentRunExecutor.ShouldOpenMcpEndpoint(agentTask);
+        var mcpFullCatalog = AgentRunExecutor.UsesFullToolCatalog(agentTask);
 
         var run = await _runs.CreateAsync(agentTask, teamId, null, null, iterationKey: "", cancellationToken).ConfigureAwait(false);
 
@@ -70,7 +70,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(task, mode, completed, grade, mcpEnabled);
+        return BuildResult(task, mode, completed, grade, mcpFullCatalog);
     }
 
     /// <summary>
@@ -149,8 +149,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpEnabled"/> is the executor's resolved MCP gate for this run — the observable cli vs cli-mcp distinction.</summary>
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpEnabled)
+    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. The run's normalized <c>ResultJson</c> is deserialized ONCE to project the token usage / revise rounds / exit reason a critic A/B reports (all null/0 when the run recorded no result). <paramref name="mcpFullCatalog"/> is the executor's resolved catalog width for this run — the observable cli vs cli-mcp distinction (the endpoint itself opens in both).</summary>
+    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpFullCatalog)
     {
         var result = run.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
 
@@ -162,7 +162,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             RunStatus = run.Status,
             DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
             Grade = grade,
-            McpEndpointEnabled = mcpEnabled,
+            McpFullCatalog = mcpFullCatalog,
             TokenUsage = result?.TokenUsage,
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,

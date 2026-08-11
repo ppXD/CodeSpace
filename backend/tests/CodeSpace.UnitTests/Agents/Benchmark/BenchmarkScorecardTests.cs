@@ -23,7 +23,7 @@ public class BenchmarkScorecardTests
         RunStatus = runStatus,
         DurationSeconds = duration,
         Grade = new BenchmarkGrade { Passed = passed, Detail = passed ? "tests-passed" : "tests-failed" },
-        McpEndpointEnabled = mode == BenchmarkMode.HarnessCliWithMcp,
+        McpFullCatalog = mode == BenchmarkMode.HarnessCliWithMcp,
     };
 
     [Fact]

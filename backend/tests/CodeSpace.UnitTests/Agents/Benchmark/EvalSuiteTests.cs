@@ -148,7 +148,7 @@ public class EvalSuiteTests
 
     private static BenchmarkResult Result(string taskId, BenchmarkMode mode, bool passed) => new()
     {
-        TaskId = taskId, Mode = mode, RunStatus = Messages.Enums.AgentRunStatus.Succeeded, McpEndpointEnabled = false,
+        TaskId = taskId, Mode = mode, RunStatus = Messages.Enums.AgentRunStatus.Succeeded, McpFullCatalog = false,
         Grade = new BenchmarkGrade { Passed = passed, Detail = passed ? "tests green" : "2 cases failed" },
         DurationSeconds = 1,
     };

@@ -54,8 +54,11 @@ public sealed record BenchmarkResult
     /// <see cref="BenchmarkMode.HarnessCliWithMcp"/> (true): the two modes run the SAME task in the SAME process and
     /// differ observably here, not merely in the scorecard label, so "does the tool fabric move the number" is a real
     /// side-by-side comparison rather than two identically-executed rows.
+    /// <para>Named for what the flag ACTUALLY selects (review hole 3): the per-run MCP endpoint opens in BOTH modes —
+    /// the opt-in widens its tool catalog from ReadOnly to Full, it never opens or closes the endpoint. The old name
+    /// (<c>McpEndpointEnabled</c>) claimed an endpoint the false rows never lacked.</para>
     /// </summary>
-    public required bool McpEndpointEnabled { get; init; }
+    public required bool McpFullCatalog { get; init; }
 
     /// <summary>
     /// PLAN-QUALITY hook (defined now for PR-D's plan-review gate; only meaningful for <see cref="BenchmarkMode.WorkflowMap"/>):
