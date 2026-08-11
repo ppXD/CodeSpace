@@ -106,9 +106,9 @@ public sealed class BenchmarkRunnerFlowTests
         // The load-bearing distinction: the cli-mcp run actually opened the run-scoped MCP endpoint (the executor's
         // resolved per-run gate), the bare cli run did not — recorded on the result, so the two rows can never be
         // mislabeled-identical the way a label-only difference would be.
-        cliRun.McpEndpointEnabled.ShouldBeFalse("the bare CLI mode runs with NO tool fabric — the baseline");
-        mcpRun.McpEndpointEnabled.ShouldBeTrue("the cli-mcp mode opens the run-scoped MCP endpoint in the SAME process — the fabric is genuinely reachable, not just a different label");
-        mcpRun.McpEndpointEnabled.ShouldNotBe(cliRun.McpEndpointEnabled, "two modes that execute byte-identically and differ only in their scorecard label would be a mislabeled comparison; these differ on the fabric");
+        cliRun.McpFullCatalog.ShouldBeFalse("the bare CLI mode runs with NO tool fabric — the baseline");
+        mcpRun.McpFullCatalog.ShouldBeTrue("the cli-mcp mode opens the run-scoped MCP endpoint in the SAME process — the fabric is genuinely reachable, not just a different label");
+        mcpRun.McpFullCatalog.ShouldNotBe(cliRun.McpFullCatalog, "two modes that execute byte-identically and differ only in their scorecard label would be a mislabeled comparison; these differ on the fabric");
 
         // Everything else is held equal so the comparison is honest: same objective grade, both runs complete.
         cliRun.RunStatus.ShouldBe(AgentRunStatus.Succeeded);

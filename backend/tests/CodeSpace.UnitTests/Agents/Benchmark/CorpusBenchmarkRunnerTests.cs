@@ -196,7 +196,7 @@ public class CorpusBenchmarkRunnerTests
                     Mode = mode,
                     RunStatus = AgentRunStatus.TimedOut,
                     Grade = new BenchmarkGrade { Passed = false, Detail = "grade-error: tests-timed-out" },
-                    McpEndpointEnabled = mode == BenchmarkMode.HarnessCliWithMcp,
+                    McpFullCatalog = mode == BenchmarkMode.HarnessCliWithMcp,
                     DurationSeconds = 120.0,
                 });
 
@@ -207,7 +207,7 @@ public class CorpusBenchmarkRunnerTests
                 Mode = mode,
                 RunStatus = AgentRunStatus.Succeeded,
                 Grade = new BenchmarkGrade { Passed = passed, Detail = passed ? "tests-passed" : "tests-failed-exit-1" },
-                McpEndpointEnabled = mode == BenchmarkMode.HarnessCliWithMcp,
+                McpFullCatalog = mode == BenchmarkMode.HarnessCliWithMcp,
                 DurationSeconds = 1.0,
             });
         }

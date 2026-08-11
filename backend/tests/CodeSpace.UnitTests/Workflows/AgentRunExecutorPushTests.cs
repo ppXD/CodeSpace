@@ -54,11 +54,11 @@ public sealed class AgentRunExecutorPushTests
     [InlineData(null, true)]    // no per-run choice → the committed default (full)
     [InlineData(true, true)]    // explicit opt-in → full
     [InlineData(false, false)]  // explicit opt-OUT → read-only, which the benchmark cli-only arm needs
-    public void ShouldOpenMcpEndpoint_takes_the_per_run_choice_else_the_committed_default(bool? perRunChoice, bool expected)
+    public void UsesFullToolCatalog_takes_the_per_run_choice_else_the_committed_default(bool? perRunChoice, bool expected)
     {
         var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunChoice };
 
-        AgentRunExecutor.ShouldOpenMcpEndpoint(task).ShouldBe(expected);
+        AgentRunExecutor.UsesFullToolCatalog(task).ShouldBe(expected);
     }
 
     // ─── Health / graceful degradation: the boot readiness diagnostic ────────

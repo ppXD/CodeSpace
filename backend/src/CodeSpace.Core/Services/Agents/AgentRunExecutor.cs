@@ -1593,17 +1593,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// now that the ambient default is on. Pure + internal so it's unit-pinned and the benchmark runner can read the
     /// SAME gate to record what the executor actually did (no mislabeled rows).
     /// </summary>
-    internal static bool ShouldOpenMcpEndpoint(AgentTask task) => task.EnableMcpEndpoint ?? FullToolCatalogByDefault;
+    internal static bool UsesFullToolCatalog(AgentTask task) => task.EnableMcpEndpoint ?? FullToolCatalogByDefault;
 
     /// <summary>
     /// Which slice of the tool catalog this run's endpoint serves. The endpoint now opens for EVERY run; this is the
-    /// ONLY thing the opt-in changes. <see cref="ShouldOpenMcpEndpoint"/> ON (the ambient flag OR the per-run opt-in)
+    /// ONLY thing the opt-in changes. <see cref="UsesFullToolCatalog"/> ON (the ambient flag OR the per-run opt-in)
     /// selects <see cref="McpCatalogMode.Full"/> — the whole registry incl. the side-effecting fabric, byte-identical to
     /// before. OFF (the default) selects <see cref="McpCatalogMode.ReadOnly"/> — only read-only tools (e.g.
     /// <c>get_context</c> + the git reads) are served, so a default run still reaches the safe read tools without
     /// exposing any side effect. Pure + internal so it's unit-pinned.
     /// </summary>
-    internal static McpCatalogMode ResolveMcpCatalogMode(AgentTask task) => ShouldOpenMcpEndpoint(task) ? McpCatalogMode.Full : McpCatalogMode.ReadOnly;
+    internal static McpCatalogMode ResolveMcpCatalogMode(AgentTask task) => UsesFullToolCatalog(task) ? McpCatalogMode.Full : McpCatalogMode.ReadOnly;
 
     /// <summary>
     /// A BOOT diagnostic the worker host calls once at startup so a mis-configured tool fabric is VISIBLE at deploy time,
