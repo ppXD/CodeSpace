@@ -102,11 +102,32 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
         recipient.Role = TeamRole.Owner;
         team.OwnerUserId = toUserId;
 
-        var outgoing = await _db.TeamMembership.SingleOrDefaultAsync(m => m.TeamId == teamId && m.UserId == actorId, cancellationToken).ConfigureAwait(false);
-
-        if (outgoing != null) outgoing.Role = TeamRole.Admin;
+        await DemoteOutgoingOwnerAsync(teamId, actorId, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Steps the outgoing owner down to Admin, writing the membership row if they were holding the
+    /// team by <c>owner_user_id</c> alone.
+    ///
+    /// <para>Skipping them when the row was missing was silent data loss: the roster is
+    /// <c>owner UNION memberships</c>, so moving <c>owner_user_id</c> to someone else removed the only
+    /// record that the outgoing owner belonged to this team at all — they left the team by handing it
+    /// over. Migration 0116 backfills the rows that were missing, and this makes handing a team over
+    /// keep the person regardless of how it was recorded.</para>
+    /// </summary>
+    private async Task DemoteOutgoingOwnerAsync(Guid teamId, Guid actorId, CancellationToken cancellationToken)
+    {
+        var outgoing = await _db.TeamMembership.SingleOrDefaultAsync(m => m.TeamId == teamId && m.UserId == actorId, cancellationToken).ConfigureAwait(false);
+
+        if (outgoing != null)
+        {
+            outgoing.Role = TeamRole.Admin;
+            return;
+        }
+
+        _db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = actorId, Role = TeamRole.Admin });
     }
 
     // ── Guards ─────────────────────────────────────────────────────────────────────
