@@ -64,7 +64,7 @@ describe("AgentToolCalls", () => {
     state.run = { status: "Succeeded" };
     state.isLoading = false;
     state.identities = new Map([
-      ["u-7", { userId: "u-7", name: "Dana Reviewer", email: "d@x.io", avatarUrl: null, isBot: false }],
+      ["u-7", { userId: "u-7", name: "Dana Reviewer", email: "d@x.io", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null }],
     ]);
     state.toolCalls = [
       call({ toolKind: "git.merge_pr", status: "Succeeded", approvedByUserId: "u-7", approvedAt: "2026-06-11T11:16:00Z" }),

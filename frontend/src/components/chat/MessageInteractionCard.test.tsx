@@ -19,8 +19,8 @@ vi.mock("@/components/identities/ActorIdentityGate", () => ({ useActorIdentityGa
 beforeEach(() => { mutate.mockClear(); prompt.mockClear(); pending = false; });
 
 const members = new Map<string, TeamMemberSummary>([
-  ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
-  ["bob", { userId: "bob", name: "Bob", email: "b@x", avatarUrl: null, isBot: false }],
+  ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null }],
+  ["bob", { userId: "bob", name: "Bob", email: "b@x", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null }],
 ]);
 
 function card(state: InteractionState, resolution: InteractionResolution | null = null, allowed: string[] | null = null, responses: InteractionResponse[] = [], resolve: ResolvePolicy = { kind: "First", count: 1 }): MessageInteractionView {

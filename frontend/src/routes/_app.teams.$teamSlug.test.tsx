@@ -17,7 +17,7 @@ vi.mock("@/components/AppShell", () => ({ AppShell: () => <Outlet /> }));
  */
 describe("team-scope gate", () => {
   const team = (over: Partial<MeTeam>): MeTeam => ({
-    id: "t", slug: "s", name: "N", kind: "Workspace", role: "Owner",
+    id: "t", slug: "s", name: "N", kind: "Workspace", role: "Owner", permissions: [],
     memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0, ...over,
   });
   const personal = team({ id: "p", slug: "personal-a3f8c1d2", kind: "Personal" });
