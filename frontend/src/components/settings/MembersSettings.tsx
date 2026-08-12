@@ -35,9 +35,13 @@ const ASSIGNABLE: TeamRole[] = ["Viewer", "Member", "Admin", "Owner"];
 export function MembersSettings() {
   const me = useMe();
   const members = useTeamMembers();
-  const { can, role: myRole } = useTeamPermissions();
+  const { can, role: myRole, isPersonal } = useTeamPermissions();
   const mayManage = can(TeamPermissions.MembersManage);
-  const invitations = useTeamInvitations(mayManage);
+  // A Personal team has exactly one member by definition and the server refuses to invite into one.
+  // Its owner holds members.manage all the same, so without this the page offered an Invite button
+  // that could only ever fail — the thing the note above says this page does not do.
+  const mayInvite = mayManage && !isPersonal;
+  const invitations = useTeamInvitations(mayInvite);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [issued, setIssued] = useState<{ email: string; result: CreateInvitationResult } | null>(null);
 
@@ -47,7 +51,7 @@ export function MembersSettings() {
   return (
     <>
       <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 16px 0" }}>
-        {mayManage && (
+        {mayInvite && (
           <button className="btn btn-primary" onClick={() => setInviteOpen(true)}>
             <Ic.Plus size={13} /> Invite
           </button>
@@ -70,7 +74,13 @@ export function MembersSettings() {
         ))}
       </Section>
 
-      {mayManage && (
+      {isPersonal && (
+        <div className="cn-field-h" style={{ padding: "12px 16px 0" }}>
+          This is your own space. To work with other people, open a workspace and invite them into that.
+        </div>
+      )}
+
+      {mayInvite && (
         <Section title="Pending invitations" count={invitations.data?.length ?? 0}>
           {(invitations.data ?? []).length === 0 && (
             <div className="ct-empty">

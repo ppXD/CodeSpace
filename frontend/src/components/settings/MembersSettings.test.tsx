@@ -15,9 +15,9 @@ import { MembersSettings } from "./MembersSettings";
  * drive the component by varying that list rather than by varying a role name.</p>
  */
 describe("members settings", () => {
-  const team = (role: MeTeam["role"], permissions: string[]): MeTeam => ({
+  const team = (role: MeTeam["role"], permissions: string[], over: Partial<MeTeam> = {}): MeTeam => ({
     id: "t1", slug: "acme", name: "Acme", kind: "Workspace", role, permissions,
-    memberCount: 3, repositoryCount: 0, projectCount: 0, workflowCount: 0,
+    memberCount: 3, repositoryCount: 0, projectCount: 0, workflowCount: 0, ...over,
   });
 
   const me = (t: MeTeam): MeResponse => ({ id: "u-viewer", email: "v@test.local", name: "Viewer", teams: [t], permissions: [], passwordMustChange: false });
@@ -138,6 +138,18 @@ describe("members settings", () => {
 
     await waitFor(() => expect(deletes()).toHaveLength(1));
     expect(deletes()[0][0]).toContain("/api/teams/members/u-other");
+  });
+
+  it("offers no invite in a personal space", async () => {
+    // Its owner genuinely holds members.manage — the matrix expands it from Owner like anywhere else
+    // — but the server refuses to invite into a solo space. An Invite button here could only fail.
+    renderAs(team("Owner", ["members.manage", "team.manage"], { kind: "Personal" }));
+
+    await waitFor(() => expect(screen.getByText("Mars P")).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: /Invite/ })).toBeNull();
+    expect(screen.queryByText("Pending invitations")).toBeNull();
+    expect(screen.getByText(/This is your own space/)).toBeTruthy();
   });
 
   it("gives the bot no role and no menu", async () => {
