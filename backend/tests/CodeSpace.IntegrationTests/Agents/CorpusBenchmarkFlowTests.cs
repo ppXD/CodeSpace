@@ -70,13 +70,16 @@ public sealed class CorpusBenchmarkFlowTests
         run.Results.ShouldAllBe(r => !string.IsNullOrEmpty(r.ExitReason), "the terminal ExitReason is projected from the run's ResultJson, never blank");
         run.Results.ShouldAllBe(r => r.ExitReason != "output-flagged", "no critic ran ⇒ no pair is critic-flagged");
 
-        // M1a — the run names its suite and classifies EVERY cell over the FIXED denominator: a clean all-ran
-        // corpus yields all-Unsolved cells (the no-op CLI never fixes anything), full evaluator health, and the
-        // exact frozen suite version the unit pin freezes.
+        // M1a — the run names its suite and classifies EVERY cell over the FIXED denominator. P0-B2 makes the
+        // offline rig's REACH honest: the no-op fake never speaks MCP, so every cli-mcp cell is an INFRA-UNKNOWN
+        // measurement (the fabric never handshook — the cell measured nothing about the mcp arm), while every
+        // bare-cli cell stays an honest Unsolved. The instrument reads half-healthy because that is the truth of
+        // a fake-CLI corpus; the REAL-model corpus (a live CLI that does handshake) measures the full matrix.
         run.SuiteVersion.ShouldBe(EvalSuite.ManifestFor(corpus).Version, "every percentage claim names EXACTLY the suite it measured");
         run.Cells!.Count.ShouldBe(expectedPairs, "the FIXED denominator: every (task × mode) cell classified");
-        run.Cells!.ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "graded-but-not-passed cells are honest Unsolved — never dropped, never infra");
-        EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(1.0, "a cleanly-run corpus has a fully healthy instrument");
+        run.Cells!.Where(c => c.Mode == BenchmarkMode.HarnessCli).ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "graded-but-not-passed cli cells are honest Unsolved — never dropped, never infra");
+        run.Cells!.Where(c => c.Mode == BenchmarkMode.HarnessCliWithMcp).ShouldAllBe(c => c.State == CorpusCellState.InfraUnknown, "the fake CLI never handshakes — an mcp-arm cell it ran measured nothing about the fabric");
+        EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(0.5, "the offline rig can only exercise half the matrix — a VISIBLE instrument reading, never a silently-healthy fake");
     }
 
     [Fact]
@@ -105,10 +108,10 @@ public sealed class CorpusBenchmarkFlowTests
         run.Cells!.Count.ShouldBe(expectedCells, "the denominator NEVER shrinks — an errored cell is a cell");
 
         var score = EvalSuite.Score(run.Cells!);
-        score.InfraUnknown.ShouldBe(2, "the ghost task's two mode-cells classify as InfraUnknown");
-        score.Unsolved.ShouldBe(2, "the good task's two cells graded honestly Unsolved (the no-op CLI fixed nothing)");
+        score.InfraUnknown.ShouldBe(3, "the ghost task's two mode-cells PLUS the good task's never-handshook mcp cell (P0-B2) classify as InfraUnknown");
+        score.Unsolved.ShouldBe(1, "the good task's bare-cli cell graded honestly Unsolved (the no-op CLI fixed nothing)");
         score.Total.ShouldBe(expectedCells);
-        score.EvaluatorHealth.ShouldBe(0.5, "a sick instrument is VISIBLE — half the cells carry no capability verdict — never silently healthy via a shrunken divisor");
+        score.EvaluatorHealth.ShouldBe(0.25, "a sick instrument is VISIBLE — three of four cells carry no capability verdict — never silently healthy via a shrunken divisor");
 
         // The pre-M1a shape (scorecard over graded results only) reported the SAME rate with or without the ghost
         // task; the fixed-denominator score cannot — the infra-dead cells occupy their slots in the divisor.
