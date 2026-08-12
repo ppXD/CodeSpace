@@ -38,9 +38,8 @@ public class HeartbeatLoopTests
 
         for (var i = 1; i <= 3; i++)
         {
-            time.Advance(interval);
+            await AdvanceUntilPingedAsync(time, pinged, interval, i);
 
-            (await pinged.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBeTrue($"ping {i} never arrived after advancing the clock a full interval");
             Volatile.Read(ref count).ShouldBe(i, $"exactly one ping per elapsed interval — after {i} interval(s) there must be {i}, not 'at least' {i}");
         }
 
@@ -49,6 +48,28 @@ public class HeartbeatLoopTests
 
         time.Advance(interval);
         (await pinged.WaitAsync(TimeSpan.FromMilliseconds(200))).ShouldBeFalse("a cancelled loop pings no more, however much time passes");
+    }
+
+    /// <summary>
+    /// Advances the fake clock until the loop pings, rather than advancing once and assuming it was
+    /// listening.
+    ///
+    /// <para>The loop arms its next timer inside Task.Delay AFTER the previous ping returns, so a
+    /// single Advance can land in the window before that registration and be missed entirely — the
+    /// clock then never moves again and the wait burns its full timeout. That is the race this test
+    /// kept losing. Nudging in fractions of an interval cannot fire a timer early, and the count
+    /// assertion at the call site is what still proves one ping per interval.</para>
+    /// </summary>
+    private static async Task AdvanceUntilPingedAsync(FakeTimeProvider time, SemaphoreSlim pinged, TimeSpan interval, int ordinal)
+    {
+        for (var nudge = 0; nudge < 200; nudge++)
+        {
+            if (await pinged.WaitAsync(TimeSpan.FromMilliseconds(10))) return;
+
+            time.Advance(interval / 10);
+        }
+
+        throw new TimeoutException($"ping {ordinal} never arrived after advancing the fake clock well past its interval");
     }
 
     [Fact]

@@ -73,10 +73,19 @@ public class StuckRunReconcilerFlowTests
             status: WorkflowRunStatus.Pending,
             createdAgo: TimeSpan.Zero);   // just-created
 
-        var summary = await ReconcileAsync();
+        // The row version BEFORE the sweep. Asserting it is unchanged proves this row was never
+        // written, which is strictly stronger than "it ended up Pending" — a redispatch that flipped
+        // it and flipped it back would pass a status check and fail this one.
+        var versionBefore = await ReadRowVersionAsync(runId);
 
-        summary.RedispatchedFromPending.ShouldBe(0,
-            "Pending rows younger than the threshold must not be touched — they're in flight");
+        await ReconcileAsync();
+
+        // Deliberately NOT asserting summary.RedispatchedFromPending == 0. The sweep is
+        // instance-wide and the summary carries only counts, so that number also reflects rows left
+        // behind by earlier tests in the shared database — it reddened at random depending on what
+        // ran before it, which teaches a reader to re-run red instead of reading it.
+        (await ReadRowVersionAsync(runId)).ShouldBe(versionBefore,
+            "a Pending row younger than the threshold is a legitimate in-flight dispatch and must not be touched at all");
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Pending,
             "the young Pending row must remain Pending");
     }
@@ -1079,6 +1088,16 @@ public class StuckRunReconcilerFlowTests
         using var scope = _fixture.BeginScope();
         var mediator = scope.Resolve<IMediator>();
         return await mediator.Send(new ReconcileStuckRunsCommand());
+    }
+
+    /// <summary>The Postgres row version. Changes on any write, so it answers "was this row touched" rather than "what does it say now".</summary>
+    private async Task<uint> ReadRowVersionAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId)
+            .Select(r => r.Xmin)
+            .SingleAsync();
     }
 
     private async Task<WorkflowRunStatus> ReadStatusAsync(Guid runId)
