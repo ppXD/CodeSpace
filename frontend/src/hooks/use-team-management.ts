@@ -16,7 +16,11 @@ export function useTeamPermissions() {
   const { active } = useActiveTeam();
   const held = new Set(active?.permissions ?? []);
 
-  return { can: (permission: string) => held.has(permission), role: active?.role ?? null };
+  // `isPersonal` rather than another permission: a Personal team's owner genuinely HOLDS
+  // members.manage — the matrix expands it from their role like anywhere else — and the server still
+  // refuses to invite into one, because a solo space having a second person in it is a contradiction
+  // rather than a permission question. So the shape of the team is what the UI has to branch on.
+  return { can: (permission: string) => held.has(permission), role: active?.role ?? null, isPersonal: active?.kind === "Personal" };
 }
 
 export const TeamPermissions = {
