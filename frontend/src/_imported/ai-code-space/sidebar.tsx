@@ -165,22 +165,27 @@ export function Sidebar() {
             );
           })}
         </div>
-        <div className="sb-pop-foot">
-          {/* "Create workspace" rather than "Create team" — Personal teams aren't
-              user-creatable (one per user, auto-provisioned on signup). The action
-              label needs to match what the operator can actually do.
-              Note: Connections used to live here briefly but mixing team
-              management with the switcher's "switch team" purpose felt off.
-              Connections now live on /teams/{slug}/settings, reached via the
-              gear icon next to this trigger. */}
-          {/* Shown only when this account actually holds the capability — the server refuses
-              otherwise, and offering an action that answers 403 is worse than not offering it. */}
-          {(me.data?.permissions ?? []).includes("teams.create") && (
+        {/* Shown only when this account actually holds the capability — the server refuses
+            otherwise, and offering an action that answers 403 is worse than not offering it.
+
+            The gate wraps the FOOT, not just the action inside it. `.sb-pop-foot` is nothing but
+            this row's frame — it carries the divider and 4px of padding — so gating only its child
+            left an empty frame drawing a rule under the last team with dead space beneath it. If a
+            second, ungated action ever lands here, this moves back down to the action. */}
+        {(me.data?.permissions ?? []).includes("teams.create") && (
+          <div className="sb-pop-foot">
+            {/* "Create workspace" rather than "Create team" — Personal teams aren't
+                user-creatable (one per user, auto-provisioned on signup). The action
+                label needs to match what the operator can actually do.
+                Note: Connections used to live here briefly but mixing team
+                management with the switcher's "switch team" purpose felt off.
+                Connections now live on /teams/{slug}/settings, reached via the
+                gear icon next to this trigger. */}
             <div className="sb-pop-action" onClick={() => { setTeamOpen(false); setCreateOpen(true); }}>
               <Ic.Plus size={14} /> Create workspace
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </>,
     document.body,

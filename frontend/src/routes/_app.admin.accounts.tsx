@@ -13,7 +13,9 @@ export const Route = createFileRoute("/_app/admin/accounts")({
 function AccountsPage() {
   return (
     <section className="ct">
-      <div className="ct-head">
+      {/* paddingBottom for the same reason as every other tab-less page — `.ct-head` leaves its
+          bottom padding to a `.ct-tabs` strip that this page does not have. */}
+      <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs"><span className="cur">Accounts</span></div>
         <div className="ct-title-row"><h1 className="ct-title">Accounts</h1></div>
       </div>
