@@ -172,7 +172,7 @@ public class TeamMemberManagementTests
         using var scope = _fixture.BeginScopeAs(team.Viewer, team.TeamId);
         var roster = await scope.Resolve<IMediator>().Send(new ListTeamMembersQuery()).ConfigureAwait(false);
 
-        roster.Single(r => r.UserId == team.Owner).Role.ShouldBe(TeamRole.Owner, "the owner has no membership row here — the role comes off the team");
+        roster.Single(r => r.UserId == team.Owner).Role.ShouldBe(TeamRole.Owner);
         roster.Single(r => r.UserId == team.Admin).Role.ShouldBe(TeamRole.Admin);
         roster.Single(r => r.UserId == team.Viewer).Role.ShouldBe(TeamRole.Viewer);
         roster.Single(r => r.UserId == team.Admin).JoinedAt.ShouldNotBeNull();
@@ -213,6 +213,31 @@ public class TeamMemberManagementTests
         ownerMe.Teams.Single(t => t.Id == team.TeamId).Permissions.ShouldBe(Messages.Authorization.TeamPermissionMatrix.GrantedTo(TeamRole.Owner));
     }
 
+    /// <summary>
+    /// Handing over a team whose owner is recorded ONLY on <c>team.owner_user_id</c> — the shape the
+    /// seed workspace shipped in, since migration 0006 wrote the column without the row.
+    ///
+    /// <para>The roster is <c>owner UNION memberships</c>, so moving <c>owner_user_id</c> to someone
+    /// else removed the outgoing owner's only tie to the team: they left it by handing it over,
+    /// silently. Every other test here seeds the owner a membership row, which is why the shape every
+    /// deployment actually starts in was the one nothing covered.</para>
+    /// </summary>
+    [Fact]
+    public async Task Transferring_keeps_an_owner_who_had_no_membership_row()
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+
+        await DropMembershipAsync(team.TeamId, team.Owner).ConfigureAwait(false);
+
+        await SendAsAsync(team.Owner, team.TeamId, new TransferTeamOwnershipCommand { ToUserId = team.Admin }).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(team.Admin, team.TeamId);
+        var roster = await scope.Resolve<IMediator>().Send(new ListTeamMembersQuery()).ConfigureAwait(false);
+
+        (await RoleOfAsync(team.TeamId, team.Owner).ConfigureAwait(false)).ShouldBe(TeamRole.Admin, "the outgoing owner stays, demoted — transferring is not leaving");
+        roster.ShouldContain(r => r.UserId == team.Owner, "handing the team over must not remove the person handing it over");
+    }
+
     // ── Drivers ────────────────────────────────────────────────────────────────────
 
     private async Task SendAsAsync<T>(Guid userId, Guid teamId, IRequest<T> request)
@@ -230,6 +255,16 @@ public class TeamMemberManagementTests
             .Where(m => m.TeamId == teamId && m.UserId == userId)
             .Select(m => (TeamRole?)m.Role)
             .SingleOrDefaultAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Reproduces the seed workspace: an owner named on the team row and nowhere else.</summary>
+    private async Task DropMembershipAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.TeamMembership.Remove(await db.TeamMembership.SingleAsync(m => m.TeamId == teamId && m.UserId == userId).ConfigureAwait(false));
+        await db.SaveChangesAsync().ConfigureAwait(false);
     }
 
     private async Task<Guid> AddMemberAsync(Guid teamId, TeamRole role)
