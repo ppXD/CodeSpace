@@ -20,6 +20,13 @@ export interface ChangePasswordRequest {
 
 export interface ChangePasswordResponse {
   user: MeResponse;
+  /**
+   * A token minted under the account's NEW security stamp. Changing a password revokes every token
+   * issued before it, including the one that made this call — store this or the caller is signed out
+   * by their own change.
+   */
+  token: string;
+  expiresAt: string;
 }
 
 export const authApi = {
@@ -32,6 +39,14 @@ export const authApi = {
     method: "POST",
     body: JSON.stringify(input),
   }),
+
+  /** Anonymous — the token in the path is the credential. Answers 204 and signs nobody in: spending
+   *  the link ends every session the account had, and handing one back here would undo that. */
+  resetPassword: (token: string, newPassword: string) =>
+    fetchJson<void>(`/api/auth/reset-password/${encodeURIComponent(token)}`, {
+      method: "POST",
+      body: JSON.stringify({ newPassword }),
+    }),
 };
 
 const JWT_STORAGE_KEY = "codespace.jwt";

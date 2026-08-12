@@ -14,9 +14,11 @@ import { Route as OauthCallbackRouteImport } from './routes/oauth-callback'
 import { Route as ChangePasswordRouteImport } from './routes/change-password'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
+import { Route as ResetPasswordTokenRouteImport } from './routes/reset-password.$token'
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as AppRepositoriesRouteImport } from './routes/_app.repositories'
 import { Route as AppTeamsTeamSlugRouteImport } from './routes/_app.teams.$teamSlug'
+import { Route as AppAdminAccountsRouteImport } from './routes/_app.admin.accounts'
 import { Route as AppTeamsTeamSlugIndexRouteImport } from './routes/_app.teams.$teamSlug.index'
 import { Route as AppTeamsTeamSlugWorkflowsRouteImport } from './routes/_app.teams.$teamSlug.workflows'
 import { Route as AppTeamsTeamSlugSettingsRouteImport } from './routes/_app.teams.$teamSlug.settings'
@@ -75,6 +77,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const ResetPasswordTokenRoute = ResetPasswordTokenRouteImport.update({
+  id: '/reset-password/$token',
+  path: '/reset-password/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const InviteTokenRoute = InviteTokenRouteImport.update({
   id: '/invite/$token',
   path: '/invite/$token',
@@ -88,6 +95,11 @@ const AppRepositoriesRoute = AppRepositoriesRouteImport.update({
 const AppTeamsTeamSlugRoute = AppTeamsTeamSlugRouteImport.update({
   id: '/teams/$teamSlug',
   path: '/teams/$teamSlug',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAdminAccountsRoute = AppAdminAccountsRouteImport.update({
+  id: '/admin/accounts',
+  path: '/admin/accounts',
   getParentRoute: () => AppRoute,
 } as any)
 const AppTeamsTeamSlugIndexRoute = AppTeamsTeamSlugIndexRouteImport.update({
@@ -293,6 +305,8 @@ export interface FileRoutesByFullPath {
   '/signin': typeof SigninRoute
   '/repositories': typeof AppRepositoriesRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/reset-password/$token': typeof ResetPasswordTokenRoute
+  '/admin/accounts': typeof AppAdminAccountsRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
@@ -334,7 +348,9 @@ export interface FileRoutesByTo {
   '/signin': typeof SigninRoute
   '/repositories': typeof AppRepositoriesRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/reset-password/$token': typeof ResetPasswordTokenRoute
   '/': typeof AppIndexRoute
+  '/admin/accounts': typeof AppAdminAccountsRoute
   '/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugIndexRoute
   '/teams/$teamSlug/projects/$projectSlug': typeof AppTeamsTeamSlugProjectsProjectSlugRoute
@@ -368,7 +384,9 @@ export interface FileRoutesById {
   '/signin': typeof SigninRoute
   '/_app/repositories': typeof AppRepositoriesRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/reset-password/$token': typeof ResetPasswordTokenRoute
   '/_app/': typeof AppIndexRoute
+  '/_app/admin/accounts': typeof AppAdminAccountsRoute
   '/_app/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
   '/_app/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/_app/teams/$teamSlug/library': typeof AppTeamsTeamSlugLibraryRoute
@@ -413,6 +431,8 @@ export interface FileRouteTypes {
     | '/signin'
     | '/repositories'
     | '/invite/$token'
+    | '/reset-password/$token'
+    | '/admin/accounts'
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/library'
@@ -454,7 +474,9 @@ export interface FileRouteTypes {
     | '/signin'
     | '/repositories'
     | '/invite/$token'
+    | '/reset-password/$token'
     | '/'
+    | '/admin/accounts'
     | '/teams/$teamSlug/library'
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/projects/$projectSlug'
@@ -487,7 +509,9 @@ export interface FileRouteTypes {
     | '/signin'
     | '/_app/repositories'
     | '/invite/$token'
+    | '/reset-password/$token'
     | '/_app/'
+    | '/_app/admin/accounts'
     | '/_app/teams/$teamSlug'
     | '/_app/teams/$teamSlug/agents'
     | '/_app/teams/$teamSlug/library'
@@ -530,6 +554,7 @@ export interface RootRouteChildren {
   OauthCallbackRoute: typeof OauthCallbackRoute
   SigninRoute: typeof SigninRoute
   InviteTokenRoute: typeof InviteTokenRoute
+  ResetPasswordTokenRoute: typeof ResetPasswordTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -569,6 +594,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/reset-password/$token': {
+      id: '/reset-password/$token'
+      path: '/reset-password/$token'
+      fullPath: '/reset-password/$token'
+      preLoaderRoute: typeof ResetPasswordTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/invite/$token': {
       id: '/invite/$token'
       path: '/invite/$token'
@@ -588,6 +620,13 @@ declare module '@tanstack/react-router' {
       path: '/teams/$teamSlug'
       fullPath: '/teams/$teamSlug'
       preLoaderRoute: typeof AppTeamsTeamSlugRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/admin/accounts': {
+      id: '/_app/admin/accounts'
+      path: '/admin/accounts'
+      fullPath: '/admin/accounts'
+      preLoaderRoute: typeof AppAdminAccountsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/teams/$teamSlug/': {
@@ -1031,12 +1070,14 @@ const AppTeamsTeamSlugRouteWithChildren =
 interface AppRouteChildren {
   AppRepositoriesRoute: typeof AppRepositoriesRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppAdminAccountsRoute: typeof AppAdminAccountsRoute
   AppTeamsTeamSlugRoute: typeof AppTeamsTeamSlugRouteWithChildren
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppRepositoriesRoute: AppRepositoriesRoute,
   AppIndexRoute: AppIndexRoute,
+  AppAdminAccountsRoute: AppAdminAccountsRoute,
   AppTeamsTeamSlugRoute: AppTeamsTeamSlugRouteWithChildren,
 }
 
@@ -1048,6 +1089,7 @@ const rootRouteChildren: RootRouteChildren = {
   OauthCallbackRoute: OauthCallbackRoute,
   SigninRoute: SigninRoute,
   InviteTokenRoute: InviteTokenRoute,
+  ResetPasswordTokenRoute: ResetPasswordTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
