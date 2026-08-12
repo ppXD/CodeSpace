@@ -18,7 +18,7 @@ public sealed record UnattendedDeliveryRunOutcome
 {
     public required Guid WorkflowRunId { get; init; }
 
-    /// <summary>At least one PublishManifest row for the run graded its diff <see cref="PublishAcceptanceState.Passed"/>, and none graded <see cref="PublishAcceptanceState.Failed"/> — the objective oracle verdict, never the model's self-report.</summary>
+    /// <summary>The run's latest metric@1 verdict reads Solved (P0-A consumer switch) — receipts of the FIRST authorized attempt only, no retry credit, no status fallback: an unassessed run, a zero-staked clean Success, and a waived run all read false here.</summary>
     public required bool Solved { get; init; }
 
     /// <summary>At least one PublishManifest row for the run reached <see cref="Agents.PublishState.Pushed"/> or carries a <c>PullRequestNumber</c> — the diff actually left the sandbox, not merely graded.</summary>
@@ -83,11 +83,17 @@ public sealed record UnattendedDeliveryRollup
     /// <summary>P4-U4 (dual-read parity dashboard): contract-era runs in the window that HAVE a durable shadow assessment row — the population the two columns below are over.</summary>
     public int AssessedRuns { get; init; }
 
-    /// <summary>Assessed runs whose LATEST assessment reads Outcome=Solved — the assessment-based solve count BESIDE the legacy ladder's <see cref="SolvedRuns"/>. The standing consumer-switch delta is the difference between the two over the same window; the primary rates above still read the LEGACY ladder until the P2b switch is argued on this very evidence.</summary>
+    /// <summary>Assessed runs whose LATEST assessment reads OPERATIONAL Outcome=Solved — the retry-crediting projection beside the primary metric@1 rates. Since the P0-A consumer switch the primary <see cref="SolvedRuns"/> reads the metric@1 verdict; the operational-vs-@1 delta is the retry-credit story.</summary>
     public int AssessmentSolvedRuns { get; init; }
 
     /// <summary>Assessed runs whose recorded would-be terminal decision is CleanSuccess — the ONLY VDS-eligible state (Lock Clause 5). The Enforced-era north-star numerator, visible while nothing is enforced yet.</summary>
     public int WouldBeCleanSuccessRuns { get; init; }
+
+    /// <summary>Runs the LEGACY manifest ladder (oracle-graded manifests, else engine Success minus degraded stops) would call solved — the status-fallback inference the metric plane removed, kept visible so the legacy-vs-metric delta stays a live query.</summary>
+    public int LegacySolvedRuns { get; init; }
+
+    /// <summary>Contract-era runs with NO metric@1 verdict yet — no shadow assessment row, or a pre-projection row. They count in every denominator and never as solved; the shadow sweep converges them.</summary>
+    public int UnassessedRuns { get; init; }
 }
 
 /// <summary>The team's unattended-delivery scorecard — the cross-run north-star roll-up plus recent per-run scores. The north-star-metric analogue of <see cref="SupervisorScorecard"/> / <see cref="AgentRunScorecard"/>.</summary>

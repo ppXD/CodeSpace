@@ -32,6 +32,12 @@ public class CompletionAssessmentRecord : IEntity<Guid>, IAuditable
 
     /// <summary>P2 (v4.3): the run's monotonic ledger version this assessment's compose actually read — captured AFTER the compose so its own write-through receipts are inside it. The revisit pass compares the head against the run's LATEST recorded value in SQL; null (a pre-slice row) compares stale once and converges.</summary>
     public long? LedgerVersion { get; set; }
+
+    /// <summary>P0-A (dual projection): the metric@1 outcome name — the solve-rate's ONLY verdict column. Null on rows written before the projection existed; those runs read unassessed, never solved.</summary>
+    public string? MetricOutcome { get; set; }
+
+    /// <summary>The full <c>MetricAt1Projection</c> this compose produced — outcome plus its bindings (@1 attempt refs, obligation set, unit, versions), self-describing per row.</summary>
+    public string? MetricJson { get; set; }
     public int RejectionCount { get; set; }
     public int ContractErrorCount { get; set; }
     public DateTimeOffset CreatedDate { get; set; }

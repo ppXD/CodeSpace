@@ -11,10 +11,11 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents.Eval;
 
 /// <summary>
-/// Loads a team's recent TERMINAL workflow runs, projects each to an <see cref="UnattendedDeliveryRunOutcome"/> by
-/// composing THREE already-existing ledgers — <see cref="IPublishManifestStore"/> (solved + delivered),
-/// <see cref="IHumanTouchReader"/> (human touches), <see cref="ITeamCostService"/> (cost) — and hands them to the
-/// pure <see cref="UnattendedDeliveryScorer"/>. Thin (Rule 16) — the service owns only the team-scoped queries +
+/// Loads a team's recent TERMINAL workflow runs, projects each to an <see cref="UnattendedDeliveryRunOutcome"/> —
+/// the solve bit from the run's latest METRIC@1 verdict (the P0-A consumer switch: durable shadow assessment rows,
+/// first-authorized-attempt receipts only, no status fallback), delivered from <see cref="IPublishManifestStore"/>,
+/// human touches from <see cref="IHumanTouchReader"/>, cost from <see cref="ITeamCostService"/> — and hands them to
+/// the pure <see cref="UnattendedDeliveryScorer"/>. Thin (Rule 16) — the service owns only the team-scoped queries +
 /// projection; all the scoring math is the pure scorer's.
 ///
 /// <para>Every terminal <c>WorkflowRun</c> counts, single-agent and supervisor-orchestrated alike — unlike
@@ -53,42 +54,62 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         if (runs.Count == 0) return Empty() with { Rollup = Empty().Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns } };
 
         var runIds = runs.Select(r => r.Id).ToList();
-        var (assessedRuns, assessmentSolvedRuns, wouldBeCleanSuccessRuns) = await AssessmentColumnsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
+        var latestAssessments = await LatestAssessmentsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
 
         var manifestsByRun = await _manifests.ListForWorkflowRunsAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var touchesByRun = await _humanTouches.CountByWorkflowRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var costsByRun = await _cost.ComputeRunsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
         var degradedStopRuns = await DegradedStopRunIdsAsync(_db, runIds, teamId, cancellationToken).ConfigureAwait(false);
 
+        var metricSolvedRuns = latestAssessments
+            .Where(kv => kv.Value.MetricOutcome == nameof(Messages.Contracts.OutcomeDisposition.Solved))
+            .Select(kv => kv.Key)
+            .ToHashSet();
+
         var outcomes = runs
-            .Select(r => ProjectRun(r.Id, r.Status, manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd, degradedStopRuns.Contains(r.Id)))
+            .Select(r => ProjectRun(r.Id, metricSolvedRuns.Contains(r.Id), manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), touchesByRun.GetValueOrDefault(r.Id), costsByRun.GetValueOrDefault(r.Id)?.EstimatedCostUsd))
             .ToList();
 
         var card = UnattendedDeliveryScorer.Compute(outcomes);
 
-        return card with { Rollup = card.Rollup with { LegacyRuns = legacyRuns, SuspendedRuns = suspendedRuns, AssessedRuns = assessedRuns, AssessmentSolvedRuns = assessmentSolvedRuns, WouldBeCleanSuccessRuns = wouldBeCleanSuccessRuns } };
+        var legacySolvedRuns = runs.Count(r => IsSolved(manifestsByRun.GetValueOrDefault(r.Id, EmptyManifests), r.Status, degradedStopRuns.Contains(r.Id)));
+        var unassessedRuns = runs.Count(r => !latestAssessments.TryGetValue(r.Id, out var latest) || latest.MetricOutcome is null);
+
+        return card with
+        {
+            Rollup = card.Rollup with
+            {
+                LegacyRuns = legacyRuns,
+                SuspendedRuns = suspendedRuns,
+                AssessedRuns = latestAssessments.Count,
+                AssessmentSolvedRuns = latestAssessments.Count(kv => kv.Value.Outcome == nameof(Messages.Contracts.OutcomeDisposition.Solved)),
+                WouldBeCleanSuccessRuns = latestAssessments.Count(kv => kv.Value.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess)),
+                LegacySolvedRuns = legacySolvedRuns,
+                UnassessedRuns = unassessedRuns,
+            },
+        };
     }
 
     /// <summary>
-    /// P4-U4 (dual-read parity dashboard): the assessment-based columns BESIDE the legacy ladder — each windowed
-    /// run's LATEST shadow assessment row gives Outcome and the would-be terminal. Report-only: nothing here
-    /// touches the primary rates, so the consumer switch stays an explicit P2b decision argued on exactly this
-    /// standing evidence (never an invisible metric shift).
+    /// Each windowed run's LATEST shadow assessment row — the metric@1 verdict (the primary solve bit since the
+    /// P0-A consumer switch), the operational Outcome, and the would-be terminal (the parity columns). A run
+    /// missing here has not been swept yet; it reads unassessed and never solved until its row lands.
     /// </summary>
-    private async Task<(int Assessed, int AssessmentSolved, int WouldBeCleanSuccess)> AssessmentColumnsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<Guid, LatestAssessment>> LatestAssessmentsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
     {
         var rows = await _db.CompletionAssessmentRecord.AsNoTracking()
             .Where(a => a.TeamId == teamId && runIds.Contains(a.WorkflowRunId))
             .OrderBy(a => a.CreatedDate)
-            .Select(a => new { a.WorkflowRunId, a.Outcome, a.WouldBeTerminalDecision, a.CreatedDate })
+            .Select(a => new { a.WorkflowRunId, a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome, a.CreatedDate })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var latest = rows.GroupBy(a => a.WorkflowRunId).Select(g => g.Last()).ToList();
-
-        return (latest.Count,
-            latest.Count(a => a.Outcome == nameof(Messages.Contracts.OutcomeDisposition.Solved)),
-            latest.Count(a => a.WouldBeTerminalDecision == nameof(Messages.Contracts.TerminalDecision.CleanSuccess)));
+        return rows
+            .GroupBy(a => a.WorkflowRunId)
+            .Select(g => g.Last())
+            .ToDictionary(a => a.WorkflowRunId, a => new LatestAssessment(a.Outcome, a.WouldBeTerminalDecision, a.MetricOutcome));
     }
+
+    private readonly record struct LatestAssessment(string Outcome, string? WouldBeTerminalDecision, string? MetricOutcome);
 
     /// <summary>
     /// The team's recent TERMINAL runs (most-recent first by CreatedDate), capped at <see cref="RecentRunCap"/> and
@@ -96,8 +117,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// snapshot runs and supervisor-orchestrated authored runs alike — so the north-star is measured over the
     /// FULL delivery population, never just the supervisor lane. An in-flight run is not yet in the population
     /// (it has not yet had the chance to deliver). Carries each run's own terminal <see cref="WorkflowRunStatus"/>
-    /// alongside its id — <see cref="IsSolved"/> needs it as the honest fallback when no manifest carries an
-    /// objective acceptance grade.
+    /// alongside its id — the LEGACY parity column (<see cref="IsSolved"/>) still reads it.
     /// </summary>
     private async Task<IReadOnlyList<TerminalRun>> RecentTerminalRunsAsync(Guid teamId, DateTimeOffset? since, CancellationToken cancellationToken)
     {
@@ -123,26 +143,24 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
         return await query.CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Project one run's manifests + human-touch count + cost into the pure scorer's input noun.</summary>
-    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, WorkflowRunStatus terminalStatus, IReadOnlyList<PublishManifest> manifests, int humanTouches, decimal? costUsd, bool degradedStop) => new()
+    /// <summary>Project one run's metric@1 solve bit + manifests + human-touch count + cost into the pure scorer's input noun.</summary>
+    private static UnattendedDeliveryRunOutcome ProjectRun(Guid runId, bool metricSolved, IReadOnlyList<PublishManifest> manifests, int humanTouches, decimal? costUsd) => new()
     {
         WorkflowRunId = runId,
-        Solved = IsSolved(manifests, terminalStatus, degradedStop),
+        Solved = metricSolved,
         Delivered = IsDelivered(manifests),
         HumanTouches = humanTouches,
         CostUsd = costUsd,
     };
 
     /// <summary>
-    /// An objective oracle verdict OVERRIDES the run's own terminal status when one exists: any manifest graded
-    /// <see cref="PublishAcceptanceState.Failed"/> → never solved; at least one graded
-    /// <see cref="PublishAcceptanceState.Passed"/> (and none Failed) → solved. When NO manifest carries an objective
-    /// grade (every one is <see cref="PublishAcceptanceState.NotApplicable"/> — no acceptance check configured, the
-    /// COMMON case for a run with no oracle wired), fall back to the run's own HONEST terminal
-    /// <paramref name="terminalStatus"/> — mirrors <c>SupervisorEvalScorecard.ClassifyByRunStatus</c>'s identical
-    /// precedent. A run with no configured oracle that genuinely reached <see cref="WorkflowRunStatus.Success"/> is
-    /// never penalized for having none, but a Failure/Cancelled run is never counted solved just because nothing
-    /// graded it either way.
+    /// THE LEGACY LADDER — no longer the primary solve bit (the P0-A consumer switch cut the primary rates over to
+    /// the metric@1 projection); retained verbatim as the standing parity comparison: the shadow snapshot's
+    /// <c>LegacyIsSolved</c> column and the rollup's <c>LegacySolvedRuns</c> both read it, so the legacy-vs-metric
+    /// delta stays a live query instead of a memory. Its shape: an objective oracle verdict overrides the run's own
+    /// terminal status when one exists (Failed → never solved; Waived → never solved; Passed → solved), and with no
+    /// graded manifest it falls back to engine Success minus degraded stops — exactly the status-fallback inference
+    /// the metric plane structurally removed.
     /// </summary>
     public static bool IsSolved(IReadOnlyList<PublishManifest> manifests, WorkflowRunStatus terminalStatus, bool degradedStop)
     {
