@@ -95,6 +95,13 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Park — the Success claim rests on evidence with integrity violations: {string.Join("; ", violations)}", TerminalDecision.Park, watermarks);
         }
 
+        // A non-clean decision names its evidence: the admission's rejections say exactly WHICH receipts never
+        // reached the fold and why — the difference between "parked, go read the composer source" and "parked,
+        // receipt X died to superseded-contract at revision 3". Park triage runs on this line.
+        if (decision != TerminalDecision.CleanSuccess && composed.Rejections.Count > 0)
+            _logger.LogWarning("Terminal arbitration for run {RunId} composed over {Count} admission rejection(s): {Rejections}",
+                workflowRunId, composed.Rejections.Count, string.Join(" · ", composed.Rejections.Take(8).Select(r => $"[{r.Code}] {r.Reason}")));
+
         return decision switch
         {
             TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
