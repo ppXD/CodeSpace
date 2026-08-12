@@ -52,6 +52,57 @@ public class SupervisorAgentResultsFoldTests
     }
 
     [Fact]
+    public void ProjectCompact_carries_the_agents_own_acceptance_verdict()
+    {
+        // P2b canary finding: the compact fold used to DROP the agent's server-graded verdict, so a staked
+        // acceptance obligation could never meet its receipt (the whole loop parked NeedsReview under Enforced).
+        // The chain of custody: AgentRun.ResultJson → compact → spawn outcome → SupervisorGradedReceipts.
+        var evidence = Guid.NewGuid();
+
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Succeeded", rowError: null,
+            JsonSerializer.Serialize(new AgentRunResult
+            {
+                Status = Messages.Enums.AgentRunStatus.Succeeded,
+                ExitReason = "completed",
+                ProducedBranch = "codespace/agent/x",
+                AcceptancePassed = true,
+                AcceptanceDetail = "tests-passed",
+                AcceptanceEvidenceId = evidence,
+            }, AgentJson.Options));
+
+        compact.AcceptancePassed.ShouldBe(true);
+        compact.AcceptanceDetail.ShouldBe("tests-passed");
+        compact.AcceptanceEvidenceId.ShouldBe(evidence);
+        compact.Contradiction.ShouldBeNull("Succeeded + passed is no contradiction");
+    }
+
+    [Fact]
+    public void ProjectCompact_stamps_the_contradiction_when_the_self_report_disagrees_with_the_grade()
+    {
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Succeeded", rowError: null,
+            JsonSerializer.Serialize(new AgentRunResult
+            {
+                Status = Messages.Enums.AgentRunStatus.Succeeded,
+                ExitReason = "completed",
+                AcceptancePassed = false,
+                AcceptanceDetail = "tests-failed-exit-1",
+            }, AgentJson.Options));
+
+        compact.Contradiction.ShouldBe(CodeSpace.Core.Services.Agents.AgentContradiction.OverClaim);
+    }
+
+    [Fact]
+    public void ProjectCompact_leaves_an_ungraded_result_verdict_less()
+    {
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Succeeded", rowError: null, ResultJson());
+
+        compact.AcceptancePassed.ShouldBeNull();
+        compact.AcceptanceDetail.ShouldBeNull();
+        compact.AcceptanceEvidenceId.ShouldBeNull();
+        compact.Contradiction.ShouldBeNull();
+    }
+
+    [Fact]
     public void ProjectCompact_falls_back_to_the_ROW_error_when_the_result_is_null()
     {
         // CROWN JEWEL — a cancelled/abandoned agent sets Status=Cancelled + a ROW error but writes NO ResultJson.

@@ -74,9 +74,15 @@ public sealed class CompletionPolicyStampFlowTests
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // seeds write rows directly — no stamp, the pre-P2a shape
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         using var scope = _fixture.BeginScope();
+
+        // The seed now stamps faithfully (mirroring RunStarter), so the PRE-protocol shape is arranged
+        // explicitly: a genuine pre-P2a row has NULL in both policy columns.
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE workflow_run SET completion_policy_version = NULL, completion_enforcement_mode = NULL WHERE id = {runId}");
+
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
         run.CompletionPolicyVersion.ShouldBeNull();

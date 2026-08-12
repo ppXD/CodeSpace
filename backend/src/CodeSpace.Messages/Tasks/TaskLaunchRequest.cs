@@ -38,6 +38,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The base branch the work starts from, when named. Null → the repo's default.</summary>
     public string? BaseBranch { get; init; }
 
+    /// <summary>P2b (Enforced cohort): the completion enforcement opt-in stamped onto the BUILT definition — <c>"enforced"</c> puts this launch's run under the completion terminal authority; <c>"shadow"</c> pins record-only explicitly; null inherits the platform default. The definition validator rejects anything else at launch, fail-closed.</summary>
+    public string? CompletionMode { get; init; }
+
     /// <summary>An operator-chosen effort tier (open <see cref="Effort.TaskEffortModes"/> string). Null / <c>"auto"</c> ⇒ the router classifies.</summary>
     public string? RequestedEffort { get; init; }
 

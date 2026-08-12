@@ -30,6 +30,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The operator's free-text task. Required by the chat surface; another surface may derive the goal from <see cref="LaunchContext"/> instead.</summary>
     public required string TaskText { get; init; }
 
+    /// <summary>P2b (Enforced cohort): optional completion-enforcement opt-in for this launch — <c>"enforced"</c> | <c>"shadow"</c> | omitted (platform default). An unknown value is rejected at launch, fail-closed.</summary>
+    public string? CompletionMode { get; init; }
+
     /// <summary>
     /// Continue an existing WorkSession: when set, this launch becomes the NEXT top-level turn of that thread
     /// (the run is bound to it) instead of opening a fresh one. Pass back the <c>SessionId</c> a prior launch

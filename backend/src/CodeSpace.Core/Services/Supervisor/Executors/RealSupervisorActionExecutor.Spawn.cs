@@ -78,6 +78,7 @@ public sealed partial class RealSupervisorActionExecutor
         var blocked = new List<DependencyBlock>();
 
         var contractHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var acceptanceUnits = new HashSet<string>(StringComparer.Ordinal);
         var deliveryUnits = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var id in spawn.SubtaskIds)
@@ -88,6 +89,7 @@ public sealed partial class RealSupervisorActionExecutor
 
             if (planned is not null) contractHashes[id] = SupervisorUnitContract.Hash(planned, spec?.GoalOverride, spec?.RepositoryId);
 
+            if (planned is not null && SupervisorUnitContract.OwesAcceptance(planned)) acceptanceUnits.Add(id);
             if (planned is not null && SupervisorUnitContract.OwesDelivery(planned)) deliveryUnits.Add(id);
 
             var staging = await ResolveDependencyStagingAsync(DependsOnFor(planned, spec), repositoryId, context, cancellationToken).ConfigureAwait(false);
@@ -104,7 +106,7 @@ public sealed partial class RealSupervisorActionExecutor
         if (blocked.Count > 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(BuildBlockedSpawnOutcome(blocked), AgentJson.Options));
 
-        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes, deliveryUnits: deliveryUnits).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(tasks, context, cancellationToken, contractHashes: contractHashes, acceptanceUnits: acceptanceUnits, deliveryUnits: deliveryUnits).ConfigureAwait(false);
     }
 
     /// <summary>A subtask's staging dependency: the model-authored <see cref="SupervisorAgentDispatch.BaseSubtaskId"/> override when present (narrows to ONE producer for this specific spawn), else the plan's own <c>DependsOn</c>. Empty when neither names a producer (byte-identical no-override path). Internal + static so the precedence is unit-pinned directly.</summary>
@@ -389,7 +391,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null, IReadOnlyCollection<string>? deliveryUnits = null)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, IReadOnlyDictionary<string, string>? contractHashes = null, IReadOnlyCollection<string>? acceptanceUnits = null, IReadOnlyCollection<string>? deliveryUnits = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -472,7 +474,7 @@ public sealed partial class RealSupervisorActionExecutor
         {
             var requirements = SupervisorUnitContract.BuildStakedRequirements(tasks
                 .Where(t => !string.IsNullOrEmpty(t.Task.SubtaskId) && contractHashes.ContainsKey(t.Task.SubtaskId!))
-                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
+                .Select(t => (t.Task.SubtaskId!, contractHashes[t.Task.SubtaskId!], acceptanceUnits?.Contains(t.Task.SubtaskId!) == true, deliveryUnits?.Contains(t.Task.SubtaskId!) == true)),
                 Messages.Contracts.ContractAuthority.ModelProposal, planRef);
 
             if (requirements.Count > 0)

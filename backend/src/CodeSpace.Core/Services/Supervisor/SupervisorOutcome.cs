@@ -514,6 +514,23 @@ public static class SupervisorOutcome
             Error = result?.Error ?? rowError,
             ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             ProducedBranch = result?.ProducedBranch,
+            // P2b canary finding: the agent's own SERVER-graded acceptance verdict (the shared protected-oracle
+            // funnel, graded at agent completion) must SURVIVE the compact fold — the staked acceptance obligation
+            // is answered by exactly this triple (SupervisorGradedReceipts reads it off the tape), and dropping it
+            // here left every agent-graded unit's Required obligation permanently Unknown: the whole loop parked
+            // NeedsReview under Enforced with zero acceptance receipts. The rehydrate-time re-grade still covers
+            // units whose agents carried no verdict; its already-graded guard now correctly skips these.
+            AcceptancePassed = result?.AcceptancePassed,
+            AcceptanceDetail = result?.AcceptanceDetail,
+            AcceptanceEvidenceId = result?.AcceptanceEvidenceId,
+            // The contradiction stamps the same instant the verdict is folded (the P4-1 doctrine — never re-derived
+            // ad-hoc by a renderer), with the same status mapping the rehydrate fold uses.
+            Contradiction = statusName switch
+            {
+                "Succeeded" => Agents.AgentContradiction.Detect(selfReportedSuccess: true, result?.AcceptancePassed),
+                "Failed" => Agents.AgentContradiction.Detect(selfReportedSuccess: false, result?.AcceptancePassed),
+                _ => null,
+            },
             // #1283 delivery attestation: the pushed tip, its base, and the publish-evidence artifact ride the
             // compact so a tape-only completion reading can mint the SAME delivery/output receipts the composer
             // mints from the manifest row. Null on old results — the attestation then caps honestly downstream.

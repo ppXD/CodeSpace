@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
 
@@ -41,6 +42,16 @@ public class SupervisorDefinitionBuilderTests
         AllowedAgentDefinitionIds = allowedAgentDefinitionIds,
         AcceptanceChecks = acceptanceChecks,
     };
+
+    [Fact]
+    public void The_launch_completion_mode_stamps_the_built_definition_verbatim()
+    {
+        // P2b: the tasks lane's Enforced opt-in — the built definition carries the launch's mode so the snapshot
+        // starter stamps the run Enforced; absent stays null (platform default), byte-identical.
+        Builder.Build(Context() with { CompletionMode = WorkflowDefinition.CompletionModeEnforced })
+            .CompletionMode.ShouldBe(WorkflowDefinition.CompletionModeEnforced);
+        Builder.Build(Context()).CompletionMode.ShouldBeNull();
+    }
 
     [Fact]
     public void The_plan_critic_bakes_as_the_plan_scoped_review_and_omits_when_off()

@@ -90,12 +90,15 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        // P2b canary: the HEADLINE arc runs ENFORCED — its Success is no longer the engine's word alone; the
+        // completion terminal authority arbitrated the whole loop's own contract ledger (CleanSuccess or nothing).
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, completionMode: WorkflowDefinition.CompletionModeEnforced);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
         await jobClient.WaitForPendingAsync();
 
+        await AssertRanEnforcedAsync(runId);
         await AssertRunReachedSuccessAsync(runId);
         await AssertBothAgentsProducedRealPatchesAsync(runId);
         await AssertDecisionLedgerAsync(runId, teamId, SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop);
@@ -641,6 +644,14 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
+    /// <summary>The Enforced stamp must have HELD — a Success asserted after this proves the terminal authority arbitrated it (a silent drift back to Shadow would keep the arm green while proving nothing).</summary>
+    private async Task AssertRanEnforcedAsync(Guid runId)
+    {
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.CompletionEnforcementMode.ShouldBe("Enforced", customMessage: "the definition opted in — the seed/starter must stamp it; check workflow_version.definition_jsonb carries completionMode and the seed's resolution");
+    }
+
     private async Task AssertRunReachedSuccessAsync(Guid runId)
     {
         using var verify = _fixture.BeginScope();
@@ -1056,7 +1067,7 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid? conversationId = null, (Guid RepoId, string Alias)? relatedRepo = null)
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid? conversationId = null, (Guid RepoId, string Alias)? relatedRepo = null, string? completionMode = null)
     {
         // The supervisor's agents clone repoId, push their branches, and the merge integrates them; the operator's
         // acceptance floor (check.sh) gates the terminal stop against the integrated head. A conversationId (when set)
@@ -1083,6 +1094,7 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             Definition = new WorkflowDefinition
             {
                 SchemaVersion = 1,
+                CompletionMode = completionMode,
                 Nodes = new List<NodeDefinition>
                 {
                     new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

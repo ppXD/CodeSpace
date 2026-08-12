@@ -31,6 +31,9 @@ public sealed record TaskBuildContext
     /// <summary>The grounding context the projection may fold into the agent prompt. Null = none (a builder may fall back to <see cref="TaskLaunchSeed.GroundingContext"/>).</summary>
     public string? GroundingContext { get; init; }
 
+    /// <summary>P2b: the launch's completion-enforcement opt-in — every builder stamps it verbatim onto the built definition's <c>CompletionMode</c>, and the snapshot starter's validator rejects an unknown value fail-closed.</summary>
+    public string? CompletionMode { get; init; }
+
     /// <summary>Per-repo (repositoryId → branch/ref) clone overrides — session branch continuity: a follow-up turn starts each repo from the prior turn's produced branch for THAT repo (primary + each related). A repo ABSENT from the map clones at its default branch. Null / empty = a fresh launch (byte-identical — every repo default).</summary>
     public IReadOnlyDictionary<Guid, string>? BaseRefs { get; init; }
 

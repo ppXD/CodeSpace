@@ -39,6 +39,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             RepositoryId = request.RepositoryId,
             RelatedRepositories = request.RelatedRepositories,
             BaseBranch = request.BaseBranch,
+            CompletionMode = request.CompletionMode,
             RequestedEffort = request.Effort,
             Autonomy = request.Autonomy,
             Overrides = BuildOverrides(request),

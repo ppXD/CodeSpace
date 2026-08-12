@@ -83,7 +83,7 @@ public class CompletionIntegrityTests
     }
 
     private static string SupervisorRequirementSchemaVersion() =>
-        Core.Services.Supervisor.SupervisorUnitContract.BuildStakedRequirements(new[] { ("s1", "h", true) }, ContractAuthority.ModelProposal)[0].ContractSchemaVersion;
+        Core.Services.Supervisor.SupervisorUnitContract.BuildStakedRequirements(new[] { ("s1", "h", true, true) }, ContractAuthority.ModelProposal)[0].ContractSchemaVersion;
 
     private static RequirementEnvelope Requirement(string requirementRef) => new()
     {

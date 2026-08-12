@@ -95,11 +95,26 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Park — the Success claim rests on evidence with integrity violations: {string.Join("; ", violations)}", TerminalDecision.Park, watermarks);
         }
 
+        // A non-clean decision names its evidence: the staked obligations, the receipts that answered them (with
+        // dispositions), and the admission rejections — the difference between "parked, go read the composer
+        // source" and "parked, acceptance:s2 has no receipt". Park triage runs on these lines.
+        if (decision != TerminalDecision.CleanSuccess)
+        {
+            _logger.LogWarning("Terminal arbitration for run {RunId}: staked=[{Staked}] receipts=[{Receipts}]",
+                workflowRunId,
+                string.Join(", ", requirements.Take(16).Select(r => $"{r.Kind}:{r.RequirementRef}@{r.Requiredness}")),
+                string.Join(", ", receipts.Take(16).Select(r => $"{r.Kind}:{r.RequirementRef}={r.Disposition}(ev={(r.EvidenceRef is null ? "null" : "y")})")));
+
+            if (composed.Rejections.Count > 0)
+                _logger.LogWarning("Terminal arbitration for run {RunId} composed over {Count} admission rejection(s): {Rejections}",
+                    workflowRunId, composed.Rejections.Count, string.Join(" · ", composed.Rejections.Take(8).Select(r => $"[{r.Code}] {r.Reason}")));
+        }
+
         return decision switch
         {
             TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
             TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"completion-authority: honest failure (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision, watermarks),
-            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (delivery={composed.Assessment.Delivery}, handoffReachable={handoffReachable})", decision, watermarks),
+            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact}, delivery={composed.Assessment.Delivery}, execution={composed.Assessment.Execution}, handoffReachable={handoffReachable})", decision, watermarks),
         };
     }
 }
