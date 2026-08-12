@@ -36,6 +36,9 @@ public static class LlmBudgetGuard
     /// <summary>Pessimistic output-token assumption when the request does not bound it — over-reserving briefly is safe (the settle corrects immediately); under-reserving is the overshoot this guard exists to prevent. Pinned by test.</summary>
     public const int DefaultMaxOutputTokensEstimate = 8192;
 
+    /// <summary>Every llm reservation carries this TTL — generously past any real call's own HTTP timeout, so only a reservation ORPHANED by a worker teardown between reserve and settle ever reaches it. The expiry sweep then moves it to Indeterminate and the settlement sweep reconciles it pessimistically; without a deadline it would sit live forever, invisibly holding headroom against every later call of a reclaimed run. Pinned by test.</summary>
+    public static readonly TimeSpan ReservationTtl = TimeSpan.FromMinutes(30);
+
     public static async Task<T> GuardedAsync<T>(LlmCallScope? scope, string model, string? systemPrompt, string? userPrompt, int? maxOutputTokens, Func<CancellationToken, Task<T>> call, Func<T, decimal?> actualUsd, CancellationToken cancellationToken)
     {
         if (scope is not { Budget: { } budget, CapUsd: { } capUsd }) return await call(cancellationToken).ConfigureAwait(false);
@@ -50,7 +53,7 @@ public static class LlmBudgetGuard
         var scopeKey = $"{scope.Kind}:{Guid.NewGuid():N}";
         var kind = $"llm:{scope.Kind}";
 
-        var admission = await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimate.Value, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: null, cancellationToken).ConfigureAwait(false);
+        var admission = await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimate.Value, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false);
 
         if (!admission.Admitted) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, admission.CapUsd);
 

@@ -78,6 +78,22 @@ public class LlmBudgetGuardTests
     }
 
     [Fact]
+    public async Task Every_reservation_carries_the_committed_ttl_so_an_orphan_can_never_sit_live_forever()
+    {
+        // W-hard slice 2: a teardown between reserve and settle leaves an orphan — without a deadline it holds
+        // headroom invisibly forever (the expiry sweep only targets rows WITH one), taxing every later call of a
+        // reclaimed run. The TTL is generously past any real call; only true orphans ever reach it.
+        var ledger = new RecordingLedger(admit: true);
+
+        await LlmBudgetGuard.GuardedAsync(Scope(ledger, 5m), "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(1), _ => 0.1m, CancellationToken.None);
+
+        LlmBudgetGuard.ReservationTtl.ShouldBe(TimeSpan.FromMinutes(30));
+        ledger.LastExpiresAt.ShouldNotBeNull("a deadline-less reservation is invisible to the expiry sweep");
+        ledger.LastExpiresAt!.Value.ShouldBeGreaterThan(DateTimeOffset.UtcNow.AddMinutes(25));
+        ledger.LastExpiresAt!.Value.ShouldBeLessThan(DateTimeOffset.UtcNow.AddMinutes(35));
+    }
+
+    [Fact]
     public void The_pessimistic_estimate_is_committed_and_directionally_safe()
     {
         LlmBudgetGuard.DefaultMaxOutputTokensEstimate.ShouldBe(8192);
@@ -92,9 +108,12 @@ public class LlmBudgetGuardTests
         public int Settles;
         public decimal? LastSettleActual;
 
+        public DateTimeOffset? LastExpiresAt;
+
         public Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
         {
             Reserves++;
+            LastExpiresAt = expiresAt;
             return Task.FromResult(new BudgetAdmission(admit, admit ? Guid.NewGuid() : null, 4.9m, capUsd, admit ? null : "cap"));
         }
 
@@ -110,5 +129,7 @@ public class LlmBudgetGuardTests
         public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
 
         public Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(0m);
+    public Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
+
     }
 }
