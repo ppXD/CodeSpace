@@ -49,7 +49,7 @@ export function CreateWorkspaceDialog({ onClose }: { onClose: () => void }) {
             />
           </label>
 
-          <div className="cn-field-h">You own what you create, and can invite people into it straight away.</div>
+          <div className="cn-field-h">You own what you create.</div>
 
           {errorMessage && <div className="cn-banner cn-banner-err" style={{ marginTop: 12 }}><div className="cn-banner-p">{errorMessage}</div></div>}
 

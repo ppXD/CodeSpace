@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Users;
 using CodeSpace.Core.Settings.Application;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Auth;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Invitations;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -201,8 +202,28 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
 
         _db.User.Add(user);
         AddPersonalTeam(user);
+        await GrantDefaultPermissionsAsync(user, cancellationToken).ConfigureAwait(false);
 
         return user;
+    }
+
+    /// <summary>
+    /// The grants every account holds from the moment it exists — today, just the right to open a
+    /// workspace of their own.
+    ///
+    /// <para>Written here for the same reason the personal team is: this is the one path that creates
+    /// an account, so this is where "every account has X" has to become true. Migration 0117 is the
+    /// same statement for the accounts that already existed.</para>
+    /// </summary>
+    private async Task GrantDefaultPermissionsAsync(User user, CancellationToken cancellationToken)
+    {
+        var ids = await _db.Permission.AsNoTracking()
+            .Where(p => Permissions.GrantedToEveryAccount.Contains(p.Name))
+            .Select(p => p.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var permissionId in ids)
+            _db.UserPermission.Add(new UserPermission { Id = Guid.NewGuid(), UserId = user.Id, PermissionId = permissionId });
     }
 
     /// <summary>

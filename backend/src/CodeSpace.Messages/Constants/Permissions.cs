@@ -20,4 +20,18 @@ public static partial class Permissions
     /// team — there is no team to hold the role that would grant it.
     /// </summary>
     public const string TeamsCreate = "teams.create";
+
+    /// <summary>
+    /// What every account holds from the moment it exists.
+    ///
+    /// <para>Opening a workspace is something anyone here may do: you become its owner and can invite
+    /// people into it, which is how the product is meant to be used rather than a privilege to hand
+    /// out. It stays a GRANT rather than becoming "any signed-in caller" so that it remains
+    /// revocable — taking it back from one account is deleting a row, not shipping a build.</para>
+    ///
+    /// <para>Adding to this list needs a backfill migration for the accounts that already exist;
+    /// granting on creation only reaches the ones made afterwards. <c>DefaultAccountPermissionsTests</c>
+    /// pins the list so that is a visible decision.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> GrantedToEveryAccount = [TeamsCreate];
 }
