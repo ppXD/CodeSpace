@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Messages.Exceptions;
 
@@ -9,8 +10,14 @@ namespace CodeSpace.Messages.Exceptions;
 /// <c>actor_identity_required</c> response so a single frontend interceptor can open the binding
 /// modal for any feature, naming the provider to connect.
 /// </summary>
-public sealed class ActorIdentityRequiredException : Exception
+public sealed class ActorIdentityRequiredException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.PreconditionRequired;
+
+    public string Code => FailureCodes.ActorIdentityRequired;
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["provider"] = ProviderKind.ToString(), ["providerInstanceId"] = ProviderInstanceId };
+
     public ProviderKind ProviderKind { get; }
     public Guid ProviderInstanceId { get; }
 

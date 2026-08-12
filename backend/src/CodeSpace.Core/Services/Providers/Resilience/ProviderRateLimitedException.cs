@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Providers.Resilience;
 
 /// <summary>
@@ -5,8 +7,14 @@ namespace CodeSpace.Core.Services.Providers.Resilience;
 /// AND queue full). Distinct from the SDK's 429 — this fires BEFORE the wire call. Background
 /// workers can choose to retry via the failure-state-machine path; controllers should surface 429 to the user.
 /// </summary>
-public sealed class ProviderRateLimitedException : Exception
+public sealed class ProviderRateLimitedException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Exhausted;
+
+    public string Code => FailureCodes.RateLimited;
+
+    public string? ClientMessage => "Too many requests to the upstream provider. Retry shortly.";
+
     public ProviderRateLimitedException(Guid providerInstanceId, string operationName)
         : base($"Local rate limit denied call '{operationName}' on provider instance {providerInstanceId} — token bucket empty and queue full. Retry after backoff.")
     {

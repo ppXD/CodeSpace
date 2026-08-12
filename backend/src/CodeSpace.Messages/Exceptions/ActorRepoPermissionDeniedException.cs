@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Messages.Exceptions;
 
@@ -12,8 +13,16 @@ namespace CodeSpace.Messages.Exceptions;
 /// leaves it Open — no false "success", no background write that fails later. Distinct from
 /// <see cref="ActorIdentityRequiredException"/> (428 — no identity at all, prompt a link).
 /// </summary>
-public sealed class ActorRepoPermissionDeniedException : Exception
+public sealed class ActorRepoPermissionDeniedException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Forbidden;
+
+    public string Code => FailureCodes.ActorRepoPermissionDenied;
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["provider"] = ProviderKind.ToString(), ["providerInstanceId"] = ProviderInstanceId, ["repository"] = RepositoryPath };
+
+    public string? ClientMessage => Reason ?? $"You don't have permission to act on {RepositoryPath}.";
+
     public ActorRepoPermissionDeniedException(ProviderKind providerKind, Guid providerInstanceId, string repositoryPath, string? reason)
         : base($"Actor lacks permission to act on {providerKind} repository '{repositoryPath}': {reason ?? "insufficient access"}")
     {

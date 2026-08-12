@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.OAuth;
 
 /// <summary>
@@ -5,8 +7,13 @@ namespace CodeSpace.Core.Services.OAuth;
 /// provider's RFC 6749 error code + description for diagnostics. NEVER includes raw secrets
 /// (client_secret, refresh_token, etc.) in the message.
 /// </summary>
-public sealed class OAuthExchangeException : Exception
+public sealed class OAuthExchangeException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Invalid;
+
+    public string Code => FailureCodes.OAuthExchangeFailed;
+
+
     public OAuthExchangeException(string error, string? description, string? providerBody)
         : base($"OAuth exchange rejected: {error}{(description != null ? $" — {description}" : string.Empty)}")
     {

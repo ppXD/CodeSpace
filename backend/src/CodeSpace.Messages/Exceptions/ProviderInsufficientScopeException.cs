@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Messages.Exceptions;
 
@@ -16,8 +17,14 @@ namespace CodeSpace.Messages.Exceptions;
 /// The frontend branches on <c>code = "oauth_insufficient_scope"</c> to render a clear
 /// remediation message naming the exact scope(s) the operator needs to add.
 /// </summary>
-public sealed class ProviderInsufficientScopeException : Exception
+public sealed class ProviderInsufficientScopeException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Unprocessable;
+
+    public string Code => FailureCodes.OAuthInsufficientScope;
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["provider"] = ProviderKind.ToString(), ["capability"] = CapabilityName, ["missingScopes"] = MissingScopes, ["grantedScopes"] = GrantedScopes, ["providerHint"] = ProviderHint };
+
     public ProviderInsufficientScopeException(ProviderKind providerKind, string capabilityName, IReadOnlyList<string> missingScopes, IReadOnlyList<string>? grantedScopes, string? providerHint = null)
         : base(BuildMessage(providerKind, capabilityName, missingScopes))
     {

@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
@@ -12,8 +14,14 @@ namespace CodeSpace.Core.Services.Workflows;
 /// matching how the validator reports them. <see cref="Exception.Message"/> joins them for
 /// log/telemetry consumers that only see the single message field.</para>
 /// </summary>
-public sealed class WorkflowValidationException : Exception
+public sealed class WorkflowValidationException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Unprocessable;
+
+    public string Code => FailureCodes.WorkflowDefinitionInvalid;
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["errors"] = Errors };
+
     public IReadOnlyList<string> Errors { get; }
 
     public WorkflowValidationException(IReadOnlyList<string> errors)

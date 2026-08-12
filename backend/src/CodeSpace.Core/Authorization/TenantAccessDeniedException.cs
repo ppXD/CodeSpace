@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Authorization;
 
 /// <summary>
@@ -5,8 +7,14 @@ namespace CodeSpace.Core.Authorization;
 /// member of the team the request targets. Mapped to HTTP 403 by GlobalExceptionFilter.
 /// Carries structured fields so logs / metrics can pivot on (UserId, TeamId, Reason).
 /// </summary>
-public sealed class TenantAccessDeniedException : Exception
+public sealed class TenantAccessDeniedException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Forbidden;
+
+    public string Code => FailureCodes.Forbidden;
+
+    public string? ClientMessage => "Access denied for this tenant.";
+
     public TenantAccessDeniedException(Guid? userId, Guid teamId, string reason)
         : base($"User {userId?.ToString() ?? "<anonymous>"} is not authorized for team {teamId}: {reason}")
     {
