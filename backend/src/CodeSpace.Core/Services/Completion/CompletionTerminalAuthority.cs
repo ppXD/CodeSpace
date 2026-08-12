@@ -99,7 +99,7 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         {
             TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
             TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"completion-authority: honest failure (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision, watermarks),
-            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (delivery={composed.Assessment.Delivery}, handoffReachable={handoffReachable})", decision, watermarks),
+            _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact}, delivery={composed.Assessment.Delivery}, execution={composed.Assessment.Execution}, handoffReachable={handoffReachable})", decision, watermarks),
         };
     }
 }

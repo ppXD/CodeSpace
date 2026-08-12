@@ -653,6 +653,12 @@ public sealed class CompletionComposerFlowTests
             run.CompletionPolicyVersion = CompletionPolicy.CurrentVersion;
             run.CompletionEnforcementMode = CompletionPolicy.CurrentMode.ToString();
         }
+        else
+        {
+            // The shared seed now stamps faithfully (P2b) — the PRE-protocol shape is arranged explicitly.
+            run.CompletionPolicyVersion = null;
+            run.CompletionEnforcementMode = null;
+        }
         await db.SaveChangesAsync();
         return runId;
     }
