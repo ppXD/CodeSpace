@@ -555,9 +555,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             if (!committed && !await HeadDiffersFromBaseAsync(repo, cancellationToken).ConfigureAwait(false)) return null;
 
             // Re-inject the SAME clone credential into the push ARGV only (never as a remote, never into
-            // .git/config — origin was stripped after clone). Plain --force, not --force-with-lease: the branch
-            // name is run-unique so lease protection is vacuous, and its no-remote-tracking-ref semantics vary by
-            // git version. The push gets a bounded timeout so a hung push can't delay run completion.
+            // .git/config — origin was stripped after clone). Plain --force, not --force-with-lease: an
+            // observe-then-lease here would still admit a zombie whose observation is fresh at push time, so the
+            // zombie fence lives in the REF NAME instead (AgentRunExecutor.BuildBranchName is generation-specific
+            // — a superseded attempt cannot name the current attempt's ref), and a lease's no-remote-tracking-ref
+            // semantics vary by git version. The push gets a bounded timeout so a hung push can't delay run completion.
             var authedUrl = BuildAuthenticatedUrl(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
 
             await RunGitOrThrowAsync(repo, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
