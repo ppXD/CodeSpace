@@ -99,6 +99,42 @@ public sealed class OpenAWorkspaceAndFillItE2ETests : IClassFixture<TaskLaunchAp
         people.Count.ShouldBe(2, "the creator and the person they invited — nobody else, and neither of them missing");
     }
 
+    /// <summary>
+    /// The chain does not stop at the person you invited. Opening a workspace is what every account
+    /// here may do — you own what you open and staff it yourself — so an account that arrived through
+    /// an invitation is not a lesser kind of account that has to ask an administrator to start.
+    ///
+    /// <para>Wire level because the grant is written by the acceptance path and read back by the
+    /// authorization behavior on a LATER request, under a different session. Nothing below this tier
+    /// crosses both.</para>
+    /// </summary>
+    [Fact]
+    public async Task Someone_you_invited_can_open_a_workspace_of_their_own()
+    {
+        var founder = await SeedGrantedAccountAsync();
+
+        var created = await PostAsync(founder, "/api/teams", new { name = "Founding Team" });
+        var teamId = JsonDocument.Parse(await created.Content.ReadAsStringAsync()).RootElement.GetProperty("id").GetGuid();
+
+        var invited = await PostAsync(founder, "/api/teams/invitations", new { email = "newcomer@guild.test", role = nameof(TeamRole.Member) }, teamId);
+        var token = JsonDocument.Parse(await invited.Content.ReadAsStringAsync()).RootElement.GetProperty("inviteUrl").GetString()!.Split('/').Last();
+
+        var accepted = await _factory.CreateClient().PostAsJsonAsync($"/api/invitations/{token}/accept", new { name = "Newcomer", password = "correct-horse-battery" });
+        accepted.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(accepted, "200 with a session"));
+
+        // Their own session, not the founder's — the newcomer was invited at Member, the lowest role
+        // that can do anything, so nothing about their standing in that team is carrying this.
+        var newcomerId = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync()).RootElement.GetProperty("user").GetProperty("id").GetGuid();
+
+        var theirs = await PostAsync(newcomerId, "/api/teams", new { name = "Newcomer Workshop" });
+
+        theirs.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(theirs, "200 — opening a workspace is not a privilege an administrator hands out"));
+
+        var mine = (await MeTeamsAsync(newcomerId)).Single(t => t.GetProperty("name").GetString() == "Newcomer Workshop");
+        mine.GetProperty("role").GetString().ShouldBe(nameof(TeamRole.Owner));
+        Permissions(mine).ShouldContain(TeamPermissions.MembersManage, "and they can staff it in turn");
+    }
+
     [Fact]
     public async Task A_workspace_you_did_not_open_is_not_yours_to_staff()
     {
