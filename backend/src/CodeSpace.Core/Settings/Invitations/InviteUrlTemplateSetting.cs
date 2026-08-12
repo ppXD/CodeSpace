@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Settings.Invitations;
 /// <para>Not a feature toggle: the value is a coordinate, and every deployment has exactly one right
 /// answer for it. The default is the dev SPA, so a fresh clone works without configuring anything.</para>
 /// </summary>
-public class InviteUrlTemplateSetting : IConfigurationSetting<string>
+public class InviteUrlTemplateSetting : LinkTemplateSetting, IConfigurationSetting<string>
 {
     public const string ConfigurationKey = "Invitations:InviteUrlTemplate";
 
@@ -21,9 +21,7 @@ public class InviteUrlTemplateSetting : IConfigurationSetting<string>
 
     public InviteUrlTemplateSetting(IConfiguration configuration)
     {
-        var configured = configuration[ConfigurationKey];
-
-        Value = string.IsNullOrWhiteSpace(configured) ? DefaultTemplate : configured.Trim();
+        Value = ResolveOrFail(configuration, ConfigurationKey, DefaultTemplate, "Invite links");
     }
 
     public string Value { get; set; }

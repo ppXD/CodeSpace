@@ -153,6 +153,7 @@ public class RequestAuthorizationInventoryTests
     private static bool HasAuthorizationMarker(Type type) =>
         typeof(IRequireAuthenticatedUser).IsAssignableFrom(type)
         || typeof(IRequireGlobalAdmin).IsAssignableFrom(type)
+        || typeof(IRequireGlobalPermission).IsAssignableFrom(type)
         || typeof(IRequireTeamMembership).IsAssignableFrom(type)
         || typeof(IRequireRepositoryAccess).IsAssignableFrom(type)
         || typeof(IRequireCredentialAccess).IsAssignableFrom(type);

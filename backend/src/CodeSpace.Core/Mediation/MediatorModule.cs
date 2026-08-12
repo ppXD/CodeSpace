@@ -34,6 +34,7 @@ public class MediatorModule : Autofac.Module
         //   PasswordRotationGuard  — blocks everything except ChangePasswordCommand while
         //                             the user has password_must_change=true
         //   GlobalAdmin            — for IRequireGlobalAdmin commands, no DB hit
+        //   GlobalPermission       — instance-level capability (teams.create); a role/permission join
         //   TeamMembership / Repo / Credential — DB-backed tenancy checks
         //   TeamPermission         — inside TeamMembership (whose marker it extends): the team is
         //                             already vetted, this adds the role check for write/action requests
@@ -43,6 +44,7 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(AuthenticatedUserAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(PasswordRotationRequiredBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(GlobalAdminAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(GlobalPermissionAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TeamMembershipAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TeamPermissionAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(RepositoryAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
