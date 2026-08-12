@@ -57,6 +57,58 @@ public class ArtifactStoreFlowTests
     }
 
     [Fact]
+    public async Task A_tampered_offloaded_blob_refuses_to_read()
+    {
+        // P2 slice 2: the row's sha/size are the store's IDENTITY CLAIM about the content — a blob that no longer
+        // matches (corruption, truncation, a foreign write under the content-addressed path) must never flow
+        // silently into a prompt, a patch apply, or an evidence read.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('x', 20_000));   // over the inline threshold → offloaded
+
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        string storageUrl;
+        using (var scope = _fixture.BeginScope())
+            storageUrl = (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(a => a.Id == artifactId)).StorageUrl!;
+
+        await File.WriteAllBytesAsync(new Uri(storageUrl).LocalPath, Encoding.UTF8.GetBytes(new string('x', 19_999) + "y"));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var ex = await Should.ThrowAsync<InvalidOperationException>(
+                scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None));
+            ex.Message.ShouldContain("read-back verification", customMessage: "same size, different bytes — the sha catches what the size cannot");
+        }
+    }
+
+    [Fact]
+    public async Task The_immutability_trigger_blocks_an_inline_mutation_at_the_database()
+    {
+        // The inline surface's REAL defense (discovered by this slice's first CI round): workflow_artifact carries
+        // an immutability trigger — an UPDATE is rejected at the database, so a mutated inline row is structurally
+        // unreachable through SQL. The read-back verification remains as defense-in-depth (and as the ONLY guard
+        // for the offloaded blob surface, where no trigger can reach the filesystem).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes("small inline content");
+
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var row = await db.WorkflowArtifact.SingleAsync(a => a.Id == artifactId);
+            row.InlineBytes = Encoding.UTF8.GetBytes("small inline CONTENT");
+
+            var ex = await Should.ThrowAsync<DbUpdateException>(db.SaveChangesAsync());
+            ex.InnerException.ShouldNotBeNull().Message.ShouldContain("immutable", customMessage: "the database itself refuses to rewrite an artifact's identity");
+        }
+    }
+
+    [Fact]
     public async Task Put_same_bytes_twice_same_team_returns_same_id_no_duplicate_row()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

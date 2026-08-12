@@ -101,6 +101,14 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
                 row.StorageUrl ?? throw new InvalidOperationException($"Artifact {artifactId} has neither inline bytes nor a storage_url."),
                 cancellationToken).ConfigureAwait(false);
 
+        // P2 slice 2 (a read proves its bytes): the row's sha/size are the artifact's IDENTITY — the store's own
+        // claims about the content. A blob that no longer matches (a corrupted/truncated file, a foreign write
+        // under the content-addressed path, a size drift) must never flow silently into a prompt, a patch apply,
+        // or an evidence read. Verified on EVERY read — inline rows included, so a mutated row can't lie either.
+        if (bytes.Length != row.SizeBytes || !string.Equals(ComputeSha256Hex(bytes), row.Sha256, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"Artifact {artifactId} failed its read-back verification: stored claim sha256={row.Sha256} size={row.SizeBytes}, observed size={bytes.Length} — the underlying {(row.InlineBytes is null ? "blob" : "inline row")} no longer matches the store's identity claim; refusing to return unverified bytes.");
+
         return new ArtifactBytes
         {
             Id = row.Id,

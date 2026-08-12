@@ -76,9 +76,28 @@ public sealed class CaptureIntentService : ICaptureIntentService, IScopedDepende
             .ConfigureAwait(false);
 
         if (committed == 0)
+        {
             _logger.LogWarning("Capture intent commit found no open promise for run {RunId} at epoch {Epoch} — a reclaim or a prior settle won; the capture facts stay on the result row", agentRunId, fenceEpoch);
 
-        return committed > 0;
+            return false;
+        }
+
+        // Slice 2 (supersedes): this CONFIRMED observation formally resolves any earlier attempt's Indeterminate
+        // promise for the same run — a pointer, never a rewrite (the status and history stay). An exactly-once
+        // guard must not eat a late truth: without this, a run whose first attempt died mid-window reads
+        // "permanently unknown" forever even after the re-attach captured everything.
+        var committedId = await _db.CaptureIntent.AsNoTracking()
+            .Where(i => i.AgentRunId == agentRunId && i.FenceEpoch == fenceEpoch)
+            .Select(i => i.Id).SingleAsync(cancellationToken).ConfigureAwait(false);
+
+        await _db.CaptureIntent
+            .Where(i => i.AgentRunId == agentRunId && i.Status == CaptureIntentStatus.Indeterminate && i.SupersededByIntentId == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(i => i.SupersededByIntentId, committedId)
+                .SetProperty(i => i.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        return true;
     }
 
     public async Task<int> MarkIndeterminateForRunAsync(Guid agentRunId, CancellationToken cancellationToken)

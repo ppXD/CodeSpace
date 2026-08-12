@@ -37,6 +37,9 @@ public class CaptureIntent : IEntity<Guid>, IAuditable
     /// <summary>Commit-time observation (JSON): what the capture actually persisted (changed-file count, patch artifact, branch, manifest presence) — including the explicit empty capture, which is a CONFIRMED fact here, never an absence.</summary>
     public string? FactsJson { get; set; }
 
+    /// <summary>Slice 2: the LATER committed promise of the same run that formally resolved this Indeterminate one (a re-attach that ran the capture to its persist). A pointer, never a rewrite — the status stays Indeterminate, history intact; null = still an open unknown.</summary>
+    public Guid? SupersededByIntentId { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
