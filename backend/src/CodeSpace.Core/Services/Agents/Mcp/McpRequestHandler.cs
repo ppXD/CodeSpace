@@ -73,6 +73,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement.Clone();
 
     private readonly IAgentToolRegistry _registry;
+    private readonly McpFabricCounters? _counters;
     private readonly AgentAutonomyLevel _autonomy;
     private readonly Guid? _teamId;
     private readonly SecretRedactor _redactor;
@@ -94,10 +95,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     // allow-listed, and callable. Full (the existing opt-in) serves the whole registry, byte-identical to before.
     private readonly McpCatalogMode _catalogMode;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null)
     {
         _registry = registry;
         _autonomy = autonomy;
+        _counters = counters;
         _teamId = teamId;
         _redactor = redactor ?? SecretRedactor.None;
         _runId = runId;
@@ -131,6 +133,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         if (!IsSupportedVersion(request)) return Serialize(JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidRequest, "Request 'jsonrpc' must be \"2.0\".")));
 
         if (!TryReadMethod(request, out var method)) return Serialize(JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidRequest, "Request 'method' is required.")));
+
+        // P0-B2: the two fabric observations — a served initialize IS the handshake fact, and every dispatched
+        // tools/call counts (including read-only calls the governance ledger never records).
+        if (method == "initialize") _counters?.MarkHandshake();
+        if (method == "tools/call") _counters?.MarkToolCall();
 
         return method switch
         {

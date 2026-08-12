@@ -108,6 +108,26 @@ public class EvalSuiteTests
     }
 
     [Fact]
+    public void A_reached_cell_with_an_infra_classed_grade_is_InfraUnknown_not_a_candidate_failure()
+    {
+        // P0-B2: the mcp-required-no-handshake rule (and every Environment/GraderFault-classed grade) is a truth
+        // hole — counting it Unsolved blames the model for infrastructure. A genuine failure still counts.
+        var corpus = Corpus();
+        var manifest = EvalSuite.ManifestFor(corpus);
+
+        var results = new List<BenchmarkResult>
+        {
+            Result("t1", BenchmarkMode.HarnessCli, passed: false) with { Grade = new BenchmarkGrade { Passed = false, Detail = "mcp-required-no-handshake: …", Class = GradeFailureClass.Environment } },
+            Result("t1", BenchmarkMode.HarnessCliWithMcp, passed: false),
+        };
+
+        var cells = EvalSuite.Classify(manifest, results, Array.Empty<CorpusBenchmarkError>());
+
+        cells.Single(c => c is { TaskId: "t1", Mode: BenchmarkMode.HarnessCli }).State.ShouldBe(CorpusCellState.InfraUnknown);
+        cells.Single(c => c is { TaskId: "t1", Mode: BenchmarkMode.HarnessCliWithMcp }).State.ShouldBe(CorpusCellState.Unsolved, "an unclassified genuine failure still counts against the candidate");
+    }
+
+    [Fact]
     public void The_score_divides_by_ALL_cells_and_health_isolates_the_instrument()
     {
         var cells = new[]

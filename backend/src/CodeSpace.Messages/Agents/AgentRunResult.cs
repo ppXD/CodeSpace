@@ -117,6 +117,10 @@ public sealed record AgentRunResult
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Guid? AcceptanceEvidenceId { get; init; }
 
+    /// <summary>P0-B2: what the run's MCP fabric ACTUALLY did — bound/declared/proxied/handshook/served, observed off the live endpoint at result time. Null on pre-slice results; null-omitted so old rows stay byte-identical.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public McpFabricEvidence? McpEvidence { get; init; }
+
     /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
     public string? AcceptanceDetail { get; init; }
 

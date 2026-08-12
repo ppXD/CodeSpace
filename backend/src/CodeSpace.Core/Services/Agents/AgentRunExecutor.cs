@@ -337,6 +337,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 priorReason = reason;
             }
 
+            // P0-B2: stamp what the fabric ACTUALLY did — observed off the live endpoint while it is still open
+            // (the await-using disposes it at scope end). The re-attach path deliberately leaves this null: the
+            // original launch's declaration facts are not durably observable across a restart, and evidence is
+            // never fabricated.
+            result = AttachMcpEvidence(result, effectiveTask, mcp, mcpWiring);
+
             // The capture sequence ran to its persist (a CONFIRMED empty included) — commit the promise with the
             // observed facts before the terminal CAS, so a crash between the two replays as re-verify + idempotent
             // re-commit, never as a terminal run with an unresolved promise.
@@ -1746,6 +1752,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// honest degradation. The harness owns its format: it renders the file Content from the run-scoped context (socket +
     /// token + the absolute proxy command), so the declaration the agent reads matches the listener by construction.</para>
     /// </summary>
+    /// <summary>P0-B2: the seven fabric facts, composed from the live endpoint + the wiring the spec carried — configuration beside observation, so "the tools were available" is a recorded fact, not an inference.</summary>
+    internal static AgentRunResult AttachMcpEvidence(AgentRunResult result, AgentTask task, Mcp.AgentMcpEndpoint? endpoint, McpServerWiring? wiring) => result with
+    {
+        McpEvidence = new McpFabricEvidence
+        {
+            RequestedCatalogMode = ResolveMcpCatalogMode(task).ToString(),
+            EndpointBound = endpoint is not null,
+            DeclarationWritten = wiring is not null,
+            ProxyResolved = File.Exists(LocalProcessRunner.McpProxyBinaryPath()),
+            HandshakeObserved = endpoint?.HandshakeObserved == true,
+            ObservedToolCalls = endpoint?.ObservedToolCalls ?? 0,
+            EffectiveCatalogDigest = endpoint?.EffectiveCatalogDigest(),
+        },
+    };
+
     private McpServerWiring? BuildMcpWiring(Guid runId, AgentMcpEndpoint? endpoint, IAgentHarness harness, string socketPath, string token)
     {
         if (endpoint is null || harness is not IMcpHarnessDeclaration declarer) return null;

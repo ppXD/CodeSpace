@@ -137,4 +137,54 @@ public class BenchmarkRunnerBuildTaskTests
             json.ShouldNotContain("maxReviseRounds", Case.Insensitive, "critic-off ⇒ the field is omitted from persisted task_json");
         }
     }
+
+    // ── P0-B2: the MCP-fabric rule ──────────────────────────────────────────────
+
+    private static Core.Persistence.Entities.AgentRun RunWith(McpFabricEvidence? evidence) => new()
+    {
+        Id = Guid.NewGuid(),
+        ResultJson = System.Text.Json.JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = Messages.Enums.AgentRunStatus.Succeeded, ExitReason = "completed", McpEvidence = evidence,
+        }, Core.Services.Agents.AgentJson.Options),
+    };
+
+    private static McpFabricEvidence Evidence(bool handshake) => new()
+    {
+        RequestedCatalogMode = "Full", EndpointBound = true, DeclarationWritten = true, ProxyResolved = true,
+        HandshakeObserved = handshake, ObservedToolCalls = handshake ? 3 : 0,
+    };
+
+    private static readonly BenchmarkGrade PassingGrade = new() { Passed = true, Detail = "tests-passed" };
+
+    [Fact]
+    public void The_mcp_arm_with_no_handshake_grades_environment_even_over_a_passing_oracle()
+    {
+        // A pass without the fabric measured the cli arm under the cli-mcp label — mislabeled A/B data is worse
+        // than a lost cell, so the rule overrides in BOTH directions.
+        var graded = BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCliWithMcp, RunWith(Evidence(handshake: false)));
+
+        graded.Passed.ShouldBeFalse();
+        graded.Class.ShouldBe(GradeFailureClass.Environment, "infra, never a model verdict — the corpus counts it InfraUnknown");
+        graded.Detail.ShouldStartWith("mcp-required-no-handshake");
+    }
+
+    [Fact]
+    public void A_handshook_mcp_arm_and_the_cli_arm_pass_through_untouched()
+    {
+        BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCliWithMcp, RunWith(Evidence(handshake: true)))
+            .ShouldBeSameAs(PassingGrade);
+        BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCli, RunWith(Evidence(handshake: false)))
+            .ShouldBeSameAs(PassingGrade, "the cli arm never required the fabric");
+    }
+
+    [Fact]
+    public void A_pre_slice_result_with_no_evidence_is_untouched()
+    {
+        // Absence of observation is never an observation — an old result must not retro-grade as infra.
+        BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCliWithMcp, RunWith(evidence: null))
+            .ShouldBeSameAs(PassingGrade);
+        BenchmarkRunner.ApplyMcpFabricRule(PassingGrade, BenchmarkMode.HarnessCliWithMcp, new Core.Persistence.Entities.AgentRun { Id = Guid.NewGuid(), ResultJson = null })
+            .ShouldBeSameAs(PassingGrade);
+    }
 }

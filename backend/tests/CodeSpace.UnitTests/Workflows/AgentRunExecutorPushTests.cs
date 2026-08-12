@@ -638,4 +638,22 @@ public sealed class AgentRunExecutorPushTests
         public Task<CodeSpace.Messages.Dtos.Agents.AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
+
+    // ── P0-B2: the fabric-evidence composition, endpoint-less arm ──────────────
+
+    [Fact]
+    public void Mcp_evidence_composes_honestly_when_the_endpoint_never_bound()
+    {
+        var task = new AgentTask { Goal = "g", Harness = "claude-code" };
+
+        var result = AgentRunExecutor.AttachMcpEvidence(new AgentRunResult { Status = Messages.Enums.AgentRunStatus.Succeeded, ExitReason = "completed" }, task, endpoint: null, wiring: null);
+
+        var evidence = result.McpEvidence.ShouldNotBeNull();
+        evidence.EndpointBound.ShouldBeFalse();
+        evidence.DeclarationWritten.ShouldBeFalse();
+        evidence.HandshakeObserved.ShouldBeFalse();
+        evidence.ObservedToolCalls.ShouldBe(0);
+        evidence.EffectiveCatalogDigest.ShouldBeNull("no endpoint served — there is no effective catalog to digest");
+        evidence.RequestedCatalogMode.ShouldBe(nameof(McpCatalogMode.Full), "the committed default");
+    }
 }
