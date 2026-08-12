@@ -82,9 +82,25 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             .Select(r => new { r.Id, r.TeamId, r.Status })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        // The THIRD pass is the P0-A backfill, and one-shot BY CONSTRUCTION: a run whose rows all predate the
+        // metric projection (none carries metric_jsonb) re-assesses once even though its ledger head never moved —
+        // without it, a settled terminal run would stay metric-less forever and permanently deflate the
+        // scorecard's assessed population. The re-assessment writes the metric columns, which removes the run
+        // from this predicate for good; RecordAsync's own gates tolerate the unmoved watermark for exactly this
+        // metric-less case.
+        var metricless = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.CompletionPolicyVersion != null
+                        && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
+                        && _db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id)
+                        && !_db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id && a.MetricJson != null))
+            .OrderByDescending(r => r.CompletedAt)
+            .Take(batchSize)
+            .Select(r => new { r.Id, r.TeamId, r.Status })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
         var appended = 0;
 
-        foreach (var run in unassessed.Concat(revisit))
+        foreach (var run in unassessed.Concat(revisit).Concat(metricless).DistinctBy(r => r.Id))
         {
             try
             {

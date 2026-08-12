@@ -86,7 +86,8 @@ public sealed class CompletionComposerFlowTests
 
         var second = await composer.ComposeAsync(runId, teamId, CancellationToken.None);
         second!.Assessment.ShouldBe(first.Assessment, "same contract + same facts ⇒ same assessment");
-        second.MetricAt1.ShouldBe(first.MetricAt1, "the metric projection is as deterministic as the assessment");
+        // Compared as JSON: the projection record carries lists, whose default record equality is by reference.
+        JsonSerializer.Serialize(second.MetricAt1).ShouldBe(JsonSerializer.Serialize(first.MetricAt1), "the metric projection is as deterministic as the assessment");
 
         (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
             .ShouldBe(3, "one acceptance + one delivery + one output receipt, exactly-once — a re-compose lands on the first rows");
