@@ -10,8 +10,8 @@ using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Completion;
 
-/// <summary>One composed verdict: the assessment plus every integrity diagnostic met on the way (admission rejections, projection contract errors). Shadow consumers RECORD it; nothing mutates a terminal from it until P2b (Lock Clause 1).</summary>
-public sealed record ComposedAssessment(CompletionAssessment Assessment, CompletionEnforcementMode Mode, IReadOnlyList<ReceiptRejection> Rejections, IReadOnlyList<string> ContractErrors);
+/// <summary>One composed verdict, TWO isolated projections (P0-A dual projection): the operational assessment (terminal authority's input) plus the metric@1 projection (the solve-rate's only verdict), both from the same facts and admission rules, plus every integrity diagnostic met on the way (admission rejections, projection contract errors). Shadow consumers RECORD it; nothing mutates a terminal from it until P2b (Lock Clause 1).</summary>
+public sealed record ComposedAssessment(CompletionAssessment Assessment, CompletionEnforcementMode Mode, IReadOnlyList<ReceiptRejection> Rejections, IReadOnlyList<string> ContractErrors, MetricAt1Projection MetricAt1);
 
 public interface ICompletionAssessmentComposer
 {
@@ -107,7 +107,7 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
             : BuildFacts(status, decisions);
 
         if (CompletionPolicy.BasisFor(run.CompletionPolicyVersion) == CompletionBasis.LegacyUnknown)
-            return new ComposedAssessment(CompletionReducer.ReduceLegacy(facts), mode, Array.Empty<ReceiptRejection>(), Array.Empty<string>());
+            return new ComposedAssessment(CompletionReducer.ReduceLegacy(facts), mode, Array.Empty<ReceiptRejection>(), Array.Empty<string>(), MetricAt1.ProjectLegacy());
 
         requirements ??= await _contracts.ListRequirementsAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -131,7 +131,9 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         var admission = ReceiptAdmission.Admit(receipts, requirements, executableSet, AttemptSelectors.SelectOperationalActive(attempts), currentRevisions);
 
-        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>());
+        var metricAt1 = MetricAt1.Project(requirements, receipts, executableSet, attempts, facts, run.CompletionPolicyVersion, currentRevisions);
+
+        return new ComposedAssessment(CompletionReducer.Reduce(requirements, admission.Admitted, facts), mode, admission.Rejections, projection?.ContractErrors ?? Array.Empty<string>(), metricAt1);
     }
 
     /// <summary>One projected workflow-agents lane: every contract-bearing attempt on its (node, iteration) unit, plus each attempt's result for the receipt bridge.</summary>

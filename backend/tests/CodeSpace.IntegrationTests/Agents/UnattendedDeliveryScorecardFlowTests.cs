@@ -26,10 +26,11 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// test is a pure DB-read/aggregation layer, so seeding the tables it reads is the right fidelity tier (Rule 12),
 /// not a lower one.
 ///
-/// <para>Proves the north-star's exact definition: solved (objective acceptance grade, never self-report) AND
-/// delivered (actually left the sandbox) AND zero human touches (neither an ask_human decision NOR an
-/// approval-parked tool call) — each condition tested in isolation — plus tenancy, the since window, and the real
-/// cost composition.</para>
+/// <para>Proves the north-star's exact definition since the P0-A consumer switch: solved (the run's latest
+/// METRIC@1 verdict — durable shadow assessment rows, no status fallback) AND delivered (actually left the
+/// sandbox) AND zero human touches (neither an ask_human decision NOR an approval-parked tool call) — each
+/// condition tested in isolation — plus the legacy ladder riding beside as a parity column, tenancy, the since
+/// window, and the real cost composition.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -45,6 +46,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
 
         var card = await ComputeAsync(teamId);
 
@@ -65,6 +67,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         // Graded Passed but never pushed (PatchOnly by policy, or a failed push) — no PR either.
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
         run.Solved.ShouldBeTrue();
@@ -80,9 +83,11 @@ public class UnattendedDeliveryScorecardFlowTests
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed, alias: "repo-a");
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Failed, PublishState.PatchOnly, alias: "repo-b");
 
-        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        var card = await ComputeAsync(teamId);
+        var run = card.Runs.Single(r => r.WorkflowRunId == runId);
         run.Solved.ShouldBeFalse("a mixed multi-repo result where ANY repo's acceptance failed must never be scored solved");
         run.UnattendedSolvedWithDelivery.ShouldBeFalse();
+        card.Rollup.LegacySolvedRuns.ShouldBe(0, "the legacy ladder's worst-first multi-repo rule still holds on the parity column");
     }
 
     [Fact]
@@ -91,6 +96,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly, prNumber: 42);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
         run.Delivered.ShouldBeTrue("an opened PR/MR is a stronger delivery signal than PublishState alone — it must count even when PublishStateValue never reached Pushed");
@@ -98,16 +104,22 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
-    public async Task A_success_run_with_no_configured_acceptance_oracle_falls_back_to_its_own_terminal_status()
+    public async Task A_success_run_with_no_oracle_no_longer_solves_through_the_status_fallback()
     {
+        // THE P0-A consumer switch, pinned from the front: engine Success with no metric@1 verdict used to solve
+        // through the legacy ladder's status fallback — the "it exited zero, so it worked" inference. The primary
+        // rates no longer carry it; the ladder's reading survives ONLY on the parity column.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         // NotApplicable — no acceptance check was ever configured for this repo, the COMMON case.
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.NotApplicable, PublishState.Pushed);
 
-        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
-        run.Solved.ShouldBeTrue("a run with no configured oracle that genuinely reached WorkflowRunStatus.Success must not be penalized for having no acceptance check at all");
-        run.UnattendedSolvedWithDelivery.ShouldBeTrue();
+        var card = await ComputeAsync(teamId);
+        var run = card.Runs.Single(r => r.WorkflowRunId == runId);
+        run.Solved.ShouldBeFalse("no metric@1 verdict exists for this run — engine Success alone must never move the solve-rate again");
+        run.UnattendedSolvedWithDelivery.ShouldBeFalse();
+        card.Rollup.LegacySolvedRuns.ShouldBe(1, "the ladder's status-fallback reading stays visible on the parity column — the delta IS the inflation story");
+        card.Rollup.UnassessedRuns.ShouldBe(1, "the run reads unassessed until the shadow sweep lands its metric verdict");
     }
 
     [Fact]
@@ -117,25 +129,28 @@ public class UnattendedDeliveryScorecardFlowTests
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Failure);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.NotApplicable, PublishState.PatchOnly);
 
-        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
-        run.Solved.ShouldBeFalse("the run's own honest terminal status is Failure — nothing graded it either way, but the fallback must never call a failed run solved");
+        var card = await ComputeAsync(teamId);
+        card.Runs.Single(r => r.WorkflowRunId == runId).Solved.ShouldBeFalse("no metric verdict and a Failure terminal — not solved on either plane");
+        card.Rollup.LegacySolvedRuns.ShouldBe(0, "the ladder never called a failed run solved either");
     }
 
     [Theory]
-    [InlineData("{\"reason\":\"no progress\"}", "{}", false)]                                          // forced stop → never a fallback solve
-    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"could-not-finish\",\"summary\":\"s\"}", false)]  // model give-up → never a fallback solve
-    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"success\",\"summary\":\"s\"}", true)]           // clean succeeded stop → fallback stands
-    public async Task A_degraded_supervisor_stop_never_reads_solved_through_the_status_fallback(string stopPayload, string stopOutcome, bool expectedSolved)
+    [InlineData("{\"reason\":\"no progress\"}", "{}", 0)]                                          // forced stop → never a fallback solve
+    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"could-not-finish\",\"summary\":\"s\"}", 0)]  // model give-up → never a fallback solve
+    [InlineData("{}", "{\"stopped\":true,\"outcome\":\"success\",\"summary\":\"s\"}", 1)]           // clean succeeded stop → the ladder's fallback stands, on the parity column
+    public async Task A_degraded_supervisor_stop_never_reads_solved_through_the_legacy_ladders_fallback(string stopPayload, string stopOutcome, int expectedLegacySolved)
     {
-        // P2b-prep metric-shift, pinned: degraded stops land engine Success BY DESIGN (AgentSupervisorNode returns
-        // Ok for every terminal turn) — THE north-star inflation both audits named. An oracle verdict still
-        // overrides in both directions; only the no-oracle fallback changes.
+        // The ladder's degraded-stop guard, now pinned on the PARITY column (the primary rates read the metric@1
+        // verdict and have no status fallback at all): degraded stops land engine Success BY DESIGN
+        // (AgentSupervisorNode returns Ok for every terminal turn) — THE north-star inflation both audits named.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.NotApplicable, PublishState.Pushed);
         await SeedStopDecisionAsync(teamId, runId, stopPayload, stopOutcome);
 
-        (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId).Solved.ShouldBe(expectedSolved);
+        var card = await ComputeAsync(teamId);
+        card.Rollup.LegacySolvedRuns.ShouldBe(expectedLegacySolved);
+        card.Runs.Single(r => r.WorkflowRunId == runId).Solved.ShouldBeFalse("no metric@1 verdict exists — the primary bit is false regardless of how the stop classified");
     }
 
     [Fact]
@@ -146,8 +161,8 @@ public class UnattendedDeliveryScorecardFlowTests
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
         await SeedStopDecisionAsync(teamId, runId, "{\"reason\":\"no progress\"}", "{}");
 
-        (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId).Solved
-            .ShouldBeTrue("a manifest graded Passed is an oracle that RAN — it outranks the stop classification");
+        (await ComputeAsync(teamId)).Rollup.LegacySolvedRuns
+            .ShouldBe(1, "a manifest graded Passed is an oracle that RAN — on the ladder it outranks the stop classification");
     }
 
     private async Task SeedStopDecisionAsync(Guid teamId, Guid runId, string payloadJson, string outcomeJson)
@@ -183,30 +198,35 @@ public class UnattendedDeliveryScorecardFlowTests
     }
 
     [Fact]
-    public async Task The_assessment_columns_ride_beside_the_legacy_ladder_without_touching_it()
+    public async Task The_primary_rates_read_the_metric_verdict_and_the_ladder_rides_beside()
     {
-        // P4-U4 dual-read parity dashboard: the assessment-based counts sit BESIDE the legacy rates — the
-        // standing consumer-switch evidence. Three contract-era runs: one assessed Solved+CleanSuccess, one
-        // assessed Unsolved (the legacy ladder still reads it Solved — THE delta, visible), one not yet swept.
+        // THE P0-A consumer switch, pinned across a window: four contract-era runs the LADDER reads 4/4 solved
+        // (all Passed+Pushed). The metric plane disagrees run by run — @1-solved, retry-solved (operational Solved
+        // but metric Unknown), a pre-projection row (null metric), never swept — and the PRIMARY rates follow the
+        // metric alone. The ladder and the operational count stay visible as parity columns.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var clean = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
-        var inflated = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var metricSolved = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var retrySolved = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
+        var preProjection = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         var unswept = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
-        await SeedManifestAsync(teamId, clean, PublishAcceptanceState.Passed, PublishState.Pushed);
-        await SeedManifestAsync(teamId, inflated, PublishAcceptanceState.Passed, PublishState.Pushed);
-        await SeedManifestAsync(teamId, unswept, PublishAcceptanceState.Passed, PublishState.Pushed);
-        await SeedAssessmentAsync(teamId, clean, outcome: "Solved", wouldBe: "CleanSuccess");
-        await SeedAssessmentAsync(teamId, inflated, outcome: "Unsolved", wouldBe: "HonestFailure");
+        foreach (var runId in new[] { metricSolved, retrySolved, preProjection, unswept })
+            await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedAssessmentAsync(teamId, metricSolved, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: "Solved");
+        await SeedAssessmentAsync(teamId, retrySolved, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: "Unknown");
+        await SeedAssessmentAsync(teamId, preProjection, outcome: "Solved", wouldBe: "CleanSuccess", metricOutcome: null);
 
         var card = await ComputeAsync(teamId);
 
-        card.Rollup.AssessedRuns.ShouldBe(2, "only runs with a durable shadow row are in the assessment columns");
-        card.Rollup.AssessmentSolvedRuns.ShouldBe(1);
-        card.Rollup.WouldBeCleanSuccessRuns.ShouldBe(1);
-        card.Rollup.SolvedRuns.ShouldBe(3, "the LEGACY ladder is untouched — the delta between the columns IS the consumer-switch evidence, never an invisible metric shift");
+        card.Rollup.SolvedRuns.ShouldBe(1, "the primary solve count follows the metric@1 verdict ALONE — operational solves, ladder solves, and unassessed runs do not move it");
+        card.Rollup.SolveRate.ShouldBe(0.25);
+        card.Rollup.LegacySolvedRuns.ShouldBe(4, "the ladder's reading survives as the parity column");
+        card.Rollup.AssessedRuns.ShouldBe(3, "runs with a durable shadow row");
+        card.Rollup.AssessmentSolvedRuns.ShouldBe(3, "the OPERATIONAL projection credits the retry — the @1 delta is the retry-credit story");
+        card.Rollup.WouldBeCleanSuccessRuns.ShouldBe(3);
+        card.Rollup.UnassessedRuns.ShouldBe(2, "no row at all, or a pre-projection row with no metric verdict — both read unassessed, in the denominator, never solved");
     }
 
-    private async Task SeedAssessmentAsync(Guid teamId, Guid runId, string outcome, string wouldBe)
+    private async Task SeedAssessmentAsync(Guid teamId, Guid runId, string outcome, string wouldBe, string? metricOutcome = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -215,9 +235,14 @@ public class UnattendedDeliveryScorecardFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId,
             EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = outcome, Verification = "Passed",
             AssessmentJson = "{}", LegacyIsSolved = true, WouldBeTerminalDecision = wouldBe,
+            MetricOutcome = metricOutcome, MetricJson = metricOutcome is null ? null : "{}",
         });
         await db.SaveChangesAsync();
     }
+
+    /// <summary>The run's latest metric@1 verdict — the primary solve bit's ONLY source since the P0-A consumer switch.</summary>
+    private Task SeedMetricAssessmentAsync(Guid teamId, Guid runId, string metricOutcome) =>
+        SeedAssessmentAsync(teamId, runId, outcome: metricOutcome, wouldBe: "CleanSuccess", metricOutcome: metricOutcome);
 
     [Fact]
     public async Task The_parked_population_is_surfaced_beside_the_terminal_denominator()
@@ -270,6 +295,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         await SeedAskHumanDecisionAsync(teamId, runId, outcomeJson: GenuineAskOutcome());
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
@@ -287,6 +313,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         await SeedAskHumanDecisionAsync(teamId, runId, outcomeJson);
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
@@ -300,6 +327,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         var agentRunId = await SeedAgentRunAsync(teamId, runId);
         await SeedApprovalParkedToolCallAsync(teamId, agentRunId, ToolCallLedgerStatus.AwaitingApproval);
 
@@ -326,6 +354,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         var agentRunId = await SeedAgentRunAsync(teamId, runId);
         await SeedApprovalParkedToolCallAsync(teamId, agentRunId, ToolCallLedgerStatus.Expired);
 
@@ -343,6 +372,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         var agentRunId = await SeedAgentRunAsync(teamId, runId);
         await SeedDecisionRequestAsync(teamId, agentRunId, answeredBy);
 
@@ -357,6 +387,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         // A real ICurrentUser scope — mirrors RoomPullRequestService.OpenAsync running inside an authenticated
         // HTTP request, whose SaveChangesAsync stamps CreatedBy with the REAL clicking user (CodeSpaceDbContext.
         // ApplyAuditFields), never SystemUsers.SeederId.
@@ -377,6 +408,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.PatchOnly);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         await SeedIntegrationPullRequestManifestAsync(teamId, runId, actorUserId: null);
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
@@ -432,6 +464,7 @@ public class UnattendedDeliveryScorecardFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Success);
         await SeedManifestAsync(teamId, runId, PublishAcceptanceState.Passed, PublishState.Pushed);
+        await SeedMetricAssessmentAsync(teamId, runId, metricOutcome: "Solved");
         await SeedNodeWaitAsync(teamId, runId, WorkflowWaitKinds.Approval, payloadJson: """{"approved":true}""");
 
         var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);

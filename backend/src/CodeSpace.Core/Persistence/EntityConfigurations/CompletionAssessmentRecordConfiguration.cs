@@ -13,6 +13,8 @@ public class CompletionAssessmentRecordConfiguration : IEntityTypeConfiguration<
         builder.Property(r => r.AssessmentJson).HasColumnName("assessment_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.WouldBeTerminalDecision).HasColumnName("would_be_terminal_decision");
         builder.Property(r => r.LedgerWatermarkJson).HasColumnName("ledger_watermark_json");
+        builder.Property(r => r.MetricOutcome).HasColumnName("metric_outcome").HasMaxLength(40);
+        builder.Property(r => r.MetricJson).HasColumnName("metric_jsonb").HasColumnType("jsonb");
         builder.HasIndex(r => new { r.WorkflowRunId, r.CreatedDate });
     }
 }

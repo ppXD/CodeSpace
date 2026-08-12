@@ -82,9 +82,25 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             .Select(r => new { r.Id, r.TeamId, r.Status })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
+        // The THIRD pass is the P0-A backfill, and one-shot BY CONSTRUCTION: a run whose rows all predate the
+        // metric projection (none carries metric_jsonb) re-assesses once even though its ledger head never moved —
+        // without it, a settled terminal run would stay metric-less forever and permanently deflate the
+        // scorecard's assessed population. The re-assessment writes the metric columns, which removes the run
+        // from this predicate for good; RecordAsync's own gates tolerate the unmoved watermark for exactly this
+        // metric-less case.
+        var metricless = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.CompletionPolicyVersion != null
+                        && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)
+                        && _db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id)
+                        && !_db.CompletionAssessmentRecord.Any(a => a.WorkflowRunId == r.Id && a.MetricJson != null))
+            .OrderByDescending(r => r.CompletedAt)
+            .Take(batchSize)
+            .Select(r => new { r.Id, r.TeamId, r.Status })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
         var appended = 0;
 
-        foreach (var run in unassessed.Concat(revisit))
+        foreach (var run in unassessed.Concat(revisit).Concat(metricless).DistinctBy(r => r.Id))
         {
             try
             {
@@ -109,20 +125,26 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
         var previous = await _db.CompletionAssessmentRecord.AsNoTracking()
             .Where(a => a.WorkflowRunId == runId)
             .OrderByDescending(a => a.CreatedDate)
-            .Select(a => new { a.AssessmentJson, a.LedgerWatermarkJson })
+            .Select(a => new { a.AssessmentJson, a.LedgerWatermarkJson, a.MetricJson })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (previous is { LedgerWatermarkJson: not null } && previous.LedgerWatermarkJson == before) return false;
+        // A pre-projection row (no metric verdict) re-assesses ONCE even under an unmoved watermark — the same
+        // backfill discipline the pre-watermark rows got: without this, a terminal run whose ledger never moves
+        // again would stay metric-less forever, permanently deflating the scorecard's assessed population.
+        if (previous is { LedgerWatermarkJson: not null, MetricJson: not null } && previous.LedgerWatermarkJson == before) return false;
 
         var composed = await _composer.ComposeAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (composed is null) return false;
 
         var assessmentJson = JsonSerializer.Serialize(composed.Assessment, AgentJson.Options);
+        var metricJson = JsonSerializer.Serialize(composed.MetricAt1, AgentJson.Options);
 
         // The ledger moved but the VERDICT may not have — a manifest rewritten to the same state, a decision that
         // changed nothing. The watermark decides whether to LOOK; this decides whether there is anything to say.
-        if (previous?.AssessmentJson == assessmentJson) return false;
+        // BOTH projections are compared: a late @1-attempt receipt can move the metric while the operational
+        // assessment (whose active attempt superseded that receipt) stands still — a metric-only change appends.
+        if (previous?.AssessmentJson == assessmentJson && previous.MetricJson == metricJson) return false;
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var degradedStop = (await UnattendedDeliveryScorecardService.DegradedStopRunIdsAsync(_db, new[] { runId }, teamId, cancellationToken).ConfigureAwait(false)).Contains(runId);
@@ -162,6 +184,8 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             WouldBeTerminalDecision = wouldBe.ToString(),
             LedgerWatermarkJson = JsonSerializer.Serialize(after, AgentJson.Options),
             LedgerVersion = after.LedgerVersion,
+            MetricOutcome = composed.MetricAt1.Outcome.ToString(),
+            MetricJson = metricJson,
             RejectionCount = composed.Rejections.Count,
             ContractErrorCount = composed.ContractErrors.Count,
         });

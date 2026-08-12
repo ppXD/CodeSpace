@@ -77,8 +77,17 @@ public sealed class CompletionComposerFlowTests
         // hash-upgrade hook (verdict-less Unknown + ContentHashes -> Captured) — capture is a fact too.
         first.Assessment.Artifact.ShouldBe(ArtifactDisposition.Captured);
 
+        // P0-A dual projection: the SAME compose carries the metric@1 verdict — one attempt, so the planes agree
+        // on outcome, and the bindings are the row's self-description.
+        first.MetricAt1.Outcome.ShouldBe(OutcomeDisposition.Unsolved);
+        first.MetricAt1.StatisticalUnit.ShouldBe(MetricAt1Projection.RunAt1Unit);
+        first.MetricAt1.AttemptRefs.ShouldHaveSingleItem().AttemptId.ShouldBe(attemptId);
+        first.MetricAt1.ObligationRefs.ShouldBe(new[] { "acceptance:acceptance:s1", "delivery:delivery:s1", "output:output:s1" });
+
         var second = await composer.ComposeAsync(runId, teamId, CancellationToken.None);
         second!.Assessment.ShouldBe(first.Assessment, "same contract + same facts ⇒ same assessment");
+        // Compared as JSON: the projection record carries lists, whose default record equality is by reference.
+        JsonSerializer.Serialize(second.MetricAt1).ShouldBe(JsonSerializer.Serialize(first.MetricAt1), "the metric projection is as deterministic as the assessment");
 
         (await store.ListReceiptsAsync(runId, teamId, CancellationToken.None)).Count
             .ShouldBe(3, "one acceptance + one delivery + one output receipt, exactly-once — a re-compose lands on the first rows");
@@ -466,6 +475,8 @@ public sealed class CompletionComposerFlowTests
         record.WouldBeTerminalDecision.ShouldBe("HonestFailure", "P3b-4: the sealed six-state decision this run WOULD receive, recorded INACTIVE (Lock Clause 1) — an unsolved oracle is an honest failure, never inflated");
         record.EnforcementMode.ShouldBe("Shadow");
         record.Basis.ShouldBe("ContractDerived");
+        record.MetricOutcome.ShouldBe("Unsolved", "the metric@1 verdict lands on the same row — the scorecard's primary solve bit reads THIS column");
+        record.MetricJson.ShouldNotBeNull();
 
         // Re-sweep with NOTHING new: the run IS a candidate now (it has to be, or late evidence could never reach
         // it), but its ledger watermark is unchanged, so the compose is skipped and nothing appends. Asserted on
@@ -475,6 +486,42 @@ public sealed class CompletionComposerFlowTests
         (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId)).ShouldBe(1);
 
         (await ScopeRunStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success, "Shadow NEVER mutates a terminal (Lock Clause 1)");
+    }
+
+    [Fact]
+    public async Task A_pre_projection_row_converges_to_a_metric_verdict_on_the_next_sweep()
+    {
+        // The backfill discipline, end to end: a row written before the dual projection existed (metric columns
+        // NULL) belongs to a terminal run whose ledger may never move again — the watermark gate alone would skip
+        // it forever, and the run would deflate UnassessedRuns permanently. A metric-less row re-assesses ONCE
+        // (the same one-shot the pre-watermark rows got), lands its verdict, and the gate holds again after.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, userId, stampPolicy: true, WorkflowRunStatus.Success);
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"goal":"g","subtasks":[{"id":"s1","title":"T","instruction":"i"}]}""", """{"planned":["s1"],"count":1,"workPlanId":"6f1d9c22-77b1-4f0e-9a1e-2c0f6f5a91b3","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        using var scope = _fixture.BeginScope();
+        var shadow = scope.Resolve<ICompletionShadowService>();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+
+        // Simulate the pre-projection era: strip the metric columns off the recorded row.
+        (await db.CompletionAssessmentRecord.Where(a => a.WorkflowRunId == runId)
+            .ExecuteUpdateAsync(u => u.SetProperty(a => a.MetricOutcome, (string?)null).SetProperty(a => a.MetricJson, (string?)null))).ShouldBe(1);
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+
+        var records = await db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.WorkflowRunId == runId).OrderBy(a => a.CreatedDate).ToListAsync();
+        records.Count.ShouldBe(2, "a metric-less row must re-assess once even under an unmoved watermark");
+        records[^1].MetricOutcome.ShouldBe("Unknown", "nothing was staked — the metric plane has no status fallback to say otherwise");
+
+        await shadow.SweepAsync(batchSize: 50, CancellationToken.None);
+        (await db.CompletionAssessmentRecord.AsNoTracking().CountAsync(a => a.WorkflowRunId == runId))
+            .ShouldBe(2, "converged: the watermark gate holds again once the metric verdict exists");
     }
 
     [Fact]

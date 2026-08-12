@@ -30,8 +30,9 @@ public sealed record ReceiptAdmissionResult(IReadOnlyList<ReceiptEnvelope> Admit
 /// consumer: a receipt must answer a KNOWN requirement (ref + kind), belong to a unit of the CURRENT executable
 /// set at the CURRENT plan version, attest the SAME contract its requirement STAKED when both sides carry a hash
 /// (same-domain: the requirement's SpecHash and the receipt's dispatch stamp are both attempt-grain — never the
-/// executable unit's plan-grain hash, see the P1 note inside), come from the OPERATIONAL ACTIVE attempt (a
-/// superseded attempt's receipt never reaches a fold — Lock Clause 3), attest a DISTINCT target (duplicate
+/// executable unit's plan-grain hash, see the P1 note inside), come from the SELECTED attempt for the fold —
+/// operationally the active attempt, on the metric plane the first authorized one (a non-selected attempt's
+/// receipt never reaches a fold — Lock Clause 3, both selectors), attest a DISTINCT target (duplicate
 /// receipts for one target collapse to the first, so ExpectedCardinality can never be faked by repetition). An
 /// identity-less receipt (no <see cref="ReceiptEnvelope.WorkUnit"/>) is admitted with a WARNING — tolerable under
 /// Legacy/Shadow, fatal under Enforced, decided by the composer, never here. Batch 2 (EvidenceRef readback,
@@ -40,7 +41,7 @@ public sealed record ReceiptAdmissionResult(IReadOnlyList<ReceiptEnvelope> Admit
 /// </summary>
 public static class ReceiptAdmission
 {
-    public static ReceiptAdmissionResult Admit(IReadOnlyList<ReceiptEnvelope> receipts, IReadOnlyList<RequirementEnvelope> requirements, ExecutableSet? executableSet, IReadOnlyDictionary<UnitKey, AttemptProjection>? operationalActive, IReadOnlyDictionary<(string RequirementRef, string Kind), long>? currentRevisions = null)
+    public static ReceiptAdmissionResult Admit(IReadOnlyList<ReceiptEnvelope> receipts, IReadOnlyList<RequirementEnvelope> requirements, ExecutableSet? executableSet, IReadOnlyDictionary<UnitKey, AttemptProjection>? selectedAttempts, IReadOnlyDictionary<(string RequirementRef, string Kind), long>? currentRevisions = null)
     {
         var admitted = new List<ReceiptEnvelope>();
         var rejections = new List<ReceiptRejection>();
@@ -77,11 +78,11 @@ public static class ReceiptAdmission
 
             }
 
-            if (receipt.WorkUnit is { } wu && operationalActive is not null
-                && operationalActive.TryGetValue(new UnitKey(wu.WorkPlanId, wu.PlanVersion, wu.UnitId), out var active)
+            if (receipt.WorkUnit is { } wu && selectedAttempts is not null
+                && selectedAttempts.TryGetValue(new UnitKey(wu.WorkPlanId, wu.PlanVersion, wu.UnitId), out var active)
                 && active.AttemptId != receipt.AttemptId)
             {
-                rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.SupersededAttempt, $"unit '{wu.UnitId}': receipt is from attempt {receipt.AttemptId} but the operational active attempt is {active.AttemptId} (ordinal {active.AttemptOrdinal})"));
+                rejections.Add(new ReceiptRejection(receipt, ReceiptRejectionCodes.SupersededAttempt, $"unit '{wu.UnitId}': receipt is from attempt {receipt.AttemptId} but the selected attempt is {active.AttemptId} (ordinal {active.AttemptOrdinal})"));
                 continue;
             }
 
