@@ -49,7 +49,15 @@ public sealed record RegenerateTeamInvitationCommand : ICommand<CreateInvitation
 /// </summary>
 public sealed record AcceptInvitationCommand : ICommand<Auth.SignInResponse>, IBypassPasswordRotationGuard
 {
-    public string Token { get; init; } = default!;
+    /// <summary>
+    /// Merged in from the route by the controller; the body never carries it.
+    ///
+    /// <para>Nullable NOT because it is optional but because <c>[ApiController]</c> treats a
+    /// non-nullable string property as implicitly required, and rejects the body for missing the very
+    /// field the route supplies — a 400 raised by model binding before the controller can merge the
+    /// real value in, and before any filter can shape it into something a client can read.</para>
+    /// </summary>
+    public string? Token { get; init; }
 
     /// <summary>Omitted when the address already has an account — the name comes from it.</summary>
     public string? Name { get; init; }
