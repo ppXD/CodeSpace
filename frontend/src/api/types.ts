@@ -94,6 +94,13 @@ export interface MeTeam {
   name: string;
   kind: TeamKind;
   role: TeamRole;
+  /**
+   * Exactly what the caller may do in this team, expanded server-side from the same matrix the API
+   * refuses on. Branch on these, never on `role` — deriving ability from a role name keeps a second
+   * copy of the rules here, and the two drift the first time a permission moves tier: the button
+   * stays visible and answers 403.
+   */
+  permissions: string[];
   memberCount: number;
   repositoryCount: number;
   /**

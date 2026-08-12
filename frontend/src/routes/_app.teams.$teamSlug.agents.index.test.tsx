@@ -14,7 +14,7 @@ vi.mock("@/components/AppShell", () => ({ AppShell: () => <Outlet /> }));
  */
 describe("agents roster deep-link", () => {
   const acme: MeTeam = {
-    id: "a", slug: "acme", name: "Acme", kind: "Workspace", role: "Owner",
+    id: "a", slug: "acme", name: "Acme", kind: "Workspace", role: "Owner", permissions: [],
     memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0,
   };
   const me = { id: "u", email: "u@test.local", name: "U", teams: [acme], passwordMustChange: false } satisfies MeResponse;

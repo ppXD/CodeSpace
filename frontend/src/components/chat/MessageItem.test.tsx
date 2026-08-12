@@ -11,8 +11,8 @@ vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate: vi.fn
 vi.mock("@/components/identities/ActorIdentityGate", () => ({ useActorIdentityGate: () => ({ prompt: vi.fn() }) }));
 
 const members = new Map<string, TeamMemberSummary>([
-  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
-  ["bot1", { userId: "bot1", name: "CodeSpace", email: "bot@x", avatarUrl: null, isBot: true }],
+  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null }],
+  ["bot1", { userId: "bot1", name: "CodeSpace", email: "bot@x", avatarUrl: null, isBot: true, role: "Member" as const, joinedAt: null }],
 ]);
 
 function msg(partial: Partial<MessageView>): MessageView {

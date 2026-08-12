@@ -11,8 +11,8 @@ vi.mock("@/hooks/use-chat", () => ({
 // UserMultiSelector reads useTeamMembers.
 vi.mock("@/hooks/use-team-members", () => ({
   useTeamMembers: () => ({ isLoading: false, data: [
-    { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false },
-    { userId: "u2", name: "Bob", email: "b@x", avatarUrl: null, isBot: false },
+    { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null },
+    { userId: "u2", name: "Bob", email: "b@x", avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null },
   ] }),
 }));
 

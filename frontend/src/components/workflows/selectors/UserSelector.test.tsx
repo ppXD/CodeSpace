@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { UserMultiSelector } from "./UserSelector";
 
 // A 20-member roster so the cap (MAX_VISIBLE = 8) and the filter are exercised on a realistically large team.
-const MANY = Array.from({ length: 20 }, (_, i) => ({ userId: `u${i}`, name: `User ${i}`, email: `u${i}@x`, avatarUrl: null, isBot: false }));
+const MANY = Array.from({ length: 20 }, (_, i) => ({ userId: `u${i}`, name: `User ${i}`, email: `u${i}@x`, avatarUrl: null, isBot: false, role: "Member" as const, joinedAt: null }));
 const mockMembers = { isLoading: false, data: MANY };
 vi.mock("@/hooks/use-team-members", () => ({ useTeamMembers: () => mockMembers }));
 

@@ -10,7 +10,7 @@ import { PERSONAL_TEAM_URL_ALIAS, resolveTeamByUrlSlug, teamToUrlSlug } from "./
  */
 describe("team URL slug resolution", () => {
   const team = (over: Partial<MeTeam>): MeTeam => ({
-    id: "t", slug: "s", name: "N", kind: "Workspace", role: "Owner",
+    id: "t", slug: "s", name: "N", kind: "Workspace", role: "Owner", permissions: [],
     memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0, ...over,
   });
 
