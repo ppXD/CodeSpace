@@ -26,4 +26,20 @@ public static class CompletionPolicy
     /// <summary>Parse a stored mode column fail-CLOSED: null or unrecognized reads <see cref="CompletionEnforcementMode.Legacy"/> — the protocol never enforces (or even shadow-trusts) a run whose policy it cannot read.</summary>
     public static CompletionEnforcementMode ModeFor(string? storedMode) =>
         Enum.TryParse<CompletionEnforcementMode>(storedMode, ignoreCase: false, out var mode) ? mode : CompletionEnforcementMode.Legacy;
+
+    /// <summary>
+    /// P2b (Enforced cohort): the mode a NEW run is stamped with, from its definition's own
+    /// <see cref="Messages.Dtos.Workflows.WorkflowDefinition.CompletionMode"/> opt-in — null inherits
+    /// <see cref="CurrentMode"/>, the two vocabulary values map exactly, and anything else THROWS: a definition
+    /// whose enforcement vocabulary the policy cannot read never launches (silently stamping a weaker mode than
+    /// the author declared would be the one unacceptable direction). The validator rejects unknown values at
+    /// authoring time; this throw is the launch-time backstop for rows that predate (or evaded) it.
+    /// </summary>
+    public static CompletionEnforcementMode StampModeFor(string? definitionCompletionMode) => definitionCompletionMode switch
+    {
+        null => CurrentMode,
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow => CompletionEnforcementMode.Shadow,
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => CompletionEnforcementMode.Enforced,
+        _ => throw new InvalidOperationException($"Unknown definition completionMode '{definitionCompletionMode}' — expected '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow}' or '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced}'; refusing to launch with an unreadable enforcement opt-in."),
+    };
 }

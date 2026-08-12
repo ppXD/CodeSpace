@@ -17,6 +17,10 @@ public sealed record WorkflowDefinition
 {
     public const int CurrentSchemaVersion = 1;
 
+    /// <summary>Wire vocabulary for <see cref="CompletionMode"/> — the definition author's completion-enforcement opt-in.</summary>
+    public const string CompletionModeShadow = "shadow";
+    public const string CompletionModeEnforced = "enforced";
+
     /// <summary>
     /// Frozen integer. Validator rejects any other value at write time so a forward-incompatible
     /// definition can't be stored. A v2 migration would re-write existing rows.
@@ -45,6 +49,17 @@ public sealed record WorkflowDefinition
     /// Terminal supplies via <c>{{ref}}</c>. Persisted to <c>workflow_run.OutputsJson</c>.
     /// </summary>
     public IReadOnlyList<WorkflowVariable> Outputs { get; init; } = Array.Empty<WorkflowVariable>();
+
+    /// <summary>
+    /// P2b (Enforced cohort, definition-grain opt-in): the completion enforcement mode runs of this definition are
+    /// stamped with — <see cref="CompletionModeEnforced"/> puts every run of this definition under the completion
+    /// terminal authority (an unbackable Success claim parks instead of terminaling), <see cref="CompletionModeShadow"/>
+    /// pins today's record-only behavior explicitly, and null inherits the platform default (Shadow while the
+    /// protocol rolls out). Part of the definition deliberately: the AUTHOR declares the contract's enforcement,
+    /// reruns and replays of the same frozen definition inherit it, and the cohort stays narrow by construction —
+    /// only definitions that opted in. The validator rejects any other value fail-closed.
+    /// </summary>
+    public string? CompletionMode { get; init; }
 
     // The workflow definition is pure structure (graph + IO contract). Per-team and
     // per-workflow operational variable values live in the `variable` table (scope=Workflow

@@ -83,6 +83,15 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ? envelope.Session
             : await _sessions.ResolveForRunAsync(envelope.Session, envelope.TeamId, envelope.WorkflowId, envelope.ActorId, cancellationToken).ConfigureAwait(false);
 
+        // P2b (Enforced cohort): the enforcement mode comes from the run's own frozen definition — the version row
+        // this run targets — so every lane launching an opted-in definition stamps Enforced, and a definition
+        // carrying an unreadable opt-in value refuses to launch (StampModeFor throws, fail-closed).
+        var definitionJson = await _db.WorkflowVersion.AsNoTracking()
+            .Where(v => v.WorkflowId == envelope.WorkflowId && v.Version == envelope.WorkflowVersion)
+            .Select(v => v.DefinitionJson)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var enforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson));
+
         _db.WorkflowRun.Add(new WorkflowRun
         {
             Id = runId,
@@ -100,7 +109,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             SessionTurnIndex = session?.TurnIndex,
             // P2a: the completion policy is part of the execution's identity — stamped at creation, immutable.
             CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
-            CompletionEnforcementMode = Completion.CompletionPolicy.CurrentMode.ToString(),
+            CompletionEnforcementMode = enforcementMode.ToString(),
             Status = WorkflowRunStatus.Pending,
             CreatedBy = envelope.CreatedBy,
             LastModifiedBy = envelope.CreatedBy,

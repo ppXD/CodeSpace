@@ -40,6 +40,7 @@ public sealed class DefinitionValidator : IScopedDependency
         var errors = new List<string>();
 
         CheckSchemaVersion(definition, errors);
+        CheckCompletionMode(definition, errors);
         CheckNodeIdsAndTypes(definition, errors);
         CheckEdgeEndpoints(definition, errors);
         CheckEdgeSourceHandles(definition, errors);
@@ -57,6 +58,13 @@ public sealed class DefinitionValidator : IScopedDependency
     {
         if (definition.SchemaVersion != WorkflowDefinition.CurrentSchemaVersion)
             errors.Add($"Unsupported schemaVersion {definition.SchemaVersion}. Expected {WorkflowDefinition.CurrentSchemaVersion}.");
+    }
+
+    /// <summary>P2b: the enforcement opt-in is a closed vocabulary, rejected fail-closed at AUTHORING time — a definition whose completionMode the platform cannot read must never be stored (the launch path throws as the backstop, but the author deserves the error here).</summary>
+    private static void CheckCompletionMode(WorkflowDefinition definition, List<string> errors)
+    {
+        if (definition.CompletionMode is not (null or WorkflowDefinition.CompletionModeShadow or WorkflowDefinition.CompletionModeEnforced))
+            errors.Add($"Unknown completionMode '{definition.CompletionMode}'. Expected '{WorkflowDefinition.CompletionModeShadow}', '{WorkflowDefinition.CompletionModeEnforced}', or omitted.");
     }
 
     private void CheckNodeIdsAndTypes(WorkflowDefinition definition, List<string> errors)
