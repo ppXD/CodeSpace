@@ -11,6 +11,7 @@ using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
+using CodeSpace.Tests.Fakes;
 namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
@@ -94,13 +95,29 @@ public class SupervisorTurnServiceTests
             ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
 
         // A decider that would NEVER stop on its own — proving the bound, not the decider, terminates.
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
         result.IsFinished.ShouldBeTrue("the no-progress guard forces a terminal stop");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
         result.TerminalReason.ShouldBe(SupervisorStopReasons.NoProgress);
+    }
+
+    [Fact]
+    public async Task A_budget_ledger_refusal_forces_the_cost_cap_stop_not_an_infra_failure()
+    {
+        // W-hard: the guard refused the NEXT brain call (thrown from inside the decision scope) — the turn must
+        // land the SAME cost-cap terminal the realized-spend bound reaches, one call earlier; never a park-and-
+        // retry loop (the ledger will refuse forever) and never an exception-shaped run failure.
+        var ledger = new FakeSupervisorDecisionLog();
+        var service = new SupervisorTurnService(ledger, new BudgetRefusedDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
+
+        result.IsFinished.ShouldBeTrue("a budget refusal terminates the run on its own bound");
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.CostCapReached);
     }
 
     // ── A FORCED stop is still a stop: the publish/delivery gates apply to it exactly as to a model-authored one.
@@ -115,7 +132,7 @@ public class SupervisorTurnServiceTests
         for (var i = 0; i < SupervisorLane.DefaultMaxNoProgressDecisions; i++)
             ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
 
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: Guid.NewGuid(), goalConfig: DeliveryGoalConfig(), CancellationToken.None);
 
@@ -133,7 +150,7 @@ public class SupervisorTurnServiceTests
         // The latest publish ran and found NOTHING to open a PR from — unsatisfied, and never satisfied by absence (H1).
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
 
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: Guid.NewGuid(), goalConfig: DeliveryGoalConfig(), CancellationToken.None);
 
@@ -152,7 +169,7 @@ public class SupervisorTurnServiceTests
 
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
 
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: DeliveryGoalConfig(), CancellationToken.None);
 
@@ -176,7 +193,7 @@ public class SupervisorTurnServiceTests
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Publish, "{}", """{"pullRequests":[]}""");
 
         var goalConfig = DeliveryGoalConfig();
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var context = await service.RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig, CancellationToken.None);
         // The gate's own card, already degraded once: terminal, question pinned to the gate prefix, NO answer.
@@ -195,7 +212,7 @@ public class SupervisorTurnServiceTests
         // parent. Gating it would let a run that should never have taken a single decision open PRs, and (with no
         // conversation) erase DepthCapExceeded behind DeliveryAdjudicationUnavailable in the scorecard.
         var ledger = new FakeSupervisorDecisionLog();
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var goalConfig = DeliveryGoalConfig();
         var context = await service.RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig, CancellationToken.None);
@@ -294,7 +311,7 @@ public class SupervisorTurnServiceTests
         // — the same forward-compat exposure a future irreversible/merge-PR policy would open. Asserts the gate
         // turns the denied side effect into a force-STOP carrying the GovernanceDenied reason and stages NO agent.
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 0, ApprovalPolicy = (SupervisorApprovalPolicy)999 };
         var spawn = new SupervisorDecision { Kind = kind, PayloadJson = """{"subtaskIds":["a","b"]}""" };
@@ -316,7 +333,7 @@ public class SupervisorTurnServiceTests
         // The safety floor wired end-to-end through the REAL gate: under None (autonomous) a spawn runs unchanged,
         // but a resolve — which dispatches an agent to autonomously RE-MERGE code — escalates to a human approval
         // card (it parks), because GateSideEffectingDecision passes irreversible=IsIrreversible(kind) for resolve.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new CountingExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var context = new SupervisorTurnContext { Goal = "goal", SupervisorRunId = _runId, TeamId = _teamId, NodeId = "sup", TurnNumber = 1, ApprovalPolicy = SupervisorApprovalPolicy.None, ConversationId = Guid.NewGuid() };
 
@@ -672,7 +689,7 @@ public class SupervisorTurnServiceTests
     {
         var ledger = new FakeSupervisorDecisionLog();
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         // First pass: turn 0 (plan) executes once + records terminal.
         await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
@@ -711,7 +728,7 @@ public class SupervisorTurnServiceTests
 
         var decider = new NonDeterministicDecider(SupervisorDecisionKinds.Plan, plannedA, SupervisorDecisionKinds.Stop, """{"reason":"divergent-B"}""");
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, decider, executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, decider, executor, db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
@@ -729,12 +746,12 @@ public class SupervisorTurnServiceTests
     }
 
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
-        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
     // ── L4 P1 stop-acceptance test helpers ──────────────────────────────────────────
 
     private SupervisorTurnService ServiceWith(FakeSupervisorDecisionLog ledger, ISupervisorDecider decider, FakeAcceptanceGrader grader) =>
-        new(ledger, decider, new StubSupervisorActionExecutor(), db: null!, grader, new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, decider, new StubSupervisorActionExecutor(), db: null!, grader, new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
     private static SupervisorDecision StopDecision() => new() { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" };
 
@@ -840,7 +857,7 @@ public class SupervisorTurnServiceTests
         var row = PlanRow(CodeSpace.Messages.Plans.WorkPlanStatuses.Authored);
         var store = new FakeWorkPlanStore(row);
         // AlwaysPlanDecider would PLAN — the ask_human coming back proves the gate preempted the brain entirely.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var decision = await service.ChooseDecisionAsync(GateContext(TerminalPlan()), SupervisorGoalPlan.From(null), depth: 0, CancellationToken.None);
 
@@ -860,7 +877,7 @@ public class SupervisorTurnServiceTests
     {
         var row = PlanRow(CodeSpace.Messages.Plans.WorkPlanStatuses.AwaitingConfirmation);
         var store = new FakeWorkPlanStore(row);
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var decision = await service.ChooseDecisionAsync(GateContext(TerminalPlan(), AnsweredConfirmation(answer)), SupervisorGoalPlan.From(null), depth: 0, CancellationToken.None);
 
@@ -874,7 +891,7 @@ public class SupervisorTurnServiceTests
         // A task launch wires no conversation — the injected card would DEGRADE to a no-surface self-advance and
         // agents would spawn unconfirmed (the review's blocker). The gate must stop the run instead.
         var store = new FakeWorkPlanStore(PlanRow(CodeSpace.Messages.Plans.WorkPlanStatuses.Authored));
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var decision = await service.ChooseDecisionAsync(GateContext(conversationId: null, TerminalPlan()), SupervisorGoalPlan.From(null), depth: 0, CancellationToken.None);
 
@@ -889,7 +906,7 @@ public class SupervisorTurnServiceTests
     public void A_spawn_while_the_latest_plan_stands_rejected_is_refused(string kind)
     {
         // Prompt-following is not a guarantee — the structural floor refuses to execute a REJECTED plan version.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
         var context = GateContext(TerminalPlan(), AnsweredConfirmation("revise: do not touch the DB"));
 
         var gated = service.ApplyPostDecisionGate(context, SupervisorGoalPlan.From(null), new SupervisorDecision { Kind = kind, PayloadJson = """{"subtaskIds":["sa","sb"]}""" });
@@ -903,7 +920,7 @@ public class SupervisorTurnServiceTests
     {
         // B5 (MAJOR-5): the fold's already-graded guard means an amendment only affects a FUTURE attempt — a stop
         // before that attempt terminalizes on the dead oracle's verdict, silently dropping what a human co-signed.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
         {
@@ -926,7 +943,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public void A_stop_after_the_owed_retry_ran_passes_the_obligation_gate()
     {
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
         {
@@ -951,7 +968,7 @@ public class SupervisorTurnServiceTests
         // B5 (A2 ruling): a bound may stop a run before it consumed an approved amendment — the server never spends
         // into a tripped cap — but the drop is NAMED on the stop, never silent. Driven through the invalid-plan
         // forced stop (a pure ApplyPostDecisionGate path), the same GateForcedStop every bound routes through.
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
         {
@@ -982,7 +999,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public void A_revised_plan_clears_the_rejected_floor()
     {
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
         var context = GateContext(TerminalPlan(), AnsweredConfirmation("revise: merge"), TerminalPlan());
 
         var spawn = new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = """{"subtaskIds":["sa"]}""" };
@@ -998,7 +1015,7 @@ public class SupervisorTurnServiceTests
         // strand AwaitingConfirmation — the answered confirmation must settle FIRST.
         var row = PlanRow(CodeSpace.Messages.Plans.WorkPlanStatuses.AwaitingConfirmation);
         var store = new FakeWorkPlanStore(row);
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         // NoProgressDecisions at the cap → the pre-decision no-progress guard force-stops this turn.
         var context = GateContext(TerminalPlan(), AnsweredConfirmation("approve")) with { NoProgressDecisions = SupervisorLane.DefaultMaxNoProgressDecisions };
@@ -1013,7 +1030,7 @@ public class SupervisorTurnServiceTests
     public async Task A_missing_plan_row_degrades_open_rather_than_parking_on_an_unreviewable_card()
     {
         var store = new FakeWorkPlanStore();   // no row — unreachable in production (persist precedes the terminal plan)
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), store, null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var decision = await service.ChooseDecisionAsync(GateContext(TerminalPlan()), SupervisorGoalPlan.From(null), depth: 0, CancellationToken.None);
 
@@ -1069,6 +1086,12 @@ public class SupervisorTurnServiceTests
             PayloadJson = card.PayloadJson,
             OutcomeJson = System.Text.Json.JsonSerializer.Serialize(new { question = "q", askHumanToken = "tok", answer }),
         };
+    }
+
+    private sealed class BudgetRefusedDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            throw new CodeSpace.Core.Services.Workflows.Llm.LlmBudgetExceededException("supervisor.decision", committedUsd: 4.9m, capUsd: 5m);
     }
 
     private sealed class AlwaysPlanDecider : ISupervisorDecider

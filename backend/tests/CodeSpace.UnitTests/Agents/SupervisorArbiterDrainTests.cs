@@ -8,6 +8,7 @@ using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
+using CodeSpace.Tests.Fakes;
 namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
@@ -163,7 +164,7 @@ public class SupervisorArbiterDrainTests
         var queue = new FakeDecisionQueue();
         var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(runId, TeamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
-        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), queue, new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), queue, new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
         var context = await service.RehydrateFromDecisionLogAsync(runId, TeamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
@@ -198,7 +199,7 @@ public class SupervisorArbiterDrainTests
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private static SupervisorTurnService Drain(FakeDecisionArbiter arbiter, FakeDecisionAnswerService answer) =>
-        new(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, answer, new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), NullLogger<SupervisorTurnService>.Instance);
+        new(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, answer, new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), NullLogger<SupervisorTurnService>.Instance);
 
     private static SupervisorTurnContext Context(params PendingDecision[] pending) => new()
     {

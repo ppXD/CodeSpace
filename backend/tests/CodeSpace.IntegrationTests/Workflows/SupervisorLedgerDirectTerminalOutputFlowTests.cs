@@ -162,6 +162,7 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         scope.Resolve<IPublishManifestStore>(),
         scope.Resolve<ISupervisorPublishedBranchResolver>(),
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
+        scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private sealed class AlwaysStopDecider : ISupervisorDecider

@@ -21,6 +21,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 public sealed partial class SupervisorTurnService : ISupervisorTurnService, IScopedDependency
 {
     private readonly ISupervisorDecisionLog _ledger;
+    private readonly Workflows.Budget.IBudgetLedger _budget;
     private readonly ISupervisorDecider _decider;
     private readonly ISupervisorActionExecutor _executor;
     private readonly CodeSpaceDbContext _db;
@@ -36,10 +37,11 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly Completion.ICompletionAssessmentComposer _completion;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
+        _budget = budget;
         _executor = executor;
         _db = db;
         _acceptanceGrader = acceptanceGrader;
@@ -189,11 +191,26 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         // Push the run-correlation around the brain call (spans the critic decorator's re-decide too) so the
         // recording LLM-client decorator binds this turn's interaction.* rows + reaches the scoped logger/offloader.
+        // W-hard: the scope ALSO carries the budget ledger + the plan's cost cap, so every model call inside this
+        // turn is atomically admitted (reserve-before-call) — the per-turn PostDecision bound checks BETWEEN
+        // decisions; the guard closes the window DURING one.
         SupervisorDecision decision;
         var iterationKey = SupervisorOutcome.SelfAdvanceWaitKey(context.NodeId, context.TurnNumber);
-        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, "supervisor.decision", _recordLogger, _offloader)))
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, iterationKey, "supervisor.decision", _recordLogger, _offloader, _budget, plan.MaxCostUsd)))
         {
-            decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Workflows.Llm.LlmBudgetExceededException refused)
+            {
+                // The ledger refused the NEXT brain call — the same terminal the realized-spend bound reaches, one
+                // call earlier: stop on the cost cap with the full recitation, never a park-and-retry loop (the
+                // ledger will refuse forever) and never an infra-shaped failure.
+                _logger.LogWarning("Supervisor run {RunId} hit the cost cap at the budget ledger (committed ${Committed} against ${Cap}) — forcing the cost-cap stop", context.SupervisorRunId, refused.CommittedUsd, refused.CapUsd);
+
+                return GateForcedStop(context, SupervisorStopReasons.CostCapReached, Deciders.SupervisorBudgetRecitation.Summary(refused.CapUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
+            }
         }
 
         decision = ClampSpawnToDependencyFrontier(context, decision);
