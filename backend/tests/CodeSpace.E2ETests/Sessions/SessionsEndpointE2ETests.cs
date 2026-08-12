@@ -233,7 +233,8 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
         var userId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
 
-        db.User.Add(new User { Id = userId, Email = $"e2e-{suffix}@test.local", Name = "E2E", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.User.Add(new User {
+            SecurityStamp = TestToken.SeedStamp, Id = userId, Email = $"e2e-{suffix}@test.local", Name = "E2E", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.Team.Add(new Team { Id = teamId, Slug = $"e2e-{suffix}", Name = "E2E", Kind = TeamKind.Workspace, OwnerUserId = userId, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
 
@@ -241,12 +242,6 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
         return (userId, teamId);
     }
 
-    private static string MintToken(Guid userId)
-    {
-        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, userId.ToString()) };
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TaskLaunchApiFactory.JwtKey));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var jwt = new JwtSecurityToken(claims: claims, notBefore: DateTime.UtcNow, expires: DateTime.UtcNow.AddHours(1), signingCredentials: creds);
-        return new JwtSecurityTokenHandler().WriteToken(jwt);
-    }
+    /// <summary>Delegates to the shared helper so the security-stamp claim cannot be forgotten here.</summary>
+    private static string MintToken(Guid userId) => TestToken.Mint(userId, TestToken.SeedStamp);
 }

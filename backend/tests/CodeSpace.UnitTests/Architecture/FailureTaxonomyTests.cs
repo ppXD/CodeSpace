@@ -79,6 +79,8 @@ public class FailureTaxonomyTests
         FailureCodes.AlreadyTeamMember.ShouldBe("already_team_member");
         FailureCodes.LastOwner.ShouldBe("last_owner");
         FailureCodes.RoleOutranksActor.ShouldBe("role_outranks_actor");
+        FailureCodes.AccountDeactivated.ShouldBe("account_deactivated");
+        FailureCodes.PasswordResetNotUsable.ShouldBe("password_reset_not_usable");
         FailureCodes.Internal.ShouldBe("internal_error");
     }
 

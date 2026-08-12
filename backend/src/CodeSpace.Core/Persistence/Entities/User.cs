@@ -24,6 +24,25 @@ public class User : IEntity<Guid>, IAuditable
     /// </summary>
     public bool IsBot { get; set; }
 
+    /// <summary>
+    /// Set while the account is switched off. Reversible, and deliberately not <c>DeletedDate</c>:
+    /// the rows this account authored stay attributable to a real user, which a soft delete would
+    /// take away.
+    /// </summary>
+    public DateTimeOffset? DeactivatedAt { get; set; }
+
+    /// <summary>
+    /// Rotated whenever every existing session must stop working — a password change, a reset, a
+    /// deactivation. The value rides in the JWT and is compared on every request, so one write
+    /// invalidates every token minted before it, with no revocation list to store or sweep.
+    /// </summary>
+    public Guid SecurityStamp { get; set; } = Guid.NewGuid();
+
+    /// <summary>SHA-256 of the outstanding reset token, or null. Never the token.</summary>
+    public string? PasswordResetTokenHash { get; set; }
+
+    public DateTimeOffset? PasswordResetExpiresAt { get; set; }
+
     public DateTimeOffset? LastLoginDate { get; set; }
 
     public DateTimeOffset CreatedDate { get; set; }

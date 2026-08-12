@@ -1,4 +1,6 @@
+using System.Security.Claims;
 using System.Text;
+using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Settings.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -30,6 +32,12 @@ public static class AuthenticationExtension
                     ClockSkew = TimeSpan.FromMinutes(5),
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
                 };
+
+                // Signature and lifetime say the token was minted by us and has not aged out. Neither
+                // says the account behind it is still live, and a stateless token cannot: that is a
+                // fact only the server holds. Checking it HERE covers every authenticated request,
+                // including the streaming endpoints and anything that never reaches the mediator.
+                options.Events = new JwtBearerEvents { OnTokenValidated = RejectDeadSessionsAsync };
             });
 
         services.AddAuthorization(options =>
@@ -40,6 +48,30 @@ public static class AuthenticationExtension
             // Without this, missing [Authorize] silently means anonymous access — the v1 P0 footgun.
             options.FallbackPolicy = policy;
         });
+    }
+
+    private static async Task RejectDeadSessionsAsync(TokenValidatedContext context)
+    {
+        var subject = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (!Guid.TryParse(subject, out var userId))
+        {
+            context.Fail("token carries no usable subject");
+            return;
+        }
+
+        var validator = context.HttpContext.RequestServices.GetRequiredService<ISessionValidator>();
+        var verdict = await validator.VerifyAsync(userId, context.Principal!.FindFirstValue(SessionValidator.SecurityStampClaim), context.HttpContext.RequestAborted).ConfigureAwait(false);
+
+        if (verdict == SessionVerdict.Live) return;
+
+        // The caller is told the same thing whichever it is — a 401 they resolve by signing in again.
+        // The reason is logged, because "why was I signed out" is a real support question.
+        context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("CodeSpace.Auth")
+            .LogInformation("Rejected a token for {UserId}: {Verdict}", userId, verdict);
+
+        context.Fail($"session is no longer valid: {verdict}");
     }
 
     /// <summary>

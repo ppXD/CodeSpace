@@ -56,6 +56,8 @@ public static class FailureCodes
     // ── Membership ─────────────────────────────────────────────────────────────────
     public const string LastOwner = "last_owner";
     public const string RoleOutranksActor = "role_outranks_actor";
+    public const string AccountDeactivated = "account_deactivated";
+    public const string PasswordResetNotUsable = "password_reset_not_usable";
 
     /// <summary>The masked answer for anything unclassified. Never carries a message from the exception.</summary>
     public const string Internal = "internal_error";

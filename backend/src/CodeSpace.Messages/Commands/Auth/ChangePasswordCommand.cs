@@ -20,4 +20,13 @@ public sealed record ChangePasswordCommand : ICommand<ChangePasswordResponse>, I
 public sealed record ChangePasswordResponse
 {
     public required MeResponse User { get; init; }
+
+    /// <summary>
+    /// A token minted under the NEW security stamp. Changing a password ends every session for the
+    /// account, including the one that asked — without handing this back, the act of rotating would
+    /// sign the rotator out.
+    /// </summary>
+    public required string Token { get; init; }
+
+    public required DateTimeOffset ExpiresAt { get; init; }
 }

@@ -1,7 +1,10 @@
+using CodeSpace.Messages.Commands.Accounts;
 using CodeSpace.Messages.Commands.Auth;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
+using CodeSpace.Api.Extensions;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace CodeSpace.Api.Controllers;
 
@@ -33,5 +36,18 @@ public class AuthController : ControllerBase
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Spend a password-reset link. Anonymous: someone who cannot sign in is exactly who needs this,
+    /// and requiring a session would make the link useless to them.
+    /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting(AnonymousRateLimitExtension.PolicyName)]
+    [HttpPost("reset-password/{token}")]
+    public async Task<IActionResult> ResetPassword([FromRoute] string token, [FromBody] ResetPasswordCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command with { Token = token }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
     }
 }

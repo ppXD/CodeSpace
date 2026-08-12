@@ -87,6 +87,8 @@ public class Startup
         // recovered by the reconciler, not drained. Configured as Shutdown:DrainSeconds.
         services.Configure<HostOptions>(o => o.ShutdownTimeout = ShutdownSettings.ResolveDrainTimeout());
 
+        services.AddAnonymousRateLimit();
+
         services.AddCustomAuthentication(Configuration, Environment);
     }
 
@@ -102,6 +104,9 @@ public class Startup
         });
         if (!env.IsDevelopment()) app.UseHttpsRedirection();
         app.UseRouting();
+        // After routing so the limiter can see which endpoint was matched, before auth because the
+        // surfaces it protects are the ones reached without a session.
+        app.UseRateLimiter();
         // CORS must run BEFORE auth — browsers send the preflight OPTIONS unauthenticated,
         // and without this the CORS middleware can't write the Access-Control-Allow-* headers
         // before auth rejects the request.
