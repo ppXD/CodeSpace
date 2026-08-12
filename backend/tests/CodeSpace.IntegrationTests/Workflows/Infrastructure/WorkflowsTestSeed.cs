@@ -182,6 +182,15 @@ public static class WorkflowsTestSeed
         var runId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
 
+        // Mirror RunStarter's P2b stamp resolution: the enforcement mode comes from the run's own frozen
+        // definition, so a definition-grain Enforced opt-in reaches seeded engine runs exactly as it reaches
+        // production ones. A missing version row resolves to the platform default, same as production.
+        var definitionJson = await db.WorkflowVersion.AsNoTracking()
+            .Where(v => v.WorkflowId == workflowId && v.Version == workflowVersion)
+            .Select(v => v.DefinitionJson)
+            .SingleOrDefaultAsync().ConfigureAwait(false);
+        var enforcementMode = CodeSpace.Core.Services.Completion.CompletionPolicy.StampModeFor(CodeSpace.Core.Services.Workflows.RunSources.DefinitionCompletionMode.Read(definitionJson));
+
         db.WorkflowRunRequest.Add(new WorkflowRunRequest
         {
             Id = requestId,
@@ -220,6 +229,11 @@ public static class WorkflowsTestSeed
             // directly to simulate the worker), so the row lands in Enqueued state and the
             // engine's atomic CAS at entry expects Enqueued → Running.
             Status = WorkflowRunStatus.Enqueued,
+            // P2a/P2b: stamped exactly as RunStarter stamps — seeded runs are contract-era Shadow by default,
+            // and Enforced when their definition opted in. A test that needs the PRE-protocol shape arranges
+            // its own policy-null row explicitly (CompletionPolicyStampFlowTests does).
+            CompletionPolicyVersion = CodeSpace.Core.Services.Completion.CompletionPolicy.CurrentVersion,
+            CompletionEnforcementMode = enforcementMode.ToString(),
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
         });

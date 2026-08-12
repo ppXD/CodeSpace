@@ -119,7 +119,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // The supervisor's brain runs on this seeded credential (key encrypted into the DB row the live decider reads).
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
-        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
+        // P2b canary (live-brain leg): the headline arc runs ENFORCED — a Drove verdict now implies the terminal
+        // authority arbitrated the live model's own contract ledger to CleanSuccess.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, completionMode: WorkflowDefinition.CompletionModeEnforced);
 
         // STRICT real-model-DROVE-to-completion gate (the real-model whole-loop CONNECTIVITY criterion). The blessed wire
         // passes ONLY when the live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY
@@ -135,6 +137,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             jobClient.Clear();
             var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per attempt — re-seed, never reuse a parked-short run
 
+            await AssertRanEnforcedAsync(runId);
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
@@ -1497,7 +1500,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             })
             .ToListAsync();
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null, (Guid RepoId, string Alias)? relatedRepo = null)
+    /// <summary>The Enforced stamp must have HELD before the engine runs — a silent drift back to Shadow would keep the arm green while proving nothing about arbitration.</summary>
+    private async Task AssertRanEnforcedAsync(Guid runId)
+    {
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.CompletionEnforcementMode.ShouldBe("Enforced", customMessage: "the definition opted in — check the workflow_version definition snapshot carries completionMode and the seed's resolution");
+    }
+
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null, (Guid RepoId, string Alias)? relatedRepo = null, string? completionMode = null)
     {
         // When an agent credential is supplied, the spawned agents run a REAL coding-CLI harness (claude-code) against the
         // gateway (its credential decrypted just-in-time + projected onto ANTHROPIC_BASE_URL/AUTH_TOKEN by the harness), at
@@ -1542,6 +1553,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             Definition = new WorkflowDefinition
             {
                 SchemaVersion = 1,
+                CompletionMode = completionMode,
                 Nodes = new List<NodeDefinition>
                 {
                     new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },

@@ -32,6 +32,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
         SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
+        CompletionMode = context.CompletionMode,
         Nodes = BuildNodes(context),
         Edges = BuildEdges(),
     };

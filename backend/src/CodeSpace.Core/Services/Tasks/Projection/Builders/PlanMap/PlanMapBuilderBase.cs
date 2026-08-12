@@ -37,6 +37,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
         SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
+        CompletionMode = context.CompletionMode,
         Nodes = BuildNodes(context),
         Edges = BuildEdges(context),
     };

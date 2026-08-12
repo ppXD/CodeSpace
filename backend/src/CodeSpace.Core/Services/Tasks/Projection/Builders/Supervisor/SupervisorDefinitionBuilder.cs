@@ -49,6 +49,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
         SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
+        CompletionMode = context.CompletionMode,
         Nodes = BuildNodes(context),
         Edges = BuildEdges(),
     };
