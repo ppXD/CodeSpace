@@ -7,6 +7,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Users;
+using CodeSpace.Core.Settings.Application;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Auth;
 using CodeSpace.Messages.Dtos.Invitations;
@@ -36,9 +37,10 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     private readonly IPasswordHasher _hasher;
     private readonly IJwtTokenIssuer _tokenIssuer;
     private readonly IUserService _users;
+    private readonly PublicBaseUrlSetting _baseUrl;
     private readonly TimeProvider _clock;
 
-    public TeamInvitationService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, TeamMembershipResolver membership, IPasswordHasher hasher, IJwtTokenIssuer tokenIssuer, IUserService users, TimeProvider clock)
+    public TeamInvitationService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, TeamMembershipResolver membership, IPasswordHasher hasher, IJwtTokenIssuer tokenIssuer, IUserService users, PublicBaseUrlSetting baseUrl, TimeProvider clock)
     {
         _db = db;
         _currentUser = currentUser;
@@ -47,10 +49,11 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         _hasher = hasher;
         _tokenIssuer = tokenIssuer;
         _users = users;
+        _baseUrl = baseUrl;
         _clock = clock;
     }
 
-    public async Task<CreateInvitationResult> InviteAsync(string email, TeamRole role, string inviteUrlTemplate, CancellationToken cancellationToken)
+    public async Task<CreateInvitationResult> InviteAsync(string email, TeamRole role, CancellationToken cancellationToken)
     {
         var teamId = RequireTeam();
         var normalized = Normalize(email);
@@ -77,7 +80,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         _db.TeamInvitation.Add(invitation);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        return new CreateInvitationResult { InvitationId = invitation.Id, InviteUrl = BuildInviteUrl(inviteUrlTemplate, token), ExpiresAt = invitation.ExpiresAt };
+        return new CreateInvitationResult { InvitationId = invitation.Id, InviteUrl = _baseUrl.InviteUrl(token), ExpiresAt = invitation.ExpiresAt };
     }
 
     public async Task<IReadOnlyList<TeamInvitationSummary>> ListAsync(CancellationToken cancellationToken)
@@ -113,7 +116,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     /// Replaces the token in place. The old link stops working immediately, which is the point —
     /// regenerate is what a member reaches for when they suspect the first link went astray.
     /// </summary>
-    public async Task<CreateInvitationResult> RegenerateAsync(Guid invitationId, string inviteUrlTemplate, CancellationToken cancellationToken)
+    public async Task<CreateInvitationResult> RegenerateAsync(Guid invitationId, CancellationToken cancellationToken)
     {
         var invitation = await LoadPendingForTeamAsync(invitationId, cancellationToken).ConfigureAwait(false);
 
@@ -123,7 +126,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        return new CreateInvitationResult { InvitationId = invitation.Id, InviteUrl = BuildInviteUrl(inviteUrlTemplate, token), ExpiresAt = invitation.ExpiresAt };
+        return new CreateInvitationResult { InvitationId = invitation.Id, InviteUrl = _baseUrl.InviteUrl(token), ExpiresAt = invitation.ExpiresAt };
     }
 
     public async Task<InvitationPreview> PreviewAsync(string token, CancellationToken cancellationToken)
@@ -321,8 +324,6 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     /// a database dump does not contain working invitations.
     /// </summary>
     private static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
-
-    private static string BuildInviteUrl(string template, string token) => template.Replace("{token}", Uri.EscapeDataString(token), StringComparison.Ordinal);
 
     private static string Normalize(string email) => email.Trim().ToLowerInvariant();
 

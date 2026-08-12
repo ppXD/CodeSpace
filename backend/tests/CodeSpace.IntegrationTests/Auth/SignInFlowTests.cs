@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Auth;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Exceptions;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -48,6 +49,36 @@ public class SignInFlowTests
 
         result.User.Email.ShouldBe("admin@codespace.local");
         result.User.Name.ShouldBe("admin");
+    }
+
+    /// <summary>
+    /// Sign-in answers "what may I do" for the account it just authenticated, and the client caches
+    /// that answer. The request itself is anonymous — nobody is signed in while it runs — so reading
+    /// the grants off the ambient principal returned nothing and every instance capability stayed
+    /// invisible until some later request happened to refresh it. Read them for the account instead.
+    /// </summary>
+    [Fact]
+    public async Task Sign_in_carries_the_signed_in_account_own_instance_permissions()
+    {
+        using var scope = _fixture.BeginScope();
+        var mediator = scope.Resolve<IMediator>();
+
+        var result = await mediator.Send(new SignInCommand { Name = "admin@codespace.local", Password = "changeme123" }).ConfigureAwait(false);
+
+        result.User.Permissions.ShouldContain(Permissions.TeamsCreate, "the seed admin holds the Admin role, which grants it");
+    }
+
+    [Fact]
+    public async Task Sign_in_reports_no_instance_permissions_for_an_account_holding_none()
+    {
+        var (email, password) = await SeedUnprivilegedUserAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScope();
+        var mediator = scope.Resolve<IMediator>();
+
+        var result = await mediator.Send(new SignInCommand { Name = email, Password = password }).ConfigureAwait(false);
+
+        result.User.Permissions.ShouldBeEmpty("grants are per-account — an ungranted user must not inherit anyone else's");
     }
 
     [Fact]
@@ -150,5 +181,20 @@ public class SignInFlowTests
         }, out var validatedToken);
 
         validatedToken.ShouldNotBeNull();
+    }
+
+    private async Task<(string Email, string Password)> SeedUnprivilegedUserAsync()
+    {
+        const string password = "plain-user-pw-123";
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var email = $"plain-{Guid.NewGuid():N}@x";
+        db.User.Add(new User { Id = Guid.NewGuid(), Email = email, Name = email, PasswordHash = scope.Resolve<IPasswordHasher>().Hash(password) });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return (email, password);
     }
 }

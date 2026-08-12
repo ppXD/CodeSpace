@@ -4,7 +4,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Auth;
-using CodeSpace.Core.Settings.Invitations;
+using CodeSpace.Core.Settings.Application;
 using CodeSpace.Messages.Dtos.Users;
 using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
@@ -26,14 +26,14 @@ public sealed class AccountLifecycleService : IAccountLifecycleService, IScopedD
 
     private readonly CodeSpaceDbContext _db;
     private readonly IPasswordHasher _hasher;
-    private readonly ResetUrlTemplateSetting _resetUrl;
+    private readonly PublicBaseUrlSetting _baseUrl;
     private readonly TimeProvider _clock;
 
-    public AccountLifecycleService(CodeSpaceDbContext db, IPasswordHasher hasher, ResetUrlTemplateSetting resetUrl, TimeProvider clock)
+    public AccountLifecycleService(CodeSpaceDbContext db, IPasswordHasher hasher, PublicBaseUrlSetting baseUrl, TimeProvider clock)
     {
         _db = db;
         _hasher = hasher;
-        _resetUrl = resetUrl;
+        _baseUrl = baseUrl;
         _clock = clock;
     }
 
@@ -92,7 +92,7 @@ public sealed class AccountLifecycleService : IAccountLifecycleService, IScopedD
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        return new PasswordResetLink { ResetUrl = _resetUrl.Value.Replace("{token}", Uri.EscapeDataString(token), StringComparison.Ordinal), ExpiresAt = user.PasswordResetExpiresAt.Value };
+        return new PasswordResetLink { ResetUrl = _baseUrl.PasswordResetUrl(token), ExpiresAt = user.PasswordResetExpiresAt.Value };
     }
 
     /// <summary>

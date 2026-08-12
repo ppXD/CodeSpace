@@ -17,7 +17,7 @@ describe("runs cockpit deep-link", () => {
     id: "a", slug: "acme", name: "Acme", kind: "Workspace", role: "Owner", permissions: [],
     memberCount: 1, repositoryCount: 0, projectCount: 0, workflowCount: 0,
   };
-  const me = { id: "u", email: "u@test.local", name: "U", teams: [acme], passwordMustChange: false } satisfies MeResponse;
+  const me = { id: "u", email: "u@test.local", name: "U", teams: [acme], permissions: [], passwordMustChange: false } satisfies MeResponse;
 
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 

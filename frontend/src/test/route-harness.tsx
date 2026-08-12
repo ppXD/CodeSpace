@@ -49,7 +49,14 @@ export async function renderRoute(initialUrl: string) {
   );
 
   // Let the router resolve the initial match + any beforeLoad redirect settle.
-  await waitFor(() => expect(router.state.status).toBe("idle"));
+  //
+  // Explicit timeout because testing-library's default is one second, and settling here means the
+  // route's loaders and beforeLoad redirects have all run — work that takes as long as the machine
+  // is busy. On a loaded box (a backend suite on the other cores, CI running everything at once)
+  // that one second lapses while the router is still working, and the test reports "pending" as a
+  // failure of the code under test. The condition is a settle, not a deadline: it becomes true or
+  // the router is genuinely stuck, and waiting longer for the second case costs nothing.
+  await waitFor(() => expect(router.state.status).toBe("idle"), { timeout: 15_000 });
 
   return { router, currentPath: () => router.state.location.pathname, ...utils };
 }

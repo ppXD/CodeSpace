@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MeResponse, MeTeam } from "@/api/types";
+import { DialogProvider } from "@/components/dialog";
 import { MembersSettings } from "./MembersSettings";
 
 /**
@@ -19,11 +20,11 @@ describe("members settings", () => {
     memberCount: 3, repositoryCount: 0, projectCount: 0, workflowCount: 0,
   });
 
-  const me = (t: MeTeam): MeResponse => ({ id: "u-viewer", email: "v@test.local", name: "Viewer", teams: [t], passwordMustChange: false });
+  const me = (t: MeTeam): MeResponse => ({ id: "u-viewer", email: "v@test.local", name: "Viewer", teams: [t], permissions: [], passwordMustChange: false });
 
   const roster = [
     { userId: "u-owner", name: "Mars P", email: "mars@test.local", avatarUrl: null, isBot: false, role: "Owner" as const, joinedAt: null },
-    { userId: "u-viewer", name: "Alex Kim", email: "v@test.local", avatarUrl: null, isBot: false, role: "Viewer" as const, joinedAt: "2026-01-01T00:00:00Z" },
+    { userId: "u-other", name: "Alex Kim", email: "alex@test.local", avatarUrl: null, isBot: false, role: "Viewer" as const, joinedAt: "2026-01-01T00:00:00Z" },
     { userId: "u-bot", name: "CodeSpace", email: "bot@test.local", avatarUrl: null, isBot: true, role: null, joinedAt: null },
   ];
 
@@ -47,7 +48,13 @@ describe("members settings", () => {
 
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
 
-    return render(<QueryClientProvider client={client}><MembersSettings /></QueryClientProvider>);
+    // DialogProvider because the destructive actions ask before they act — the app mounts it at the
+    // root, so a component test without it is testing a shape the product never renders.
+    return render(
+      <QueryClientProvider client={client}>
+        <DialogProvider><MembersSettings /></DialogProvider>
+      </QueryClientProvider>,
+    );
   }
 
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
@@ -99,6 +106,38 @@ describe("members settings", () => {
     await waitFor(() => expect(screen.getByText("Mars P")).toBeTruthy());
 
     expect(screen.getByText(/Owner · locked/)).toBeTruthy();
+  });
+
+  it("asks before it removes someone", async () => {
+    // The menu used to act on click. Removing a person is not something to discover by having done
+    // it, so the click opens a question and the mutation waits for the answer.
+    renderAs(team("Owner", ["members.manage", "team.manage"]));
+
+    await waitFor(() => expect(screen.getByText("Alex Kim")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Alex Kim" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(screen.getByText("Remove Alex Kim?")).toBeTruthy());
+
+    const deletes = () => (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === "DELETE");
+
+    expect(deletes()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByText("Remove Alex Kim?")).toBeNull());
+    expect(deletes()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Alex Kim" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => expect(screen.getByText("Remove Alex Kim?")).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Remove" }).at(-1)!);
+
+    await waitFor(() => expect(deletes()).toHaveLength(1));
+    expect(deletes()[0][0]).toContain("/api/teams/members/u-other");
   });
 
   it("gives the bot no role and no menu", async () => {

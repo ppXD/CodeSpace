@@ -117,6 +117,11 @@ export interface MeTeam {
 }
 
 export interface MeResponse {
+  /**
+   * INSTANCE-level capabilities — the deployment-wide grants, not a team role. Branch on these for
+   * anything that is not about one team, like whether this account may open a workspace.
+   */
+  permissions: string[];
   id: string;
   email: string;
   name: string;

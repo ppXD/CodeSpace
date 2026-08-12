@@ -24,7 +24,7 @@ describe("team-scope gate", () => {
   const acme = team({ id: "a", slug: "acme" });
 
   const meWith = (...teams: MeTeam[]): MeResponse =>
-    ({ id: "u", email: "u@test.local", name: "U", teams, passwordMustChange: false } satisfies MeResponse);
+    ({ id: "u", email: "u@test.local", name: "U", teams, permissions: [], passwordMustChange: false } satisfies MeResponse);
 
   const backend = (me: MeResponse) => stubFetch({ "/api/users/me": me, "/api/projects": [] });
 

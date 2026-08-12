@@ -67,7 +67,67 @@ public class MeQueryTests
         team.WorkflowCount.ShouldBe(2); // 2 active, 1 soft-deleted excluded
     }
 
+    /// <summary>
+    /// The sidebar's member count and the members screen's roster are two readings of one fact, and a
+    /// user who sees "3 members" over a list of two has caught the product lying. Every team created
+    /// since invitations shipped gives its owner a membership row of their own, so the two must agree
+    /// on that shape specifically — counting rows and adding the owner double-counts them.
+    /// </summary>
+    [Fact]
+    public async Task Me_member_count_matches_the_roster_when_the_owner_holds_a_membership_row()
+    {
+        var (userId, teamId) = await SeedTeamAsProvisionedAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var mediator = scope.Resolve<IMediator>();
+
+        var me = await mediator.Send(new MeQuery()).ConfigureAwait(false);
+        var roster = await mediator.Send(new ListTeamMembersQuery()).ConfigureAwait(false);
+
+        var team = me.Teams.Single(t => t.Id == teamId);
+
+        team.MemberCount.ShouldBe(2, "the owner and the one member — the owner's own membership row is not a second person");
+        team.MemberCount.ShouldBe(roster.Count, "the count and the list must never disagree");
+    }
+
+    [Fact]
+    public async Task Me_member_count_excludes_departed_accounts()
+    {
+        var (userId, teamId) = await SeedTeamAsProvisionedAsync(deleteTheMember: true).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var mediator = scope.Resolve<IMediator>();
+
+        var me = await mediator.Send(new MeQuery()).ConfigureAwait(false);
+        var roster = await mediator.Send(new ListTeamMembersQuery()).ConfigureAwait(false);
+
+        me.Teams.Single(t => t.Id == teamId).MemberCount.ShouldBe(roster.Count);
+        roster.Count.ShouldBe(1);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>Seeds a team the way <c>TeamProvisioningService</c> does — owner row AND owner membership.</summary>
+    private async Task<(Guid UserId, Guid TeamId)> SeedTeamAsProvisionedAsync(bool deleteTheMember = false)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
+        var owner = new User { Id = Guid.NewGuid(), Email = $"o-{suffix}@x", Name = "owner" };
+        var member = new User { Id = Guid.NewGuid(), Email = $"m-{suffix}@x", Name = "member", DeletedDate = deleteTheMember ? DateTimeOffset.UtcNow : null };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"prov-{suffix}", Name = "Provisioned", OwnerUserId = owner.Id };
+
+        db.User.AddRange(owner, member);
+        db.Team.Add(team);
+        db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner },
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return (owner.Id, team.Id);
+    }
 
     private async Task<Guid> SeedUserOnlyAsync()
     {

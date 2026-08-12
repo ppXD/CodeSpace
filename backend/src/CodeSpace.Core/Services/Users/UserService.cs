@@ -166,6 +166,31 @@ public sealed class UserService : IUserService, IScopedDependency
     /// all three return the identical shape. Personal team first then Workspaces by name,
     /// matching the sidebar's grouping so the SPA doesn't have to re-sort.
     /// </summary>
+    /// <summary>
+    /// The account's OWN instance grants, read for the account being described rather than taken from
+    /// <c>ICurrentUser</c>.
+    ///
+    /// <para>Two of the three callers here are anonymous at the moment they run — sign-in and
+    /// invitation acceptance both build this response for someone who had no session when the request
+    /// started. Reading the ambient principal returned an empty list for exactly those, and the client
+    /// caches this response as its answer to "what may I do", so the grant stayed invisible until
+    /// something else refetched.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<string>> LoadInstancePermissionsAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var fromRoles = _db.RoleUser.AsNoTracking()
+            .Where(ru => ru.UserId == userId)
+            .Join(_db.Role.AsNoTracking().Where(r => r.Status), ru => ru.RoleId, r => r.Id, (ru, _) => ru.RoleId)
+            .Join(_db.RolePermission.AsNoTracking(), rid => rid, rp => rp.RoleId, (_, rp) => rp.PermissionId);
+
+        var granted = _db.UserPermission.AsNoTracking().Where(up => up.UserId == userId).Select(up => up.PermissionId);
+
+        return await _db.Permission.AsNoTracking()
+            .Where(p => fromRoles.Contains(p.Id) || granted.Contains(p.Id))
+            .Select(p => p.Name)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<MeResponse> BuildMeForAsync(User user, CancellationToken cancellationToken) => await BuildMeResponseAsync(user, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -187,12 +212,15 @@ public sealed class UserService : IUserService, IScopedDependency
                 t.Kind,
                 t.OwnerUserId,
                 MembershipRole = t.Memberships.Where(m => m.UserId == user.Id).Select(m => (TeamRole?)m.Role).FirstOrDefault(),
-                MemberCount = t.Memberships.Count() + 1,    // memberships + owner
+                // People, counted the same way the roster lists them: owner ∪ memberships, deduped and
+                // minus departed accounts. The owner holds a membership row of their own on every team
+                // created since invitations shipped, so "memberships + 1" counted them twice — a fresh
+                // one-person team read as 2.
+                MemberCount = _db.User.Count(u => u.DeletedDate == null && (u.Id == t.OwnerUserId || t.Memberships.Any(m => m.UserId == u.Id))),
                 RepositoryCount = _db.Repository.Count(r => r.TeamId == t.Id && r.DeletedDate == null),
-                // Sidebar "Projects" row badge — counts active projects only. The auto-seeded
-                // "default" project is always present, so for any team that's done a single
-                // repo bind this is ≥ 1; an empty team shows 0 until it lands on the projects
-                // page (which calls EnsureDefaultProjectAsync lazily on first list).
+                // Sidebar "Projects" row badge — counts active projects only. The "default" project is
+                // seeded by the first repository bind (RepositoryBindingService), not by listing, so a
+                // team that has never bound a repo reads 0 here.
                 ProjectCount = _db.Project.Count(p => p.TeamId == t.Id && p.DeletedDate == null),
                 // Sidebar "Workflows" row badge — active workflows for the team (same filter as the list query).
                 WorkflowCount = _db.Workflow.Count(w => w.TeamId == t.Id && w.DeletedDate == null)
@@ -208,6 +236,7 @@ public sealed class UserService : IUserService, IScopedDependency
             Name = user.Name,
             AvatarUrl = user.AvatarUrl,
             PasswordMustChange = user.PasswordMustChange,
+            Permissions = await LoadInstancePermissionsAsync(user.Id, cancellationToken).ConfigureAwait(false),
             Teams = teams.Select(t => new MeTeam
             {
                 Id = t.Id,
