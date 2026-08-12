@@ -9,7 +9,7 @@ namespace CodeSpace.Core.Settings.Invitations;
 /// request's Host header would let anyone who can set one mint a link pointing at their own site,
 /// and a person following a reset link is about to type a new password into whatever it opens.</para>
 /// </summary>
-public class ResetUrlTemplateSetting : IConfigurationSetting<string>
+public class ResetUrlTemplateSetting : LinkTemplateSetting, IConfigurationSetting<string>
 {
     public const string ConfigurationKey = "Invitations:ResetUrlTemplate";
 
@@ -17,9 +17,7 @@ public class ResetUrlTemplateSetting : IConfigurationSetting<string>
 
     public ResetUrlTemplateSetting(IConfiguration configuration)
     {
-        var configured = configuration[ConfigurationKey];
-
-        Value = string.IsNullOrWhiteSpace(configured) ? DefaultTemplate : configured.Trim();
+        Value = ResolveOrFail(configuration, ConfigurationKey, DefaultTemplate, "Password reset links");
     }
 
     public string Value { get; set; }

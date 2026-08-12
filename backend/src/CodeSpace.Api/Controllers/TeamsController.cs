@@ -101,4 +101,15 @@ public class TeamsController : ControllerBase
         await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return NoContent();
     }
+
+    /// <summary>
+    /// Open a new workspace, owned by the caller. Not team-scoped — there is no team yet, so no
+    /// X-Team-Id and no membership check; the instance capability is the whole gate.
+    /// </summary>
+    [HttpPost]
+    public async Task<IActionResult> Create([FromBody] CreateTeamCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
 }
