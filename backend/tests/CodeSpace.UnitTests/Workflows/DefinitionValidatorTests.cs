@@ -57,6 +57,40 @@ public class DefinitionValidatorTests
         BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(WorkflowDefinition.CompletionModeShadow)]
+    [InlineData(WorkflowDefinition.CompletionModeEnforced)]
+    public void A_known_or_absent_completion_mode_passes(string? completionMode)
+    {
+        var definition = new WorkflowDefinition
+        {
+            CompletionMode = completionMode,
+            Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("end", "builtin.terminal") },
+            Edges = new List<EdgeDefinition> { new() { From = "t", To = "end" } }
+        };
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void An_unknown_completion_mode_errors()
+    {
+        // P2b fail-close at AUTHORING time: an enforcement opt-in outside the closed vocabulary must never be
+        // stored — silently launching it weaker than the author intended is the one unacceptable direction.
+        var definition = new WorkflowDefinition
+        {
+            CompletionMode = "Enforced",   // wrong case is unknown too — the vocabulary is exact
+            Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("end", "builtin.terminal") },
+            Edges = new List<EdgeDefinition> { new() { From = "t", To = "end" } }
+        };
+
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("Unknown completionMode 'Enforced'"));
+    }
+
     [Fact]
     public void Unknown_typekey_errors()
     {

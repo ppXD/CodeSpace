@@ -183,9 +183,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             TeamId = teamId,
             RunRequestId = requestId,
             // P2a: a replay/rerun is a NEW execution — it explicitly receives the policy current at ITS creation,
-            // never an inherited or inferred one.
+            // never an inherited or inferred one. P2b: the enforcement mode is the exception BY DESIGN — it reads
+            // the frozen definition's own opt-in, so a rerun of an enforced definition is enforced again.
             CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
-            CompletionEnforcementMode = Completion.CompletionPolicy.CurrentMode.ToString(),
+            CompletionEnforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson)).ToString(),
             ActorId = actorUserId,   // snapshot / task runs are always user-launched (mirrors the request's ActorId)
             ProjectionKind = projectionKind,
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),
