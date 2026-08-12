@@ -87,6 +87,7 @@ public sealed class PasswordRotationGateEndpointE2ETests : IClassFixture<TaskLau
 
         db.User.Add(new User
         {
+            SecurityStamp = TestToken.SeedStamp,
             Id = userId,
             Email = $"rotation-{suffix}@test.local",
             Name = "Rotation E2E",
@@ -99,16 +100,8 @@ public sealed class PasswordRotationGateEndpointE2ETests : IClassFixture<TaskLau
         return userId;
     }
 
-    private static string MintToken(Guid userId)
-    {
-        var claims = new[] { new Claim(ClaimTypes.NameIdentifier, userId.ToString()) };
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TaskLaunchApiFactory.JwtKey));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var jwt = new JwtSecurityToken(claims: claims, notBefore: DateTime.UtcNow, expires: DateTime.UtcNow.AddHours(1), signingCredentials: creds);
-
-        return new JwtSecurityTokenHandler().WriteToken(jwt);
-    }
+    /// <summary>Delegates to the shared helper so the security-stamp claim cannot be forgotten here.</summary>
+    private static string MintToken(Guid userId) => TestToken.Mint(userId, TestToken.SeedStamp);
 
     private static async Task<string> DescribeAsync(HttpResponseMessage response, string expectation) =>
         $"GET /api/users/me expected {expectation}; got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";

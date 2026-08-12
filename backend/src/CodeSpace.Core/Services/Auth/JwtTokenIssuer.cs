@@ -13,6 +13,7 @@ namespace CodeSpace.Core.Services.Auth;
 ///   • <c>sub</c> / <c>nameid</c>  — user id (ApiUser reads NameIdentifier)
 ///   • <c>name</c>                  — display name
 ///   • <c>email</c>                 — email
+///   • <c>sst</c>                   — the account's security stamp, compared on every request
 /// Lifetime is 24 hours; refresh tokens aren't issued yet (rotation is a separate slice).
 /// </summary>
 public sealed class JwtTokenIssuer : IJwtTokenIssuer, ISingletonDependency
@@ -39,7 +40,10 @@ public sealed class JwtTokenIssuer : IJwtTokenIssuer, ISingletonDependency
         {
             new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new Claim(ClaimTypes.Name, user.Name),
-            new Claim(ClaimTypes.Email, user.Email)
+            new Claim(ClaimTypes.Email, user.Email),
+            // The stamp the token is minted under. Rotating it on the account invalidates every token
+            // issued before the rotation — this claim is what makes that comparison possible.
+            new Claim(SessionValidator.SecurityStampClaim, user.SecurityStamp.ToString())
         };
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_keySetting.Value));

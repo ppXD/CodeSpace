@@ -36,6 +36,10 @@ public sealed class UserService : IUserService, IScopedDependency
         if (user == null || string.IsNullOrEmpty(user.PasswordHash) || !_hasher.Verify(password, user.PasswordHash))
             throw new InvalidCredentialsException();
 
+        // Checked AFTER the password, so a wrong guess against a deactivated address still answers
+        // "invalid credentials" — otherwise this endpoint becomes an oracle for which addresses exist.
+        if (user.DeactivatedAt != null) throw new AccountDeactivatedException();
+
         user.LastLoginDate = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
@@ -57,11 +61,18 @@ public sealed class UserService : IUserService, IScopedDependency
 
         user.PasswordHash = _hasher.Hash(newPassword);
         user.PasswordMustChange = false;
+        // Ends every OTHER session for this account. Changing a password is what someone does when
+        // they think a session is not theirs, and leaving those alive makes the act cosmetic.
+        user.SecurityStamp = Guid.NewGuid();
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         var me = await BuildMeResponseAsync(user, cancellationToken).ConfigureAwait(false);
-        return new ChangePasswordResponse { User = me };
+        // Re-issued under the new stamp, so the caller who just rotated is not signed out by their own
+        // change — every other token minted before it is.
+        var reissued = _tokenIssuer.Issue(user);
+
+        return new ChangePasswordResponse { User = me, Token = reissued.Token, ExpiresAt = reissued.ExpiresAt };
     }
 
     public async Task<MeResponse> GetMeAsync(CancellationToken cancellationToken)

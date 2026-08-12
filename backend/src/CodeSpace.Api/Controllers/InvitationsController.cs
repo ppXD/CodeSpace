@@ -2,7 +2,9 @@ using CodeSpace.Messages.Commands.Invitations;
 using CodeSpace.Messages.Queries.Invitations;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
+using CodeSpace.Api.Extensions;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace CodeSpace.Api.Controllers;
 
@@ -16,6 +18,7 @@ namespace CodeSpace.Api.Controllers;
 /// </summary>
 [ApiController]
 [AllowAnonymous]
+[EnableRateLimiting(AnonymousRateLimitExtension.PolicyName)]
 [Route("api/invitations")]
 public class InvitationsController : ControllerBase
 {

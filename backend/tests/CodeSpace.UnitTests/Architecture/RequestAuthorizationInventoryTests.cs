@@ -38,6 +38,7 @@ public class RequestAuthorizationInventoryTests
         ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row.",
         ["AcceptInvitationCommand"] = "the invitee has no account yet; proof is the single-use invitation token in the route.",
         ["PreviewInvitationQuery"] = "same token, read-only, and it answers nothing at all unless the token checks out.",
+        ["ResetPasswordCommand"] = "someone who cannot sign in is exactly who needs this; proof is the single-use reset token in the route.",
     };
 
     /// <summary>
