@@ -1099,7 +1099,10 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
                 {
                     new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
                     new() { Id = NodeId, TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json(supConfig), Inputs = WorkflowsTestSeed.EmptyJson() },
-                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    // The terminal binds the supervisor's outputs exactly as the production projection does — an
+                    // empty-input terminal captures NOTHING into run.OutputsJson (the engine's ResolvedInputs.Count
+                    // gate), which left the PR-6 repositoryId-echo surface structurally unwired in these arms.
+                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor.SupervisorDefinitionBuilder.TerminalInputs() },
                 },
                 Edges = new List<EdgeDefinition>
                 {

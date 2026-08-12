@@ -1558,7 +1558,10 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                 {
                     new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
                     new() { Id = NodeId, TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json(supConfig), Inputs = WorkflowsTestSeed.EmptyJson() },
-                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    // Mirrors the production projection's terminal binding (shared literal) — without it the PR-6
+                    // repositoryId-echo check asserted a surface this workflow never wired, so the arm could only
+                    // pass on trajectories that skipped the accepted-work branch.
+                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor.SupervisorDefinitionBuilder.TerminalInputs() },
                 },
                 Edges = new List<EdgeDefinition>
                 {
