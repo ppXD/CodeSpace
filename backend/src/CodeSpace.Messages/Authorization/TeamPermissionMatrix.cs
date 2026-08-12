@@ -46,4 +46,13 @@ public static class TeamPermissionMatrix
         MinimumRole.TryGetValue(permission, out var role) ? role : throw new ArgumentOutOfRangeException(nameof(permission), permission, "unknown team permission — declare it in TeamPermissions and map it here");
 
     public static bool IsGranted(TeamRole role, string permission) => TeamRoleRank.Of(role) >= TeamRoleRank.Of(MinimumRoleFor(permission));
+
+    /// <summary>
+    /// Everything a role holds, for handing to a client so it can hide what it must not offer.
+    ///
+    /// <para>Sorted so the list is a stable value: it is embedded in a cached /me response, and an
+    /// order that varies per call would make two identical answers look like a change.</para>
+    /// </summary>
+    public static IReadOnlyList<string> GrantedTo(TeamRole role) =>
+        MinimumRole.Where(entry => TeamRoleRank.Of(role) >= TeamRoleRank.Of(entry.Value)).Select(entry => entry.Key).OrderBy(code => code, StringComparer.Ordinal).ToArray();
 }

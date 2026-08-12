@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Commands.Invitations;
+using CodeSpace.Messages.Commands.Teams;
 using CodeSpace.Messages.Queries.Invitations;
 using CodeSpace.Messages.Queries.Users;
 using MediatR;
@@ -69,5 +70,35 @@ public class TeamsController : ControllerBase
     {
         var result = await _mediator.Send(new RegenerateTeamInvitationCommand { InvitationId = invitationId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
+    }
+
+    /// <summary>Move someone between roles. The server clamps both ways — see TeamMemberService.</summary>
+    [HttpPatch("members/{userId:guid}")]
+    public async Task<IActionResult> ChangeMemberRole([FromRoute] Guid userId, [FromBody] ChangeTeamMemberRoleCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command with { UserId = userId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    [HttpDelete("members/{userId:guid}")]
+    public async Task<IActionResult> RemoveMember([FromRoute] Guid userId, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new RemoveTeamMemberCommand { UserId = userId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    /// <summary>The caller leaving. Separate from removing someone else because it needs no permission.</summary>
+    [HttpPost("members/leave")]
+    public async Task<IActionResult> Leave(CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new LeaveTeamCommand(), cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    [HttpPost("transfer-ownership")]
+    public async Task<IActionResult> TransferOwnership([FromBody] TransferTeamOwnershipCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return NoContent();
     }
 }

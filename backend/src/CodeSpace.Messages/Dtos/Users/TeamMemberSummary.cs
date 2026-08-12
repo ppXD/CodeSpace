@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Messages.Dtos.Users;
 
 /// <summary>
@@ -20,4 +22,13 @@ public sealed record TeamMemberSummary
     /// is false for every row there.
     /// </summary>
     public bool IsBot { get; init; }
+
+    /// <summary>
+    /// The member's role in this team. Null for the per-team bot, which holds no role — it is not a
+    /// person and has nothing to be promoted to.
+    /// </summary>
+    public TeamRole? Role { get; init; }
+
+    /// <summary>When they joined. Null for an owner seeded without a membership row (see migration 0008).</summary>
+    public DateTimeOffset? JoinedAt { get; init; }
 }

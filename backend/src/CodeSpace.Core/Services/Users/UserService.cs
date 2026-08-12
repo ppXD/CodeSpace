@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Auth;
+using CodeSpace.Messages.Authorization;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Messages.Commands.Auth;
 using CodeSpace.Messages.Dtos.Users;
@@ -96,11 +97,29 @@ public sealed class UserService : IUserService, IScopedDependency
 
         var userIds = memberIds.Append(ownerId.Value).Distinct().ToList();
 
-        return await _db.User.AsNoTracking()
+        // Role and joined-at come from the membership row; the owner may have none, and resolves to
+        // Owner from the team row instead. The bot holds no role at all — it is not a person.
+        var memberships = await _db.TeamMembership.AsNoTracking()
+            .Where(m => m.TeamId == teamId)
+            .Select(m => new { m.UserId, m.Role, m.CreatedDate })
+            .ToDictionaryAsync(m => m.UserId, cancellationToken).ConfigureAwait(false);
+
+        var users = await _db.User.AsNoTracking()
             .Where(u => userIds.Contains(u.Id) && u.DeletedDate == null)
             .OrderBy(u => u.Name)
-            .Select(u => new TeamMemberSummary { UserId = u.Id, Name = u.Name, Email = u.Email, AvatarUrl = u.AvatarUrl, IsBot = u.IsBot })
+            .Select(u => new { u.Id, u.Name, u.Email, u.AvatarUrl, u.IsBot })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return users.Select(u => new TeamMemberSummary
+        {
+            UserId = u.Id,
+            Name = u.Name,
+            Email = u.Email,
+            AvatarUrl = u.AvatarUrl,
+            IsBot = u.IsBot,
+            Role = u.IsBot ? null : ResolveRole(ownerId.Value, u.Id, memberships.TryGetValue(u.Id, out var m) ? m.Role : null),
+            JoinedAt = memberships.TryGetValue(u.Id, out var joined) ? joined.CreatedDate : null,
+        }).ToList();
     }
 
     /// <summary>
@@ -137,6 +156,13 @@ public sealed class UserService : IUserService, IScopedDependency
     /// matching the sidebar's grouping so the SPA doesn't have to re-sort.
     /// </summary>
     public async Task<MeResponse> BuildMeForAsync(User user, CancellationToken cancellationToken) => await BuildMeResponseAsync(user, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Ownership is recorded on the team row and does not require a membership row (migration 0008
+    /// writes one only for personal teams), so an owner without one still resolves to Owner.
+    /// </summary>
+    private static TeamRole ResolveRole(Guid ownerUserId, Guid userId, TeamRole? membershipRole) =>
+        ownerUserId == userId ? TeamRole.Owner : membershipRole ?? TeamRole.Member;
 
     private async Task<MeResponse> BuildMeResponseAsync(User user, CancellationToken cancellationToken)
     {
@@ -177,7 +203,8 @@ public sealed class UserService : IUserService, IScopedDependency
                 Slug = t.Slug,
                 Name = t.Name,
                 Kind = t.Kind,
-                Role = t.OwnerUserId == user.Id ? TeamRole.Owner : (t.MembershipRole ?? TeamRole.Member),
+                Role = ResolveRole(t.OwnerUserId, user.Id, t.MembershipRole),
+                Permissions = TeamPermissionMatrix.GrantedTo(ResolveRole(t.OwnerUserId, user.Id, t.MembershipRole)),
                 MemberCount = t.MemberCount,
                 RepositoryCount = t.RepositoryCount,
                 ProjectCount = t.ProjectCount,
