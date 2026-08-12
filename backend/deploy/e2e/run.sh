@@ -11,6 +11,8 @@ export E2E_JWT_KEY="deploy-e2e-only-symmetric-jwt-key-at-least-32-bytes"
 # Test-only AES-256 master key (base64 32 bytes) for variable encryption — required in non-Development.
 export E2E_VARIABLE_MASTER_KEY="ECxvpc1Qm6DkzLwTyHnv0OkVj3XaVLVegdoh1NbHziU="
 USER_ID="11111111-1111-1111-1111-111111111111"
+# Must match seed.sql — the API compares it against the row on every request.
+SECURITY_STAMP="33333333-4444-5555-6666-777777777777"
 TEAM_ID="22222222-2222-2222-2222-222222222222"
 API="http://localhost:18080"
 WORKER="http://localhost:18081"
@@ -74,7 +76,7 @@ $COMPOSE exec -T postgres psql -U codespace -d codespace -v ON_ERROR_STOP=1 -q <
 echo "    seeded"
 
 echo "==> launch a quick chat task via the API (enqueue only — the API processes nothing)"
-JWT="$(node mint-jwt.js "$E2E_JWT_KEY" "$USER_ID")"
+JWT="$(node mint-jwt.js "$E2E_JWT_KEY" "$USER_ID" "$SECURITY_STAMP")"
 AUTH=(-H "Authorization: Bearer $JWT" -H "X-Team-Id: $TEAM_ID")
 RESP="$(curl -fsS -X POST "$API/api/workflows/runs" "${AUTH[@]}" -H "Content-Type: application/json" \
   -d '{"taskText":"Deploy E2E smoke task","effort":"quick","harness":"codex-cli","runnerKind":"local","autonomy":"Confined","surfaceKind":"chat"}')" || fail "launch HTTP call failed"
