@@ -95,12 +95,20 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Park — the Success claim rests on evidence with integrity violations: {string.Join("; ", violations)}", TerminalDecision.Park, watermarks);
         }
 
-        // A non-clean decision names its evidence: the admission's rejections say exactly WHICH receipts never
-        // reached the fold and why — the difference between "parked, go read the composer source" and "parked,
-        // receipt X died to superseded-contract at revision 3". Park triage runs on this line.
-        if (decision != TerminalDecision.CleanSuccess && composed.Rejections.Count > 0)
-            _logger.LogWarning("Terminal arbitration for run {RunId} composed over {Count} admission rejection(s): {Rejections}",
-                workflowRunId, composed.Rejections.Count, string.Join(" · ", composed.Rejections.Take(8).Select(r => $"[{r.Code}] {r.Reason}")));
+        // A non-clean decision names its evidence: the staked obligations, the receipts that answered them (with
+        // dispositions), and the admission rejections — the difference between "parked, go read the composer
+        // source" and "parked, acceptance:s2 has no receipt". Park triage runs on these lines.
+        if (decision != TerminalDecision.CleanSuccess)
+        {
+            _logger.LogWarning("Terminal arbitration for run {RunId}: staked=[{Staked}] receipts=[{Receipts}]",
+                workflowRunId,
+                string.Join(", ", requirements.Take(16).Select(r => $"{r.Kind}:{r.RequirementRef}@{r.Requiredness}")),
+                string.Join(", ", receipts.Take(16).Select(r => $"{r.Kind}:{r.RequirementRef}={r.Disposition}(ev={(r.EvidenceRef is null ? "null" : "y")})")));
+
+            if (composed.Rejections.Count > 0)
+                _logger.LogWarning("Terminal arbitration for run {RunId} composed over {Count} admission rejection(s): {Rejections}",
+                    workflowRunId, composed.Rejections.Count, string.Join(" · ", composed.Rejections.Take(8).Select(r => $"[{r.Code}] {r.Reason}")));
+        }
 
         return decision switch
         {
