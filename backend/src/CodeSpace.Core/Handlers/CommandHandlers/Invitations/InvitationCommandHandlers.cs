@@ -57,5 +57,5 @@ public sealed class AcceptInvitationCommandHandler : IRequestHandler<AcceptInvit
     public AcceptInvitationCommandHandler(ITeamInvitationService invitations) { _invitations = invitations; }
 
     public async Task<SignInResponse> Handle(AcceptInvitationCommand request, CancellationToken cancellationToken) =>
-        await _invitations.AcceptAsync(request.Token, request.Name, request.Password, cancellationToken).ConfigureAwait(false);
+        await _invitations.AcceptAsync(request.Token ?? string.Empty, request.Name, request.Password, cancellationToken).ConfigureAwait(false);
 }

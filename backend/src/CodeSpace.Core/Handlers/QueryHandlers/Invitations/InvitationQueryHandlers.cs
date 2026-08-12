@@ -22,5 +22,5 @@ public sealed class PreviewInvitationQueryHandler : IRequestHandler<PreviewInvit
     public PreviewInvitationQueryHandler(ITeamInvitationService invitations) { _invitations = invitations; }
 
     public async Task<InvitationPreview> Handle(PreviewInvitationQuery request, CancellationToken cancellationToken) =>
-        await _invitations.PreviewAsync(request.Token, cancellationToken).ConfigureAwait(false);
+        await _invitations.PreviewAsync(request.Token ?? string.Empty, cancellationToken).ConfigureAwait(false);
 }

@@ -13,5 +13,6 @@ public sealed record ListTeamInvitationsQuery : IQuery<IReadOnlyList<TeamInvitat
 /// </summary>
 public sealed record PreviewInvitationQuery : IQuery<InvitationPreview>
 {
-    public string Token { get; init; } = default!;
+    /// <summary>Route-supplied. Nullable for the same reason as <c>AcceptInvitationCommand.Token</c>.</summary>
+    public string? Token { get; init; }
 }
