@@ -128,7 +128,7 @@ public class ContractHashingTests
         // (explicitly authorized off, never silently absent). P5-4: the REQUIRED rows record the caller-declared
         // provenance; the NA rows stay ServerPolicy REGARDLESS — the exemption is the server's policy whoever
         // authored the contract.
-        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true), ("r", "h2", false) }, requiredAuthority);
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true, true), ("r", "h2", true, false) }, requiredAuthority);
 
         rows.Count.ShouldBe(6);
         rows.ShouldAllBe(r => r.SpecHash == (r.RequirementRef.EndsWith(":w") ? "h1" : "h2"));
@@ -156,7 +156,7 @@ public class ContractHashingTests
         // contract hash, mirroring the receipt's own WorkUnitRef so a future revision↔receipt join is symmetric.
         var planId = Guid.NewGuid();
 
-        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true) }, ContractAuthority.ModelProposal, (planId, 3));
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true, true) }, ContractAuthority.ModelProposal, (planId, 3));
 
         rows.Count.ShouldBe(3);
         rows.ShouldAllBe(r => r.WorkUnit != null && r.WorkUnit.WorkPlanId == planId && r.WorkUnit.PlanVersion == 3 && r.WorkUnit.UnitId == "w" && r.WorkUnit.ContractHash == "h1");
@@ -167,7 +167,7 @@ public class ContractHashingTests
     {
         // Null-omitted: envelopes staked with no plan identity (legacy callers, unit-tier contexts) must not
         // change bytes — envelope JSON equality is the store's own no-amendment/no-revision discriminator.
-        var row = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true) }, ContractAuthority.ModelProposal).First();
+        var row = SupervisorUnitContract.BuildStakedRequirements(new[] { ("w", "h1", true, true) }, ContractAuthority.ModelProposal).First();
 
         row.WorkUnit.ShouldBeNull();
         System.Text.Json.JsonSerializer.Serialize(row, CodeSpace.Core.Services.Agents.AgentJson.Options).ShouldNotContain("workUnit");
@@ -182,4 +182,19 @@ public class ContractHashingTests
     }
 
     private static SupervisorPlannedSubtask Planned(string instruction) => new() { Id = "s1", Title = "T", Instruction = instruction };
+
+    [Fact]
+    public void A_spec_less_unit_stakes_acceptance_authorized_not_applicable()
+    {
+        // P2b canary finding: a unit nobody will ever grade must not owe a Required verdict — the whole-loop gate
+        // parked NeedsReview forever on exactly that overstake. The stage is explicitly authorized off (Lock
+        // Clause 4), never silently absent; a spec-carrying unit still stakes Required.
+        var rows = SupervisorUnitContract.BuildStakedRequirements(new[] { ("spec", "h1", true, true), ("specless", "h2", false, true) }, ContractAuthority.ModelProposal);
+
+        rows.Single(r => r.RequirementRef == "acceptance:spec").Requiredness.ShouldBe(Requiredness.Required);
+
+        var na = rows.Single(r => r.RequirementRef == "acceptance:specless");
+        na.Requiredness.ShouldBe(Requiredness.ServerPolicyAuthorizedNotApplicable);
+        na.Authority.ShouldBe(ContractAuthority.ServerPolicy, "the authorized-NA pairing must satisfy the kernel's IsAuthorizedNa check");
+    }
 }

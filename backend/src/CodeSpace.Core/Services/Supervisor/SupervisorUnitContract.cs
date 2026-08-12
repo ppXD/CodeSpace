@@ -21,6 +21,9 @@ public static class SupervisorUnitContract
     /// </summary>
     public static bool OwesDelivery(SupervisorPlannedSubtask planned) => planned.ExpectsChanges != false;
 
+    /// <summary>P2b canary finding: a unit owes a verification VERDICT only when someone will actually grade it — a plan-authored per-unit oracle exists. A spec-less unit stakes acceptance ServerPolicy-authorized-NotApplicable (the run's gate is the operator floor at stop, engine-level), never a Required obligation nobody can ever answer.</summary>
+    public static bool OwesAcceptance(SupervisorPlannedSubtask planned) => planned.Acceptance is not null;
+
     /// <summary>
     /// P2b-2: the staked obligation set for one authorization wave — every contracted unit stakes its acceptance,
     /// delivery, and output rows, spec-hash-bound to the same effective contract. A change-expecting unit stakes
@@ -37,18 +40,18 @@ public static class SupervisorUnitContract
     /// <summary>The acceptance requirement ref for one unit — THE literal <see cref="BuildStakedRequirements"/> stakes and the dispatch stamp joins its revision on; one builder so the two can never drift.</summary>
     public static string AcceptanceRef(string subtaskId) => $"acceptance:{subtaskId}";
 
-    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> units, Messages.Contracts.ContractAuthority requiredAuthority, (Guid WorkPlanId, int Version)? planRef = null)
+    public static List<Messages.Contracts.RequirementEnvelope> BuildStakedRequirements(IEnumerable<(string SubtaskId, string ContractHash, bool OwesAcceptance, bool OwesDelivery)> units, Messages.Contracts.ContractAuthority requiredAuthority, (Guid WorkPlanId, int Version)? planRef = null)
     {
         var requirements = new List<Messages.Contracts.RequirementEnvelope>();
 
-        foreach (var (subtaskId, contractHash, owesDelivery) in units)
+        foreach (var (subtaskId, contractHash, owesAcceptance, owesDelivery) in units)
         {
             // P1 (v4.3): a caller that knows its plan identity stamps the SAME WorkUnitRef coordinates receipts
             // carry, so both sides of the ledger name their unit. A plan-less caller (legacy tests, a unit-tier
             // context) stakes exactly as before — the envelope stays byte-identical without the field.
             var workUnit = planRef is { } plan ? new Messages.Contracts.WorkUnitRef { WorkPlanId = plan.WorkPlanId, PlanVersion = plan.Version, UnitId = subtaskId, ContractHash = contractHash } : null;
 
-            requirements.Add(Stake(AcceptanceRef(subtaskId), Messages.Contracts.ContractKinds.Acceptance, contractHash, required: true, requiredAuthority, workUnit));
+            requirements.Add(Stake(AcceptanceRef(subtaskId), Messages.Contracts.ContractKinds.Acceptance, contractHash, owesAcceptance, requiredAuthority, workUnit));
             requirements.Add(Stake($"delivery:{subtaskId}", Messages.Contracts.ContractKinds.Delivery, contractHash, owesDelivery, requiredAuthority, workUnit));
             requirements.Add(Stake($"output:{subtaskId}", Messages.Contracts.ContractKinds.Output, contractHash, owesDelivery, requiredAuthority, workUnit));
         }

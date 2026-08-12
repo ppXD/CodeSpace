@@ -90,7 +90,7 @@ public static class SupervisorTapeCompletion
     /// spawn decision's payload — which is why this needs no rows. A spawn naming a unit the plan never declared
     /// stakes nothing, exactly as production skips a unit with no planned spec.
     /// </summary>
-    private static IEnumerable<(string SubtaskId, string ContractHash, bool OwesDelivery)> StakedUnits(IReadOnlyList<SupervisorPriorDecision> decisions)
+    private static IEnumerable<(string SubtaskId, string ContractHash, bool OwesAcceptance, bool OwesDelivery)> StakedUnits(IReadOnlyList<SupervisorPriorDecision> decisions)
     {
         // Production stakes only under an AUTHORIZED plan: the executor reads the last ref-bearing plan decision's
         // own recorded workPlanId off its OUTCOME and stakes nothing without one. A tape whose plans carry no ref
@@ -116,7 +116,7 @@ public static class SupervisorTapeCompletion
 
                 var (goalOverride, repositoryId) = overrides.GetValueOrDefault(subtaskId);
 
-                yield return (subtaskId, SupervisorUnitContract.Hash(spec, goalOverride, repositoryId), SupervisorUnitContract.OwesDelivery(spec));
+                yield return (subtaskId, SupervisorUnitContract.Hash(spec, goalOverride, repositoryId), SupervisorUnitContract.OwesAcceptance(spec), SupervisorUnitContract.OwesDelivery(spec));
             }
         }
     }

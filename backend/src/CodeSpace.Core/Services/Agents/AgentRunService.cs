@@ -209,9 +209,10 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             // ModelProposal default; authority is only ever under-claimed, never inflated.
             // planRef mirrors the composer's workflow-agent convention exactly (WorkPlanId = the run, PlanVersion 0)
             // — the same coordinates its attempts and receipts already carry.
+            // OwesAcceptance is true by construction — this method only stakes when task.Acceptance is present.
             var requirements = Supervisor.SupervisorUnitContract.BuildStakedRequirements(new[]
             {
-                (AgentAcceptanceContract.UnitId(nodeId, iterationKey), AgentAcceptanceContract.Hash(task), AgentAcceptanceContract.ExpectsChanges(task)),
+                (AgentAcceptanceContract.UnitId(nodeId, iterationKey), AgentAcceptanceContract.Hash(task), true, AgentAcceptanceContract.ExpectsChanges(task)),
             }, task.AcceptanceAuthority ?? Messages.Contracts.ContractAuthority.ModelProposal, (runId, 0));
 
             await _contracts.UpsertRequirementsAsync(runId, teamId, requirements, cancellationToken).ConfigureAwait(false);

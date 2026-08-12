@@ -189,7 +189,7 @@ public sealed class CompletionComposerFlowTests
         var store = scope.Resolve<ICompletionContractStore>();
         var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
         await store.UpsertRequirementsAsync(runId, teamId,
-            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesAcceptance(s), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
             CancellationToken.None);
 
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
@@ -245,7 +245,7 @@ public sealed class CompletionComposerFlowTests
         using var scope = _fixture.BeginScope();
         var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
         await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId,
-            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesAcceptance(s), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
             CancellationToken.None);
 
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
@@ -283,7 +283,7 @@ public sealed class CompletionComposerFlowTests
         using var scope = _fixture.BeginScope();
         var planned = SupervisorOutcome.ReadPlanSubtasks(planPayload);
         await scope.Resolve<ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId,
-            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
+            SupervisorUnitContract.BuildStakedRequirements(planned.Select(s => (s.Id, SupervisorUnitContract.Hash(s, null, null), SupervisorUnitContract.OwesAcceptance(s), SupervisorUnitContract.OwesDelivery(s))), ContractAuthority.ModelProposal),
             CancellationToken.None);
 
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
