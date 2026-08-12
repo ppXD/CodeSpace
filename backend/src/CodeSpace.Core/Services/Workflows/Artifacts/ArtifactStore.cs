@@ -38,11 +38,22 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
         // The query is cheap (unique index lookup) and avoids racing the DB constraint.
         var existing = await _db.WorkflowArtifact.AsNoTracking()
             .Where(a => a.TeamId == teamId && a.Sha256 == sha)
-            .Select(a => (Guid?)a.Id)
+            .Select(a => new { a.Id, a.StorageUrl })
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (existing.HasValue) return existing.Value;
+        if (existing is not null)
+        {
+            // P2 slice 3 (a dedup hit verifies the bytes are still THERE): an offloaded blob under a wiped or
+            // once-unconfigured root can be gone while the row's identity claim survives — trusting the key would
+            // hand back an id whose read is doomed. We are HOLDING the exact bytes the claim describes (the sha
+            // matched), so restore the blob instead of failing: self-healing beats a dead reference. Content
+            // correctness on the healthy path stays the read's verification; inline rows have nothing to check.
+            if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
+                await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false);
+
+            return existing.Id;
+        }
 
         // Size-routed storage: small payloads stay inline in the DB row; large ones are offloaded to the
         // out-of-band backend (content-addressed by sha, so the write is idempotent) and the row keeps only the

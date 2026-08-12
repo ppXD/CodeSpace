@@ -115,6 +115,11 @@ RUN chmod +x ./codespace-mcp
 # defense-in-depth: the worker is the one image that runs agent-driven commands. The CLIs + codespace-mcp are
 # world-executable; the harness pins per-run CODEX_HOME / CLAUDE_CONFIG_DIR, and /tmp (per-run clones + the MCP
 # socket) is world-writable. $APP_UID is numeric so a k8s runAsNonRoot check is satisfied.
+# P2 slice 3: the DURABLE data roots, prepared with app ownership — a Production host refuses to start when
+# Artifacts:StoreDirectory / Agents:RunSpoolDirectory are unconfigured, and a real deployment mounts volumes at
+# these paths (the mount point must be writable by the app user either way).
+RUN mkdir -p /var/lib/codespace/artifacts /var/lib/codespace/spool && chown -R $APP_UID /var/lib/codespace
+
 USER $APP_UID
 
 EXPOSE 8080

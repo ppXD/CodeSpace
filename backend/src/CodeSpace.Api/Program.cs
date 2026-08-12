@@ -26,6 +26,10 @@ public class Program
         // would be too late for anything on this path.
         RuntimeSettings.Bind(configuration);
 
+        // P2 slice 3 (the production /tmp ban): a Production host with unconfigured durable roots refuses to
+        // start — artifact blobs and re-attach spools must never silently land under the system temp dir.
+        CodeSpace.Core.Settings.DurableRootsGuard.ThrowIfProductionUnconfigured(RuntimeSettings.Current, environment);
+
         var application = new SerilogApplicationSetting(configuration).Value;
 
         Log.Logger = new LoggerConfiguration()
