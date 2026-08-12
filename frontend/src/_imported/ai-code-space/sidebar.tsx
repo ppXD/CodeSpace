@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 
 import { clearAuthState } from "@/api/auth";
 import type { MeTeam } from "@/api/types";
+import { CreateWorkspaceDialog } from "@/components/settings/CreateWorkspaceDialog";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
 
 import { Ic } from "./icons";
@@ -37,10 +38,12 @@ export function Sidebar() {
   const isLibraryActive = /^\/teams\/[^/]+\/library/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
   const isRunsActive = /^\/teams\/[^/]+\/runs/.test(pathname);
+  const isMembersActive = /^\/teams\/[^/]+\/members/.test(pathname);
   const isSettingsActive = /^\/teams\/[^/]+\/settings/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
   const [teamOpen, setTeamOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [teamCoords, setTeamCoords] = useState<Coords | null>(null);
   const teamTriggerRef = useRef<HTMLDivElement | null>(null);
 
@@ -170,7 +173,13 @@ export function Sidebar() {
               management with the switcher's "switch team" purpose felt off.
               Connections now live on /teams/{slug}/settings, reached via the
               gear icon next to this trigger. */}
-          <div className="sb-pop-action"><Ic.Plus size={14} /> Create workspace</div>
+          {/* Shown only when this account actually holds the capability — the server refuses
+              otherwise, and offering an action that answers 403 is worse than not offering it. */}
+          {(me.data?.permissions ?? []).includes("teams.create") && (
+            <div className="sb-pop-action" onClick={() => { setTeamOpen(false); setCreateOpen(true); }}>
+              <Ic.Plus size={14} /> Create workspace
+            </div>
+          )}
         </div>
       </div>
     </>,
@@ -254,6 +263,7 @@ export function Sidebar() {
         <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
       </div>
       {teamPopover}
+      {createOpen && <CreateWorkspaceDialog onClose={() => setCreateOpen(false)} />}
 
       <nav className="sb-nav">
         <div
@@ -354,6 +364,24 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Play size={15} /></span>
           <span className="sb-nav-lbl">Runs</span>
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isMembersActive}
+          onClick={() => {
+            // Who is in the team is not configuration — it is one of the things a team IS, so it sits
+            // in the primary nav rather than a tab inside Settings.
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/members", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Members"
+        >
+          <span className="sb-nav-ic"><Ic.Users size={15} /></span>
+          <span className="sb-nav-lbl">Members</span>
+          {active != null && active.memberCount > 0 && (
+            <span className="sb-nav-badge">{active.memberCount}</span>
+          )}
         </div>
         <div
           className="sb-nav-item"

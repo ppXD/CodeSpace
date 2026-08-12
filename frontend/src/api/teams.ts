@@ -35,7 +35,17 @@ export interface CreateInvitationResult {
   expiresAt: string;
 }
 
+export interface TeamSummary {
+  id: string;
+  slug: string;
+  name: string;
+  kind: "Personal" | "Workspace";
+}
+
 export const teamsApi = {
+  /** Opening a workspace. Gated on the instance capability `teams.create`, enforced server-side. */
+  create: (name: string) => fetchJson<TeamSummary>("/api/teams", { method: "POST", body: JSON.stringify({ name }) }),
+
   /** Pickable members (bot-excluded) — the `@`-mention picker, invite list, member roster. */
   listMembers: () => fetchJson<TeamMemberSummary[]>("/api/teams/members"),
 

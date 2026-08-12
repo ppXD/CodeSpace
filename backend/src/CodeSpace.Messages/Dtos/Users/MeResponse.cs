@@ -4,6 +4,13 @@ namespace CodeSpace.Messages.Dtos.Users;
 
 public sealed record MeResponse
 {
+    /// <summary>
+    /// INSTANCE-level capabilities this account holds — the <c>permission</c> tables, not a team role.
+    /// Sent for the same reason the per-team list is: a client that has to guess whether an action
+    /// exists will either hide something the person may do or offer something they may not.
+    /// </summary>
+    public required IReadOnlyList<string> Permissions { get; init; }
+
     public required Guid Id { get; init; }
     public required string Email { get; init; }
     public required string Name { get; init; }

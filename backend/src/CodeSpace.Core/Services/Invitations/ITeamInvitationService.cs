@@ -10,10 +10,10 @@ namespace CodeSpace.Core.Services.Invitations;
 /// </summary>
 public interface ITeamInvitationService
 {
-    Task<CreateInvitationResult> InviteAsync(string email, TeamRole role, string inviteUrlTemplate, CancellationToken cancellationToken);
+    Task<CreateInvitationResult> InviteAsync(string email, TeamRole role, CancellationToken cancellationToken);
     Task<IReadOnlyList<TeamInvitationSummary>> ListAsync(CancellationToken cancellationToken);
     Task RevokeAsync(Guid invitationId, CancellationToken cancellationToken);
-    Task<CreateInvitationResult> RegenerateAsync(Guid invitationId, string inviteUrlTemplate, CancellationToken cancellationToken);
+    Task<CreateInvitationResult> RegenerateAsync(Guid invitationId, CancellationToken cancellationToken);
 
     /// <summary>Anonymous: the token is the authorization.</summary>
     Task<InvitationPreview> PreviewAsync(string token, CancellationToken cancellationToken);

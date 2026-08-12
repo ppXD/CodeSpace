@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { useConfirm } from "@/components/dialog";
+import { RowMenu } from "./RowMenu";
 import { ApiError } from "@/api/request";
 import type { CreateInvitationResult, TeamInvitationSummary, TeamMemberSummary } from "@/api/teams";
 import type { TeamRole } from "@/api/types";
@@ -113,7 +115,7 @@ function MemberRow({ member, isMe, myRole, mayManage, mayTransfer, isLastOwner }
   isLastOwner: boolean;
 }) {
   const { changeRole, removeMember, transferOwnership } = useTeamManagement();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const confirm = useConfirm();
 
   // Mirrors the server's rule so the UI offers only what would be accepted: you may act on anyone
   // below you and on yourself, never above, never across. The server refuses regardless — this is
@@ -157,30 +159,51 @@ function MemberRow({ member, isMe, myRole, mayManage, mayTransfer, isLastOwner }
             )}
 
         {mayManage && member.role != null && !member.isBot && (
-          <div style={{ position: "relative" }}>
-            <button className="btn btn-icon" aria-label={`Actions for ${member.name}`} onClick={() => setMenuOpen((v) => !v)}>⋯</button>
-            {menuOpen && (
-              <div className="sb-pop sb-pop-menu" style={{ position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 40, minWidth: 230 }} onMouseLeave={() => setMenuOpen(false)}>
+          <RowMenu label={`Actions for ${member.name}`}>
+            {(close) => (
+              <>
                 {mayTransfer && !isMe && (
                   <button
                     className="sb-pop-item"
-                    onClick={() => { setMenuOpen(false); transferOwnership.mutate(member.userId); }}
+                    onClick={async () => {
+                      close();
+                      // Irreversible without the new owner's cooperation — they end up outranking the
+                      // person who clicked, so this asks before it acts.
+                      const ok = await confirm({
+                        title: `Make ${member.name} the owner?`,
+                        message: "They become Owner and you become Admin. Only they can hand it back.",
+                        confirmLabel: "Transfer",
+                      });
+
+                      if (ok) transferOwnership.mutate(member.userId);
+                    }}
                   >
                     Transfer ownership
-                    <span className="lt3-opt-d" style={{ display: "block" }}>Makes them Owner and you Admin. One step, both sides.</span>
                   </button>
                 )}
                 <button
                   className="sb-pop-item sb-pop-menu-danger"
                   disabled={!outranked || isLastOwner}
-                  onClick={() => { setMenuOpen(false); removeMember.mutate(member.userId); }}
+                  title={isLastOwner ? "A team must always have an owner. Transfer ownership first." : undefined}
+                  onClick={async () => {
+                    close();
+                    const ok = await confirm({
+                      title: isMe ? "Leave this team?" : `Remove ${member.name}?`,
+                      message: isMe
+                        ? "You lose access to everything in it. Someone still in the team would have to invite you back."
+                        : "They lose access to everything in this team. Inviting them again starts over.",
+                      confirmLabel: isMe ? "Leave" : "Remove",
+                      destructive: true,
+                    });
+
+                    if (ok) removeMember.mutate(member.userId);
+                  }}
                 >
-                  {isMe ? "Leave team" : "Remove from team"}
-                  {isLastOwner && <span className="lt3-opt-d" style={{ display: "block" }}>The last owner can't leave. Transfer ownership first.</span>}
+                  {isMe ? "Leave team" : "Remove"}
                 </button>
-              </div>
+              </>
             )}
-          </div>
+          </RowMenu>
         )}
       </div>
 
@@ -191,7 +214,7 @@ function MemberRow({ member, isMe, myRole, mayManage, mayTransfer, isLastOwner }
 
 function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSummary; onIssued: (v: { email: string; result: CreateInvitationResult }) => void }) {
   const { revokeInvitation, regenerateInvitation } = useTeamManagement();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const confirm = useConfirm();
 
   return (
     <div className="cn-row">
@@ -208,30 +231,49 @@ function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSum
           ? <span className="cn-status cn-status-warn">expired</span>
           : <span className="cn-sub">expires {relativeDays(invitation.expiresAt)}</span>}
 
-        <div style={{ position: "relative" }}>
-          <button className="btn btn-icon" aria-label={`Actions for ${invitation.email}`} onClick={() => setMenuOpen((v) => !v)}>⋯</button>
-          {menuOpen && (
-            <div className="sb-pop sb-pop-menu" style={{ position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 40, minWidth: 230 }} onMouseLeave={() => setMenuOpen(false)}>
-              {/* No "copy link": after creation there is nothing to copy — the server kept only a hash.
-                  Saying so is what stops someone hunting for a link they think they mislaid. */}
+        <RowMenu label={`Actions for ${invitation.email}`}>
+          {(close) => (
+            <>
+              {/* No "copy link": after creation there is nothing to copy — the server kept only a
+                  hash. Saying so is what stops someone hunting for a link they think they mislaid. */}
               <button
                 className="sb-pop-item"
                 disabled={regenerateInvitation.isPending}
                 onClick={async () => {
-                  setMenuOpen(false);
+                  close();
+                  const ok = await confirm({
+                    title: "Issue a new link?",
+                    message: "The link already sent stops working immediately. Anyone holding it will need the new one.",
+                    confirmLabel: "Regenerate",
+                  });
+
+                  if (!ok) return;
+
                   const result = await regenerateInvitation.mutateAsync(invitation.id);
                   onIssued({ email: invitation.email, result });
                 }}
               >
                 Regenerate link
-                <span className="lt3-opt-d" style={{ display: "block" }}>Issues a new link and kills the old one.</span>
               </button>
-              <button className="sb-pop-item sb-pop-menu-danger" onClick={() => { setMenuOpen(false); revokeInvitation.mutate(invitation.id); }}>
-                Revoke invitation
+              <button
+                className="sb-pop-item sb-pop-menu-danger"
+                onClick={async () => {
+                  close();
+                  const ok = await confirm({
+                    title: `Revoke the invitation to ${invitation.email}?`,
+                    message: "Their link stops working. You can invite them again later.",
+                    confirmLabel: "Revoke",
+                    destructive: true,
+                  });
+
+                  if (ok) revokeInvitation.mutate(invitation.id);
+                }}
+              >
+                Revoke
               </button>
-            </div>
+            </>
           )}
-        </div>
+        </RowMenu>
       </div>
     </div>
   );
