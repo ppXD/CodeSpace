@@ -36,6 +36,8 @@ public class RequestAuthorizationInventoryTests
         ["ReceiveWebhookCommand"] = "provider-signed inbound; proof is the HMAC verified against the per-webhook secret.",
         ["ResumeWorkflowCallbackCommand"] = "proof is the single-use high-entropy callback token in the URL.",
         ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row.",
+        ["AcceptInvitationCommand"] = "the invitee has no account yet; proof is the single-use invitation token in the route.",
+        ["PreviewInvitationQuery"] = "same token, read-only, and it answers nothing at all unless the token checks out.",
     };
 
     /// <summary>

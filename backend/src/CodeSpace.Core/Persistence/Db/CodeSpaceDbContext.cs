@@ -24,6 +24,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<User> User => Set<User>();
     public DbSet<Team> Team => Set<Team>();
     public DbSet<TeamMembership> TeamMembership => Set<TeamMembership>();
+    public DbSet<TeamInvitation> TeamInvitation => Set<TeamInvitation>();
     public DbSet<ProviderInstance> ProviderInstance => Set<ProviderInstance>();
     public DbSet<Credential> Credential => Set<Credential>();
     public DbSet<Repository> Repository => Set<Repository>();

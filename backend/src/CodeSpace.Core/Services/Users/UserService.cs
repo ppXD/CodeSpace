@@ -136,6 +136,8 @@ public sealed class UserService : IUserService, IScopedDependency
     /// all three return the identical shape. Personal team first then Workspaces by name,
     /// matching the sidebar's grouping so the SPA doesn't have to re-sort.
     /// </summary>
+    public async Task<MeResponse> BuildMeForAsync(User user, CancellationToken cancellationToken) => await BuildMeResponseAsync(user, cancellationToken).ConfigureAwait(false);
+
     private async Task<MeResponse> BuildMeResponseAsync(User user, CancellationToken cancellationToken)
     {
         var teams = await _db.Team.AsNoTracking()

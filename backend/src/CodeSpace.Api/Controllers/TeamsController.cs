@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Commands.Invitations;
+using CodeSpace.Messages.Queries.Invitations;
 using CodeSpace.Messages.Queries.Users;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -33,6 +35,39 @@ public class TeamsController : ControllerBase
     public async Task<IActionResult> MemberIdentities(CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new ListTeamMemberIdentitiesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Invite an address to this team. The link comes back ONCE — it is not stored, and a member who
+    /// loses it regenerates rather than reads it again.
+    /// </summary>
+    [HttpPost("invitations")]
+    public async Task<IActionResult> Invite([FromBody] CreateTeamInvitationCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("invitations")]
+    public async Task<IActionResult> Invitations(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListTeamInvitationsQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpDelete("invitations/{invitationId:guid}")]
+    public async Task<IActionResult> RevokeInvitation([FromRoute] Guid invitationId, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new RevokeTeamInvitationCommand { InvitationId = invitationId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    /// <summary>Replaces the token, which kills the previous link — the move for a link that went astray.</summary>
+    [HttpPost("invitations/{invitationId:guid}/regenerate")]
+    public async Task<IActionResult> RegenerateInvitation([FromRoute] Guid invitationId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new RegenerateTeamInvitationCommand { InvitationId = invitationId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 }

@@ -1,3 +1,4 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Commands.Auth;
 using CodeSpace.Messages.Dtos.Users;
 
@@ -14,4 +15,11 @@ public interface IUserService
     Task<ChangePasswordResponse> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken);
     Task<MeResponse> GetMeAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<TeamMemberSummary>> ListTeamMembersAsync(Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The /me projection for a user OTHER than the request's principal — the one case being an
+    /// invitation acceptance, which mints a session for an account that did not exist when the
+    /// request began, so <see cref="GetMeAsync"/> (which reads ICurrentUser) cannot describe it.
+    /// </summary>
+    Task<MeResponse> BuildMeForAsync(User user, CancellationToken cancellationToken);
 }
