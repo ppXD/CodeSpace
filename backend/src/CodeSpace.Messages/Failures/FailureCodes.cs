@@ -44,6 +44,15 @@ public static class FailureCodes
     public const string RerunUpstreamNotReusable = "rerun_upstream_not_reusable";
     public const string PackImportFailed = "pack_import_failed";
 
+    // ── Invitations ────────────────────────────────────────────────────────────────
+    public const string InvitationNotUsable = "invitation_not_usable";
+    public const string InvitationEmailMismatch = "invitation_email_mismatch";
+    public const string InvitationRequiresSignIn = "invitation_requires_sign_in";
+    public const string InvitationRoleExceedsGranter = "invitation_role_exceeds_granter";
+    public const string PersonalTeamNotInvitable = "personal_team_not_invitable";
+    public const string InvitationAlreadyPending = "invitation_already_pending";
+    public const string AlreadyTeamMember = "already_team_member";
+
     /// <summary>The masked answer for anything unclassified. Never carries a message from the exception.</summary>
     public const string Internal = "internal_error";
 }

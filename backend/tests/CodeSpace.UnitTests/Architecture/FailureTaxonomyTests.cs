@@ -70,6 +70,13 @@ public class FailureTaxonomyTests
         FailureCodes.RerunBlockedUnsupportedNode.ShouldBe("rerun_blocked_unsupported_node");
         FailureCodes.RerunUpstreamNotReusable.ShouldBe("rerun_upstream_not_reusable");
         FailureCodes.PackImportFailed.ShouldBe("pack_import_failed");
+        FailureCodes.InvitationNotUsable.ShouldBe("invitation_not_usable");
+        FailureCodes.InvitationEmailMismatch.ShouldBe("invitation_email_mismatch");
+        FailureCodes.InvitationRequiresSignIn.ShouldBe("invitation_requires_sign_in");
+        FailureCodes.InvitationRoleExceedsGranter.ShouldBe("invitation_role_exceeds_granter");
+        FailureCodes.PersonalTeamNotInvitable.ShouldBe("personal_team_not_invitable");
+        FailureCodes.InvitationAlreadyPending.ShouldBe("invitation_already_pending");
+        FailureCodes.AlreadyTeamMember.ShouldBe("already_team_member");
         FailureCodes.Internal.ShouldBe("internal_error");
     }
 
