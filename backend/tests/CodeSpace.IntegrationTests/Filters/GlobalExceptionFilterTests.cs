@@ -8,7 +8,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Filters;
@@ -19,6 +18,10 @@ namespace CodeSpace.IntegrationTests.Filters;
 /// "provider_unauthorized", NOT an app 401 — the SPA signs the user out on any 401, so
 /// mirroring the provider's 401 used to drop the user's session mid "Add repository". Other
 /// provider statuses (404 / 5xx) still mirror through as "provider_error".
+///
+/// The assertions here are UNCHANGED across the move to a classification-driven filter — they are the
+/// evidence that collapsing sixteen per-type arms into one kind-to-status table kept every status and
+/// every code byte-identical. Only the constructor call moved, because logging left the filter.
 ///
 /// Lives in IntegrationTests (not UnitTests) because the filter needs the ASP.NET framework +
 /// CodeSpace.Api references the lean UnitTests project excludes; tagged Integration per the
@@ -146,7 +149,7 @@ public class GlobalExceptionFilterTests
 
     private static ObjectResult Run(Exception exception)
     {
-        var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);
+        var filter = new GlobalExceptionFilter();
         var actionContext = new ActionContext(new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
         var context = new ExceptionContext(actionContext, new List<IFilterMetadata>()) { Exception = exception };
 

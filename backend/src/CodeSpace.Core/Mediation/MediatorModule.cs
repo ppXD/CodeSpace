@@ -1,10 +1,12 @@
 using System.Reflection;
 using Autofac;
 using CodeSpace.Core.Authorization;
+using CodeSpace.Core.Middlewares.Failures;
 using CodeSpace.Core.Middlewares.Logging;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Middlewares.Visibility;
 using MediatR;
+using MediatR.Pipeline;
 using MediatR.Extensions.Autofac.DependencyInjection;
 using MediatR.Extensions.Autofac.DependencyInjection.Builder;
 
@@ -47,5 +49,14 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(CredentialAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(BotVisibilityBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TransactionalBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+
+        // MediatR's own exception seam, registered explicitly rather than left to the assembly scan so
+        // the one thing that observes every failure is visible in the same list as everything else that
+        // wraps a request. RegisterMediatR already supplies the processor behaviours that invoke it.
+        //
+        // An ACTION, never a handler: handlers can mark an exception handled, and the processors sit
+        // inside TransactionalBehavior, so a handled exception would return normally and commit the
+        // transaction that had just failed.
+        builder.RegisterGeneric(typeof(RequestFailureObserver<,>)).As(typeof(IRequestExceptionAction<,>)).InstancePerLifetimeScope();
     }
 }

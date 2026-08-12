@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
@@ -7,7 +9,12 @@ namespace CodeSpace.Core.Services.Workflows;
 /// original simply never finished the part we'd reuse (e.g. rerun-from a node whose upstream never completed in a
 /// Failed/Suspended original). Refused before any write; the message names the offending upstream node. Maps to 422.
 /// </summary>
-public sealed class RerunUpstreamNotReusableException : Exception
+public sealed class RerunUpstreamNotReusableException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Unprocessable;
+
+    public string Code => FailureCodes.RerunUpstreamNotReusable;
+
+
     public RerunUpstreamNotReusableException(string message) : base(message) { }
 }

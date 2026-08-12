@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
@@ -7,8 +9,13 @@ namespace CodeSpace.Core.Services.Workflows;
 /// double-fire a side-effecting branch body. Distinct from the OperationId idempotency path (a SAME-token
 /// resubmit dedups to the prior fork and never reaches the lease). The global exception filter maps it to 409.
 /// </summary>
-public sealed class RerunAlreadyInProgressException : Exception
+public sealed class RerunAlreadyInProgressException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Conflict;
+
+    public string Code => FailureCodes.RerunAlreadyInProgress;
+
+
     public RerunAlreadyInProgressException(Guid originalRunId, string mapNodeId, IReadOnlyCollection<int> branchIndices)
         : base($"A rerun of map '{mapNodeId}' branch(es) {string.Join(", ", branchIndices)} in run {originalRunId} is already in progress; wait for it to finish before rerunning the same branch.")
     {

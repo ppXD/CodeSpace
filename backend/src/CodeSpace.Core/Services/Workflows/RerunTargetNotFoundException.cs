@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
@@ -7,7 +9,12 @@ namespace CodeSpace.Core.Services.Workflows;
 /// <see cref="WorkflowValidationException"/> so the global exception filter maps it to 400 with the specific
 /// message (which names the offending node / the container to rerun instead) rather than a generic 404.
 /// </summary>
-public sealed class RerunTargetNotFoundException : Exception
+public sealed class RerunTargetNotFoundException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Invalid;
+
+    public string Code => FailureCodes.RerunTargetInvalid;
+
+
     public RerunTargetNotFoundException(string message) : base(message) { }
 }

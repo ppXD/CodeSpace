@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Failures;
+
 namespace CodeSpace.Core.Services.Workflows;
 
 /// <summary>
@@ -14,8 +16,14 @@ namespace CodeSpace.Core.Services.Workflows;
 /// UPSTREAM (kept + reused, never re-executed) is always fine. The global filter maps THIS exception to 422 with
 /// the offending node id(s) so the operator knows exactly which node blocks the rerun.</para>
 /// </summary>
-public sealed class RerunBlockedByUnsupportedNodeException : Exception
+public sealed class RerunBlockedByUnsupportedNodeException : Exception, IFailure
 {
+    public FailureKind Kind => FailureKind.Unprocessable;
+
+    public string Code => FailureCodes.RerunBlockedUnsupportedNode;
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["blockedNodeIds"] = BlockedNodeIds };
+
     public IReadOnlyList<string> BlockedNodeIds { get; }
 
     public RerunBlockedByUnsupportedNodeException(IReadOnlyList<string> blockedNodeIds)
