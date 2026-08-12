@@ -84,6 +84,38 @@ public class ArtifactStoreFlowTests
     }
 
     [Fact]
+    public async Task A_dedup_hit_restores_a_missing_blob_instead_of_returning_a_dead_reference()
+    {
+        // P2 slice 3: an offloaded blob under a wiped (or once-unconfigured) root can be gone while the row's
+        // identity claim survives. The dedup hit HOLDS the exact bytes the claim describes — restoring beats
+        // handing back an id whose read is doomed.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('z', 20_000));   // over the inline threshold → offloaded
+
+        Guid firstId;
+        using (var scope = _fixture.BeginScope())
+            firstId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        string storageUrl;
+        using (var scope = _fixture.BeginScope())
+            storageUrl = (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(a => a.Id == firstId)).StorageUrl!;
+
+        File.Delete(new Uri(storageUrl).LocalPath);
+
+        Guid secondId;
+        using (var scope = _fixture.BeginScope())
+            secondId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+
+        secondId.ShouldBe(firstId, "the dedup contract holds — same (team, sha), same id");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var fetched = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, firstId, CancellationToken.None);
+            fetched.ShouldNotBeNull().Bytes.ShouldBe(content, "the blob was restored — and the read's own verification proves the restored content byte-exact");
+        }
+    }
+
+    [Fact]
     public async Task The_immutability_trigger_blocks_an_inline_mutation_at_the_database()
     {
         // The inline surface's REAL defense (discovered by this slice's first CI round): workflow_artifact carries

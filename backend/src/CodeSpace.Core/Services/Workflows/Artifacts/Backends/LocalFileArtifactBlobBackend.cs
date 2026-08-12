@@ -62,6 +62,9 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingle
         return ToUrl(path);
     }
 
+    public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) =>
+        Task.FromResult(File.Exists(ResolveUnderRoot(storageUrl)));
+
     public async Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken)
     {
         var path = ResolveUnderRoot(storageUrl);

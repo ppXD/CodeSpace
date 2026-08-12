@@ -20,6 +20,9 @@ public interface IArtifactBlobBackend
     /// </summary>
     Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken);
 
+    /// <summary>Whether the blob a <paramref name="storageUrl"/> claims is still THERE (P2 slice 3 — the dedup hit's existence check; content correctness is the read path's verification). Never throws for a missing blob — that's the false it exists to report.</summary>
+    Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken);
+
     /// <summary>Resolve a <paramref name="storageUrl"/> this backend produced back to its bytes.</summary>
     Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken);
 }
