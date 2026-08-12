@@ -29,6 +29,7 @@ public class TeamWritePermissionAdoptionTests
         ["MarkConversationReadCommand"] = "advances the caller's own read cursor; unread counts are per-member and the cursor only moves forward.",
         ["LinkProviderIdentityByPatCommand"] = "links the caller's own GitHub/GitLab account; the service scopes by ICurrentUser.Id, never by team.",
         ["UnlinkProviderIdentityCommand"] = "unlinks the caller's own provider identity, same scoping.",
+        ["LeaveTeamCommand"] = "removes the caller's own membership row; a Viewer who cannot leave a team has been locked in.",
     };
 
     [Fact]

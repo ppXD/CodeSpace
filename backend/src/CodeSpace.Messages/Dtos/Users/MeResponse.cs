@@ -47,4 +47,14 @@ public sealed record MeTeam
     /// same uniform treatment as <see cref="ProjectCount"/>. Matches the team's workflow list query.
     /// </summary>
     public required int WorkflowCount { get; init; }
+
+    /// <summary>
+    /// Exactly what this caller may DO in this team, expanded from their role by
+    /// <c>TeamPermissionMatrix</c> — the same table the server refuses on.
+    ///
+    /// <para>Sent so a client can hide what it must not offer WITHOUT reimplementing the rules. A
+    /// frontend that derives ability from the role name keeps a second copy of the matrix, and the two
+    /// drift the first time a permission moves tier: a button stays visible and answers 403.</para>
+    /// </summary>
+    public required IReadOnlyList<string> Permissions { get; init; }
 }

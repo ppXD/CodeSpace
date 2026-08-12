@@ -77,6 +77,8 @@ public class FailureTaxonomyTests
         FailureCodes.PersonalTeamNotInvitable.ShouldBe("personal_team_not_invitable");
         FailureCodes.InvitationAlreadyPending.ShouldBe("invitation_already_pending");
         FailureCodes.AlreadyTeamMember.ShouldBe("already_team_member");
+        FailureCodes.LastOwner.ShouldBe("last_owner");
+        FailureCodes.RoleOutranksActor.ShouldBe("role_outranks_actor");
         FailureCodes.Internal.ShouldBe("internal_error");
     }
 

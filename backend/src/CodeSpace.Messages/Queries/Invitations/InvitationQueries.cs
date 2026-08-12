@@ -1,11 +1,21 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Invitations;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Queries.Invitations;
 
-/// <summary>Pending invitations for the current team. Never carries a token.</summary>
-public sealed record ListTeamInvitationsQuery : IQuery<IReadOnlyList<TeamInvitationSummary>>, IRequireTeamMembership;
+/// <summary>
+/// Pending invitations for the current team. Never carries a token.
+///
+/// <para>Gated on members.manage rather than plain membership: who has been offered a seat, at what
+/// role, and by whom is management information. A Viewer reading it learns about people who are not
+/// in the team yet, which is not part of what the read-only role exists to give them.</para>
+/// </summary>
+public sealed record ListTeamInvitationsQuery : IQuery<IReadOnlyList<TeamInvitationSummary>>, IRequireTeamPermission
+{
+    public string RequiredPermission => TeamPermissions.MembersManage;
+}
 
 /// <summary>
 /// What a token is worth, to whoever holds it. ANONYMOUS — see <c>AcceptInvitationCommand</c>.
