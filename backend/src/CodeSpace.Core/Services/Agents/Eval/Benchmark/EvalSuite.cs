@@ -91,7 +91,12 @@ public static class EvalSuite
                 return new CorpusCellOutcome
                 {
                     TaskId = cell.TaskId, Mode = cell.Mode,
-                    State = result.Grade.Passed ? CorpusCellState.Solved : CorpusCellState.Unsolved,
+                    // P0-B2: a REACHED cell whose grade is infra-classed (grader fault, environment — incl. the
+                    // mcp-required-no-handshake rule) is a truth hole, not a candidate failure: it leaves the
+                    // solve denominator instead of counting Unsolved against the model.
+                    State = result.Grade.Passed ? CorpusCellState.Solved
+                        : Agents.AgentAcceptanceContract.IsInfraFailure(result.Grade, workPresent: true) ? CorpusCellState.InfraUnknown
+                        : CorpusCellState.Unsolved,
                     Detail = result.Grade.Detail,
                 };
 

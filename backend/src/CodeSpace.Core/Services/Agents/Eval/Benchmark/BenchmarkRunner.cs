@@ -68,6 +68,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
+        grade = ApplyMcpFabricRule(grade, mode, completed);
+
         grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
         return BuildResult(task, mode, completed, grade, mcpFullCatalog);
@@ -132,6 +134,31 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             _logger.LogWarning(ex, "Benchmark evidence store failed; the verdict stands evidence-less");
             return grade with { EvidenceText = null };
         }
+    }
+
+    /// <summary>
+    /// P0-B2: an MCP-REQUIRED arm whose fabric never HANDSHOOK is an infrastructure fault, never a model verdict —
+    /// the run was offered a catalog no client ever connected to, so the cell measured the cli arm under the
+    /// cli-mcp label. Overrides even a passing oracle (mislabeled A/B data is worse than a lost cell): the grade
+    /// becomes Environment-classed, which the corpus counts as InfraUnknown, outside the solve denominator.
+    /// Pre-slice results (no evidence recorded) are untouched — absence of observation is never an observation.
+    /// </summary>
+    internal static BenchmarkGrade ApplyMcpFabricRule(BenchmarkGrade grade, BenchmarkMode mode, Persistence.Entities.AgentRun run)
+    {
+        if (mode != BenchmarkMode.HarnessCliWithMcp || run.ResultJson is not { } json) return grade;
+
+        McpFabricEvidence? evidence;
+        try { evidence = JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.McpEvidence; }
+        catch (JsonException) { return grade; }
+
+        if (evidence is not { HandshakeObserved: false }) return grade;
+
+        return grade with
+        {
+            Passed = false,
+            Class = GradeFailureClass.Environment,
+            Detail = $"mcp-required-no-handshake: the cli-mcp arm's fabric never served an initialize (endpointBound={evidence.EndpointBound}, declarationWritten={evidence.DeclarationWritten}, proxyResolved={evidence.ProxyResolved}) — infra, not a model verdict",
+        };
     }
 
     /// <summary>Grade the finished run with the task's oracle, against the post-run workspace, on the same runner kind the agent ran on. The grader is independent of the agent (it re-runs the repo's tests).</summary>

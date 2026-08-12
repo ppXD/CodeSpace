@@ -37,6 +37,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly Guid _teamId;
     private readonly SecretRedactor _redactor;
     private readonly string _socketPath;
+    private readonly McpFabricCounters _counters;
     private readonly string _token;
     private readonly IAgentMcpConnectRegistry _connects;
     private readonly IServiceScope _scope;
@@ -67,6 +68,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _approvalConversationId = approvalConversationId;
         _catalogMode = catalogMode;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _counters = new McpFabricCounters();
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
         // On any setup throw, dispose the listener + cts (an fd would otherwise orphan) and rethrow; the opener
@@ -113,6 +115,19 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     /// </summary>
     public IReadOnlyList<string> AllowedToolNames() =>
         McpAllowedTools.QualifiedNames(_registry.All.Where(t => _catalogMode == McpCatalogMode.Full || t.IsReadOnly), _autonomy, McpRequestHandler.ServerName).ToArray();
+
+    /// <summary>P0-B2: an authenticated client served the MCP <c>initialize</c> handshake at least once on this endpoint.</summary>
+    public bool HandshakeObserved => _counters.Handshakes > 0;
+
+    /// <summary>P0-B2: total <c>tools/call</c> requests dispatched on this endpoint — read-only calls included.</summary>
+    public int ObservedToolCalls => _counters.ToolCalls;
+
+    /// <summary>P0-B2: SHA-256 (hex) over this endpoint's sorted served tool names — the effective catalog's identity. Deterministic per (registry, autonomy, mode).</summary>
+    public string EffectiveCatalogDigest()
+    {
+        var canonical = string.Join("\n", AllowedToolNames().OrderBy(n => n, StringComparer.Ordinal));
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Utf8NoBom.GetBytes(canonical)));
+    }
 
     public async ValueTask DisposeAsync()
     {
@@ -180,7 +195,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         var waiters = connectionScope?.ServiceProvider.GetRequiredService<IToolApprovalWaiterRegistry>();
         var components = connectionScope?.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>();
 
-        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode);
+        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters);
         var loop = new McpFramingLoop(handler);
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }

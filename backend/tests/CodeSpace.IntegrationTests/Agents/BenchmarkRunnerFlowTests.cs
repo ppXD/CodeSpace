@@ -110,10 +110,17 @@ public sealed class BenchmarkRunnerFlowTests
         mcpRun.McpFullCatalog.ShouldBeTrue("the cli-mcp mode opens the run-scoped MCP endpoint in the SAME process — the fabric is genuinely reachable, not just a different label");
         mcpRun.McpFullCatalog.ShouldNotBe(cliRun.McpFullCatalog, "two modes that execute byte-identically and differ only in their scorecard label would be a mislabeled comparison; these differ on the fabric");
 
-        // Everything else is held equal so the comparison is honest: same objective grade, both runs complete.
+        // Both runs complete; the bare-cli arm grades on the oracle alone. The cli-mcp arm now ALSO requires the
+        // fabric to have actually connected (P0-B2): this fake CLI never speaks MCP, so its passing oracle is
+        // overridden to an Environment-classed infra grade — a pass without the fabric would have measured the
+        // cli arm under the cli-mcp label. This is the rule's integration-tier pin, through the REAL executor,
+        // REAL endpoint, and a real non-connecting client.
         cliRun.RunStatus.ShouldBe(AgentRunStatus.Succeeded);
         mcpRun.RunStatus.ShouldBe(AgentRunStatus.Succeeded);
-        cliRun.Grade.Passed.ShouldBe(mcpRun.Grade.Passed, "the same staged start-state grades the same under the objective oracle");
+        cliRun.Grade.Passed.ShouldBeTrue("the staged-solved start-state passes the objective oracle on the bare-cli arm");
+        mcpRun.Grade.Passed.ShouldBeFalse("the fabric never handshook — the cli-mcp cell measured nothing about the mcp arm");
+        mcpRun.Grade.Class.ShouldBe(GradeFailureClass.Environment, "infra, never a model verdict");
+        mcpRun.Grade.Detail.ShouldStartWith("mcp-required-no-handshake");
 
         // And they land as the two distinct comparable rows the scorecard exists to lay side by side.
         var card = BenchmarkScorecard.Compute(new[] { cliRun, mcpRun });

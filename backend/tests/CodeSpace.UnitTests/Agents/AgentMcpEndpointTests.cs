@@ -102,6 +102,62 @@ public class AgentMcpEndpointTests
     }
 
     [Fact]
+    public async Task The_fabric_evidence_observes_the_handshake_and_tool_calls()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var dir = new TempDir();
+        var socketPath = Path.Combine(dir.Path, "mcp.sock");
+        var connects = new AgentMcpConnectRegistry();
+        var scope = new TrackingScope();
+        const string token = "the-token";
+
+        var endpoint = new AgentMcpEndpoint(Guid.NewGuid(), new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, token, connects, scope, CancellationToken.None, NullLogger.Instance);
+
+        endpoint.HandshakeObserved.ShouldBeFalse("nothing has connected yet");
+        endpoint.ObservedToolCalls.ShouldBe(0);
+        var digest = endpoint.EffectiveCatalogDigest();
+        digest.ShouldNotBeNullOrEmpty();
+        endpoint.EffectiveCatalogDigest().ShouldBe(digest, "the catalog digest is deterministic per (registry, autonomy, mode)");
+
+        using (var client = await ConnectAsync(socketPath))
+        {
+            await SendLineAsync(client, token);
+            await SendLineAsync(client, """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""");
+            await SendLineAsync(client, """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mcp__codespace__nope","arguments":{}}}""");
+            await Task.Delay(200);
+            client.Shutdown(SocketShutdown.Both);
+        }
+        await Task.Delay(100);
+
+        endpoint.HandshakeObserved.ShouldBeTrue("an authenticated client served initialize — THE fabric-connected fact");
+        endpoint.ObservedToolCalls.ShouldBe(1, "every dispatched tools/call counts, even one that resolves no tool — the call ARRIVED");
+
+        await endpoint.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task An_unauthenticated_client_never_moves_the_fabric_evidence()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var dir = new TempDir();
+        var socketPath = Path.Combine(dir.Path, "mcp.sock");
+        var endpoint = new AgentMcpEndpoint(Guid.NewGuid(), new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "right-token", new AgentMcpConnectRegistry(), new TrackingScope(), CancellationToken.None, NullLogger.Instance);
+
+        using (var client = await ConnectAsync(socketPath))
+        {
+            await SendLineAsync(client, "wrong-token");
+            await SendLineAsync(client, """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}""");
+            await Task.Delay(150);
+        }
+
+        endpoint.HandshakeObserved.ShouldBeFalse("a rejected connection serves nothing — evidence must not count it");
+
+        await endpoint.DisposeAsync();
+    }
+
+    [Fact]
     public async Task A_connection_presenting_a_wrong_token_is_closed_without_serving()
     {
         if (!Socket.OSSupportsUnixDomainSockets) return;
