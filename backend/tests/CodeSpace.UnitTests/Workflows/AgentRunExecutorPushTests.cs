@@ -161,6 +161,18 @@ public sealed class AgentRunExecutorPushTests
     }
 
     [Fact]
+    public void BuildBranchName_is_generation_specific_past_the_first_epoch()
+    {
+        // P3 git-layer fence: a reclaimed attempt can never name the zombie's ref. Epoch 1 stays byte-identical —
+        // the overwhelming case and every pre-slice consumer's expectation.
+        var id = Guid.NewGuid();
+
+        AgentRunExecutor.BuildBranchName(id, fenceEpoch: 1).ShouldBe($"codespace/agent/{id:N}");
+        AgentRunExecutor.BuildBranchName(id, fenceEpoch: 2).ShouldBe($"codespace/agent/{id:N}-g2");
+        AgentRunExecutor.BuildBranchName(id, fenceEpoch: 2).ShouldNotBe(AgentRunExecutor.BuildBranchName(id, fenceEpoch: 1), "two generations of one run must never share a remote ref");
+    }
+
+    [Fact]
     public void BuildBranchName_is_deterministic_for_the_same_run_and_unique_across_runs()
     {
         var a = Guid.NewGuid();
@@ -281,7 +293,7 @@ public sealed class AgentRunExecutorPushTests
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
         handle.PushCalled.ShouldBeTrue();
-        handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the deterministic run-derived branch name is pushed");
+        handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "the deterministic run-derived branch name is pushed");
         result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result so the node's branch output carries it");
     }
 
@@ -326,7 +338,7 @@ public sealed class AgentRunExecutorPushTests
 
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-        var expected = AgentRunExecutor.BuildBranchName(runId);
+        var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         handle.PushedByAlias.Keys.ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "every writable repo is pushed, each to its own remote");
         handle.PushedByAlias["web"].ShouldBe(expected, "each repo pushes under the same run-derived branch name (distinct remotes)");
         handle.PushedByAlias["api"].ShouldBe(expected);
@@ -346,7 +358,7 @@ public sealed class AgentRunExecutorPushTests
 
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-        var expected = AgentRunExecutor.BuildBranchName(runId);
+        var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
         result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the unchanged secondary repo produced no branch");
         result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
@@ -366,7 +378,7 @@ public sealed class AgentRunExecutorPushTests
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, input, handle, ClaimedEpoch, CancellationToken.None);
 
         handle.PushedByAlias.Count.ShouldBe(2, "the empty top-level gate does not short-circuit a multi-repo push");
-        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch));
     }
 
     [Fact]
@@ -380,7 +392,7 @@ public sealed class AgentRunExecutorPushTests
 
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
-        var expected = AgentRunExecutor.BuildBranchName(runId);
+        var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "one repo's push failure never fails the run");
         result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected, "the repo that pushed BEFORE the failure keeps its branch — never discarded");
         result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the failed repo has no branch");
@@ -413,7 +425,7 @@ public sealed class AgentRunExecutorPushTests
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
-        result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
+        result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
         handle.PushCallCount.ShouldBe(3, "exactly two failed attempts + the one that succeeded — never more, never fewer");
         runs.AppendedEvents.ShouldBeEmpty("a recovered push is invisible to the operator — no warning for a transient blip that resolved itself");
     }
@@ -427,8 +439,8 @@ public sealed class AgentRunExecutorPushTests
         var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
-        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
-        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "api's transient first failure recovered on retry — no branch lost");
+        result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch));
+        result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "api's transient first failure recovered on retry — no branch lost");
         handle.CallCountByAlias["web"].ShouldBe(1, "web never failed — one call, no wasted retries");
         handle.CallCountByAlias["api"].ShouldBe(2, "api's one failure + the retry that succeeded");
         runs.AppendedEvents.ShouldBeEmpty("both repos recovered — no operator-facing warning for a resolved transient blip");

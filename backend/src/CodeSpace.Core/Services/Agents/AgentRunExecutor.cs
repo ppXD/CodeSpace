@@ -953,9 +953,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     ///
     /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
     /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
-    /// anyway) and we must not fire it. The branch name is run-id-derived, so a workflow RETRY of agent.run is a
-    /// new run id → a NEW branch (acceptable v1 branch-litter), and a re-push of the SAME run is a plain --force
-    /// overwrite (no divergent branch).</para>
+    /// anyway) and we must not fire it. The branch name is run-id-derived AND generation-specific
+    /// (see <see cref="BuildBranchName"/>): a workflow RETRY of agent.run is a new run id → a NEW branch
+    /// (acceptable v1 branch-litter), a re-push of the SAME attempt is a plain --force overwrite (no divergent
+    /// branch), and a RECLAIMED attempt pushes its own generation's ref — the pre-check below narrows the zombie
+    /// window, the generation ref closes it at the remote.</para>
     ///
     /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> is
     /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips the run's own status) but is
@@ -988,9 +990,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            if (multiRepo) return await PushRepositoryResultsAsync(runId, task, result, workspace, pushHandle, cancellationToken).ConfigureAwait(false);
+            if (multiRepo) return await PushRepositoryResultsAsync(runId, task, result, workspace, pushHandle, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-            var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId), ct), cancellationToken).ConfigureAwait(false);
+            var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId, claimedEpoch), ct), cancellationToken).ConfigureAwait(false);
 
             return branch is null ? result : result with { ProducedBranch = branch, PushedCommitSha = pushHandle.LastPushedCommitSha() };
         }
@@ -1038,9 +1040,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// catch returns the UNMODIFIED result, which would orphan already-pushed remote branches (live on the remote but
     /// recorded as no-branch). Cancellation still propagates (worker torn down).</para>
     /// </summary>
-    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, long claimedEpoch, CancellationToken cancellationToken)
     {
-        var branchName = BuildBranchName(runId);
+        var branchName = BuildBranchName(runId, claimedEpoch);
         var updated = new List<RepositoryRunResult>(result.RepositoryResults.Count);
         string? primaryBranch = null;
 
@@ -1594,7 +1596,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Deterministic, run-unique remote branch name for a produced diff. Pure + private so it's unit-pinned. Run-id-derived, so a workflow retry (new run id) → a new branch; a re-push of the same run → the same branch (plain --force overwrite).</summary>
-    internal static string BuildBranchName(Guid runId) => $"codespace/agent/{runId:N}";
+    /// <summary>
+    /// P3 (git-layer fence): the run's push ref is GENERATION-SPECIFIC — a reclaimed attempt (fence epoch &gt; 1)
+    /// pushes <c>-g&lt;epoch&gt;</c>, so a superseded zombie worker and its reclaimed successor can NEVER write the
+    /// same remote ref. The StillOwns pre-check above the push narrows the zombie window; this closes it at the
+    /// remote: the zombie's late force-push lands on ITS OWN generation's ref — an orphan nothing references,
+    /// because the manifest (whose write IS epoch-fenced, #1341) records the current generation's branch + confirmed
+    /// sha and every consumer follows the manifest. First attempts (epoch 1, the overwhelming case) keep the
+    /// unsuffixed name byte-identical.
+    /// </summary>
+    internal static string BuildBranchName(Guid runId, long fenceEpoch = 1) =>
+        fenceEpoch <= 1 ? $"codespace/agent/{runId:N}" : $"codespace/agent/{runId:N}-g{fenceEpoch}";
 
     /// <summary>
     /// Evaluate the publish guard chain (see <see cref="IPublishGuard"/>), in ascending <see cref="IPublishGuard.Order"/>
