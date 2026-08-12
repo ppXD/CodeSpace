@@ -22,7 +22,11 @@ public sealed record LlmCallScope(
     /// <summary>The OPEN step identifier stamped on the payload (e.g. "supervisor.decision", "planner.plan") — never switched on.</summary>
     string Kind,
     IRunRecordLogger Logger,
-    IArtifactOffloader Offloader);
+    IArtifactOffloader Offloader,
+    /// <summary>W-hard: the run's budget ledger, carried by a pusher that wants THIS scope's model calls atomically admitted against <see cref="CapUsd"/>. Null (every pre-slice pusher) = no reservation, byte-identical.</summary>
+    Budget.IBudgetLedger? Budget = null,
+    /// <summary>The run's cost cap the guard admits against. Null = no cap known here — no reservation.</summary>
+    decimal? CapUsd = null);
 
 public static class LlmCallContext
 {

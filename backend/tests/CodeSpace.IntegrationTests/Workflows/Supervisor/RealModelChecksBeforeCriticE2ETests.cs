@@ -21,6 +21,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Shouldly;
 
+using CodeSpace.Tests.Fakes;
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
 /// <summary>
@@ -103,7 +104,7 @@ public sealed class RealModelChecksBeforeCriticE2ETests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
         var goalConfig = new SupervisorGoalConfig { Goal = Goal, DecisionReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId };

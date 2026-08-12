@@ -43,7 +43,12 @@ public class RecordingLLMClientDecorator : ILLMClient
         LLMCompletion completion;
         try
         {
-            completion = await _inner.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
+            // W-hard: the budget guard rides INSIDE the recording pair, so a cap refusal lands on the tape as this
+            // call's Failed row — legible, never a silent skip. A scope without a ledger+cap passes through.
+            completion = await LlmBudgetGuard.GuardedAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
+                ct => _inner.CompleteAsync(request, ct),
+                c => Agents.Cost.AgentCostPricing.CostUsd(c.Model, c.Usage.InputTokens ?? 0, c.Usage.OutputTokens ?? 0),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

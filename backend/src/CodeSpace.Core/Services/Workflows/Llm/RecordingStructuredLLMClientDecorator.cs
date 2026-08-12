@@ -34,7 +34,12 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
         StructuredLLMCompletion completion;
         try
         {
-            completion = await _structuredInner.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
+            // W-hard: same guard as the plain face — the decider's structured decision calls are exactly the
+            // brain-plane spend the cap must bound atomically.
+            completion = await LlmBudgetGuard.GuardedAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
+                ct => _structuredInner.CompleteStructuredAsync(request, ct),
+                c => Agents.Cost.AgentCostPricing.CostUsd(c.Model, c.Usage.InputTokens ?? 0, c.Usage.OutputTokens ?? 0),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

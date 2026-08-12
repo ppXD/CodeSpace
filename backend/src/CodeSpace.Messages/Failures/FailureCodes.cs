@@ -61,4 +61,7 @@ public static class FailureCodes
 
     /// <summary>The masked answer for anything unclassified. Never carries a message from the exception.</summary>
     public const string Internal = "internal_error";
+
+    /// <summary>W-hard: the run's cost cap is spent — the budget ledger refused the next model call. Remedy: a bigger cap or a narrower goal, never a retry.</summary>
+    public const string RunBudgetExhausted = "run_budget_exhausted";
 }

@@ -16,6 +16,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Shouldly;
 
+using CodeSpace.Tests.Fakes;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
@@ -966,7 +967,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             scope.Resolve<IDecisionArbiter>(),
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
-            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
