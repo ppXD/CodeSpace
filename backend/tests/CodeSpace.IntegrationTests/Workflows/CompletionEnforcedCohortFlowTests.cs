@@ -44,9 +44,12 @@ public class CompletionEnforcedCohortFlowTests
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
         run.CompletionEnforcementMode.ShouldBe("Enforced", "the definition's opt-in must reach the run row through the real RunStarter");
-        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "a clean engine Success that staked no obligation is an unbackable claim — the authority parks it for a human, never a fake Success");
+        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "an Enforced claim nothing qualified must park, never terminalize");
         run.Error.ShouldNotBeNull();
         run.Error.ShouldContain("completion-authority", customMessage: "the park must name its arbiter — check workflow_run.error for the decision detail");
+        // P4: a bare trigger→terminal graph is the GENERIC mode — no registered conformance profile, so the
+        // authority now parks it at the mode gate (before the zero-staked compose even runs), naming the mode.
+        run.Error.ShouldContain("mode 'generic'", customMessage: "the park reason must name the unregistered operating mode");
     }
 
     [Fact]
