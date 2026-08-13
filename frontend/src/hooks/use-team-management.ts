@@ -26,6 +26,7 @@ export function useTeamPermissions() {
 export const TeamPermissions = {
   MembersManage: "members.manage",
   TeamManage: "team.manage",
+  ReposManage: "repos.manage",
 } as const;
 
 /** Pending invitations. Only fetched when the caller may manage members — the endpoint refuses otherwise. */

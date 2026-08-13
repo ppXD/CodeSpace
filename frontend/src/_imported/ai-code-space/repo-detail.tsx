@@ -51,7 +51,7 @@ import { Pager } from "./pager";
  * the header — no duplicate fetches.
  */
 
-export type DetailTab = "overview" | "code" | "issues" | "pulls";
+export type DetailTab = "overview" | "code" | "issues" | "pulls" | "webhooks";
 
 const PROVIDER_LABEL: Record<string, string> = { GitHub: "GitHub", GitLab: "GitLab", Git: "Git" };
 
@@ -143,6 +143,9 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
     ["code", "Code"],
     ["issues", "Issues", issueTotal],
     ["pulls", "Pull requests", prTotal],
+    // No badge. The Overview stat already counts the Registered ones, and a count is exactly the
+    // thing this tab exists to replace — a dead-lettered hook and no hook at all both read as zero.
+    ["webhooks", "Webhooks"],
   ];
 
   if (repository.isLoading || instances.isLoading) {

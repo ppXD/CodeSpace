@@ -310,6 +310,48 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    // ── Webhooks: what the repository's hooks are, and why they aren't firing ─────────
+    // The count on the repository detail says only how many are Registered, so a dead-lettered
+    // hook reads there exactly like a repository that never had one. These three open that up.
+
+    /// <summary>
+    /// Every webhook on the repository with its full attempt timeline — the Webhook tab's read.
+    /// The signing secret is NOT in this answer; it has its own endpoint below, so opening the
+    /// tab never puts it on the wire.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/webhooks")]
+    public async Task<IActionResult> ListWebhooks([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListRepositoryWebhooksQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// The webhook's decrypted signing secret — what an operator re-enters at the provider when a
+    /// hook has to be re-created by hand. Reserved for repos.manage and logged with the caller,
+    /// because whoever holds this value can sign a delivery this repository will accept.
+    ///
+    /// POST rather than GET: it is an action with a record, and a GET would be cacheable by
+    /// anything between here and the browser.
+    /// </summary>
+    [HttpPost("{repositoryId:guid}/webhooks/{webhookId:guid}/secret")]
+    public async Task<IActionResult> RevealWebhookSecret([FromRoute] Guid repositoryId, [FromRoute] Guid webhookId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new RevealRepositoryWebhookSecretCommand { RepositoryId = repositoryId, WebhookId = webhookId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Put a Failed or DeadLettered registration back in the queue now. Returns the webhook as it
+    /// stands after the revival; 400 when it is in any other state.
+    /// </summary>
+    [HttpPost("{repositoryId:guid}/webhooks/{webhookId:guid}/retry")]
+    public async Task<IActionResult> RetryWebhookRegistration([FromRoute] Guid repositoryId, [FromRoute] Guid webhookId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new RetryRepositoryWebhookRegistrationCommand { RepositoryId = repositoryId, WebhookId = webhookId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Re-point a repository at another active credential of the same provider instance.
     /// Used to recover from a credential disconnect: the operator picks a teammate's

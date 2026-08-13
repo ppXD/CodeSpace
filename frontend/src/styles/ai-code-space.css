@@ -6976,3 +6976,60 @@ input.lt3-chip2-add::placeholder { color: var(--accent); opacity: 0.75; }
 .lt3-spec-all:hover:not(:disabled) { filter: brightness(.95); }
 .lt3-spec-all:disabled { opacity: .5; cursor: default; }
 .lt3-spec-load { font-size: 11px; color: var(--muted); padding: 7px 6px 0; }
+
+/* ── Repository → Webhook tab ──────────────────────────────────────────────────────
+   Rows are `.cn-row` plus a state stripe down the left edge. The stripe is an inset
+   box-shadow rather than a border so it can never shift the row's text against its
+   siblings, and it is ALWAYS paired with a `.cn-status` pill: forty repositories have
+   to be scannable, which is what the colour buys, and colour cannot be the only
+   signal, which is what the pill buys. */
+.hk-row { padding-left: 17px; box-shadow: inset 3px 0 0 var(--line-2); }
+.hk-row[data-tone="good"] { box-shadow: inset 3px 0 0 var(--good); }
+.hk-row[data-tone="work"] { box-shadow: inset 3px 0 0 var(--warn); }
+.hk-row[data-tone="bad"]  { box-shadow: inset 3px 0 0 var(--danger); }
+.hk-status-good { color: var(--good);  background: color-mix(in srgb, var(--good) 9%, transparent);   border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.hk-status-work { color: var(--warn);  background: color-mix(in srgb, var(--warn) 9%, transparent);   border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.hk-status-bad  { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+
+/* Everything below the row head once a row is opened. Inline rather than a popover, so
+   `.cn-list`'s overflow:hidden simply grows with it — no portal involved. */
+.hk-open { display: flex; flex-direction: column; gap: 15px; padding: 3px 0 2px; }
+.hk-open-h { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+/* The diagnosis, framed as the answer to "what went wrong" rather than as more metadata. */
+.hk-diag { border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--line)); border-radius: 8px; overflow: hidden; background: color-mix(in srgb, var(--danger) 3%, var(--panel)); }
+.hk-diag-h { padding: 11px 13px; display: flex; flex-direction: column; gap: 5px; border-bottom: 1px solid color-mix(in srgb, var(--danger) 20%, var(--line)); }
+.hk-diag-cause { font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+.hk-diag-pattern { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.hk-pre-h { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted-2); padding: 9px 13px 0; background: var(--panel-2); }
+.hk-pre { margin: 0; padding: 7px 13px 11px; background: var(--panel-2); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; border-bottom: 1px solid var(--line); }
+/* No status code is a finding, not a missing field — it gets the danger colour a code would have. */
+.hk-noanswer { color: var(--danger); font-weight: 600; }
+
+/* One line per failed attempt, oldest first. Tabular numerals so the codes column lines up
+   and a run of identical answers is visible as a shape before it is read as text. */
+.hk-tl-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 13px; font-size: 11.5px; font-variant-numeric: tabular-nums; border-top: 1px solid var(--line); background: var(--panel-2); }
+.hk-tl-n { flex: none; min-width: 26px; color: var(--muted-2); }
+.hk-tl-at { flex: none; color: var(--muted); white-space: nowrap; }
+.hk-tl-code { flex: none; font-weight: 600; color: var(--danger); white-space: nowrap; }
+.hk-tl-err { min-width: 0; flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Finish-by-hand steps. `.hk-step strong` is where the provider's own field labels land — they are
+   set apart because the reader is matching them by eye against another window. */
+.hk-steps { display: flex; flex-direction: column; gap: 11px; }
+.hk-step { display: flex; gap: 9px; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+.hk-step-n { flex: none; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.hk-step-b { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.hk-step strong { font-weight: 600; color: var(--ink); }
+.hk-val { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); min-width: 0; }
+.hk-val code { flex: 1; min-width: 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--ink); overflow-x: auto; white-space: nowrap; }
+.hk-val-mask { letter-spacing: .18em; color: var(--muted-2); }
+.hk-val-a { flex: none; display: flex; gap: 6px; }
+/* `.cn-sub` clamps its first span to one line with an ellipsis, which is right for a host name and
+   wrong for the only sentence on the row that says whether events are arriving — in a narrow pane
+   "Gave up after 10 attempts · nothing has arrived at all" clipped to "Gav…". It wraps here instead,
+   and the head wraps with it so the actions drop to their own line rather than crowding it. */
+.hk-row .cn-row-head { flex-wrap: wrap; }
+.hk-row .cn-meta { flex: 1 1 320px; }
+.hk-row .cn-sub { align-items: flex-start; }
+.hk-row .cn-sub > span:first-child { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.5; }
