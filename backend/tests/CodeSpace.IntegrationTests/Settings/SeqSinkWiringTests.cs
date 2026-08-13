@@ -88,6 +88,30 @@ public class SeqSinkWiringTests
         elapsed.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(10), "unbounded this waits ~200s, and the shutdown that inherits it looks like a hang");
     }
 
+    /// <summary>
+    /// Logging must never be the reason the product will not start.
+    ///
+    /// <para>An unreachable Seq already costs nothing, because the sink is batched. A MALFORMED one is a different
+    /// failure: a ServerUrl that is not a URL at all throws while the sink is being CONSTRUCTED, before any of that
+    /// batching exists — so it would take the boot down, over a logging setting.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("not-a-url")]
+    [InlineData("://missing-scheme")]
+    [InlineData("http://[malformed")]
+    [InlineData("   ")]
+    public void A_malformed_server_url_still_gives_a_working_logger(string serverUrl)
+    {
+        var act = () => BuildLogger(("Serilog:Seq:ServerUrl", serverUrl));
+
+        var logger = act.ShouldNotThrow();
+
+        using (logger)
+        {
+            Should.NotThrow(() => logger.Information("the process still logs"), "a bad Seq setting degrades to console, it does not remove logging");
+        }
+    }
+
     // ─── Drivers ────────────────────────────────────────────────────────────────
 
     /// <summary>Calls the real private <c>BuildLogger</c>, so this cannot drift from what the process runs.</summary>

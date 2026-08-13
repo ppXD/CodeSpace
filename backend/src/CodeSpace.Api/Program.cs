@@ -95,14 +95,33 @@ public class Program
 
         var seqApiKey = new SerilogApiKeySetting(configuration).Value;
 
-        // Blank key means anonymous ingestion, which is what a local Seq accepts; pass null rather than an empty
-        // header value so the sink's own "no key configured" path is the one that runs.
-        //
-        // The handler timeout is the whole reason this is not a one-liner. Its default leaves a batch waiting on a
-        // server that accepted the socket and then went quiet, and CloseAndFlush inherits that wait at shutdown.
-        return logger
-            .WriteTo.Seq(seqServerUrl, apiKey: string.IsNullOrWhiteSpace(seqApiKey) ? null : seqApiKey, messageHandler: new CodeSpace.Api.Logging.BoundedSeqPostHandler())
-            .CreateLogger();
+        try
+        {
+            // Blank key means anonymous ingestion, which is what a local Seq accepts; pass null rather than an
+            // empty header value so the sink's own "no key configured" path is the one that runs.
+            //
+            // The handler is the whole reason this is not a one-liner. Its default leaves a batch waiting on a
+            // server that accepted the socket and then went quiet, and CloseAndFlush inherits that wait at
+            // shutdown — see BoundedSeqPostHandler.
+            return logger
+                .WriteTo.Seq(seqServerUrl, apiKey: string.IsNullOrWhiteSpace(seqApiKey) ? null : seqApiKey, messageHandler: new CodeSpace.Api.Logging.BoundedSeqPostHandler())
+                .CreateLogger();
+        }
+        catch (Exception ex)
+        {
+            // Logging must never be the reason the product will not start. An unreachable Seq already costs
+            // nothing — the sink is batched — but a MALFORMED one is a different failure: a ServerUrl that is not
+            // a URL at all throws while the sink is being constructed, before any of that batching exists.
+            //
+            // Swallowing it would be its own trap, so the console — which is already attached and is the thing an
+            // operator is watching during a boot — says what happened and that logs are console-only until it is
+            // fixed. The process comes up serving requests either way.
+            var consoleOnly = logger.CreateLogger();
+
+            consoleOnly.Error(ex, "Seq is configured as {SeqServerUrl} but the sink could not be built; continuing with console logging only. Fix {ConfigurationKey}, or blank it to turn Seq off deliberately", seqServerUrl, SerilogServerUrlSetting.ConfigurationKey);
+
+            return consoleOnly;
+        }
     }
 
     /// <summary>
