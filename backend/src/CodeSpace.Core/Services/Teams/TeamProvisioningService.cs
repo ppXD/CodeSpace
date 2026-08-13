@@ -2,10 +2,9 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.Slugs;
+using CodeSpace.Core.Services.Projects;
 using CodeSpace.Messages.Dtos.Teams;
 using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Teams;
 
@@ -18,19 +17,15 @@ namespace CodeSpace.Core.Services.Teams;
 /// </summary>
 public sealed class TeamProvisioningService : ITeamProvisioningService, IScopedDependency
 {
-    /// <summary>
-    /// Slugs that would collide with a URL the SPA already routes. "personal" is how migration 0008
-    /// prefixes a personal workspace, and the frontend treats it as an alias.
-    /// </summary>
-    private static readonly IReadOnlySet<string> ReservedSlugs = new HashSet<string>(StringComparer.Ordinal) { "personal", "admin", "new", "settings", "teams" };
-
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentUser _currentUser;
+    private readonly TeamSlugAllocator _slugs;
 
-    public TeamProvisioningService(CodeSpaceDbContext db, ICurrentUser currentUser)
+    public TeamProvisioningService(CodeSpaceDbContext db, ICurrentUser currentUser, TeamSlugAllocator slugs)
     {
         _db = db;
         _currentUser = currentUser;
+        _slugs = slugs;
     }
 
     public async Task<TeamSummary> CreateAsync(string name, CancellationToken cancellationToken)
@@ -40,38 +35,41 @@ public sealed class TeamProvisioningService : ITeamProvisioningService, IScopedD
 
         if (trimmed.Length == 0) throw new ArgumentException("A team needs a name.", nameof(name));
 
-        var team = new Team
-        {
-            Id = Guid.NewGuid(),
-            Name = trimmed,
-            Slug = await DeriveSlugAsync(trimmed, cancellationToken).ConfigureAwait(false),
-            Kind = TeamKind.Workspace,
-        };
+        // Minted before the row is built because the slug falls back to it when the name — every
+        // all-CJK one, for instance — cannot contribute anything a URL can carry.
+        var teamId = Guid.NewGuid();
+        var slug = await _slugs.ForWorkspaceAsync(trimmed, teamId, cancellationToken).ConfigureAwait(false);
 
-        _db.Team.Add(team);
-        _db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = ownerId, Role = TeamRole.Owner });
+        var team = Stage(new Team { Id = teamId, Name = trimmed, Slug = slug, Kind = TeamKind.Workspace }, ownerId);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return new TeamSummary { Id = team.Id, Slug = team.Slug, Name = team.Name, Kind = team.Kind };
     }
 
-    /// <summary>
-    /// A readable slug from the name, deduplicated against what exists. Two teams called "Platform"
-    /// is an ordinary thing to want, so the second becomes platform-2 rather than an error the person
-    /// has to work around by inventing a different name.
-    /// </summary>
-    private async Task<string> DeriveSlugAsync(string name, CancellationToken cancellationToken)
+    public async Task<Team> StagePersonalAsync(Guid ownerUserId, CancellationToken cancellationToken)
     {
-        var baseSlug = Slug.Slugify(name);
+        var slug = await _slugs.ForPersonalAsync(ownerUserId, cancellationToken).ConfigureAwait(false);
 
-        if (baseSlug.Length == 0) baseSlug = "team";
+        // PersonalForUserId is not ownership — the Owner row Stage writes is that. It is what the
+        // partial unique index reads to hold the account to one active Personal team.
+        return Stage(new Team { Id = Guid.NewGuid(), Name = "Personal", Slug = slug, Kind = TeamKind.Personal, PersonalForUserId = ownerUserId }, ownerUserId);
+    }
 
-        var taken = await _db.Team.AsNoTracking()
-            .Where(t => t.DeletedDate == null && t.Slug.StartsWith(SlugDeduper.ProbePrefix(baseSlug)))
-            .Select(t => t.Slug)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// Everything it takes for a team to exist, staged as one unit of work: the team, the Owner
+    /// membership row that IS its ownership, and the default project.
+    ///
+    /// <para>Staged rather than saved so both callers keep their own transaction shape — the
+    /// invitation path is mid-way through creating an account when it asks for a personal team, and a
+    /// save there would flush a half-built one.</para>
+    /// </summary>
+    private Team Stage(Team team, Guid ownerUserId)
+    {
+        _db.Team.Add(team);
+        _db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = ownerUserId, Role = TeamRole.Owner });
+        _db.Project.Add(ProjectService.BuildDefaultProject(team.Id, ownerUserId));
 
-        return SlugDeduper.DeriveAvailable(baseSlug, taken.ToHashSet(StringComparer.Ordinal), ReservedSlugs);
+        return team;
     }
 }

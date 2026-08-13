@@ -75,6 +75,31 @@ public class TeamCreationTests
     }
 
     [Fact]
+    public async Task A_new_workspace_arrives_with_the_default_project_its_own_page_promises()
+    {
+        // The creator lands on a Projects page that tells them a default project was auto-created for
+        // this team, and the row itself is described as "auto-created when this team was provisioned".
+        // Nothing created one until the first repository was bound, so both statements were false for
+        // every workspace whose owner had not bound one — including every workspace on its first day.
+        var userId = await SeedUserAsync(withPermission: true).ConfigureAwait(false);
+
+        using var scope = BeginScopeGranted(userId);
+        var team = await scope.Resolve<IMediator>().Send(new CreateTeamCommand { Name = "Fresh Start" }).ConfigureAwait(false);
+
+        using var verify = _fixture.BeginScope();
+        var projects = await verify.Resolve<CodeSpaceDbContext>().Project.AsNoTracking()
+            .Where(p => p.TeamId == team.Id && p.DeletedDate == null)
+            .ToListAsync().ConfigureAwait(false);
+
+        // The literal, not the constant: the frontend copy and the {{project.default.X}} variable path
+        // both spell it out, so a rename has to break here rather than pass under a moved constant.
+        projects.Select(p => p.Slug).ShouldBe(new[] { "default" },
+            customMessage: "a workspace opens with exactly one project — the default its Projects page says is already there");
+
+        projects.Single().Name.ShouldBe("Default");
+    }
+
+    [Fact]
     public async Task The_creator_can_immediately_administer_what_they_made()
     {
         // The point of the previous test, proved through the product rather than the schema: if the
@@ -132,6 +157,44 @@ public class TeamCreationTests
 
         team.Slug.ShouldNotBeNullOrWhiteSpace();
         team.Name.ShouldBe("!!!");
+    }
+
+    [Fact]
+    public async Task Workspaces_named_in_a_script_the_slug_alphabet_cannot_carry_are_still_told_apart()
+    {
+        // Slugify keeps ASCII only, so every all-CJK name derives to nothing and they all fell into one
+        // shared bucket: 設計組, 工程團隊 and 行銷 came out team, team-2 and team-3 — a URL that numbers
+        // workspaces rather than naming one, and that says nothing about which is which.
+        var userId = await SeedUserAsync(withPermission: true);
+
+        using var scope = BeginScopeGranted(userId);
+        var mediator = scope.Resolve<IMediator>();
+
+        var design = await mediator.Send(new CreateTeamCommand { Name = "設計組" }).ConfigureAwait(false);
+        var engineering = await mediator.Send(new CreateTeamCommand { Name = "工程團隊" }).ConfigureAwait(false);
+
+        design.Slug.ShouldBe($"team-{design.Id.ToString("N")[..8]}");
+        engineering.Slug.ShouldBe($"team-{engineering.Id.ToString("N")[..8]}");
+
+        design.Slug.ShouldNotBe(engineering.Slug, "two workspaces that share a fallback share a bucket, and the second only ever gets a counter");
+    }
+
+    [Theory]
+    [InlineData("personal deadbeef", "team-personal-deadbeef")]
+    [InlineData("Personal", "team-personal")]
+    public async Task A_workspace_cannot_derive_into_the_namespace_a_new_account_needs(string name, string expected)
+    {
+        // personal-{8 hex of the account id} is the slug signup mints, on an index that is unique
+        // instance-wide. A workspace allowed to hold personal-deadbeef is a workspace that stops the
+        // next account whose id starts deadbeef from being created at all. The bare word is the same
+        // hazard one dedup suffix later: reserved, it used to come out personal-2.
+        var userId = await SeedUserAsync(withPermission: true);
+
+        using var scope = BeginScopeGranted(userId);
+        var team = await scope.Resolve<IMediator>().Send(new CreateTeamCommand { Name = name }).ConfigureAwait(false);
+
+        team.Slug.ShouldNotStartWith("personal-", customMessage: "a name a person typed must never be able to reach the namespace signup allocates from");
+        team.Slug.ShouldBe(expected, "moved out of the namespace rather than refused — what they typed still carries the URL");
     }
 
     [Fact]
