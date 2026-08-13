@@ -68,7 +68,7 @@ function pickActiveTabFromPath(pathname: string): DetailTab {
   const seg = segs[4] ?? "overview";
   // Releases lives under the Code tab (reached from its sidebar card), so keep Code lit there.
   if (seg === "releases") return "code";
-  const known: DetailTab[] = ["overview", "code", "issues", "pulls"];
+  const known: DetailTab[] = ["overview", "code", "issues", "pulls", "webhooks"];
   return known.includes(seg as DetailTab) ? (seg as DetailTab) : "overview";
 }
 
@@ -80,5 +80,6 @@ function tabToPath(tab: DetailTab) {
     case "code": return "/teams/$teamSlug/repositories/$repoFullPath/code" as const;
     case "issues": return "/teams/$teamSlug/repositories/$repoFullPath/issues" as const;
     case "pulls": return "/teams/$teamSlug/repositories/$repoFullPath/pulls" as const;
+    case "webhooks": return "/teams/$teamSlug/repositories/$repoFullPath/webhooks" as const;
   }
 }

@@ -195,6 +195,67 @@ export interface RepositoryDetail extends RepositorySummary {
   projectName: string;
 }
 
+/**
+ * Lifecycle of a remote webhook registration. Mirrors backend
+ * <c>CodeSpace.Messages.Enums.RepositoryWebhookRegistrationStatus</c>.
+ *
+ * <para>These are the queue's words, not the operator's. Nothing renders them directly — every
+ * surface goes through `webhookState()`, which answers the question actually being asked, which is
+ * whether events are arriving.</para>
+ */
+export type RepositoryWebhookRegistrationStatus =
+  | "Pending" | "Enqueued" | "Registering" | "Registered" | "Failed" | "DeadLettered" | "Cancelled";
+
+/**
+ * One FAILED registration attempt. Every field is masked at capture, so this is the whole record —
+ * nothing is withheld on the way out.
+ */
+export interface RepositoryWebhookAttemptDetail {
+  attemptNumber: number;
+  attemptedAt: string;
+  error: string;
+  /** Null means the call never got an answer — a timeout, a DNS failure, a refused connection. That absence is itself the diagnosis. */
+  statusCode: number | null;
+  responseBody: string | null;
+  requestMethod: string | null;
+  requestUrl: string | null;
+  requestBody: string | null;
+  /** A JSON object serialized as a string. Passed through as stored, so the client renders the record rather than a re-serialization of it. */
+  requestHeadersJson: string | null;
+}
+
+/**
+ * One repository webhook with the timeline of everything that went wrong registering it.
+ *
+ * <para>The signing secret is deliberately absent — it travels only on its own endpoint, so opening
+ * the tab never puts it on the wire. See `repositoriesApi.revealWebhookSecret`.</para>
+ */
+export interface RepositoryWebhookDetail {
+  id: string;
+  /** False when an operator disabled the hook: the provider still delivers, and ingestion rejects every delivery. */
+  active: boolean;
+  registrationStatus: RepositoryWebhookRegistrationStatus;
+  /** Failed attempts so far — a position on the backoff ladder, not a census. The census is `attemptTimeline`. */
+  attempts: number;
+  nextAttemptAt: string;
+  /** Null means registered but never fired. */
+  lastReceivedDate: string | null;
+  callbackUrl: string;
+  /** Provider-assigned id. Null until the registration reaches Registered. */
+  externalId: string | null;
+  subscribedEvents: string[];
+  /** The newest error, and the only account there is for anything that failed before the attempt table existed. */
+  lastError: string | null;
+  /** Every failed attempt, oldest first. Empty when nothing failed. */
+  attemptTimeline: RepositoryWebhookAttemptDetail[];
+}
+
+/** The decrypted signing secret, from the reveal endpoint. Never part of a list read. */
+export interface RepositoryWebhookSecret {
+  webhookId: string;
+  secret: string;
+}
+
 export interface RemoteRepository {
   externalId: string;
   namespacePath: string;

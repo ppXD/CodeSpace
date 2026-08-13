@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary, RepositoryWebhookDetail, RepositoryWebhookSecret } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -68,6 +68,22 @@ export const repositoriesApi = {
       method: "POST",
       body: JSON.stringify({ newCredentialId }),
     }),
+
+  // Every hook on the repository with its full attempt timeline. Reachable by any team member, so a
+  // Member can open the Webhook tab and read why nothing is arriving.
+  listWebhooks: (repositoryId: string) =>
+    fetchJson<RepositoryWebhookDetail[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks`),
+
+  // The signing secret, on its own call because it is the one field that authenticates an inbound
+  // delivery — the tab must be openable without it ever reaching the browser. POST, not GET: the
+  // backend treats a reveal as an action it records, and a GET would be cacheable in between.
+  revealWebhookSecret: (repositoryId: string, webhookId: string) =>
+    fetchJson<RepositoryWebhookSecret>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks/${encodeURIComponent(webhookId)}/secret`, { method: "POST" }),
+
+  // Put a Failed or DeadLettered registration back in the queue. Answers the same shape as a list
+  // row so the caller can swap the row in place; 400 names the actual state when it is neither.
+  retryWebhookRegistration: (repositoryId: string, webhookId: string) =>
+    fetchJson<RepositoryWebhookDetail>(`/api/repositories/${encodeURIComponent(repositoryId)}/webhooks/${encodeURIComponent(webhookId)}/retry`, { method: "POST" }),
 
   accessibleFor: (credentialId: string, search?: string, page = 1, perPage = 30) => {
     const params = new URLSearchParams();

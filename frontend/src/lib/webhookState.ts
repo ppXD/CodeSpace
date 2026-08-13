@@ -1,0 +1,245 @@
+import type { ProviderKind, RepositoryWebhookAttemptDetail, RepositoryWebhookDetail } from "@/api/types";
+import { relativeTime } from "./codeTree";
+
+/**
+ * What the Webhook tab says, as opposed to what the database stores.
+ *
+ * <p>The registration status is the queue's vocabulary — "DeadLettered" describes where a job ended
+ * up, and the person reading the page is asking something else entirely: are events arriving. So
+ * seven statuses collapse into three answers to that question, and nothing on the page renders a
+ * status name.</p>
+ *
+ * <p>The tone travels with the label rather than replacing it. A list of forty repositories has to be
+ * scannable, which is what the colour is for, and colour cannot be the only signal, which is what the
+ * label is for.</p>
+ */
+export type WebhookTone = "good" | "work" | "bad" | "idle";
+
+export interface WebhookState {
+  tone: WebhookTone;
+  label: string;
+  /** The line under the name — this row's own terms, not a restatement of the label. */
+  detail: string;
+}
+
+export function webhookState(hook: RepositoryWebhookDetail, provider: ProviderKind, now: number = Date.now()): WebhookState {
+  // Disabled here beats every registration state: the hook may be perfectly registered and the
+  // provider may be delivering to it, and every one of those deliveries is thrown away on arrival.
+  // Reading "Delivering" off a Registered row would be the page's worst possible lie.
+  if (!hook.active) return { tone: "bad", label: "Not delivering", detail: `Turned off here. ${providerName(provider)} still sends events and every one of them is rejected on arrival.` };
+
+  switch (hook.registrationStatus) {
+    case "Registered": return deliveringState(hook, provider, now);
+    case "DeadLettered": return stoppedState(hook, now);
+    case "Cancelled": return { tone: "idle", label: "Not delivering", detail: "Registration was abandoned before it finished — this hook was never created at the provider." };
+    default: return registeringState(hook, now);
+  }
+}
+
+function deliveringState(hook: RepositoryWebhookDetail, provider: ProviderKind, now: number): WebhookState {
+  const hookId = hook.externalId ? `${providerName(provider)} hook ${formatHookId(hook.externalId)}` : `Registered at ${providerName(provider)}`;
+  // "Registered but nothing has ever arrived" is the single most common way a hook is quietly broken
+  // — the provider accepted it and cannot reach us — so the row has to say so rather than fall silent.
+  const delivery = hook.lastReceivedDate ? `last delivery ${relativeTime(hook.lastReceivedDate, now)}` : "no event has arrived yet";
+
+  return { tone: "good", label: "Delivering", detail: `${hookId} · ${delivery}` };
+}
+
+function registeringState(hook: RepositoryWebhookDetail, now: number): WebhookState {
+  const attempt = hook.attempts + 1;
+
+  if (hook.registrationStatus === "Registering") return { tone: "work", label: "Registering", detail: `Attempt ${attempt} is in flight.` };
+
+  const detail = hook.attempts === 0
+    ? "First attempt is queued."
+    : `Attempt ${attempt} · next try ${inWords(new Date(hook.nextAttemptAt).getTime() - now)}`;
+
+  return { tone: "work", label: "Registering", detail };
+}
+
+function stoppedState(hook: RepositoryWebhookDetail, now: number): WebhookState {
+  const gaveUp = hook.attempts > 0 ? `Gave up after ${hook.attempts} attempts` : "Stopped retrying";
+  // A hook can be dead-lettered on registration and still have received events — someone added it by
+  // hand at the provider. Saying "nothing has arrived" there would send the reader hunting a fault
+  // that was already fixed.
+  const delivery = hook.lastReceivedDate ? `last delivery ${relativeTime(hook.lastReceivedDate, now)}` : "nothing has arrived at all";
+
+  return { tone: "bad", label: "Not delivering", detail: `${gaveUp} · ${delivery}` };
+}
+
+/**
+ * Whether the row can be handed back to the dispatcher. Mirrors the server's own rule so the button
+ * is absent rather than present-and-refusing — the 400 names the actual state, but a reader should
+ * not have to press something to be told it was never available.
+ */
+export function canRetryWebhook(hook: RepositoryWebhookDetail): boolean {
+  return hook.registrationStatus === "Failed" || hook.registrationStatus === "DeadLettered";
+}
+
+export interface WebhookDiagnosis {
+  /** One sentence naming the likely cause, in the reader's terms rather than the provider's. */
+  cause: string;
+  /** What the shape of the whole run says, which no single attempt can. */
+  pattern: string;
+}
+
+/**
+ * Why it failed. Null when nothing has — an unremarkable hook has no diagnosis to give.
+ *
+ * <p>Reads the NEWEST attempt for the cause and the whole run for the pattern, because they answer
+ * different questions: the last answer says what to change, and the shape says whether changing it is
+ * the fix. Ten straight 403s is a permission problem; nine timeouts and then a 403 is a network that
+ * came back and a permission problem underneath it.</p>
+ */
+export function webhookDiagnosis(hook: RepositoryWebhookDetail, provider: ProviderKind): WebhookDiagnosis | null {
+  const newest = hook.attemptTimeline.at(-1);
+
+  // Anything that failed before the attempt table existed has only `lastError` to its name. Rendering
+  // it verbatim is worse than nothing without saying that it IS the whole record.
+  if (!newest) return hook.lastError ? { cause: hook.lastError, pattern: "This is the only account kept of that failure — it happened before per-attempt records were stored." } : null;
+
+  return { cause: causeOf(newest, provider), pattern: attemptPattern(hook.attemptTimeline) };
+}
+
+function causeOf(attempt: RepositoryWebhookAttemptDetail, provider: ProviderKind): string {
+  const who = providerName(provider);
+
+  // No status code at all is not a missing field to render blank — it is the diagnosis. The request
+  // was made and nothing on the other end answered it.
+  if (attempt.statusCode == null) return `The call never got an answer — no HTTP response at all. ${who} was unreachable from here: a timeout, a DNS failure, or a refused connection.`;
+
+  return STATUS_CAUSE[attempt.statusCode]?.(who, provider)
+    ?? (attempt.statusCode >= 500 ? `${who} failed on its own side with ${attempt.statusCode}. Nothing here needs changing — this one is theirs.` : `${who} refused the call with ${attempt.statusCode}: ${attempt.error}`);
+}
+
+/**
+ * The sentence a status code is worth. Each one names the thing to go and change, because a reader who
+ * is told "403" has to already know that GitLab grades hook creation at Maintainer to get anywhere.
+ */
+const STATUS_CAUSE: Record<number, (who: string, provider: ProviderKind) => string> = {
+  401: (who) => `${who} rejected the token outright. It has expired, been revoked, or never belonged to this connection.`,
+  403: (who, provider) => `${who} refused to create the hook. ${HOOK_RIGHTS[provider]} — the token on this connection has less than that.`,
+  404: (who) => `${who} says the repository is not there. A token that cannot see a repository gets the same answer as one that does not exist, so this is nearly always scope rather than a typo.`,
+  422: (who, provider) => provider === "GitHub"
+    ? `${who} rejected the hook's settings. It answers 422 both when the callback URL is not reachable from the public internet and when a hook with that URL already exists on the repository.`
+    : `${who} rejected the hook's settings — most often the callback URL, which it will not accept if it cannot reach it.`,
+  429: (who) => `${who} is rate-limiting this connection. Nothing about the hook is wrong; there have simply been too many calls on this token.`,
+};
+
+const HOOK_RIGHTS: Record<ProviderKind, string> = {
+  GitLab: "Creating a project hook needs Maintainer",
+  GitHub: "Creating a repository hook needs admin rights on the repository",
+  Git: "Creating a hook needs rights to manage the repository",
+};
+
+/**
+ * What the run as a whole did. "All 10 attempts answered 403" and "9 attempts got no answer at all,
+ * then 1 attempt answered 403" are two different faults, and the last attempt alone cannot tell them
+ * apart.
+ */
+export function attemptPattern(timeline: readonly RepositoryWebhookAttemptDetail[]): string {
+  const runs = consecutiveRuns(timeline);
+
+  if (runs.length === 0) return "";
+  if (runs.length === 1) return `All ${runs[0].count} ${plural(runs[0].count, "attempt")} ${outcomeVerb(runs[0].statusCode)}.`;
+
+  return `${runs.map((run) => `${run.count} ${plural(run.count, "attempt")} ${outcomeVerb(run.statusCode)}`).join(", then ")}.`;
+}
+
+interface AttemptRun { statusCode: number | null; count: number }
+
+function consecutiveRuns(timeline: readonly RepositoryWebhookAttemptDetail[]): AttemptRun[] {
+  const runs: AttemptRun[] = [];
+
+  for (const attempt of timeline) {
+    const open = runs.at(-1);
+
+    if (open && open.statusCode === attempt.statusCode) open.count += 1;
+    else runs.push({ statusCode: attempt.statusCode, count: 1 });
+  }
+
+  return runs;
+}
+
+function outcomeVerb(statusCode: number | null): string {
+  return statusCode == null ? "got no answer at all" : `answered ${statusCode}`;
+}
+
+/** The outcome as it appears in the timeline column. Shares `null ⇒ no answer` with the sentence above so the two can't disagree. */
+export function attemptOutcome(attempt: RepositoryWebhookAttemptDetail): string {
+  return attempt.statusCode == null ? "no answer" : String(attempt.statusCode);
+}
+
+/**
+ * The steps for finishing by hand, quoting the provider's own field labels — those are the words on
+ * the screen the reader is actually looking at, and the two providers do not use the same ones.
+ * `**` marks a phrase the provider owns; the renderer sets those apart so they can be matched by eye
+ * against the other window.
+ */
+export type WebhookSetupStep =
+  | { kind: "say"; text: string }
+  | { kind: "paste"; label: string; into: "url" | "secret" };
+
+export function webhookSetupSteps(provider: ProviderKind, fullPath: string): WebhookSetupStep[] {
+  if (provider === "GitHub") return gitHubSteps(fullPath);
+  if (provider === "GitLab") return gitLabSteps(fullPath);
+
+  return [
+    { kind: "say", text: `Open the webhook settings for ${fullPath} at your provider and add a new hook.` },
+    { kind: "paste", label: "URL", into: "url" },
+    { kind: "paste", label: "Secret", into: "secret" },
+    { kind: "say", text: "Subscribe it to push and pull-request events only — CodeSpace rejects anything it did not ask for." },
+    { kind: "say", text: "Save, then send a test event. The row above turns to **Delivering** on its own once the first one lands here." },
+  ];
+}
+
+function gitLabSteps(fullPath: string): WebhookSetupStep[] {
+  return [
+    { kind: "say", text: `In GitLab, open **${fullPath} → Settings → Webhooks** and click **Add new webhook**.` },
+    { kind: "paste", label: "URL", into: "url" },
+    { kind: "paste", label: "Secret token", into: "secret" },
+    { kind: "say", text: "Under **Trigger**, tick **Push events** and **Merge request events**. Leave the rest clear — CodeSpace rejects deliveries it did not subscribe to." },
+    { kind: "say", text: "Save, then use **Test → Push events** in GitLab. The row above turns to **Delivering** on its own once the first event lands here." },
+  ];
+}
+
+function gitHubSteps(fullPath: string): WebhookSetupStep[] {
+  return [
+    { kind: "say", text: `In GitHub, open **${fullPath} → Settings → Webhooks** and click **Add webhook**.` },
+    { kind: "paste", label: "Payload URL", into: "url" },
+    // Its own step rather than a note on the URL: GitHub defaults to a form encoding CodeSpace does
+    // not parse, and a hook that is otherwise perfect fails silently on every delivery because of it.
+    { kind: "say", text: "Set **Content type** to **application/json**. GitHub's default is a form encoding CodeSpace does not read." },
+    { kind: "paste", label: "Secret", into: "secret" },
+    { kind: "say", text: "Choose **Let me select individual events**, then tick **Pushes** and **Pull requests** only." },
+    { kind: "say", text: "Save, then use **Recent Deliveries → Redeliver** to send a test event. The row above turns to **Delivering** on its own once the first one lands here." },
+  ];
+}
+
+/** "the provider" reads better than "Git" in a sentence about who refused a call. */
+function providerName(provider: ProviderKind): string {
+  return provider === "Git" ? "The provider" : provider;
+}
+
+/** GitLab and GitHub both hand back numeric hook ids; `#` makes one read as an id rather than a count. */
+function formatHookId(externalId: string): string {
+  return /^\d+$/.test(externalId) ? `#${externalId}` : externalId;
+}
+
+/** Forward-looking counterpart to `relativeTime` — "in 4 minutes", or "now" once the deadline has passed. */
+function inWords(ms: number): string {
+  if (ms <= 0) return "now";
+
+  const minutes = Math.round(ms / 60_000);
+
+  if (minutes < 1) return "in less than a minute";
+  if (minutes < 60) return `in ${minutes} ${plural(minutes, "minute")}`;
+
+  const hours = Math.round(minutes / 60);
+
+  return `in ${hours} ${plural(hours, "hour")}`;
+}
+
+function plural(n: number, unit: string): string {
+  return n === 1 ? unit : `${unit}s`;
+}
