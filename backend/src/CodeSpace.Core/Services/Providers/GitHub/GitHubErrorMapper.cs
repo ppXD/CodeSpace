@@ -50,13 +50,13 @@ public sealed class GitHubErrorMapper : IProviderErrorMapper, ISingletonDependen
                 return null;
             }
 
-            return new ProviderInsufficientScopeException(Kind, operationName, missing, granted, api.Message);
+            return new ProviderInsufficientScopeException(Kind, operationName, missing, granted, api.Message, api);
         }
 
         // Fallback heuristic: 403 + message hints at scope. Best-effort guess at what's missing.
         if (LooksLikeScopeIssue(api.Message))
         {
-            return new ProviderInsufficientScopeException(Kind, operationName, new[] { "repo" }, granted, api.Message);
+            return new ProviderInsufficientScopeException(Kind, operationName, new[] { "repo" }, granted, api.Message, api);
         }
 
         return null;
