@@ -1,8 +1,11 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
+using CodeSpace.Messages.Exceptions;
 
 namespace CodeSpace.IntegrationTests.Binding;
 
@@ -23,6 +26,18 @@ public sealed class TestRemoteHookStore
 
     /// <summary>Total times <c>RegisterWebhookAsync</c> created a fresh hook (not counting find-by-URL reuse).</summary>
     public int RegisterCallCount { get; private set; }
+
+    /// <summary>
+    /// Set it and the next registration is refused instead of registered. Null means "the remote
+    /// works", which is what every test that isn't about failure wants.
+    /// </summary>
+    public TestHookRefusal? Refusal
+    {
+        get { lock (_lock) { return _refusal; } }
+        set { lock (_lock) { _refusal = value; } }
+    }
+
+    private TestHookRefusal? _refusal;
 
     public RemoteWebhook? Find(string callbackUrl)
     {
@@ -57,8 +72,24 @@ public sealed class TestRemoteHookStore
         {
             _byCallbackUrl.Clear();
             RegisterCallCount = 0;
+            _refusal = null;
         }
     }
+}
+
+/// <summary>
+/// How the remote refuses. <see cref="StatusCode"/> null models the failure that never reached
+/// HTTP — a timeout, a refused connection — which is the case the attempt timeline exists to tell
+/// apart from a permission refusal.
+/// </summary>
+public sealed record TestHookRefusal
+{
+    public int? StatusCode { get; init; }
+    public string? ResponseBody { get; init; }
+    public required string Message { get; init; }
+
+    /// <summary>Stands in for the credential the real provider would put in its auth header — the test asserts it never reaches the row.</summary>
+    public string CredentialToken { get; init; } = "test-credential-token";
 }
 
 /// <summary>
@@ -332,8 +363,40 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
     public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) =>
         Task.FromResult(_hookStore.Find(callbackUrl));
 
-    public Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken) =>
-        Task.FromResult(_hookStore.Register(request));
+    public Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
+    {
+        var refusal = _hookStore.Refusal;
+
+        if (refusal != null) throw BuildRefusal(refusal, repository, request);
+
+        return Task.FromResult(_hookStore.Register(request));
+    }
+
+    /// <summary>
+    /// Refuse the way a real provider refuses: the same typed exception, carrying a request built by
+    /// the SAME production capture the GitLab and GitHub providers use. A double that masked secrets
+    /// its own way would let a test pass while production leaked.
+    /// </summary>
+    private static ProviderWebhookRegistrationException BuildRefusal(TestHookRefusal refusal, RemoteRepository repository, WebhookRegistration request)
+    {
+        var headers = new Dictionary<string, string> { ["Authorization"] = $"Bearer {refusal.CredentialToken}" };
+        var body = JsonSerializer.Serialize(new { url = request.CallbackUrl, push_events = true, token = request.Secret });
+
+        var diagnostic = new ProviderCallDiagnostic
+        {
+            StatusCode = refusal.StatusCode,
+            ResponseBody = refusal.ResponseBody,
+            Request = ProviderCallCapture.CaptureRedacted("POST", $"https://test.local/api/v4/projects/{repository.ExternalId}/hooks", headers, body, new[] { refusal.CredentialToken })
+        };
+
+        // A refusal that reached HTTP arrives as the resilience layer's translation; one that never
+        // did arrives as the raw transport failure. Both are what the registrar really catches.
+        Exception inner = refusal.StatusCode == null
+            ? new TaskCanceledException(refusal.Message)
+            : new ProviderApiException(ProviderKind.Git, refusal.StatusCode.Value, nameof(RegisterWebhookAsync), refusal.Message, new InvalidOperationException(refusal.Message));
+
+        return new ProviderWebhookRegistrationException(diagnostic, inner);
+    }
 
     public Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken) => Task.CompletedTask;
 

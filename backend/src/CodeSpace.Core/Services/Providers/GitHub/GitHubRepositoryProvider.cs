@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
@@ -704,63 +706,104 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, baseAddress, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var repositoryId = long.Parse(repository.ExternalId);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), async _ =>
+        try
         {
-            // GET /repos/:owner/:repo/hooks — Octokit fetches all hook configs via the
-            // owner+name route. The hook's `config["url"]` carries the callback we set
-            // at register time, so a case-insensitive exact match against our generated
-            // callback URL identifies a prior registration uniquely.
-            var hooks = await client.Repository.Hooks.GetAll(long.Parse(repository.ExternalId)).ConfigureAwait(false);
+            // GET /repositories/:id/hooks — the hook's `config["url"]` carries the callback we set
+            // at register time, so a case-insensitive exact match against our generated callback
+            // URL identifies a prior registration uniquely.
+            return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), async _ =>
+                MatchHookByCallbackUrl(await client.Repository.Hooks.GetAll(repositoryId).ConfigureAwait(false), callbackUrl),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Failing to LIST hooks fails the registration exactly as surely as failing to create
+            // one, and for the same reasons (revoked token, no permission, instance down) — so the
+            // operator gets the same evidence from either step.
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", baseAddress, repositoryId, token, null)), ex);
+        }
+    }
 
-            foreach (var hook in hooks)
-            {
-                if (hook.Config != null && hook.Config.TryGetValue("url", out var url) && string.Equals(url, callbackUrl, StringComparison.OrdinalIgnoreCase))
-                {
-                    return new RemoteWebhook
-                    {
-                        ExternalId = hook.Id.ToString(),
-                        CallbackUrl = url,
-                        SubscribedEvents = hook.Events.ToList(),
-                        Active = hook.Active
-                    };
-                }
-            }
+    private static RemoteWebhook? MatchHookByCallbackUrl(IEnumerable<RepositoryHook> hooks, string callbackUrl)
+    {
+        foreach (var hook in hooks)
+        {
+            if (hook.Config == null || !hook.Config.TryGetValue("url", out var url) || !string.Equals(url, callbackUrl, StringComparison.OrdinalIgnoreCase)) continue;
 
-            return null;
-        }, cancellationToken).ConfigureAwait(false);
+            return new RemoteWebhook { ExternalId = hook.Id.ToString(), CallbackUrl = url, SubscribedEvents = hook.Events.ToList(), Active = hook.Active };
+        }
+
+        return null;
     }
 
     public async Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, baseAddress, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var repositoryId = long.Parse(repository.ExternalId);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
+        // Built once and used twice — as the payload and as the record of the payload — so the two
+        // can never drift into describing different requests.
+        var config = new Dictionary<string, string> { ["url"] = request.CallbackUrl, ["content_type"] = "json", ["secret"] = request.Secret };
+
+        try
         {
-            var config = new Dictionary<string, string>
+            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
-                ["url"] = request.CallbackUrl,
-                ["content_type"] = "json",
-                ["secret"] = request.Secret
-            };
+                var newHook = new NewRepositoryHook("web", config) { Active = true, Events = request.SubscribedEvents.ToArray() };
+                var created = await client.Repository.Hooks.Create(repositoryId, newHook).ConfigureAwait(false);
 
-            var newHook = new NewRepositoryHook("web", config)
-            {
-                Active = true,
-                Events = request.SubscribedEvents.ToArray()
-            };
+                return new RemoteWebhook
+                {
+                    ExternalId = created.Id.ToString(),
+                    CallbackUrl = request.CallbackUrl,
+                    SubscribedEvents = created.Events.ToList(),
+                    Active = created.Active
+                };
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var body = JsonSerializer.Serialize(new { name = "web", config, events = request.SubscribedEvents, active = true });
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("POST", baseAddress, repositoryId, token, body)), ex);
+        }
+    }
 
-            var created = await client.Repository.Hooks.Create(long.Parse(repository.ExternalId), newHook).ConfigureAwait(false);
+    /// <summary>
+    /// What we sent, for an operator to read months later. Octokit's exception carries the response
+    /// but not the request, so both the URL and the payload are reproduced here — verified against
+    /// the wire: <c>{apiBase}/repositories/{id}/hooks</c>, authenticated with a token header.
+    ///
+    /// <para>The credential is masked because <c>Authorization</c> is a credential header; the
+    /// webhook secret is masked because it rides in a field named <c>secret</c> — nested under
+    /// <c>config</c>, which is why the field rule has to recurse.</para>
+    /// </summary>
+    private static CapturedProviderRequest CaptureHookRequest(string method, Uri baseAddress, long repositoryId, string token, string? body)
+    {
+        var headers = new Dictionary<string, string> { ["Authorization"] = $"Token {token}" };
+        var url = $"{baseAddress.ToString().TrimEnd('/')}/repositories/{repositoryId}/hooks";
 
-            return new RemoteWebhook
-            {
-                ExternalId = created.Id.ToString(),
-                CallbackUrl = request.CallbackUrl,
-                SubscribedEvents = created.Events.ToList(),
-                Active = created.Active
-            };
-        }, cancellationToken).ConfigureAwait(false);
+        return ProviderCallCapture.CaptureRedacted(method, url, headers, body, new[] { token });
+    }
+
+    /// <summary>
+    /// Pull the status and the response body back out of whatever the call threw. The SDK exception
+    /// is rarely the one we caught — the resilience layer translates it and the scope mapper replaces
+    /// it — so we look down the chain for the shape that still knows what GitHub said. Finding
+    /// nothing is itself informative: no status means the call never got an answer.
+    /// </summary>
+    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request)
+    {
+        var api = ProviderCallCapture.FindInChain<ApiException>(exception);
+
+        return new ProviderCallDiagnostic
+        {
+            StatusCode = api == null ? null : (int)api.StatusCode,
+            ResponseBody = ProviderCallCapture.Clamp(api?.HttpResponse?.Body as string),
+            Request = request
+        };
     }
 
     public async Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken)
@@ -1125,11 +1168,16 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
     }
 
     private async Task<GitHubClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
+        => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;
+
+    // Like BuildClientAsync but also surfaces the API base + token, which the webhook calls need in
+    // order to describe the request they sent when it fails. One auth resolve serves both.
+    private async Task<(GitHubClient Client, Uri BaseAddress, string Token)> BuildAuthedAsync(ProviderContext context, CancellationToken cancellationToken)
     {
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var baseAddress = ResolveApiBaseAddress(context.Instance);
 
-        return new GitHubClient(new ProductHeaderValue("CodeSpace"), baseAddress) { Credentials = new Octokit.Credentials(auth.Token) };
+        return (new GitHubClient(new ProductHeaderValue("CodeSpace"), baseAddress) { Credentials = new Octokit.Credentials(auth.Token) }, baseAddress, auth.Token);
     }
 
     private static Uri ResolveApiBaseAddress(ProviderInstance instance)

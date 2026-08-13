@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -6,6 +7,7 @@ using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Hangfire;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -71,7 +73,7 @@ public sealed class RepositoryWebhookRegistrar : IRepositoryWebhookRegistrar, IS
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "RepositoryWebhookRegistrar: registration failed for webhook {WebhookId}", webhookId);
-            await RecordFailureAsync(webhookId, ex.Message, cancellationToken).ConfigureAwait(false);
+            await RecordFailureAsync(webhookId, ex, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -164,11 +166,10 @@ public sealed class RepositoryWebhookRegistrar : IRepositoryWebhookRegistrar, IS
     }
 
     /// <summary>
-    /// Failure-path CAS: bump attempts, write error, branch to Failed (with backoff) or
-    /// DeadLettered. The WHERE guards against a Cancel that flipped the row while the
-    /// provider call was in flight.
+    /// Failure path: record what happened, then CAS the state machine forward — Failed (with
+    /// backoff) or DeadLettered once the attempts are spent.
     /// </summary>
-    private async Task RecordFailureAsync(Guid webhookId, string errorMessage, CancellationToken cancellationToken)
+    private async Task RecordFailureAsync(Guid webhookId, Exception exception, CancellationToken cancellationToken)
     {
         // Read attempts under the same scope so backoff is computed against the post-increment
         // value. Race-safe because we filter the UPDATE on the row + the Registering state;
@@ -182,26 +183,76 @@ public sealed class RepositoryWebhookRegistrar : IRepositoryWebhookRegistrar, IS
 
         var nextAttempts = attempts + 1;
 
+        // Evidence first. A crash between here and the CAS below costs a state transition, which
+        // the reconciler recovers; losing it the other way round would cost the only account of
+        // why this attempt failed, which nothing recovers.
+        await RecordAttemptAsync(webhookId, nextAttempts, exception).ConfigureAwait(false);
+
         if (nextAttempts >= MaxAttempts)
         {
-            await _db.RepositoryWebhook
-                .Where(w => w.Id == webhookId && w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Registering)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.DeadLettered)
-                    .SetProperty(w => w.Attempts, nextAttempts)
-                    .SetProperty(w => w.LastError, (string?)errorMessage), CancellationToken.None)
-                .ConfigureAwait(false);
-
-            _logger.LogError("RepositoryWebhookRegistrar: webhook {WebhookId} dead-lettered after {Attempts} attempts: {Error}", webhookId, nextAttempts, errorMessage);
+            await DeadLetterAsync(webhookId, nextAttempts, exception.Message).ConfigureAwait(false);
             return;
         }
 
-        var nextAttemptAt = DateTimeOffset.UtcNow + ComputeBackoff(nextAttempts);
+        await ScheduleRetryAsync(webhookId, nextAttempts, exception.Message).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Append this attempt to the webhook's timeline: what the provider answered, and what we sent
+    /// to get that answer. <c>last_error</c> keeps only the newest of these, which is why "403 ten
+    /// times" and "nine timeouts then a 403" were indistinguishable before the timeline existed.
+    ///
+    /// <para>The diagnostic is present only when the provider gave us one — a failure before the
+    /// call (a soft-deleted repository, a missing credential) leaves the columns null and the error
+    /// message carrying the whole story, which is the right shape for that case.</para>
+    /// </summary>
+    private async Task RecordAttemptAsync(Guid webhookId, int attemptNumber, Exception exception)
+    {
+        var diagnostic = (exception as ProviderWebhookRegistrationException)?.Diagnostic;
+        var request = diagnostic?.Request;
+
+        _db.RepositoryWebhookAttempt.Add(new RepositoryWebhookAttempt
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWebhookId = webhookId,
+            AttemptNumber = attemptNumber,
+            AttemptedAt = DateTimeOffset.UtcNow,
+            Error = exception.Message,
+            StatusCode = diagnostic?.StatusCode,
+            ResponseBody = diagnostic?.ResponseBody,
+            RequestMethod = request?.Method,
+            RequestUrl = request?.Url,
+            RequestBody = request?.Body,
+            RequestHeadersJson = request == null ? null : JsonSerializer.Serialize(request.Headers)
+        });
+
+        await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>Terminal CAS. The WHERE guards against a Cancel that flipped the row while the provider call was in flight.</summary>
+    private async Task DeadLetterAsync(Guid webhookId, int attempts, string errorMessage)
+    {
+        await _db.RepositoryWebhook
+            .Where(w => w.Id == webhookId && w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Registering)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.DeadLettered)
+                .SetProperty(w => w.Attempts, attempts)
+                .SetProperty(w => w.LastError, (string?)errorMessage), CancellationToken.None)
+            .ConfigureAwait(false);
+
+        _logger.LogError("RepositoryWebhookRegistrar: webhook {WebhookId} dead-lettered after {Attempts} attempts: {Error}", webhookId, attempts, errorMessage);
+    }
+
+    /// <summary>Retryable CAS: Failed with next_attempt_at set, for the reconciler to revive once the backoff elapses.</summary>
+    private async Task ScheduleRetryAsync(Guid webhookId, int attempts, string errorMessage)
+    {
+        var nextAttemptAt = DateTimeOffset.UtcNow + ComputeBackoff(attempts);
+
         await _db.RepositoryWebhook
             .Where(w => w.Id == webhookId && w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Registering)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Failed)
-                .SetProperty(w => w.Attempts, nextAttempts)
+                .SetProperty(w => w.Attempts, attempts)
                 .SetProperty(w => w.LastError, (string?)errorMessage)
                 .SetProperty(w => w.NextAttemptAt, nextAttemptAt), CancellationToken.None)
             .ConfigureAwait(false);

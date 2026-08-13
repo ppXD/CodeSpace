@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
@@ -1164,74 +1165,133 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), _ =>
+        try
         {
             // GitLab's IProjectHooksClient exposes All as IEnumerable<ProjectHook>; we
             // scan once and pick the entry whose Url matches the callback we set at
-            // registration time. The wire URL is set via Uri so we compare strings via
-            // OrdinalIgnoreCase (the host component is case-insensitive; we tolerate
-            // trailing-slash drift the same way).
-            var projectId = int.Parse(repository.ExternalId);
-            var hooks = client.GetRepository(projectId).ProjectHooks.All;
+            // registration time.
+            return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync),
+                _ => Task.FromResult(MatchHookByCallbackUrl(client.GetRepository(projectId).ProjectHooks.All, callbackUrl)),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Failing to LIST hooks fails the registration exactly as surely as failing to create
+            // one, and for the same reasons (revoked token, no permission, instance down) — so the
+            // operator gets the same evidence from either step.
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", host, projectId, token, null)), ex);
+        }
+    }
 
-            foreach (var hook in hooks)
-            {
-                var hookUrl = hook.Url?.ToString();
-                if (!string.IsNullOrEmpty(hookUrl) && string.Equals(hookUrl, callbackUrl, StringComparison.OrdinalIgnoreCase))
-                {
-                    // GitLab ProjectHook doesn't expose the flag-style "subscribed_events"
-                    // string array we model — events are individual booleans on the hook
-                    // record. Surface the boolean → string mapping that mirrors what
-                    // RegisterWebhookAsync set up, so a later code path can decide whether
-                    // to re-register with a wider subscription if the set has grown.
-                    var subscribed = new List<string>();
-                    if (hook.PushEvents) subscribed.Add("push");
-                    if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
-                    if (hook.IssuesEvents) subscribed.Add("issue");
+    /// <summary>
+    /// The wire URL is set via Uri so we compare strings via OrdinalIgnoreCase (the host component
+    /// is case-insensitive; we tolerate trailing-slash drift the same way).
+    /// </summary>
+    private static RemoteWebhook? MatchHookByCallbackUrl(IEnumerable<ProjectHook> hooks, string callbackUrl)
+    {
+        foreach (var hook in hooks)
+        {
+            var hookUrl = hook.Url?.ToString();
+            if (string.IsNullOrEmpty(hookUrl) || !string.Equals(hookUrl, callbackUrl, StringComparison.OrdinalIgnoreCase)) continue;
 
-                    return Task.FromResult<RemoteWebhook?>(new RemoteWebhook
-                    {
-                        ExternalId = hook.Id.ToString(),
-                        CallbackUrl = hookUrl,
-                        SubscribedEvents = subscribed,
-                        Active = true
-                    });
-                }
-            }
+            // GitLab ProjectHook doesn't expose the flag-style "subscribed_events"
+            // string array we model — events are individual booleans on the hook
+            // record. Surface the boolean → string mapping that mirrors what
+            // RegisterWebhookAsync set up, so a later code path can decide whether
+            // to re-register with a wider subscription if the set has grown.
+            var subscribed = new List<string>();
+            if (hook.PushEvents) subscribed.Add("push");
+            if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
+            if (hook.IssuesEvents) subscribed.Add("issue");
 
-            return Task.FromResult<RemoteWebhook?>(null);
-        }, cancellationToken).ConfigureAwait(false);
+            return new RemoteWebhook { ExternalId = hook.Id.ToString(), CallbackUrl = hookUrl, SubscribedEvents = subscribed, Active = true };
+        }
+
+        return null;
     }
 
     public async Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+        var upsert = BuildHookUpsert(request);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), _ =>
+        try
         {
-            var projectId = int.Parse(repository.ExternalId);
-            var upsert = new ProjectHookUpsert
+            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), _ =>
             {
-                Url = new Uri(request.CallbackUrl),
-                Token = request.Secret,
-                PushEvents = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
-                MergeRequestsEvents = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
-                IssuesEvents = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
-                EnableSslVerification = true
-            };
+                var created = client.GetRepository(projectId).ProjectHooks.Create(upsert);
 
-            var created = client.GetRepository(projectId).ProjectHooks.Create(upsert);
+                return Task.FromResult(new RemoteWebhook
+                {
+                    ExternalId = created.Id.ToString(),
+                    CallbackUrl = request.CallbackUrl,
+                    SubscribedEvents = request.SubscribedEvents.ToList(),
+                    Active = true
+                });
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var sent = CaptureHookRequest("POST", host, projectId, token, JsonSerializer.Serialize(upsert, _snakeCaseJson));
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent), ex);
+        }
+    }
 
-            return Task.FromResult(new RemoteWebhook
-            {
-                ExternalId = created.Id.ToString(),
-                CallbackUrl = request.CallbackUrl,
-                SubscribedEvents = request.SubscribedEvents.ToList(),
-                Active = true
-            });
-        }, cancellationToken).ConfigureAwait(false);
+    private static ProjectHookUpsert BuildHookUpsert(WebhookRegistration request) => new()
+    {
+        Url = new Uri(request.CallbackUrl),
+        Token = request.Secret,
+        PushEvents = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
+        MergeRequestsEvents = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
+        IssuesEvents = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
+        EnableSslVerification = true
+    };
+
+    /// <summary>
+    /// What we sent, for an operator to read months later. NGitLab hands back neither the URL it
+    /// composed nor the payload it serialised, so both are reproduced here — verified against a
+    /// live instance: <c>{host}/api/v4/projects/{id}/hooks</c>, authenticated with a bearer token,
+    /// body serialised snake_case (which is why <see cref="_snakeCaseJson"/> reproduces it exactly).
+    ///
+    /// <para>The credential is masked because <c>Authorization</c> is a credential header; the
+    /// webhook secret is masked because it rides in a field named <c>token</c>. Two independent
+    /// rules in <see cref="ProviderCallCapture"/>, so neither secret depends on the other's rule.</para>
+    /// </summary>
+    private static CapturedProviderRequest CaptureHookRequest(string method, string host, int projectId, string token, string? body)
+    {
+        var headers = new Dictionary<string, string> { ["Authorization"] = $"Bearer {token}" };
+
+        return ProviderCallCapture.CaptureRedacted(method, $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/hooks", headers, body, new[] { token });
+    }
+
+    /// <summary>
+    /// Pull the status and the response body back out of whatever the call threw. The SDK exception
+    /// is rarely the one we caught — the resilience layer translates it and the scope mapper replaces
+    /// it — so we look down the chain for the shape that still knows what GitLab said. Finding
+    /// nothing is itself informative: no status means the call never got an answer.
+    /// </summary>
+    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request)
+    {
+        var gitLab = ProviderCallCapture.FindInChain<GitLabException>(exception);
+
+        return new ProviderCallDiagnostic
+        {
+            StatusCode = gitLab == null ? null : (int)gitLab.StatusCode,
+            ResponseBody = ProviderCallCapture.Clamp(ReadErrorBody(gitLab)),
+            Request = request
+        };
+    }
+
+    /// <summary>NGitLab keeps the parsed error body in ErrorObject; ErrorMessage is what it could salvage when the body wasn't the shape it expected.</summary>
+    private static string? ReadErrorBody(GitLabException? exception)
+    {
+        if (exception == null) return null;
+
+        return exception.ErrorObject == null ? exception.ErrorMessage : JsonSerializer.Serialize(exception.ErrorObject);
     }
 
     public async Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken)

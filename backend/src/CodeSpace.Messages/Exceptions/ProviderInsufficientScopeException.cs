@@ -25,8 +25,14 @@ public sealed class ProviderInsufficientScopeException : Exception, IFailure
 
     public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["provider"] = ProviderKind.ToString(), ["capability"] = CapabilityName, ["missingScopes"] = MissingScopes, ["grantedScopes"] = GrantedScopes, ["providerHint"] = ProviderHint };
 
-    public ProviderInsufficientScopeException(ProviderKind providerKind, string capabilityName, IReadOnlyList<string> missingScopes, IReadOnlyList<string>? grantedScopes, string? providerHint = null)
-        : base(BuildMessage(providerKind, capabilityName, missingScopes))
+    /// <param name="innerException">
+    /// The SDK exception this was mapped from, on the runtime path. Kept because it is the only
+    /// carrier of the status and response body the provider actually sent — dropping it made a 403
+    /// (the most common webhook-registration failure there is) the one failure we could say least
+    /// about. Null on the pre-flight path, where no call was made.
+    /// </param>
+    public ProviderInsufficientScopeException(ProviderKind providerKind, string capabilityName, IReadOnlyList<string> missingScopes, IReadOnlyList<string>? grantedScopes, string? providerHint = null, Exception? innerException = null)
+        : base(BuildMessage(providerKind, capabilityName, missingScopes), innerException)
     {
         ProviderKind = providerKind;
         CapabilityName = capabilityName;

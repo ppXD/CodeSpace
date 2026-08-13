@@ -28,7 +28,7 @@ public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependen
     {
         if (exception is not GitLabException gl) return null;
 
-        return ClassifyScope((int)gl.StatusCode, gl.ErrorObject?.ToString(), gl.ErrorMessage ?? gl.Message, operationName);
+        return ClassifyScope((int)gl.StatusCode, gl.ErrorObject?.ToString(), gl.ErrorMessage ?? gl.Message, operationName, gl);
     }
 
     /// <summary>
@@ -40,7 +40,7 @@ public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependen
     /// through to <c>ProviderApiException(403)</c> and an accurate "you may lack access/permission"
     /// message, rather than a misleading "missing api scope" that sends the user to re-link a fine token.
     /// </summary>
-    internal ProviderInsufficientScopeException? ClassifyScope(int statusCode, string? body, string? hint, string operationName)
+    internal ProviderInsufficientScopeException? ClassifyScope(int statusCode, string? body, string? hint, string operationName, Exception? sdkException = null)
     {
         if (statusCode != 403) return null;
 
@@ -51,7 +51,7 @@ public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependen
         if (hasScopeTag)
         {
             var requiredScope = ExtractRequiredScope(body) ?? "api";
-            return new ProviderInsufficientScopeException(Kind, operationName, new[] { requiredScope }, Array.Empty<string>(), hint);
+            return new ProviderInsufficientScopeException(Kind, operationName, new[] { requiredScope }, Array.Empty<string>(), hint, sdkException);
         }
 
         return null;
