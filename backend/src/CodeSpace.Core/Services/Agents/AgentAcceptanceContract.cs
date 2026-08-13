@@ -129,6 +129,9 @@ public static class AgentAcceptanceContract
                    // throws → grade-error) and Genuine under bubblewrap (bwrap starts fine, execvp fails inside,
                    // exit 127) — the concrete leak the amend precondition would otherwise trip over.
                    || effective is "tests-failed-exit-127" or "tests-failed-exit-126"
+                   // W-hard: the run's own budget refused the judge call — the check never ran, and the compact
+                   // fold carries only this string (the typed Environment class does not survive onto the tape).
+                   || effective == "grade-skipped-budget-exhausted"
                    || (effective == "no-branch-or-repo" && workPresent));
     }
 

@@ -75,6 +75,32 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
     }
 
+    [Fact]
+    public async Task A_budget_refused_judge_leaves_the_unit_a_budget_skip_never_a_grader_fault()
+    {
+        // W-hard: the run's own cap refused the judge call mid-fold. The unit must NOT read grade-error (that
+        // labels the instrument sick) and must NOT read a genuine failure (that blames the candidate and buys
+        // retries no retry can afford) — it reads the budget-skip, infra-classed, and the rehydrate SURVIVES so
+        // the decider's own guarded call can land the run's honest CostCapReached stop.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new CodeSpace.Core.Services.Workflows.Llm.LlmBudgetExceededException("grader.acceptance", committedUsd: 4.9m, capUsd: 5m));
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        var result = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceDetail.ShouldBe(SupervisorTurnService.GradeSkippedBudgetExhausted);
+
+        CodeSpace.Core.Services.Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, workPresent: true)
+            .ShouldBeTrue("the check never ran — infra-classed, buys no retries, never blames the candidate");
+    }
+
     // ── B-pre: the fold's verdict is written back to the unit's publish manifest ──────────────────────
 
     [Theory]

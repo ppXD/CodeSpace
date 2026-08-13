@@ -22,6 +22,9 @@ public sealed partial class SupervisorTurnService
     /// <summary>P3.5 — the interaction-record label for the acceptance grader's LlmJudge model call, so its spend is visible + countable exactly like the decider's own "supervisor.decision" and the critic's "critic.review". Pinned by a unit test (Rule 8).</summary>
     public const string GraderAcceptanceCallKind = "grader.acceptance";
 
+    /// <summary>The grade detail when the run's own budget refused the judge call — classified Environment (typed) AND pinned in the string conventions, because the compact fold carries only the detail string. Wire-stable.</summary>
+    public const string GradeSkippedBudgetExhausted = "grade-skipped-budget-exhausted";
+
     public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken)
     {
         var rows = await _ledger.GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
@@ -72,6 +75,9 @@ public sealed partial class SupervisorTurnService
         // terminal record). TurnNumber = the count of DECIDED (terminal) decisions, which is what drives both
         // the next decision and the per-turn IterationKey — so a re-entry replays exactly the same decisions
         // and re-claims the in-flight one rather than emitting a duplicate.
+        // Hoisted ABOVE the walk (pure over goalConfig) so the grading scopes below can carry the run's cost cap.
+        var plan = SupervisorGoalPlan.From(goalConfig);
+
         foreach (var row in rows)
         {
             var decision = FoldAskHumanAnswer(ToPriorDecision(row), answersByToken);
@@ -87,7 +93,7 @@ public sealed partial class SupervisorTurnService
                 // P3.5 — an LlmJudge-kind acceptance check makes a real model call; label it "grader.acceptance" so
                 // its spend lands on the ledger (RecordingLLMClientDecorator records nothing with no ambient scope) and
                 // counts toward the run's cost cap. A no-op for every OTHER grader kind (TestsPass etc. make no model call).
-                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
+                using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd)))
                 {
                     decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                     decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
@@ -104,8 +110,6 @@ public sealed partial class SupervisorTurnService
             if (decision.OutcomeJson != row.OutcomeJson)
                 await _ledger.UpdateOutcomeAsync(row.Id, teamId, decision.OutcomeJson!, cancellationToken).ConfigureAwait(false);
         }
-
-        var plan = SupervisorGoalPlan.From(goalConfig);
 
         // P3.5 — brain-plane spend (the supervisor's own decision calls, a decision critic's review, an
         // acceptance-grading judge, any future in-process model call) is DB-gated on a cost cap actually being set:
@@ -496,6 +500,14 @@ public sealed partial class SupervisorTurnService
 
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
         }
+        catch (Workflows.Llm.LlmBudgetExceededException refused)
+        {
+            // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
+            // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
+            // lands via the decider's own guarded call, which the same ledger refuses next.
+            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Acceptance grade for resolve decision {DecisionId} failed unexpectedly; recording not-accepted", decision.Id);
@@ -705,6 +717,14 @@ public sealed partial class SupervisorTurnService
 
             return NotApplicableOrFailed(expectsChanges);
         }
+        catch (Workflows.Llm.LlmBudgetExceededException refused)
+        {
+            // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
+            // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
+            // lands via the decider's own guarded call, which the same ledger refuses next.
+            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
@@ -795,7 +815,15 @@ public sealed partial class SupervisorTurnService
 
                 grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseSha, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Workflows.Llm.LlmBudgetExceededException refused)
+        {
+            // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
+            // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
+            // lands via the decider's own guarded call, which the same ledger refuses next.
+            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Per-unit multi-repo acceptance grade for agent {AgentRunId} repo '{Alias}' in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, target.Alias, decisionId);
                 return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
@@ -977,7 +1005,7 @@ public sealed partial class SupervisorTurnService
         // P3.5 — see the identical rationale on the rehydrate-fold's own grading wrap: labels any LlmJudge model call
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
         BenchmarkGrade grade;
-        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader)))
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd)))
             grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
@@ -1075,7 +1103,15 @@ public sealed partial class SupervisorTurnService
                 {
                     grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Workflows.Llm.LlmBudgetExceededException refused)
+        {
+            // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
+            // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
+            // lands via the decider's own guarded call, which the same ledger refuses next.
+            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex, "Stop acceptance {Gate} grade for repo {Repo} failed unexpectedly; recording not-accepted", label, target.Alias);
                     return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };

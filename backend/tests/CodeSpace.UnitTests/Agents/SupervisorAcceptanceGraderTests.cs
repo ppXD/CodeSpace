@@ -386,6 +386,8 @@ public class SupervisorAcceptanceGraderTests
     [InlineData("tests-failed-exit-126", true)]                              // B6: found but not executable — same class
     [InlineData("repo 'web': tests-failed-exit-127", true)]                  // and the tag never defeats it
     [InlineData("tests-failed-exit-2", false)]                               // an ordinary non-zero exit stays genuine
+    [InlineData("grade-skipped-budget-exhausted", true)]                     // W-hard: the run's own cap refused the judge — the check never ran
+    [InlineData("repo 'web': grade-skipped-budget-exhausted", true)]         // and the tag never defeats it
     public void A_repo_tag_never_defeats_the_infra_classification(string detail, bool expected)
     {
         // The multi-repo grade paths wrap the classifiable detail in a uniform "repo 'alias': " tag for display —
