@@ -110,7 +110,7 @@ public sealed class RealModelAvailabilityE2ETests
         var userId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"rmavail-{userId:N}@test.local", Name = $"rmavail-{userId:N}" });
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"rmavail-{teamId:N}", Name = "RM Avail Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"rmavail-{teamId:N}", Name = "RM Avail Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
         await db.SaveChangesAsync();
         return teamId;

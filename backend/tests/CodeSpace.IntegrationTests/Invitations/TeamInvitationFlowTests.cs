@@ -52,7 +52,7 @@ public class TeamInvitationFlowTests
 
         // Migration 0008 holds "one personal team per user" for accounts that already existed. Nothing
         // created one for a NEW account, because until this path there were no new accounts.
-        var personal = await db.Team.SingleAsync(t => t.OwnerUserId == user.Id && t.Kind == TeamKind.Personal).ConfigureAwait(false);
+        var personal = await db.Team.SingleAsync(t => t.PersonalForUserId == user.Id && t.Kind == TeamKind.Personal).ConfigureAwait(false);
         personal.Name.ShouldBe("Personal");
         (await db.TeamMembership.AnyAsync(m => m.TeamId == personal.Id && m.UserId == user.Id && m.Role == TeamRole.Owner).ConfigureAwait(false)).ShouldBeTrue();
     }
@@ -370,10 +370,11 @@ public class TeamInvitationFlowTests
         var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = "admin" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"vie-{suffix}@x", Name = "viewer" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"inv-{suffix}", Name = "Invitees", OwnerUserId = owner.Id, Kind = kind };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"inv-{suffix}", Name = "Invitees", Kind = kind };
 
         db.User.AddRange(owner, admin, member, viewer);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner });
         db.Project.Add(TestProjectSeed.BuildDefaultProject(team.Id, owner.Id));
         db.TeamMembership.AddRange(
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = admin.Id, Role = TeamRole.Admin },

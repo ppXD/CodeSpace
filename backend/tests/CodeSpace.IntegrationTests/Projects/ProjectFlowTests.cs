@@ -493,7 +493,6 @@ public class ProjectFlowTests
             Slug = $"proj-team-{teamId:N}",
             Name = "Project Test Team",
             Kind = TeamKind.Workspace,
-            OwnerUserId = userId,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
         });

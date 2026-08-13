@@ -607,7 +607,7 @@ public class McpToolApprovalFlowTests
             db.User.Add(new User { Id = ownerId, Email = $"appr-{ownerId:N}@test.local", Name = $"appr-{ownerId:N}" });
 
             teamId = Guid.NewGuid();
-            db.Team.Add(new Team { Id = teamId, Slug = $"appr-{teamId:N}", Name = "Approval Team", Kind = TeamKind.Workspace, OwnerUserId = ownerId });
+            db.Team.Add(new Team { Id = teamId, Slug = $"appr-{teamId:N}", Name = "Approval Team", Kind = TeamKind.Workspace });
             db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = ownerId, Role = TeamRole.Owner });
 
             await db.SaveChangesAsync();

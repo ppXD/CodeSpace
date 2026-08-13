@@ -105,7 +105,7 @@ public class DefinitionScopeSchemaFlowTests
         var teamId = Guid.NewGuid();
 
         db.User.Add(new User { Id = userId, Email = $"scope-{userId:N}@test.local", Name = $"scope-user-{userId:N}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
-        db.Team.Add(new Team { Id = teamId, Slug = $"scope-team-{teamId:N}", Name = "Scope Test Team", Kind = TeamKind.Workspace, OwnerUserId = userId, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"scope-team-{teamId:N}", Name = "Scope Test Team", Kind = TeamKind.Workspace, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
 
         await db.SaveChangesAsync();

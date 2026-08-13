@@ -215,13 +215,16 @@ public class TenancyEnforcementTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var userA = new User { Id = Guid.NewGuid(), Email = $"a-{suffix}@x", Name = "userA" };
         var userB = new User { Id = Guid.NewGuid(), Email = $"b-{suffix}@x", Name = "userB" };
-        var teamA = new Team { Id = Guid.NewGuid(), Slug = $"a-{suffix}", Name = "TeamA", OwnerUserId = userA.Id };
-        var teamB = new Team { Id = Guid.NewGuid(), Slug = $"b-{suffix}", Name = "TeamB", OwnerUserId = userB.Id };
+        var teamA = new Team { Id = Guid.NewGuid(), Slug = $"a-{suffix}", Name = "TeamA" };
+        var teamB = new Team { Id = Guid.NewGuid(), Slug = $"b-{suffix}", Name = "TeamB" };
         var projectA = TestProjectSeed.BuildDefaultProject(teamA.Id, userA.Id);
         var projectB = TestProjectSeed.BuildDefaultProject(teamB.Id, userB.Id);
 
         db.User.AddRange(userA, userB);
         db.Team.AddRange(teamA, teamB);
+        db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = teamA.Id, UserId = userA.Id, Role = TeamRole.Owner },
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = teamB.Id, UserId = userB.Id, Role = TeamRole.Owner });
         db.Project.AddRange(projectA, projectB);
         await db.SaveChangesAsync().ConfigureAwait(false);
 

@@ -171,7 +171,7 @@ public class AgentPackImportFlowTests
         var userId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"pack-{userId:N}@test.local", Name = $"pack-{userId:N}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
-        db.Team.Add(new Team { Id = teamId, Slug = $"pack-team-{teamId:N}", Name = "Pack Team", Kind = TeamKind.Workspace, OwnerUserId = userId, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"pack-team-{teamId:N}", Name = "Pack Team", Kind = TeamKind.Workspace, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         await db.SaveChangesAsync();
         return teamId;
@@ -180,7 +180,7 @@ public class AgentPackImportFlowTests
     private async Task<Guid> OwnerOfAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
-        return (await scope.Resolve<CodeSpaceDbContext>().Team.AsNoTracking().SingleAsync(t => t.Id == teamId)).OwnerUserId;
+        return (await scope.Resolve<CodeSpaceDbContext>().TeamMembership.AsNoTracking().SingleAsync(m => m.TeamId == teamId && m.Role == TeamRole.Owner)).UserId;
     }
 
     private async Task SeedPersonaAsync(Guid teamId, string slug, DefinitionScope scope = DefinitionScope.Working)

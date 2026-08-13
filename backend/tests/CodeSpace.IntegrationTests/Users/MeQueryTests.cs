@@ -63,18 +63,18 @@ public class MeQueryTests
 
         var team = result.Teams.Single(t => t.Id == teamId);
         team.RepositoryCount.ShouldBe(2);
-        team.MemberCount.ShouldBe(2); // owner + 1 membership
+        team.MemberCount.ShouldBe(2); // the owner and one member
         team.WorkflowCount.ShouldBe(2); // 2 active, 1 soft-deleted excluded
     }
 
     /// <summary>
     /// The sidebar's member count and the members screen's roster are two readings of one fact, and a
-    /// user who sees "3 members" over a list of two has caught the product lying. Every team created
-    /// since invitations shipped gives its owner a membership row of their own, so the two must agree
-    /// on that shape specifically — counting rows and adding the owner double-counts them.
+    /// user who sees "3 members" over a list of two has caught the product lying. Both now count the
+    /// same membership rows; the count used to add the owner on top of them and read 2 for a team of
+    /// one.
     /// </summary>
     [Fact]
-    public async Task Me_member_count_matches_the_roster_when_the_owner_holds_a_membership_row()
+    public async Task Me_member_count_matches_the_roster()
     {
         var (userId, teamId) = await SeedTeamAsProvisionedAsync().ConfigureAwait(false);
 
@@ -107,7 +107,7 @@ public class MeQueryTests
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    /// <summary>Seeds a team the way <c>TeamProvisioningService</c> does — owner row AND owner membership.</summary>
+    /// <summary>Seeds a team the way <c>TeamProvisioningService</c> does — the owner holds an Owner membership row.</summary>
     private async Task<(Guid UserId, Guid TeamId)> SeedTeamAsProvisionedAsync(bool deleteTheMember = false)
     {
         using var scope = _fixture.BeginScope();
@@ -116,7 +116,7 @@ public class MeQueryTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"o-{suffix}@x", Name = "owner" };
         var member = new User { Id = Guid.NewGuid(), Email = $"m-{suffix}@x", Name = "member", DeletedDate = deleteTheMember ? DateTimeOffset.UtcNow : null };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"prov-{suffix}", Name = "Provisioned", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"prov-{suffix}", Name = "Provisioned" };
 
         db.User.AddRange(owner, member);
         db.Team.Add(team);
@@ -148,13 +148,15 @@ public class MeQueryTests
         var otherOwner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "other" };
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "subject" };
 
-        var owned = new Team { Id = Guid.NewGuid(), Slug = $"owned-{suffix}", Name = "OwnedTeam", OwnerUserId = user.Id };
-        var memberOf = new Team { Id = Guid.NewGuid(), Slug = $"member-{suffix}", Name = "MemberTeam", OwnerUserId = otherOwner.Id };
+        var owned = new Team { Id = Guid.NewGuid(), Slug = $"owned-{suffix}", Name = "OwnedTeam" };
+        var memberOf = new Team { Id = Guid.NewGuid(), Slug = $"member-{suffix}", Name = "MemberTeam" };
 
         db.User.AddRange(otherOwner, user);
         db.Team.AddRange(owned, memberOf);
-
-        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = memberOf.Id, UserId = user.Id, Role = TeamRole.Member });
+        db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = owned.Id, UserId = user.Id, Role = TeamRole.Owner },
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = memberOf.Id, UserId = otherOwner.Id, Role = TeamRole.Owner },
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = memberOf.Id, UserId = user.Id, Role = TeamRole.Member });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
 
@@ -170,7 +172,7 @@ public class MeQueryTests
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "owner" };
         var member = new User { Id = Guid.NewGuid(), Email = $"m-{suffix}@x", Name = "member" };
 
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "BusyTeam", OwnerUserId = user.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "BusyTeam" };
         var project = TestProjectSeed.BuildDefaultProject(team.Id, user.Id);
         var instance = new ProviderInstance
         {
@@ -185,7 +187,9 @@ public class MeQueryTests
         db.Team.Add(team);
         db.Project.Add(project);
         db.ProviderInstance.Add(instance);
-        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member });
+        db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Owner },
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member });
         db.Repository.AddRange(
             new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
             new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });

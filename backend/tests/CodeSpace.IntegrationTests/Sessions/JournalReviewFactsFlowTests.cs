@@ -182,7 +182,8 @@ public sealed class JournalReviewFactsFlowTests
         db.User.Add(new User { Id = userId, Email = $"jrf-{userId:N}@test.local", Name = $"jrf-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"jrf-{teamId:N}", Name = "Journal Review Facts Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"jrf-{teamId:N}", Name = "Journal Review Facts Team", Kind = TeamKind.Workspace });
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         return teamId;
     }

@@ -152,7 +152,7 @@ public class PublishManifestStoreTests
         db.User.Add(new User { Id = userId, Email = $"manifest-{userId:N}@test.local", Name = $"manifest-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"manifest-{teamId:N}", Name = "Manifest Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"manifest-{teamId:N}", Name = "Manifest Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

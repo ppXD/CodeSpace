@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Users;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Teams;
 using CodeSpace.Messages.Constants;
@@ -144,11 +145,6 @@ public class TeamMemberManagementTests
 
         await SendAsAsync(team.Owner, team.TeamId, new TransferTeamOwnershipCommand { ToUserId = team.Admin }).ConfigureAwait(false);
 
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-
-        // Ownership is recorded twice. Both have to move, or one of them still names the old owner.
-        (await db.Team.Where(t => t.Id == team.TeamId).Select(t => t.OwnerUserId).SingleAsync().ConfigureAwait(false)).ShouldBe(team.Admin);
         (await RoleOfAsync(team.TeamId, team.Admin).ConfigureAwait(false)).ShouldBe(TeamRole.Owner);
         (await RoleOfAsync(team.TeamId, team.Owner).ConfigureAwait(false)).ShouldBe(TeamRole.Admin, "the outgoing owner stays, demoted — transferring is not leaving");
     }
@@ -213,32 +209,87 @@ public class TeamMemberManagementTests
         ownerMe.Teams.Single(t => t.Id == team.TeamId).Permissions.ShouldBe(Messages.Authorization.TeamPermissionMatrix.GrantedTo(TeamRole.Owner));
     }
 
-    /// <summary>
-    /// Handing over a team whose owner is recorded ONLY on <c>team.owner_user_id</c> — the shape the
-    /// seed workspace shipped in, since migration 0006 wrote the column without the row.
-    ///
-    /// <para>The roster is <c>owner UNION memberships</c>, so moving <c>owner_user_id</c> to someone
-    /// else removed the outgoing owner's only tie to the team: they left it by handing it over,
-    /// silently. Every other test here seeds the owner a membership row, which is why the shape every
-    /// deployment actually starts in was the one nothing covered.</para>
-    /// </summary>
+    // ── Ownership ends where the Owner row ends ────────────────────────────────────
+    //
+    // Ownership used to be recorded on `team.owner_user_id` as well, and that column outlived every
+    // way of ending it: leaving and being removed delete the membership row and cannot delete a
+    // column, and a demotion rewrote a row the column then overruled. Each of these three drives one
+    // of those exits and then asks what the person can still do.
+    //
+    // Each drives the SEEDED owner on purpose, because that is the account the column named. Against a
+    // build that still consults it, all three fail: the person is out of the team and reads as its
+    // Owner anyway.
+
     [Fact]
-    public async Task Transferring_keeps_an_owner_who_had_no_membership_row()
+    public async Task Leaving_a_team_ends_ownership_of_it()
     {
         var team = await SeedTeamAsync().ConfigureAwait(false);
+        await AddMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
 
-        await DropMembershipAsync(team.TeamId, team.Owner).ConfigureAwait(false);
+        await SendAsAsync(team.Owner, team.TeamId, new LeaveTeamCommand()).ConfigureAwait(false);
 
-        await SendAsAsync(team.Owner, team.TeamId, new TransferTeamOwnershipCommand { ToUserId = team.Admin }).ConfigureAwait(false);
+        await ShouldHaveNoStandingAsync(team.TeamId, team.Owner).ConfigureAwait(false);
+    }
 
-        using var scope = _fixture.BeginScopeAs(team.Admin, team.TeamId);
-        var roster = await scope.Resolve<IMediator>().Send(new ListTeamMembersQuery()).ConfigureAwait(false);
+    [Fact]
+    public async Task Being_removed_from_a_team_ends_ownership_of_it()
+    {
+        // Stepped down first because equal rank is not authority over: an Owner cannot remove another
+        // Owner, so somebody has to stop being one before they can be removed at all.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var successor = await AddMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
 
-        (await RoleOfAsync(team.TeamId, team.Owner).ConfigureAwait(false)).ShouldBe(TeamRole.Admin, "the outgoing owner stays, demoted — transferring is not leaving");
-        roster.ShouldContain(r => r.UserId == team.Owner, "handing the team over must not remove the person handing it over");
+        await SendAsAsync(team.Owner, team.TeamId, new ChangeTeamMemberRoleCommand { UserId = team.Owner, Role = TeamRole.Admin }).ConfigureAwait(false);
+        await SendAsAsync(successor, team.TeamId, new RemoveTeamMemberCommand { UserId = team.Owner }).ConfigureAwait(false);
+
+        await ShouldHaveNoStandingAsync(team.TeamId, team.Owner).ConfigureAwait(false);
+    }
+
+    [Fact]
+    public async Task Being_demoted_ends_ownership_of_the_team()
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        await AddMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
+
+        await SendAsAsync(team.Owner, team.TeamId, new ChangeTeamMemberRoleCommand { UserId = team.Owner, Role = TeamRole.Viewer }).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(team.Owner, team.TeamId);
+        var me = await scope.Resolve<IMediator>().Send(new MeQuery()).ConfigureAwait(false);
+
+        me.Teams.Single(t => t.Id == team.TeamId).Role.ShouldBe(TeamRole.Viewer, "a demotion that leaves the person able to act as Owner is decoration");
+        me.Teams.Single(t => t.Id == team.TeamId).Permissions.ShouldBeEmpty();
+
+        var act = async () => await SendAsAsync(team.Owner, team.TeamId, new RemoveTeamMemberCommand { UserId = team.Member }).ConfigureAwait(false);
+        await act.ShouldThrowAsync<TenantAccessDeniedException>().ConfigureAwait(false);
     }
 
     // ── Drivers ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Nothing left: not a role the tenancy pipeline will grant, not a line on the roster, not a team
+    /// in their own sidebar. Asked three ways because ownership was read from three places.
+    /// </summary>
+    private async Task ShouldHaveNoStandingAsync(Guid teamId, Guid userId)
+    {
+        var act = async () => await SendAsAsync(userId, teamId, new ListTeamMembersQuery()).ConfigureAwait(false);
+        var denied = await act.ShouldThrowAsync<TenantAccessDeniedException>().ConfigureAwait(false);
+        denied.Reason.ShouldContain("not a member");
+
+        using var scope = _fixture.BeginScope();
+        var roster = await scope.Resolve<IUserService>().ListTeamMembersAsync(teamId, default).ConfigureAwait(false);
+        roster.ShouldNotContain(r => r.UserId == userId, "the roster still lists someone who is no longer in the team");
+
+        using var theirs = _fixture.BeginScopeAs(userId, teamId);
+        var me = await theirs.Resolve<IUserService>().BuildMeForAsync(await UserAsync(userId).ConfigureAwait(false), default).ConfigureAwait(false);
+        me.Teams.ShouldNotContain(t => t.Id == teamId, "the team is still in the sidebar of someone who left it");
+    }
+
+    private async Task<User> UserAsync(Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().User.AsNoTracking().SingleAsync(u => u.Id == userId).ConfigureAwait(false);
+    }
 
     private async Task SendAsAsync<T>(Guid userId, Guid teamId, IRequest<T> request)
     {
@@ -255,16 +306,6 @@ public class TeamMemberManagementTests
             .Where(m => m.TeamId == teamId && m.UserId == userId)
             .Select(m => (TeamRole?)m.Role)
             .SingleOrDefaultAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>Reproduces the seed workspace: an owner named on the team row and nowhere else.</summary>
-    private async Task DropMembershipAsync(Guid teamId, Guid userId)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-
-        db.TeamMembership.Remove(await db.TeamMembership.SingleAsync(m => m.TeamId == teamId && m.UserId == userId).ConfigureAwait(false));
-        await db.SaveChangesAsync().ConfigureAwait(false);
     }
 
     private async Task<Guid> AddMemberAsync(Guid teamId, TeamRole role)
@@ -290,7 +331,7 @@ public class TeamMemberManagementTests
         var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = "admin" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"vie-{suffix}@x", Name = "viewer" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"mem-{suffix}", Name = "Members", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"mem-{suffix}", Name = "Members" };
 
         db.User.AddRange(owner, admin, member, viewer);
         db.Team.Add(team);

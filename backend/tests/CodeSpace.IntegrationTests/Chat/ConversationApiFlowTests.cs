@@ -90,7 +90,7 @@ public class ConversationApiFlowTests
         db.User.Add(new User { Id = userId, Email = $"capi-{userId:N}@test.local", Name = $"capi-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"capi-{teamId:N}", Name = "Conv API Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"capi-{teamId:N}", Name = "Conv API Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

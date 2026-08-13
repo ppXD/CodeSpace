@@ -17,10 +17,10 @@ namespace CodeSpace.UnitTests.Auth;
 /// carrying "could not be translated", while a translatable one gets as far as failing to connect.
 /// Pointing the context at a closed port therefore tells us which happened.</para>
 ///
-/// <para>Worth its own test because the projection is the non-obvious part of the resolver — it pulls
-/// the owner flag and the membership role in one round trip via a nested collection projection, and
-/// an expression EF cannot translate would surface as a 500 on every authorized write rather than as
-/// a build failure. This calls the real production method, so it cannot drift from what ships.</para>
+/// <para>Worth its own test because the projection is the non-obvious part of the resolver — it reads
+/// the membership role through the team via a nested collection projection, and an expression EF
+/// cannot translate would surface as a 500 on every authorized write rather than as a build failure.
+/// This calls the real production method, so it cannot drift from what ships.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class TeamMembershipResolverQueryTests

@@ -384,7 +384,7 @@ public sealed class RealModelCriticE2ETests
         var userId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"rmcritic-{userId:N}@test.local", Name = $"rmcritic-{userId:N}" });
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"rmcritic-{teamId:N}", Name = "RM Critic Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"rmcritic-{teamId:N}", Name = "RM Critic Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
         await db.SaveChangesAsync();
         return teamId;

@@ -119,7 +119,7 @@ public class ActAsCandidatesFlowTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(),
@@ -147,6 +147,7 @@ public class ActAsCandidatesFlowTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner });
         db.ProviderInstance.Add(instance);
         db.Repository.Add(repo);
         await db.SaveChangesAsync().ConfigureAwait(false);

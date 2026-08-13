@@ -45,7 +45,6 @@ public static class WorkflowsTestSeed
             Slug = $"wf-team-{teamId:N}",
             Name = "Workflow Test Team",
             Kind = TeamKind.Workspace,
-            OwnerUserId = userId,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
         });

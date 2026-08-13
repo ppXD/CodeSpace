@@ -242,7 +242,9 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
             Slug = $"personal-{user.Id.ToString("N")[..8]}",
             Name = "Personal",
             Kind = TeamKind.Personal,
-            OwnerUserId = user.Id,
+            // Not ownership — the Owner row below is that. This is what the partial unique index reads
+            // to keep the account to one active Personal team.
+            PersonalForUserId = user.Id,
         };
 
         _db.Team.Add(team);
@@ -283,8 +285,8 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
 
     private async Task EnsureNotAlreadyMemberByIdAsync(Guid teamId, Guid userId, CancellationToken cancellationToken)
     {
-        var isMember = await _db.Team.AsNoTracking()
-            .AnyAsync(t => t.Id == teamId && (t.OwnerUserId == userId || t.Memberships.Any(m => m.UserId == userId)), cancellationToken)
+        var isMember = await _db.TeamMembership.AsNoTracking()
+            .AnyAsync(m => m.TeamId == teamId && m.UserId == userId, cancellationToken)
             .ConfigureAwait(false);
 
         if (isMember) throw new AlreadyTeamMemberException();

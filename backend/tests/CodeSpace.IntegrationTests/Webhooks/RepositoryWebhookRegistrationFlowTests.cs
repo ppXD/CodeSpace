@@ -468,7 +468,7 @@ public class RepositoryWebhookRegistrationFlowTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "Owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team" };
         var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
         var instance = new ProviderInstance
         {
@@ -492,6 +492,7 @@ public class RepositoryWebhookRegistrationFlowTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner });
         db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(credential);

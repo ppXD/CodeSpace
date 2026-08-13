@@ -207,7 +207,7 @@ public class ToolApprovalExpiryServiceTests
             db.User.Add(new User { Id = ownerId, Email = $"exp-{ownerId:N}@test.local", Name = $"exp-{ownerId:N}" });
 
             teamId = Guid.NewGuid();
-            db.Team.Add(new Team { Id = teamId, Slug = $"exp-{teamId:N}", Name = "Expiry Team", Kind = TeamKind.Workspace, OwnerUserId = ownerId });
+            db.Team.Add(new Team { Id = teamId, Slug = $"exp-{teamId:N}", Name = "Expiry Team", Kind = TeamKind.Workspace });
             db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = ownerId, Role = TeamRole.Owner });
 
             await db.SaveChangesAsync();

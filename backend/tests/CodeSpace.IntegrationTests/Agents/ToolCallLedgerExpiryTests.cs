@@ -224,7 +224,7 @@ public class ToolCallLedgerExpiryTests
         db.User.Add(new User { Id = userId, Email = $"expiry-{userId:N}@test.local", Name = $"expiry-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"expiry-{teamId:N}", Name = "Expiry Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"expiry-{teamId:N}", Name = "Expiry Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

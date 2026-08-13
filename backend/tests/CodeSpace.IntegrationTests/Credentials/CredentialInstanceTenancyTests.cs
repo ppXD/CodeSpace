@@ -102,11 +102,12 @@ public class CredentialInstanceTenancyTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = user.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };
         var project = TestProjectSeed.BuildDefaultProject(team.Id, user.Id);
 
         db.User.Add(user);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Owner });
         db.Project.Add(project);
         await db.SaveChangesAsync().ConfigureAwait(false);
 

@@ -279,7 +279,8 @@ public class RepositoryWorkspaceResolverTests
         db.User.Add(new User { Id = userId, Email = $"ws-{userId:N}@test.local", Name = "ws" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"ws-{teamId:N}", Name = "WS", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"ws-{teamId:N}", Name = "WS", Kind = TeamKind.Workspace });
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
         return teamId;

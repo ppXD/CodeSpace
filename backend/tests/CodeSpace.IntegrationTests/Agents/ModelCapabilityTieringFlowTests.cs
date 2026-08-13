@@ -187,7 +187,7 @@ public sealed class ModelCapabilityTieringFlowTests
         var userId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"tier-{userId:N}@test.local", Name = $"tier-{userId:N}" });
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"tier-{teamId:N}", Name = "Tier Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"tier-{teamId:N}", Name = "Tier Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
         await db.SaveChangesAsync();
         return teamId;

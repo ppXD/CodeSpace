@@ -912,7 +912,7 @@ public class AgentMcpEndpointFlowTests
     private async Task<Guid> TeamOwnerAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<CodeSpaceDbContext>().Team.AsNoTracking().Where(t => t.Id == teamId).Select(t => t.OwnerUserId).SingleAsync();
+        return await scope.Resolve<CodeSpaceDbContext>().TeamMembership.AsNoTracking().Where(m => m.TeamId == teamId && m.Role == TeamRole.Owner).Select(m => m.UserId).SingleAsync();
     }
 
     /// <summary>Poll for the run's parked decision.request ledger row — the durable queue surface, present regardless of any chat card (Slice 0). Mirrors McpDecisionFlowTests.WaitForParkedDecisionAsync.</summary>
@@ -1339,7 +1339,7 @@ public class AgentMcpEndpointFlowTests
         db.User.Add(new User { Id = userId, Email = $"agent-{userId:N}@test.local", Name = $"agent-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"agent-{teamId:N}", Name = "Agent Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"agent-{teamId:N}", Name = "Agent Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

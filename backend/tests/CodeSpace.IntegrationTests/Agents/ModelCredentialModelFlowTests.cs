@@ -214,7 +214,7 @@ public class ModelCredentialModelFlowTests
         db.User.Add(new User { Id = userId, Email = $"mcm-{userId:N}@test.local", Name = $"mcm-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"mcm-{teamId:N}", Name = "Model Catalog Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"mcm-{teamId:N}", Name = "Model Catalog Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

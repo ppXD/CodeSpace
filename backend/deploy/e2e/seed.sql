@@ -13,9 +13,15 @@ VALUES ('11111111-1111-1111-1111-111111111111', 'deploy-e2e@codespace.local', 'D
         now(), '00000000-0000-0000-0000-000000000001', now(), '00000000-0000-0000-0000-000000000001')
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO team (id, slug, name, owner_user_id, created_date, created_by, last_modified_date, last_modified_by)
+-- The team row names nobody. Ownership is the Owner membership row below and nothing else since 0118,
+-- which renamed the old `owner_user_id` column to `personal_for_user_id` — filled in by a Personal team
+-- and NULL on a Workspace like this one.
+--
+-- This file is hand-written SQL outside DbUp, so a column rename does not break its build; it breaks
+-- this lane at runtime, where run.sh pipes it through `psql -v ON_ERROR_STOP=1` and fails the job. Same
+-- shape as the security_stamp note above: whatever the schema does, it has to be restated here by hand.
+INSERT INTO team (id, slug, name, created_date, created_by, last_modified_date, last_modified_by)
 VALUES ('22222222-2222-2222-2222-222222222222', 'deploy-e2e', 'Deploy E2E',
-        '11111111-1111-1111-1111-111111111111',
         now(), '00000000-0000-0000-0000-000000000001', now(), '00000000-0000-0000-0000-000000000001')
 ON CONFLICT (id) DO NOTHING;
 

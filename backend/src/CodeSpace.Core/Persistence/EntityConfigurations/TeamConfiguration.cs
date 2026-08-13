@@ -10,7 +10,7 @@ public class TeamConfiguration : IEntityTypeConfiguration<Team>
     {
         builder.HasKey(t => t.Id);
 
-        builder.HasOne(t => t.Owner).WithMany().HasForeignKey(t => t.OwnerUserId);
+        builder.HasOne(t => t.PersonalFor).WithMany().HasForeignKey(t => t.PersonalForUserId);
 
         // Kind stored as text — easier to inspect via psql than an int enum, matches the
         // CHECK constraint added in migration 0008. EF Core's HasConversion<string>() handles
