@@ -124,6 +124,56 @@ public sealed class CompletionTerminalAuthorityFlowTests
         arbitration.Status.ShouldBe(WorkflowRunStatus.Success);
     }
 
+    // ── P4 per-cell law: a CleanSuccess missing a Required upstream stage parks naming the stage ──
+
+    [Fact]
+    public async Task An_enforced_success_claim_with_no_integration_evidence_parks_naming_the_stage()
+    {
+        // The FULL completion-side predicate holds (solved + verified + delivered + reachable) — but the tape is
+        // plan → spawn → stop with NO merge: fresh spawned work nothing ever integrated. The supervisor profile
+        // declares Integrate Required, so the stage gate refuses the CleanSuccess and names the exact cell —
+        // fragmented per-agent delivery must never terminalize as integrated delivery.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using var scope = _fixture.BeginScope();
+        var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
+
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Suspended, "a supervisor-mode Success whose latest work was never integrated must park, never terminalize");
+        arbitration.Decision.ShouldBe(TerminalDecision.Park);
+        arbitration.Reason!.ShouldContain("Integrate", customMessage: "the park must name the exact missing stage");
+        arbitration.Reason!.ShouldContain("mode 'supervisor'", customMessage: "…and the profile it was judged against");
+    }
+
+    [Fact]
+    public async Task The_shadow_would_be_decision_mirrors_the_stage_gate()
+    {
+        // Same seeding as the stage park above, driven through the shadow sweep on a Shadow-mode run — parity
+        // evidence recording "would have been CleanSuccess" for a run Enforced would park on a missing stage is
+        // evidence about a rule that doesn't exist.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunningRunAsync(teamId, userId, mode: "Shadow");
+        var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+        await FlipRunToAsync(runId, WorkflowRunStatus.Success);
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<ICompletionShadowService>().SweepAsync(batchSize: 50, CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
+
+        var record = await scope.Resolve<CodeSpaceDbContext>().CompletionAssessmentRecord.AsNoTracking().SingleAsync(a => a.WorkflowRunId == runId);
+        record.WouldBeTerminalDecision.ShouldBe(TerminalDecision.Park.ToString(), "the shadow's would-be decision must apply the authority's OWN stage gate, or the parity evidence lies about Enforced");
+    }
+
     // ── P1 fail-close: a CleanSuccess built over integrity violations parks instead ──
 
     [Fact]
@@ -308,7 +358,8 @@ public sealed class CompletionTerminalAuthorityFlowTests
         return runId;
     }
 
-    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed)
+    /// <summary>The canonical graded supervisor tape: plan → spawn → merge → stop. <paramref name="merged"/> false drops the merge decision — the exact tape P4's stage gate must refuse (fresh spawned work nothing ever integrated).</summary>
+    private async Task<Guid> SeedGradedTapeAsync(Guid runId, Guid teamId, bool acceptancePassed, bool merged = true)
     {
         var attemptId = Guid.NewGuid();
         var planId = Guid.NewGuid();
@@ -319,7 +370,13 @@ public sealed class CompletionTerminalAuthorityFlowTests
         await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
             """{"subtaskIds":["s1"]}""",
             JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed, acceptanceDetail = acceptancePassed ? null : "tests-failed-exit-1", acceptanceEvidenceId = (Guid?)Guid.NewGuid(), producedBranch = "codespace/agent/s1" } } }));
-        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Stop, "{}", "{}");
+
+        if (merged)
+            await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge,
+                """{"branches":["codespace/agent/s1"]}""",
+                $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
+
+        await SeedDecisionAsync(runId, teamId, merged ? 4 : 3, SupervisorDecisionKinds.Stop, "{}", "{}");
         return attemptId;
     }
 

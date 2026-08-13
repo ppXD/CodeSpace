@@ -33,15 +33,17 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
     private readonly IPublishManifestStore _manifests;
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
+    private readonly IModeProfileRegistry _modes;
     private readonly ILogger<CompletionShadowService> _logger;
 
-    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ILogger<CompletionShadowService> logger)
+    public CompletionShadowService(CodeSpaceDbContext db, ICompletionAssessmentComposer composer, IPublishManifestStore manifests, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, IModeProfileRegistry modes, ILogger<CompletionShadowService> logger)
     {
         _db = db;
         _composer = composer;
         _manifests = manifests;
         _contracts = contracts;
         _handoff = handoff;
+        _modes = modes;
         _logger = logger;
     }
 
@@ -163,6 +165,12 @@ public sealed class CompletionShadowService : ICompletionShadowService, IScopedD
             var requirements = await _contracts.ListRequirementsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
             if (CompletionIntegrity.Violations(composed.Rejections, composed.ContractErrors, requirements) is { Count: > 0 }) wouldBe = TerminalDecision.Park;
+
+            // P4 (stage-gate mirror): the authority also refuses a CleanSuccess missing a Required upstream stage,
+            // so the would-be must too. Only the EVIDENCE-dependent gates are baked in (integrity, stages) — the
+            // structural registration gates (capability, mode) re-derive at query time from the rows themselves.
+            else if (_modes.Resolve(await RunModeReader.DeriveAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false)) is { } profile
+                && UpstreamStageTrace.MissingRequired(profile, composed.ExercisedUpstreamStages).Count > 0) wouldBe = TerminalDecision.Park;
         }
 
         // Captured AFTER composing, on purpose (the A2 discipline): ComposeAsync write-throughs receipts, so a
