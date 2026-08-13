@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Teams;
 using CodeSpace.Core.Services.Users;
 using CodeSpace.Core.Settings.Application;
 using CodeSpace.Messages.Authorization;
@@ -38,10 +39,11 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     private readonly IPasswordHasher _hasher;
     private readonly IJwtTokenIssuer _tokenIssuer;
     private readonly IUserService _users;
+    private readonly ITeamProvisioningService _teams;
     private readonly PublicBaseUrlSetting _baseUrl;
     private readonly TimeProvider _clock;
 
-    public TeamInvitationService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, TeamMembershipResolver membership, IPasswordHasher hasher, IJwtTokenIssuer tokenIssuer, IUserService users, PublicBaseUrlSetting baseUrl, TimeProvider clock)
+    public TeamInvitationService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, TeamMembershipResolver membership, IPasswordHasher hasher, IJwtTokenIssuer tokenIssuer, IUserService users, ITeamProvisioningService teams, PublicBaseUrlSetting baseUrl, TimeProvider clock)
     {
         _db = db;
         _currentUser = currentUser;
@@ -50,6 +52,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         _hasher = hasher;
         _tokenIssuer = tokenIssuer;
         _users = users;
+        _teams = teams;
         _baseUrl = baseUrl;
         _clock = clock;
     }
@@ -201,7 +204,10 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         var user = new User { Id = Guid.NewGuid(), Email = email, Name = name.Trim(), PasswordHash = _hasher.Hash(password) };
 
         _db.User.Add(user);
-        AddPersonalTeam(user);
+        // Its own workspace, from the one place that knows what a team needs in order to exist —
+        // a free slug, the Owner row that IS its ownership, and the default project its Projects page
+        // already claims is there. Staged, not saved: this account is still half-built.
+        await _teams.StagePersonalAsync(user.Id, cancellationToken).ConfigureAwait(false);
         await GrantDefaultPermissionsAsync(user, cancellationToken).ConfigureAwait(false);
 
         return user;
@@ -224,31 +230,6 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
 
         foreach (var permissionId in ids)
             _db.UserPermission.Add(new UserPermission { Id = Guid.NewGuid(), UserId = user.Id, PermissionId = permissionId });
-    }
-
-    /// <summary>
-    /// Every account gets its own workspace at the moment it is created.
-    ///
-    /// <para>Migration 0008 backfilled one for every account that existed and holds "one active
-    /// personal team per user" as a partial unique index — but nothing created one for a NEW account,
-    /// because until now no path created accounts. This is that path, so this is where the invariant
-    /// has to hold. The slug matches 0008's so the two are indistinguishable afterwards.</para>
-    /// </summary>
-    private void AddPersonalTeam(User user)
-    {
-        var team = new Team
-        {
-            Id = Guid.NewGuid(),
-            Slug = $"personal-{user.Id.ToString("N")[..8]}",
-            Name = "Personal",
-            Kind = TeamKind.Personal,
-            // Not ownership — the Owner row below is that. This is what the partial unique index reads
-            // to keep the account to one active Personal team.
-            PersonalForUserId = user.Id,
-        };
-
-        _db.Team.Add(team);
-        _db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Owner });
     }
 
     // ── Guards ─────────────────────────────────────────────────────────────────────

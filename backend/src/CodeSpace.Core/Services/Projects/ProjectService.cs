@@ -27,6 +27,32 @@ public sealed class ProjectService : IProjectService, IScopedDependency
     public const string SlugPattern = "^[A-Za-z0-9_-]{1,64}$";
     public const string DefaultProjectSlug = "default";
 
+    /// <summary>
+    /// The "default" project every team is provisioned with, as an unsaved entity.
+    ///
+    /// <para>Here rather than in the provisioning service so there is one description of what
+    /// "default" means. Provisioning stages it in the same unit of work as the team, where nothing can
+    /// race it; <see cref="EnsureDefaultProjectAsync"/> is the other writer, for a team that predates
+    /// this and is having a repository bound into it.</para>
+    /// </summary>
+    public static Project BuildDefaultProject(Guid teamId, Guid createdBy)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        return new Project
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = DefaultProjectSlug,
+            Name = "Default",
+            Description = "Default project for repositories and variables. Auto-created when this team was provisioned; rename or add additional projects as your team grows.",
+            CreatedDate = now,
+            CreatedBy = createdBy,
+            LastModifiedDate = now,
+            LastModifiedBy = createdBy,
+        };
+    }
+
     private static readonly Regex SlugRegex = new(SlugPattern, RegexOptions.Compiled);
 
     private readonly CodeSpaceDbContext _db;
@@ -326,28 +352,23 @@ public sealed class ProjectService : IProjectService, IScopedDependency
 
         if (existing.HasValue) return existing.Value;
 
-        // Slow path — race-safe create. The (team_id, slug) partial unique index
-        // guarantees only one row wins under concurrency; the loser catches the unique
-        // violation and re-reads. For simplicity we just retry with a single re-fetch.
+        // Slow path — create for a team that predates provisioning writing one, or whose default was
+        // deleted. The (team_id, slug) partial unique index guarantees only one row wins under
+        // concurrency; the loser catches the unique violation and re-reads.
+        //
+        // That recovery only works when this call owns its transaction. Inside an ambient one Postgres
+        // has already aborted the whole transaction by the time the catch runs, and the re-read fails
+        // too — so a caller holding a transaction must not rely on it. Provisioning does not: it stages
+        // the default project alongside the team in a single unit of work, where a brand-new team's id
+        // means nothing can be racing it.
         try
         {
             // EnsureDefault uses a direct INSERT path because we want slug=='default'
             // verbatim, not derived from a Name that might slugify differently.
             EnsureValidSlug(DefaultProjectSlug);
 
-            var now = DateTimeOffset.UtcNow;
-            var project = new Project
-            {
-                Id = Guid.NewGuid(),
-                TeamId = teamId,
-                Slug = DefaultProjectSlug,
-                Name = "Default",
-                Description = "Default project for repositories and variables. Auto-created when this team was provisioned; rename or add additional projects as your team grows.",
-                CreatedDate = now,
-                CreatedBy = SystemUsers.SeederId,
-                LastModifiedDate = now,
-                LastModifiedBy = SystemUsers.SeederId,
-            };
+            var project = BuildDefaultProject(teamId, SystemUsers.SeederId);
+
             _db.Project.Add(project);
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Default project lazily created: team={TeamId} project={ProjectId}", teamId, project.Id);
@@ -383,11 +404,19 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         // the slug is part of the variable-path contract — a silent mangle would surprise
         // the operator when they later try to reference {{project.{X}.foo}} from a
         // workflow and the path they expected doesn't exist.
-        if (exists)
-            throw new InvalidOperationException(
-                $"A project with slug '{slug}' (derived from name '{requestedName}') already exists in this team. " +
-                $"Pick a different project name — the slug is used as the prefix for variable references " +
-                $"({{{{project.{slug}.X}}}}) and must be unique per team.");
+        if (!exists) return;
+
+        // "Default" is the one name every team is guaranteed to hit, because provisioning already made
+        // that project. Saying so beats the generic message, which reads as though the person collided
+        // with something a colleague made.
+        var whose = string.Equals(slug, DefaultProjectSlug, StringComparison.Ordinal)
+            ? "every team is provisioned with a project named 'Default', so that slug is already taken here. "
+            : $"A project with slug '{slug}' (derived from name '{requestedName}') already exists in this team. ";
+
+        throw new InvalidOperationException(
+            whose +
+            $"Pick a different project name — the slug is used as the prefix for variable references " +
+            $"({{{{project.{slug}.X}}}}) and must be unique per team.");
     }
 
     private static void EnsureValidSlug(string slug)

@@ -55,6 +55,17 @@ public class TeamInvitationFlowTests
         var personal = await db.Team.SingleAsync(t => t.PersonalForUserId == user.Id && t.Kind == TeamKind.Personal).ConfigureAwait(false);
         personal.Name.ShouldBe("Personal");
         (await db.TeamMembership.AnyAsync(m => m.TeamId == personal.Id && m.UserId == user.Id && m.Role == TeamRole.Owner).ConfigureAwait(false)).ShouldBeTrue();
+
+        // And its default project. The sidebar gives a personal team a Projects row like any other, and
+        // that page tells whoever opens it one was auto-created for this team. It is the workspace a new
+        // account lands in first, so it is the worst place for that to be untrue — and the least likely
+        // to ever have a repository bound into it, which was the only thing that used to make it true.
+        //
+        // This also pins the wiring: the personal team is built by the provisioning service now, and a
+        // path that went back to constructing one by hand would produce no project here.
+        var projects = await db.Project.AsNoTracking().Where(p => p.TeamId == personal.Id && p.DeletedDate == null).Select(p => p.Slug).ToListAsync().ConfigureAwait(false);
+
+        projects.ShouldBe(["default"], customMessage: "a personal workspace opens with exactly one project — the default its Projects page says is there");
     }
 
     [Fact]
