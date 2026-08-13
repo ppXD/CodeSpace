@@ -79,7 +79,7 @@ public class AgentToolActorStrippingFlowTests
 
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "tester" };
         var victim = new User { Id = Guid.NewGuid(), Email = $"v-{suffix}@x", Name = "victim" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = user.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(), TeamId = team.Id, Provider = ProviderKind.Git, DisplayName = "instance",
@@ -100,6 +100,7 @@ public class AgentToolActorStrippingFlowTests
         db.User.Add(user);
         db.User.Add(victim);            // deliberately has NO UserProviderIdentity on this instance
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Owner });
         db.ProviderInstance.Add(instance);
         db.Credential.Add(connection);
         db.Repository.Add(repo);

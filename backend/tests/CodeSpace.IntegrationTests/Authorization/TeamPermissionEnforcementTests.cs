@@ -150,25 +150,6 @@ public class TeamPermissionEnforcementTests
     }
 
     [Fact]
-    public async Task The_team_owner_holds_every_permission_without_a_membership_row()
-    {
-        // Ownership lives on team.owner_user_id; only the personal-team backfill writes a matching
-        // membership row. A role lookup that read the membership table alone would lock an owner out
-        // of the team they created.
-        var team = await SeedTeamAsync().ConfigureAwait(false);
-
-        using var verify = _fixture.BeginScope();
-        var db = verify.Resolve<CodeSpaceDbContext>();
-        db.TeamMembership.Any(m => m.TeamId == team.TeamId && m.UserId == team.Owner).ShouldBeFalse("this test is meaningless if the owner also holds a membership row");
-
-        using var scope = _fixture.BeginScopeAs(team.Owner, team.TeamId);
-        var mediator = scope.Resolve<IMediator>();
-        var thrown = await Record.ExceptionAsync(() => mediator.Send(new AddModelCredentialCommand { Provider = "openai", DisplayName = $"owner-{Guid.NewGuid():N}", ApiKey = "sk-owner" })).ConfigureAwait(false);
-
-        thrown.ShouldNotBeOfType<TenantAccessDeniedException>();
-    }
-
-    [Fact]
     public async Task The_global_Admin_role_still_bypasses()
     {
         var team = await SeedTeamAsync().ConfigureAwait(false);
@@ -185,6 +166,10 @@ public class TeamPermissionEnforcementTests
     {
         // The membership tier must keep failing first — an outsider gets "not a member", never a
         // permission verdict that would confirm the team exists.
+        //
+        // Also the whole of standing since 0118: the role lookup used to read team.owner_user_id too,
+        // which handed Owner to whoever that column named whether or not they were still in the team.
+        // The membership row is the only record now, so not having one is the end of the question.
         var team = await SeedTeamAsync().ConfigureAwait(false);
 
         using var scope = _fixture.BeginScopeAs(Guid.NewGuid(), team.TeamId);
@@ -217,12 +202,13 @@ public class TeamPermissionEnforcementTests
         var admin = new User { Id = Guid.NewGuid(), Email = $"admin-{suffix}@x", Name = "admin" };
         var member = new User { Id = Guid.NewGuid(), Email = $"member-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"viewer-{suffix}@x", Name = "viewer" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };
 
         db.User.AddRange(owner, admin, member, viewer);
         db.Team.Add(team);
         db.Project.Add(TestProjectSeed.BuildDefaultProject(team.Id, owner.Id));
         db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner },
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = admin.Id, Role = TeamRole.Admin },
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member },
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = viewer.Id, Role = TeamRole.Viewer });

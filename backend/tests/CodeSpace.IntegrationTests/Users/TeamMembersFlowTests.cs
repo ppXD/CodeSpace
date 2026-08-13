@@ -11,11 +11,10 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Users;
 
 /// <summary>
-/// Contract for the team-member directory (<see cref="IUserService.ListTeamMembersAsync"/>) and
-/// its mediator path. The owner is stored separately from membership rows (a team's owner has no
-/// self-membership row in production — see MeQuery's <c>owner + memberships</c> count), so the
-/// listing must union the two and dedupe. This is the identity source the chat UI uses to name
-/// message authors and drive @-mentions.
+/// Contract for the team-member directory (<see cref="IUserService.ListTeamMembersAsync"/>) and its
+/// mediator path. The roster is the team's membership rows, owner included — it used to union them
+/// with a separately-stored owner and dedupe, which is what made a one-person team read as two. This
+/// is the identity source the chat UI uses to name message authors and drive @-mentions.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -26,28 +25,17 @@ public class TeamMembersFlowTests
     public TeamMembersFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Lists_the_owner_plus_membership_rows_name_sorted()
+    public async Task Lists_everyone_in_the_team_once_name_sorted()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var (teamId, _) = await SeedTeamAsync(suffix, ownerName: "Zoe", ownerHasMembershipRow: false);
+        var (teamId, ownerId) = await SeedTeamAsync(suffix, ownerName: "Zoe");
         await AddMemberAsync(teamId, $"bob-{suffix}@x", "Bob");
         await AddMemberAsync(teamId, $"amy-{suffix}@x", "Amy");
 
         var members = await ListAsync(teamId);
 
-        members.Select(m => m.Name).ShouldBe(new[] { "Amy", "Bob", "Zoe" },
-            customMessage: "Owner (with no self-membership row) must appear, and the list is name-sorted.");
-    }
-
-    [Fact]
-    public async Task Owner_with_a_self_membership_row_is_not_duplicated()
-    {
-        var suffix = Guid.NewGuid().ToString("N")[..8];
-        var (teamId, ownerId) = await SeedTeamAsync(suffix, ownerName: "Owner", ownerHasMembershipRow: true);
-
-        var members = await ListAsync(teamId);
-
-        members.Count(m => m.UserId == ownerId).ShouldBe(1, customMessage: "An owner who also has a membership row must appear exactly once.");
+        members.Select(m => m.Name).ShouldBe(new[] { "Amy", "Bob", "Zoe" }, customMessage: "the owner is on the roster like anyone else, and the list is name-sorted");
+        members.Count(m => m.UserId == ownerId).ShouldBe(1, customMessage: "the owner is one person, counted once");
     }
 
     [Fact]
@@ -55,8 +43,8 @@ public class TeamMembersFlowTests
     {
         var a = Guid.NewGuid().ToString("N")[..8];
         var b = Guid.NewGuid().ToString("N")[..8];
-        var (teamA, ownerA) = await SeedTeamAsync(a, ownerName: "A-Owner", ownerHasMembershipRow: false);
-        var (teamB, _) = await SeedTeamAsync(b, ownerName: "B-Owner", ownerHasMembershipRow: false);
+        var (teamA, ownerA) = await SeedTeamAsync(a, ownerName: "A-Owner");
+        var (teamB, _) = await SeedTeamAsync(b, ownerName: "B-Owner");
         await AddMemberAsync(teamB, $"b-{b}@x", "B-Member");
 
         var members = await ListAsync(teamA);
@@ -64,11 +52,31 @@ public class TeamMembersFlowTests
         members.ShouldHaveSingleItem().UserId.ShouldBe(ownerA);
     }
 
+    /// <summary>
+    /// <c>team_membership</c> is a hard-delete junction table, so its rows outlive a soft-deleted
+    /// team. Reading them without asking about the team would keep answering for one that is gone.
+    /// </summary>
+    [Fact]
+    public async Task A_closed_team_lists_nobody()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var (teamId, _) = await SeedTeamAsync(suffix, ownerName: "Owner");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.Team.FindAsync(teamId))!.DeletedDate = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        (await ListAsync(teamId)).ShouldBeEmpty();
+    }
+
     [Fact]
     public async Task Excludes_soft_deleted_users()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var (teamId, _) = await SeedTeamAsync(suffix, ownerName: "Owner", ownerHasMembershipRow: false);
+        var (teamId, _) = await SeedTeamAsync(suffix, ownerName: "Owner");
         var goneId = await AddMemberAsync(teamId, $"gone-{suffix}@x", "Gone");
 
         using (var scope = _fixture.BeginScope())
@@ -94,7 +102,7 @@ public class TeamMembersFlowTests
     public async Task ListTeamMembers_through_mediator_scopes_to_the_current_team()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var (teamId, ownerId) = await SeedTeamAsync(suffix, ownerName: "Owner", ownerHasMembershipRow: true);
+        var (teamId, ownerId) = await SeedTeamAsync(suffix, ownerName: "Owner");
         var memberId = await AddMemberAsync(teamId, $"m-{suffix}@x", "Member");
 
         using var scope = _fixture.BeginScopeAs(ownerId, teamId);
@@ -111,7 +119,7 @@ public class TeamMembersFlowTests
         return await scope.Resolve<IUserService>().ListTeamMembersAsync(teamId, default);
     }
 
-    private async Task<(Guid TeamId, Guid OwnerId)> SeedTeamAsync(string suffix, string ownerName, bool ownerHasMembershipRow)
+    private async Task<(Guid TeamId, Guid OwnerId)> SeedTeamAsync(string suffix, string ownerName)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -120,10 +128,8 @@ public class TeamMembersFlowTests
         db.User.Add(new User { Id = ownerId, Email = $"owner-{suffix}@x", Name = ownerName });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"tm-{suffix}", Name = "Team", Kind = TeamKind.Workspace, OwnerUserId = ownerId });
-
-        if (ownerHasMembershipRow)
-            db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = ownerId, Role = TeamRole.Owner });
+        db.Team.Add(new Team { Id = teamId, Slug = $"tm-{suffix}", Name = "Team", Kind = TeamKind.Workspace });
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = ownerId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
         return (teamId, ownerId);

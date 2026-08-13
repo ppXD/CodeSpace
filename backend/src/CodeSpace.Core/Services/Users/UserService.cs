@@ -86,35 +86,25 @@ public sealed class UserService : IUserService, IScopedDependency
     }
 
     /// <summary>
-    /// Members of a team = the owner (which may or may not also have a membership row) unioned
-    /// with the membership rows, deduplicated. Mirrors the visibility rule in
-    /// <see cref="BuildMeResponseAsync"/> (owner OR membership), so the owner is never dropped
-    /// just because the team was seeded without a self-membership row. Soft-deleted users fall
-    /// out; name-sorted for a stable picker.
+    /// Members of a team = its membership rows, owner included. It used to be the owner UNIONed with
+    /// them, to cover teams whose owner was named on <c>team.owner_user_id</c> and nowhere else; that
+    /// column is gone, so the union has nothing left to add and the roster is one table again.
+    /// Soft-deleted users fall out; name-sorted for a stable picker.
     /// </summary>
     public async Task<IReadOnlyList<TeamMemberSummary>> ListTeamMembersAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        var ownerId = await _db.Team.AsNoTracking()
-            .Where(t => t.Id == teamId && t.DeletedDate == null)
-            .Select(t => (Guid?)t.OwnerUserId)
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-
-        if (ownerId == null) return Array.Empty<TeamMemberSummary>();
-
-        var memberIds = await _db.TeamMembership.AsNoTracking()
-            .Where(m => m.TeamId == teamId)
-            .Select(m => m.UserId)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        var userIds = memberIds.Append(ownerId.Value).Distinct().ToList();
-
-        // Role and joined-at come from the membership row; the owner may have none, and resolves to
-        // Owner from the team row instead. The bot holds no role at all — it is not a person.
+        // Filtered through the team so a soft-deleted one lists nobody — membership rows are a
+        // hard-delete junction table and survive it.
         var memberships = await _db.TeamMembership.AsNoTracking()
-            .Where(m => m.TeamId == teamId)
+            .Where(m => m.TeamId == teamId && m.Team.DeletedDate == null)
             .Select(m => new { m.UserId, m.Role, m.CreatedDate })
             .ToDictionaryAsync(m => m.UserId, cancellationToken).ConfigureAwait(false);
 
+        if (memberships.Count == 0) return Array.Empty<TeamMemberSummary>();
+
+        var userIds = memberships.Keys.ToList();
+
+        // The bot holds no role at all — it is not a person.
         var users = await _db.User.AsNoTracking()
             .Where(u => userIds.Contains(u.Id) && u.DeletedDate == null)
             .OrderBy(u => u.Name)
@@ -128,8 +118,8 @@ public sealed class UserService : IUserService, IScopedDependency
             Email = u.Email,
             AvatarUrl = u.AvatarUrl,
             IsBot = u.IsBot,
-            Role = u.IsBot ? null : ResolveRole(ownerId.Value, u.Id, memberships.TryGetValue(u.Id, out var m) ? m.Role : null),
-            JoinedAt = memberships.TryGetValue(u.Id, out var joined) ? joined.CreatedDate : null,
+            Role = u.IsBot ? null : memberships[u.Id].Role,
+            JoinedAt = memberships[u.Id].CreatedDate,
         }).ToList();
     }
 
@@ -193,30 +183,23 @@ public sealed class UserService : IUserService, IScopedDependency
 
     public async Task<MeResponse> BuildMeForAsync(User user, CancellationToken cancellationToken) => await BuildMeResponseAsync(user, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>
-    /// Ownership is recorded on the team row and does not require a membership row (migration 0008
-    /// writes one only for personal teams), so an owner without one still resolves to Owner.
-    /// </summary>
-    private static TeamRole ResolveRole(Guid ownerUserId, Guid userId, TeamRole? membershipRole) =>
-        ownerUserId == userId ? TeamRole.Owner : membershipRole ?? TeamRole.Member;
-
     private async Task<MeResponse> BuildMeResponseAsync(User user, CancellationToken cancellationToken)
     {
         var teams = await _db.Team.AsNoTracking()
-            .Where(t => t.DeletedDate == null && (t.OwnerUserId == user.Id || t.Memberships.Any(m => m.UserId == user.Id)))
+            .Where(t => t.DeletedDate == null && t.Memberships.Any(m => m.UserId == user.Id))
             .Select(t => new
             {
                 t.Id,
                 t.Slug,
                 t.Name,
                 t.Kind,
-                t.OwnerUserId,
+                // Nullable only because the projection cannot see that the Where above guarantees a
+                // row; TeamRole.Owner is the zero value, so a plain FirstOrDefault() would hand Owner
+                // to anyone a future predicate change let through.
                 MembershipRole = t.Memberships.Where(m => m.UserId == user.Id).Select(m => (TeamRole?)m.Role).FirstOrDefault(),
-                // People, counted the same way the roster lists them: owner ∪ memberships, deduped and
-                // minus departed accounts. The owner holds a membership row of their own on every team
-                // created since invitations shipped, so "memberships + 1" counted them twice — a fresh
-                // one-person team read as 2.
-                MemberCount = _db.User.Count(u => u.DeletedDate == null && (u.Id == t.OwnerUserId || t.Memberships.Any(m => m.UserId == u.Id))),
+                // People, counted the same way the roster lists them: membership rows minus departed
+                // accounts.
+                MemberCount = _db.User.Count(u => u.DeletedDate == null && t.Memberships.Any(m => m.UserId == u.Id)),
                 RepositoryCount = _db.Repository.Count(r => r.TeamId == t.Id && r.DeletedDate == null),
                 // Sidebar "Projects" row badge — counts active projects only. The "default" project is
                 // seeded by the first repository bind (RepositoryBindingService), not by listing, so a
@@ -243,8 +226,8 @@ public sealed class UserService : IUserService, IScopedDependency
                 Slug = t.Slug,
                 Name = t.Name,
                 Kind = t.Kind,
-                Role = ResolveRole(t.OwnerUserId, user.Id, t.MembershipRole),
-                Permissions = TeamPermissionMatrix.GrantedTo(ResolveRole(t.OwnerUserId, user.Id, t.MembershipRole)),
+                Role = t.MembershipRole!.Value,
+                Permissions = TeamPermissionMatrix.GrantedTo(t.MembershipRole!.Value),
                 MemberCount = t.MemberCount,
                 RepositoryCount = t.RepositoryCount,
                 ProjectCount = t.ProjectCount,

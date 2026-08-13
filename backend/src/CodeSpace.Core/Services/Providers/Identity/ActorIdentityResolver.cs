@@ -36,18 +36,14 @@ public sealed class ActorIdentityResolver : IActorIdentityResolver, IScopedDepen
 
         if (providerInstanceId == null) return Array.Empty<ActAsCandidateSummary>();
 
-        // Team users (members + owner) — only they may be offered as an author.
+        // Team users — only they may be offered as an author. The owner used to be fetched separately
+        // and appended, because they could be recorded on the team row alone; they hold a membership
+        // row like everyone else now.
         var teamUserIds = await _db.TeamMembership.AsNoTracking()
-            .Where(m => m.TeamId == teamId)
+            .Where(m => m.TeamId == teamId && m.Team.DeletedDate == null)
             .Select(m => m.UserId)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var ownerId = await _db.Team.AsNoTracking()
-            .Where(t => t.Id == teamId && t.DeletedDate == null)
-            .Select(t => (Guid?)t.OwnerUserId)
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-
-        if (ownerId is { } oid) teamUserIds.Add(oid);
         if (teamUserIds.Count == 0) return Array.Empty<ActAsCandidateSummary>();
 
         // Every teammate with a LIVE, usable identity on this provider instance — the EXACT predicate

@@ -354,7 +354,7 @@ public class ToolCallLedgerServiceTests
         db.User.Add(new User { Id = userId, Email = $"ledger-{userId:N}@test.local", Name = $"ledger-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"ledger-{teamId:N}", Name = "Ledger Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"ledger-{teamId:N}", Name = "Ledger Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

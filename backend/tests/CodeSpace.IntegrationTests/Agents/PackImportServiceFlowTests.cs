@@ -131,7 +131,7 @@ public class PackImportServiceFlowTests
         db.User.Add(new User { Id = userId, Email = $"import-{userId:N}@test.local", Name = $"import-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"import-{teamId:N}", Name = "Import Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"import-{teamId:N}", Name = "Import Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

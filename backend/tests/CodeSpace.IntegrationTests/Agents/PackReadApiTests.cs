@@ -340,7 +340,7 @@ public class PackReadApiTests
         db.User.Add(new User { Id = userId, Email = $"packs-{userId:N}@test.local", Name = $"packs-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"packs-{teamId:N}", Name = "Packs Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"packs-{teamId:N}", Name = "Packs Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

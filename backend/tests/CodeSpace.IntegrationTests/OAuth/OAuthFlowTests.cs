@@ -274,7 +274,7 @@ public class OAuthFlowTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "tester" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = user.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };
 
         var instance = new ProviderInstance
         {
@@ -289,6 +289,7 @@ public class OAuthFlowTests
 
         db.User.Add(user);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Owner });
         db.ProviderInstance.Add(instance);
         await db.SaveChangesAsync().ConfigureAwait(false);
 

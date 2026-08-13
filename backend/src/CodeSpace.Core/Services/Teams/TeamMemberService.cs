@@ -81,10 +81,10 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
     }
 
     /// <summary>
-    /// Hands the team over in one step: the recipient becomes Owner, the outgoing owner becomes Admin,
-    /// and <c>team.owner_user_id</c> follows.
+    /// Hands the team over in one step: the recipient becomes Owner and the outgoing owner becomes
+    /// Admin.
     ///
-    /// <para>All three together or none — an owner who demoted themselves before the recipient was
+    /// <para>Both together or neither — an owner who demoted themselves before the recipient was
     /// promoted would leave the team ownerless for the width of a failure.</para>
     /// </summary>
     public async Task TransferOwnershipAsync(Guid toUserId, CancellationToken cancellationToken)
@@ -94,13 +94,11 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
 
         if (toUserId == actorId) throw new ArgumentException("Ownership is already held by this account.", nameof(toUserId));
 
-        var team = await _db.Team.SingleOrDefaultAsync(t => t.Id == teamId && t.DeletedDate == null, cancellationToken).ConfigureAwait(false)
-            ?? throw new KeyNotFoundException($"team {teamId} not found");
+        await EnsureTeamLiveAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         var recipient = await LoadMembershipAsync(teamId, toUserId, cancellationToken).ConfigureAwait(false);
 
         recipient.Role = TeamRole.Owner;
-        team.OwnerUserId = toUserId;
 
         await DemoteOutgoingOwnerAsync(teamId, actorId, cancellationToken).ConfigureAwait(false);
 
@@ -108,26 +106,19 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
     }
 
     /// <summary>
-    /// Steps the outgoing owner down to Admin, writing the membership row if they were holding the
-    /// team by <c>owner_user_id</c> alone.
+    /// Steps the outgoing owner down to Admin — transferring is not leaving, so they stay in the team.
     ///
-    /// <para>Skipping them when the row was missing was silent data loss: the roster is
-    /// <c>owner UNION memberships</c>, so moving <c>owner_user_id</c> to someone else removed the only
-    /// record that the outgoing owner belonged to this team at all — they left the team by handing it
-    /// over. Migration 0116 backfills the rows that were missing, and this makes handing a team over
-    /// keep the person regardless of how it was recorded.</para>
+    /// <para>No row means the actor is not in this team, which only an instance Admin acting on
+    /// somebody else's team can be. Writing them one would add them to a team they were never in, so
+    /// there is nothing to demote and nothing to do.</para>
     /// </summary>
     private async Task DemoteOutgoingOwnerAsync(Guid teamId, Guid actorId, CancellationToken cancellationToken)
     {
         var outgoing = await _db.TeamMembership.SingleOrDefaultAsync(m => m.TeamId == teamId && m.UserId == actorId, cancellationToken).ConfigureAwait(false);
 
-        if (outgoing != null)
-        {
-            outgoing.Role = TeamRole.Admin;
-            return;
-        }
+        if (outgoing == null) return;
 
-        _db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = actorId, Role = TeamRole.Admin });
+        outgoing.Role = TeamRole.Admin;
     }
 
     // ── Guards ─────────────────────────────────────────────────────────────────────
@@ -165,23 +156,43 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
     }
 
     /// <summary>
-    /// Ownership is recorded twice — on <c>team.owner_user_id</c> and as a membership row — and either
-    /// one alone leaves someone in charge. Both have to name someone else before this user stops being
-    /// the owner.
+    /// Owner ROWS, and only Owner rows. It used to fall back to <c>team.owner_user_id</c> naming
+    /// someone else, which made the guard pass on a column the departing person's own leave had
+    /// already failed to clear — the team read as owned by whoever the column still named.
+    ///
+    /// <para>Behind a lock on the team row, because counting and then deleting are two statements and
+    /// read committed shows each of two departing Owners the other one still there. Both would pass a
+    /// bare count and the team would end up with none. The column used to be a second record that made
+    /// that recoverable; it is gone, so this is the only thing standing between a team and nobody
+    /// being able to administer it — a state no one inside the team can undo.</para>
+    ///
+    /// <para>The team row rather than the membership rows: it is the one row every departure from this
+    /// team contends on, whoever is leaving, so it serialises them against each other and against
+    /// nothing else.</para>
     /// </summary>
     private async Task EnsureAnotherOwnerRemainsAsync(Guid teamId, Guid leavingUserId, CancellationToken cancellationToken)
     {
+        await LockTeamAsync(teamId, cancellationToken).ConfigureAwait(false);
+
         var otherOwners = await _db.TeamMembership.AsNoTracking()
             .CountAsync(m => m.TeamId == teamId && m.UserId != leavingUserId && m.Role == TeamRole.Owner, cancellationToken)
             .ConfigureAwait(false);
 
-        if (otherOwners > 0) return;
+        if (otherOwners == 0) throw new LastOwnerException();
+    }
 
-        var teamOwnerIsSomeoneElse = await _db.Team.AsNoTracking()
-            .AnyAsync(t => t.Id == teamId && t.OwnerUserId != leavingUserId, cancellationToken)
-            .ConfigureAwait(false);
+    /// <summary>
+    /// Holds the team row until the surrounding transaction ends. Every write in this service runs
+    /// inside one — the mediator opens it — so the lock spans the count and the delete that follows it.
+    /// </summary>
+    private async Task LockTeamAsync(Guid teamId, CancellationToken cancellationToken) =>
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM team WHERE id = {teamId} FOR UPDATE", cancellationToken).ConfigureAwait(false);
 
-        if (!teamOwnerIsSomeoneElse) throw new LastOwnerException();
+    private async Task EnsureTeamLiveAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        var live = await _db.Team.AsNoTracking().AnyAsync(t => t.Id == teamId && t.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+        if (!live) throw new KeyNotFoundException($"team {teamId} not found");
     }
 
     private async Task<TeamMembership> LoadMembershipAsync(Guid teamId, Guid userId, CancellationToken cancellationToken) =>

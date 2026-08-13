@@ -111,7 +111,7 @@ public sealed class RealModelCapabilityTierE2ETests
         var userId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"rmtier-{userId:N}@test.local", Name = $"rmtier-{userId:N}" });
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"rmtier-{teamId:N}", Name = "RM Tier Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"rmtier-{teamId:N}", Name = "RM Tier Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
         await db.SaveChangesAsync();
         return teamId;

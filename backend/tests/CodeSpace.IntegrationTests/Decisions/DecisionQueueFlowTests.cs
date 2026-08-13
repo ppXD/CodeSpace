@@ -232,7 +232,7 @@ public class DecisionQueueFlowTests
         db.User.Add(new User { Id = ownerId, Email = $"dq-{ownerId:N}@test.local", Name = $"dq-{ownerId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"dq-{teamId:N}", Name = "Decision Queue Team", Kind = TeamKind.Workspace, OwnerUserId = ownerId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"dq-{teamId:N}", Name = "Decision Queue Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = ownerId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

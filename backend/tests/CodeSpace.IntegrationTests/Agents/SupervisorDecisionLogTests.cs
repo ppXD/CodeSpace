@@ -544,7 +544,7 @@ public class SupervisorDecisionLogTests
         db.User.Add(new User { Id = userId, Email = $"sd-{userId:N}@test.local", Name = $"sd-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"sd-{teamId:N}", Name = "Supervisor Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"sd-{teamId:N}", Name = "Supervisor Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

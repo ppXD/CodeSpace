@@ -9,8 +9,8 @@ namespace CodeSpace.Core.Authorization;
 
 /// <summary>
 /// Single source of truth for "is this user allowed to act on this team, and as what?" Used by every
-/// tenancy pipeline behavior. The Admin role bypasses entirely; non-admins must be the
-/// team owner or hold a TeamMembership row.
+/// tenancy pipeline behavior. The Admin role bypasses entirely; non-admins must hold a TeamMembership
+/// row, and its role is their answer.
 /// </summary>
 public sealed class TeamMembershipResolver : IScopedDependency
 {
@@ -36,10 +36,11 @@ public sealed class TeamMembershipResolver : IScopedDependency
     /// have no standing at all — which is what lets <see cref="EnsureMembershipAsync"/> delegate to it
     /// instead of issuing a second query.
     ///
-    /// <para>Ownership is recorded on <c>team.owner_user_id</c> and does NOT require a TeamMembership
-    /// row (only the personal-team backfill in migration 0008 writes one), so an owner without a
-    /// membership row resolves to <see cref="TeamRole.Owner"/> synthetically. A lookup that read only
-    /// the membership table would lock an owner out of their own team.</para>
+    /// <para>The membership row is the whole answer, including for owners. It used to be OR'd with
+    /// <c>team.owner_user_id</c>, and that column outlived every departure: leaving a team deletes the
+    /// row and cannot delete a column, so the person who walked out kept resolving to
+    /// <see cref="TeamRole.Owner"/> here. It also WON, so an account the column named read as Owner
+    /// past a demotion that had already rewritten their row.</para>
     ///
     /// <para>Memoized per team for the lifetime of the scope: the membership and permission behaviors
     /// both ask, and authorization is decided once at request entry, so re-reading inside the same
@@ -55,18 +56,18 @@ public sealed class TeamMembershipResolver : IScopedDependency
 
         if (userId == null) throw new TenantAccessDeniedException(null, teamId, "no authenticated user on request");
 
-        var standing = await _db.Team.AsNoTracking()
+        // Rooted on the team so a soft-deleted one denies everyone, membership rows or not — they are
+        // a hard-delete junction table and outlive the team they point at.
+        var role = await _db.Team.AsNoTracking()
             .Where(t => t.Id == teamId && t.DeletedDate == null)
-            .Select(t => new { IsOwner = t.OwnerUserId == userId.Value, MemberRoles = t.Memberships.Where(m => m.UserId == userId.Value).Select(m => m.Role).ToList() })
+            .SelectMany(t => t.Memberships.Where(m => m.UserId == userId.Value).Select(m => (TeamRole?)m.Role))
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (standing == null || (!standing.IsOwner && standing.MemberRoles.Count == 0)) throw new TenantAccessDeniedException(userId, teamId, "user is not a member of this team");
+        if (role == null) throw new TenantAccessDeniedException(userId, teamId, "user is not a member of this team");
 
-        var role = standing.IsOwner ? TeamRole.Owner : standing.MemberRoles[0];
+        _resolved[teamId] = role.Value;
 
-        _resolved[teamId] = role;
-
-        return role;
+        return role.Value;
     }
 }

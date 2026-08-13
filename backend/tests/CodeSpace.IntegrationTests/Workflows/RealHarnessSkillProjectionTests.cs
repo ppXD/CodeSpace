@@ -76,7 +76,7 @@ public class RealHarnessSkillProjectionTests
         db.User.Add(new User { Id = userId, Email = $"skillexec-{userId:N}@test.local", Name = $"skillexec-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"skillexec-{teamId:N}", Name = "Skill Exec Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"skillexec-{teamId:N}", Name = "Skill Exec Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

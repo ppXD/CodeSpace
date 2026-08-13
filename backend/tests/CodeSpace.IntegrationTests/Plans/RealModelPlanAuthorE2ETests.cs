@@ -108,7 +108,7 @@ public sealed class RealModelPlanAuthorE2ETests
         var userId = Guid.NewGuid();
         db.User.Add(new User { Id = userId, Email = $"rmplan-{userId:N}@test.local", Name = $"rmplan-{userId:N}" });
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"rmplan-{teamId:N}", Name = "RM Plan Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"rmplan-{teamId:N}", Name = "RM Plan Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
         await db.SaveChangesAsync();
         return teamId;

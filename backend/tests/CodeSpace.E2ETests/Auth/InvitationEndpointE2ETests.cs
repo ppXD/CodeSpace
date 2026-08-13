@@ -119,13 +119,14 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var owner = new User { Id = Guid.NewGuid(), Email = $"inviter-{suffix}@test.local", Name = "Inviter", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"wire-{suffix}", Name = "Wire Team", OwnerUserId = owner.Id, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"wire-{suffix}", Name = "Wire Team", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
 
         var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
         var email = $"invitee-{suffix}@test.local";
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.TeamInvitation.Add(new TeamInvitation
         {
             Id = Guid.NewGuid(),

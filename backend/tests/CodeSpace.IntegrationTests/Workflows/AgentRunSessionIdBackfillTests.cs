@@ -109,7 +109,7 @@ WHERE session_id IS NULL
         db.User.Add(new User { Id = userId, Email = $"backfill-{userId:N}@test.local", Name = $"backfill-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"backfill-{teamId:N}", Name = "Backfill Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"backfill-{teamId:N}", Name = "Backfill Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

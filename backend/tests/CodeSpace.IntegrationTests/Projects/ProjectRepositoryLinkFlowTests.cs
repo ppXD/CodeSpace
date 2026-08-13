@@ -253,7 +253,6 @@ public class ProjectRepositoryLinkFlowTests
             Slug = $"prl-team-{teamId:N}",
             Name = "PRL Team",
             Kind = TeamKind.Workspace,
-            OwnerUserId = userId,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
         });

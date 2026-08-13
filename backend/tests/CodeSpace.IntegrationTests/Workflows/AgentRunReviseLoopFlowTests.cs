@@ -275,7 +275,7 @@ public sealed class AgentRunReviseLoopFlowTests
         db.User.Add(new User { Id = userId, Email = $"revise-{userId:N}@test.local", Name = $"revise-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"revise-{teamId:N}", Name = "Revise Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"revise-{teamId:N}", Name = "Revise Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

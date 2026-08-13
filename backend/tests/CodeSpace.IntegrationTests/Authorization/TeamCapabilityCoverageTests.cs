@@ -194,12 +194,13 @@ public class TeamCapabilityCoverageTests
         var owner = new User { Id = Guid.NewGuid(), Email = $"own-{suffix}@x", Name = "owner" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"vie-{suffix}@x", Name = "viewer" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"cap-{suffix}", Name = "Capability", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"cap-{suffix}", Name = "Capability" };
 
         db.User.AddRange(owner, member, viewer);
         db.Team.Add(team);
         db.Project.Add(TestProjectSeed.BuildDefaultProject(team.Id, owner.Id));
         db.TeamMembership.AddRange(
+            new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner },
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member },
             new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = viewer.Id, Role = TeamRole.Viewer });
 

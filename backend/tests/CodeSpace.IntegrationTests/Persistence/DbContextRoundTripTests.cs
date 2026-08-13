@@ -27,7 +27,7 @@ public class DbContextRoundTripTests
         var db = readScope.Resolve<CodeSpaceDbContext>();
 
         var team = await db.Team.AsNoTracking().SingleAsync(t => t.Slug == $"team-{suffix}").ConfigureAwait(false);
-        team.OwnerUserId.ShouldBe(ownerId);
+        (await db.TeamMembership.AsNoTracking().Where(m => m.TeamId == team.Id && m.Role == TeamRole.Owner).Select(m => m.UserId).SingleAsync().ConfigureAwait(false)).ShouldBe(ownerId);
 
         var instance = await db.ProviderInstance.AsNoTracking().SingleAsync(p => p.TeamId == team.Id).ConfigureAwait(false);
         instance.Provider.ShouldBe(ProviderKind.GitLab);
@@ -81,7 +81,7 @@ public class DbContextRoundTripTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var owner = new User { Id = Guid.NewGuid(), Email = $"role-{Guid.NewGuid():N}@test", Name = "Owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"role-team-{Guid.NewGuid():N}", Name = "Role Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"role-team-{Guid.NewGuid():N}", Name = "Role Team" };
         var membership = new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner };
 
         db.User.Add(owner);
@@ -99,7 +99,7 @@ public class DbContextRoundTripTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@test", Name = "Owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team" };
         var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
 
         var instance = new ProviderInstance
@@ -151,6 +151,7 @@ public class DbContextRoundTripTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner });
         db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(credential);

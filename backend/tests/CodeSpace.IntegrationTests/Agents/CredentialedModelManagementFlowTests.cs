@@ -190,7 +190,7 @@ public class CredentialedModelManagementFlowTests
         db.User.Add(new User { Id = userId, Email = $"cmm-{userId:N}@test.local", Name = $"cmm-{userId:N}" });
 
         var teamId = Guid.NewGuid();
-        db.Team.Add(new Team { Id = teamId, Slug = $"cmm-{teamId:N}", Name = "Model Mgmt Team", Kind = TeamKind.Workspace, OwnerUserId = userId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"cmm-{teamId:N}", Name = "Model Mgmt Team", Kind = TeamKind.Workspace });
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();

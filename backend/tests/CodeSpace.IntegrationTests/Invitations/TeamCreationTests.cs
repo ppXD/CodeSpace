@@ -64,13 +64,14 @@ public class TeamCreationTests
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
-        (await db.Team.Where(t => t.Id == team.Id).Select(t => t.OwnerUserId).SingleAsync().ConfigureAwait(false)).ShouldBe(userId);
-
-        // Ownership is recorded twice on purpose: the roster, the role tier and the last-owner guard
-        // all read the membership row, so a team created without one shows an empty member list and
-        // refuses its own creator a role.
+        // The Owner membership row is the whole record of ownership — the roster, the role tier and
+        // the last-owner guard all read it, and a team created without one has no owner at all.
         var membership = await db.TeamMembership.SingleAsync(m => m.TeamId == team.Id && m.UserId == userId).ConfigureAwait(false);
         membership.Role.ShouldBe(TeamRole.Owner);
+
+        // A Workspace is nobody's personal space, so the column that survives only to keep an account
+        // to one Personal team stays empty for it.
+        (await db.Team.Where(t => t.Id == team.Id).Select(t => t.PersonalForUserId).SingleAsync().ConfigureAwait(false)).ShouldBeNull();
     }
 
     [Fact]

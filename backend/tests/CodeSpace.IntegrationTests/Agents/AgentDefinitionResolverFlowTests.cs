@@ -413,7 +413,8 @@ public class AgentDefinitionResolverFlowTests
         var teamId = Guid.NewGuid();
 
         db.User.Add(new User { Id = userId, Email = $"res-{userId:N}@test.local", Name = $"res-{userId:N}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
-        db.Team.Add(new Team { Id = teamId, Slug = $"res-team-{teamId:N}", Name = "Resolver Team", Kind = TeamKind.Workspace, OwnerUserId = userId, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Team.Add(new Team { Id = teamId, Slug = $"res-team-{teamId:N}", Name = "Resolver Team", Kind = TeamKind.Workspace, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
 
         await db.SaveChangesAsync();
         return teamId;

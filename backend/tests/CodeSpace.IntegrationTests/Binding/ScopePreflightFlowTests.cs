@@ -106,10 +106,11 @@ public class ScopePreflightFlowTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "Owner" };
-        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team" };
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = owner.Id, Role = TeamRole.Owner });
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return team.Id;

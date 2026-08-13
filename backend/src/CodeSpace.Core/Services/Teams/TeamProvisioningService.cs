@@ -12,10 +12,9 @@ namespace CodeSpace.Core.Services.Teams;
 /// <summary>
 /// Opening a new workspace.
 ///
-/// <para>Whoever creates a team owns it, and gets an explicit Owner membership row alongside
-/// <c>team.owner_user_id</c>. Ownership being recorded twice is not redundancy here: the membership
-/// row is what the roster, the role tier and the last-owner guard all read, and a team created
-/// without one would show an empty member list and refuse its own creator a role.</para>
+/// <para>Whoever creates a team owns it, and that is recorded as an Owner membership row — the only
+/// place ownership lives. A team created without one has no owner at all: it would show an empty
+/// member list and refuse its own creator a role.</para>
 /// </summary>
 public sealed class TeamProvisioningService : ITeamProvisioningService, IScopedDependency
 {
@@ -47,7 +46,6 @@ public sealed class TeamProvisioningService : ITeamProvisioningService, IScopedD
             Name = trimmed,
             Slug = await DeriveSlugAsync(trimmed, cancellationToken).ConfigureAwait(false),
             Kind = TeamKind.Workspace,
-            OwnerUserId = ownerId,
         };
 
         _db.Team.Add(team);
