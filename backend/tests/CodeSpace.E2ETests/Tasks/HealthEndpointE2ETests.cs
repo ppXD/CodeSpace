@@ -15,7 +15,6 @@ namespace CodeSpace.E2ETests.Tasks;
 /// </summary>
 [Trait("Category", "E2E")]
 [Trait("Surface", "Http")]
-[Collection(FakeCliHttpE2ECollection.Name)]
 public sealed class HealthEndpointE2ETests : IClassFixture<TaskLaunchApiFactory>
 {
     private readonly TaskLaunchApiFactory _factory;

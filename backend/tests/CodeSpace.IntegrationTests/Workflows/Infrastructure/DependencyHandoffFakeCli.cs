@@ -26,15 +26,13 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// bwrap-safe and independent of the live brain's exact wording. POSIX <c>/bin/sh</c> only.</para>
 ///
 /// <para>⚠ Both command env vars this arms are PROCESS-WIDE, so while armed this shadows any REAL claude/codex
-/// binary in the same test process — and a real-CLI test that gates on "the env var points at a file that exists"
-/// (<c>RealClaudeResumeE2ETests.ClaudeResolves</c>) sees THIS script and runs instead of self-skipping. Unreachable
-/// in CI today: the only consumer that arms it in the E2E assembly self-skips before construction when
-/// <c>CODESPACE_LLM_*</c> is absent, and the real-model job filters to that one class. It IS reachable in a local
-/// full-assembly run with those secrets set, because the real-CLI resume classes declare no <c>[Collection]</c> and
-/// so run in parallel with this one — the same hazard <c>FakeCliHttpE2ECollection</c> (E2ETests, not visible from
-/// here) was created for, and whose summary still describes it as codex-only. Serializing those classes is tracked
-/// separately; do not widen
-/// this fake's reach further until it is.</para>
+/// binary in the same test process. Two separate guards keep that contained, and widening this fake's reach is only
+/// safe while both hold. READERS: a real-CLI test that gated on "the env var points at a file that exists" would see
+/// THIS script and assert real-resume semantics on it — those gates now ask <see cref="FakeAgentCliMarker"/> what
+/// they resolved and self-skip, which holds no matter who runs when (they declare no <c>[Collection]</c>).
+/// WRITERS: another fake-arming class would re-point the var mid-flight of this one's agents; every one of them
+/// therefore carries <c>[Collection(PostgresCollection.Name)]</c> so they run serially, pinned by
+/// <see cref="FakeAgentCliCollectionConventionTests"/>.</para>
 /// </summary>
 public sealed class DependencyHandoffFakeCli : IDisposable
 {
