@@ -301,6 +301,9 @@ public sealed class CompletionTerminalAuthorityFlowTests
         run.Status = WorkflowRunStatus.Running;
         run.CompletionPolicyVersion = CompletionPolicy.CurrentVersion;
         run.CompletionEnforcementMode = mode;
+        // P4: these fixtures simulate SUPERVISOR-shaped tapes on a minimal graph — stamp the mode honestly so the
+        // authority's mode gate (unregistered ⇒ Unsupported park) reads the lane the tape actually models.
+        run.ProjectionKind = CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor;
         await db.SaveChangesAsync();
         return runId;
     }

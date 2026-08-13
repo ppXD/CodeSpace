@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Completion;
@@ -35,21 +36,40 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
     private readonly ICompletionCapabilityRegistry _capabilities;
+    private readonly IModeProfileRegistry _modes;
     private readonly Persistence.Db.CodeSpaceDbContext _db;
     private readonly ILogger<CompletionTerminalAuthority> _logger;
 
-    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ICompletionCapabilityRegistry capabilities, Persistence.Db.CodeSpaceDbContext db, ILogger<CompletionTerminalAuthority> logger)
+    public CompletionTerminalAuthority(ICompletionAssessmentComposer composer, ICompletionContractStore contracts, ICompletionHandoffProbe handoff, ICompletionCapabilityRegistry capabilities, IModeProfileRegistry modes, Persistence.Db.CodeSpaceDbContext db, ILogger<CompletionTerminalAuthority> logger)
     {
         _composer = composer;
         _contracts = contracts;
         _handoff = handoff;
         _capabilities = capabilities;
+        _modes = modes;
         _db = db;
         _logger = logger;
     }
 
     public async Task<bool> VerifyWatermarksAsync(Guid workflowRunId, Guid teamId, CompletionLedgerWatermarks captured, CancellationToken cancellationToken) =>
         captured == await CompletionLedgerWatermarks.CaptureAsync(_db, workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The run's operating mode off its own row: the tasks lane's stamped projection kind wins; an authored run derives from its frozen definition (the snapshot json, else the workflow version's).</summary>
+    private async Task<string> DeriveModeAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == workflowRunId && r.TeamId == teamId)
+            .Select(r => new { r.ProjectionKind, r.DefinitionSnapshotJson, r.WorkflowId, r.WorkflowVersion })
+            .SingleAsync(cancellationToken).ConfigureAwait(false);
+
+        var definitionJson = run.DefinitionSnapshotJson
+            ?? await _db.WorkflowVersion.AsNoTracking()
+                .Where(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion)
+                .Select(v => v.DefinitionJson)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return RunModeClassifier.DeriveFromJson(run.ProjectionKind, definitionJson);
+    }
 
     public async Task<TerminalArbitration> ArbitrateAsync(Guid workflowRunId, Guid teamId, string? enforcementMode, WorkflowRunStatus engineStatus, CancellationToken cancellationToken)
     {
@@ -63,6 +83,15 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
 
         if (_capabilities.Resolve(capabilityKey) is null)
             return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — capability '{capabilityKey}' is not registered", TerminalDecision.Unsupported);
+
+        // P4 (Lock Clause 4, first cell of the matrix): HOW this run operates must be a REGISTERED mode too — a
+        // run whose operating shape has no declared conformance story (an arbitrary generic graph) parks
+        // Unsupported instead of terminalizing a Success nothing ever qualified. Derived from the run's own
+        // launch-stamped projection kind, else its frozen definition's node shape.
+        var mode = await DeriveModeAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (_modes.Resolve(mode) is null)
+            return new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: Unsupported — mode '{mode}' has no registered conformance profile", TerminalDecision.Unsupported);
 
         // Lock Clause 2: capture the ledgers' watermarks BEFORE composing — conservative direction: a fact that
         // lands mid-compose reads as moved at the terminal boundary and forces a recompose, never a stale stamp.
