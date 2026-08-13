@@ -21,6 +21,11 @@ public class Program
             .AddEnvironmentVariables()
             .Build();
 
+        // Before anything reads a value: a placeholder the release tooling never substituted is set, non-empty,
+        // and therefore passes every "is it configured" check below. It has to be caught here or it is caught
+        // later as a permission error on a path named after the variable itself.
+        CodeSpace.Core.Settings.ConfigurationPlaceholderGuard.ThrowIfUnrendered(configuration);
+
         // The deployment-varying settings that deep static call sites read (sandbox confinement, spool + artifact
         // roots, the drain budget). Bound here because Main runs BEFORE the host, so CodeSpaceModule's own binding
         // would be too late for anything on this path.
