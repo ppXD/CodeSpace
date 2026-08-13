@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.Budget;
@@ -37,6 +38,16 @@ public interface IBudgetLedger
 
     /// <summary>The run's committed total: settled + live reserved — what the invariant compares against the cap.</summary>
     Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// W-hard slice 2: pessimistically reconcile a KIND PREFIX's dangling reservations — INDETERMINATE rows (the
+    /// expiry sweep's output), and still-live rows whose RUN is already terminal (nothing will ever settle them).
+    /// Each lands <see cref="BudgetReservationStates.Reconciled"/> with the settled amount defaulting AT the
+    /// reserve — the audit trail says "never confirmed, decided pessimistically", distinct from a fact-based
+    /// settle. Cap math is unchanged in the only direction that matters (headroom is never silently freed);
+    /// what this closes is the FOREVER-LIVE orphan an in-flight teardown leaves behind.
+    /// </summary>
+    Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -150,6 +161,30 @@ public sealed class BudgetLedger : IBudgetLedger, IScopedDependency
         await _db.BudgetReservation
             .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired)
             .SumAsync(r => r.SettledUsd ?? r.ReservedUsd, cancellationToken).ConfigureAwait(false);
+
+    public async Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken)
+    {
+        var terminal = new[] { WorkflowRunStatus.Success, WorkflowRunStatus.Failure, WorkflowRunStatus.Cancelled };
+
+        var dangling = await _db.BudgetReservation
+            .Where(r => r.Kind.StartsWith(kindPrefix)
+                        && (r.State == BudgetReservationStates.Indeterminate
+                            || ((r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight)
+                                && _db.WorkflowRun.Any(w => w.Id == r.WorkflowRunId && terminal.Contains(w.Status)))))
+            .OrderBy(r => r.CreatedDate)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var reservation in dangling)
+        {
+            reservation.State = BudgetReservationStates.Reconciled;
+            reservation.SettledUsd ??= reservation.ReservedUsd;   // pessimistic — never lower than the claim it held
+        }
+
+        if (dangling.Count > 0) await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return dangling.Count;
+    }
 
     /// <summary>Serialize admissions per run — pg_advisory_xact_lock releases with the transaction.</summary>
     private async Task TakeRunLockAsync(Guid workflowRunId, CancellationToken cancellationToken) =>

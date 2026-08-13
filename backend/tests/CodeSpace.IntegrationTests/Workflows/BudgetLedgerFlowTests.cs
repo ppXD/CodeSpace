@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Autofac;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -143,6 +144,49 @@ public sealed class BudgetLedgerFlowTests
             Activations = new List<Messages.Commands.Workflows.WorkflowActivationInput>(),
             Enabled = true,
         });
+    }
+
+    [Fact]
+    public async Task Dangling_llm_reservations_reconcile_pessimistically_and_leave_the_live_set()
+    {
+        // W-hard slice 2: the llm:* kinds have no fact source to settle from — an orphan (teardown between
+        // reserve and settle) must become TERMINAL bookkeeping without ever freeing the claim it held.
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var terminalRunId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+        var ledger = scope.Resolve<IBudgetLedger>();
+
+        // The seeded run must be TERMINAL for the terminal-run arm; a second, still-running run pins the negative.
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_run SET status = 'Success' WHERE id = {terminalRunId}");
+        var runningRunId = Guid.NewGuid();
+
+        (await ledger.ReserveAsync(terminalRunId, teamId, "llm:supervisor.decision", "orphan-1", 0.5m, 10m, "realized-v1", null, null, CancellationToken.None)).Admitted.ShouldBeTrue();
+        (await ledger.ReserveAsync(runningRunId, teamId, "llm:supervisor.decision", "live-1", 0.5m, 10m, "realized-v1", null, null, CancellationToken.None)).Admitted.ShouldBeTrue();
+        (await ledger.ReserveAsync(terminalRunId, teamId, "agent-attempt", "s1#a1", 0.5m, 10m, "realized-v1", null, null, CancellationToken.None)).Admitted.ShouldBeTrue();
+
+        var committedBefore = await ledger.CommittedUsdAsync(terminalRunId, teamId, CancellationToken.None);
+
+        var reconciled = await ledger.ReconcileDanglingAsync("llm:", batchSize: 50, CancellationToken.None);
+
+        reconciled.ShouldBe(1, "exactly the terminal run's dangling llm row — the running run's live row and the agent-attempt kind are untouched");
+
+        var rows = await db.BudgetReservation.AsNoTracking().Where(r => r.TeamId == teamId).ToListAsync();
+        var orphan = rows.Single(r => r.ScopeKey == "orphan-1");
+        orphan.State.ShouldBe(BudgetReservationStates.Reconciled, "the audit trail says decided-pessimistically, distinct from a fact-based settle");
+        orphan.SettledUsd.ShouldBe(0.5m, "never lower than the claim it held");
+        rows.Single(r => r.ScopeKey == "live-1").State.ShouldBe(BudgetReservationStates.Reserved);
+        rows.Single(r => r.ScopeKey == "s1#a1").State.ShouldBe(BudgetReservationStates.Reserved, "the kind prefix scopes the pass — agent-attempt reconciliation stays fact-based");
+
+        (await ledger.CommittedUsdAsync(terminalRunId, teamId, CancellationToken.None))
+            .ShouldBe(committedBefore, "reconciliation is bookkeeping — headroom is never silently freed");
+
+        // An INDETERMINATE llm row (the expiry sweep's output) reconciles too.
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE budget_reservation SET state = 'Indeterminate' WHERE scope_key = 'live-1'");
+        (await ledger.ReconcileDanglingAsync("llm:", 50, CancellationToken.None)).ShouldBe(1);
+        (await db.BudgetReservation.AsNoTracking().SingleAsync(r => r.ScopeKey == "live-1")).State.ShouldBe(BudgetReservationStates.Reconciled);
     }
 
     [Fact]

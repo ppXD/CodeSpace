@@ -68,6 +68,11 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
 
         released += await ReleaseTerminalMapBranchesAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
+        // W-hard slice 2: the llm:* kinds have no fact source to settle from (the guard settles in-band; only
+        // orphans reach here) — reconcile them pessimistically so a teardown's dangling claim is terminal
+        // bookkeeping, never a forever-live row every later admission of the run keeps paying for.
+        released += await _ledger.ReconcileDanglingAsync("llm:", batchSize, cancellationToken).ConfigureAwait(false);
+
         var expired = await _ledger.ExpireOverdueAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
         return (settled, released, expired);
