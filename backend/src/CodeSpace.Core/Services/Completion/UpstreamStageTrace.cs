@@ -40,5 +40,9 @@ public static class UpstreamStageTrace
 
     /// <summary>The profile's Required upstream stages the trace does NOT evidence — non-empty means the Success claim skipped a declared stage and must park. A null trace (never derived — a legacy compose) evidences nothing: fail-close.</summary>
     public static IReadOnlyList<CompletionStage> MissingRequired(ModeProfile profile, IReadOnlySet<CompletionStage>? exercised) =>
-        Array.Empty<CompletionStage>();
+        profile.Stages
+            .Where(s => s.Value == StageRequiredness.Required && Stages.Contains(s.Key) && exercised?.Contains(s.Key) != true)
+            .Select(s => s.Key)
+            .OrderBy(s => s)
+            .ToList();
 }
