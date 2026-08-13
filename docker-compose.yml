@@ -61,6 +61,10 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
+      # Blank turns Seq off, which is what a container gets by default: appsettings points at
+      # localhost:5341, and inside a container that is the container itself. Point it at a reachable
+      # Seq (host.docker.internal, or a service you add) to search these logs afterwards.
+      Serilog__Seq__ServerUrl: "${SEQ_SERVER_URL:-}"
       # This pod NEVER processes jobs — it serves HTTP + enqueues only. Agent execution lives in the worker.
       HangfireHosting: "Api"
       # ASPNETCORE_ENVIRONMENT=Production above means the variable-encryption master key is REQUIRED (Development is
@@ -98,6 +102,10 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
+      # Blank turns Seq off, which is what a container gets by default: appsettings points at
+      # localhost:5341, and inside a container that is the container itself. Point it at a reachable
+      # Seq (host.docker.internal, or a service you add) to search these logs afterwards.
+      Serilog__Seq__ServerUrl: "${SEQ_SERVER_URL:-}"
       # This pod IS the worker — it executes agent runs + the per-run MCP endpoint. Stated explicitly rather than
       # relying on the default, so the topology is readable from the compose file alone.
       HangfireHosting: "Worker"
