@@ -10,6 +10,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.E2ETests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -33,7 +34,7 @@ namespace CodeSpace.E2ETests.Tasks;
 /// </summary>
 [Trait("Category", "E2E")]
 [Trait("Surface", "Http")]
-[Collection(FakeCliHttpE2ECollection.Name)]   // serial with the other fake-CLI Http E2E classes — they share the process-wide CodexHarness.CommandEnvVar
+[Collection(PostgresCollection.Name)]   // serial with EVERY fake-arming class in this assembly — they all share the process-wide CodexHarness.CommandEnvVar
 public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFactory>
 {
     private readonly TaskLaunchApiFactory _factory;
