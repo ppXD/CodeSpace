@@ -22,21 +22,36 @@ public static class DurableRootsGuard
 
         var violations = new List<string>();
 
-        if (string.IsNullOrWhiteSpace(settings.ArtifactStoreDirectory))
-            violations.Add("Artifacts:StoreDirectory is not configured — artifact blobs would land under the system temp dir and die with the host while their durable rows keep claiming them.");
-
-        if (string.IsNullOrWhiteSpace(settings.AgentRunSpoolDirectory))
-            violations.Add("Agents:RunSpoolDirectory is not configured — agent-run spools would land under the system temp dir, so re-attach after a restart has nothing to observe.");
+        Check("Artifacts:StoreDirectory", DurableRoots.ArtifactStore(settings.ArtifactStoreDirectory), "artifact blobs die with the host while their durable rows keep claiming them");
+        Check("Agents:RunSpoolDirectory", DurableRoots.AgentRunSpool(settings.AgentRunSpoolDirectory), "re-attach after a restart has nothing to observe");
 
         return violations;
+
+        void Check(string key, string resolved, string consequence)
+        {
+            if (!IsUnderTempDirectory(resolved)) return;
+
+            violations.Add($"{key} resolves to {resolved}, which is under the system temp directory — {consequence}. Point it at a volume.");
+        }
     }
 
-    /// <summary>Refuse to start a Production host whose durable roots are unconfigured — a legible startup failure beats a silent temp landing discovered at the first host wipe.</summary>
+    /// <summary>
+    /// Compared as full paths with a trailing separator, so <c>/tmp/codespace</c> counts and a sibling like
+    /// <c>/tmpfoo</c> does not.
+    /// </summary>
+    private static bool IsUnderTempDirectory(string resolved)
+    {
+        var temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+
+        return Path.GetFullPath(resolved).StartsWith(temp + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    /// <summary>Refuse to start a Production host whose durable roots are ephemeral — a legible startup failure beats a silent temp landing discovered at the first host wipe.</summary>
     public static void ThrowIfProductionUnconfigured(RuntimeSettings settings, string environmentName)
     {
         var violations = Violations(settings, environmentName);
 
         if (violations.Count > 0)
-            throw new InvalidOperationException("Refusing to start in Production with unconfigured durable roots:\n - " + string.Join("\n - ", violations));
+            throw new InvalidOperationException("Refusing to start in Production with ephemeral durable roots:\n - " + string.Join("\n - ", violations));
     }
 }

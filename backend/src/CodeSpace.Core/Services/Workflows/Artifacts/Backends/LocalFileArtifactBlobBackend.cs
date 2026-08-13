@@ -18,13 +18,13 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, ISingle
 {
     private readonly string _root;
 
-    /// <summary>Roots the store at <c>Artifacts:StoreDirectory</c> when configured, else under the system temp dir — fine for dev/test, but NOT durable across a host wipe, so a deployment whose artifacts must outlive the pod points the setting at a persistent volume.</summary>
+    /// <summary>Roots the store at <c>Artifacts:StoreDirectory</c> when configured, else where <see cref="CodeSpace.Core.Settings.DurableRoots"/> puts it — the path the container image already creates, or a per-user one off a container. Never the temp dir: artifacts outlive the rows that reference them only if the bytes do.</summary>
     public LocalFileArtifactBlobBackend()
         : this(CodeSpace.Core.Settings.RuntimeSettings.Current.ArtifactStoreDirectory) { }
 
     /// <summary>Test seam — the root is passed explicitly so a test pins behaviour without binding process-wide settings.</summary>
     internal LocalFileArtifactBlobBackend(string? configuredRoot) =>
-        _root = Path.GetFullPath(configuredRoot ?? Path.Combine(Path.GetTempPath(), "codespace-artifact-store"));
+        _root = CodeSpace.Core.Settings.DurableRoots.ArtifactStore(configuredRoot);
 
     public async Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
