@@ -585,9 +585,9 @@ public sealed partial class LocalProcessRunner
     public static string McpProxyBinaryPath() =>
         Environment.GetEnvironmentVariable(McpProxyPathEnvVar) is { Length: > 0 } p ? p : Path.Combine(AppContext.BaseDirectory, McpProxyFile);
 
-    /// <summary>The spool root: <c>Agents:RunSpoolDirectory</c> when configured, else a path under the system temp dir. The temp default is fine for development but does NOT survive a pod restart, so a deployment that wants re-attach to work across one points the setting at a volume.</summary>
+    /// <summary>The spool root: <c>Agents:RunSpoolDirectory</c> when configured, else where <see cref="CodeSpace.Core.Settings.DurableRoots"/> puts it — the path the container image already creates, or a per-user one off a container. Surviving a pod restart is what re-attach needs, so a deployment whose pods are replaced points this at a volume.</summary>
     internal static string SpoolRoot() =>
-        CodeSpace.Core.Settings.RuntimeSettings.Current.AgentRunSpoolDirectory ?? Path.Combine(Path.GetTempPath(), "codespace", "agent-runs");
+        CodeSpace.Core.Settings.DurableRoots.AgentRunSpool(CodeSpace.Core.Settings.RuntimeSettings.Current.AgentRunSpoolDirectory);
 
     internal static string SpoolDirectoryFor(string spoolKey) => Path.Combine(SpoolRoot(), spoolKey);
 
