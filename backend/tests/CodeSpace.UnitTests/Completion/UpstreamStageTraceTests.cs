@@ -1,6 +1,8 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Completion;
@@ -21,7 +23,7 @@ public class UpstreamStageTraceTests
     [Fact]
     public void An_empty_run_evidences_nothing()
     {
-        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>()).ShouldBeEmpty();
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>()).ShouldBeEmpty();
     }
 
     [Fact]
@@ -34,7 +36,7 @@ public class UpstreamStageTraceTests
     [Fact]
     public void Staked_requirements_evidence_contract()
     {
-        var exercised = UpstreamStageTrace.Derive(new[] { Requirement("acceptance:s1") }, Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>());
+        var exercised = UpstreamStageTrace.Derive(new[] { Requirement("acceptance:s1") }, Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>());
 
         exercised.ShouldBe(new HashSet<CompletionStage> { CompletionStage.Contract });
     }
@@ -44,7 +46,7 @@ public class UpstreamStageTraceTests
     [InlineData(SupervisorDecisionStatus.Failed, false)]     // a failed plan decision authorized nothing
     public void Only_a_succeeded_plan_decision_evidences_plan(SupervisorDecisionStatus status, bool expected)
     {
-        var exercised = UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), new[] { Decision(1, SupervisorDecisionKinds.Plan, status) }, Array.Empty<AttemptProjection>());
+        var exercised = UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), new[] { Decision(1, SupervisorDecisionKinds.Plan, status) }, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>());
 
         exercised.Contains(CompletionStage.Plan).ShouldBe(expected);
     }
@@ -52,7 +54,7 @@ public class UpstreamStageTraceTests
     [Fact]
     public void Projected_attempts_evidence_execute()
     {
-        var exercised = UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), new[] { Attempt() });
+        var exercised = UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), new[] { Attempt() }, Array.Empty<PublishManifest>());
 
         exercised.ShouldBe(new HashSet<CompletionStage> { CompletionStage.Execute });
     }
@@ -66,7 +68,7 @@ public class UpstreamStageTraceTests
             Decision(2, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","integratedBranch":"codespace/integration/x"}}"""),
         };
 
-        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>())
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
             .ShouldContain(CompletionStage.Integrate);
     }
 
@@ -81,7 +83,7 @@ public class UpstreamStageTraceTests
             Decision(2, SupervisorDecisionKinds.Spawn),
         };
 
-        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>())
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
             .ShouldNotContain(CompletionStage.Integrate);
     }
 
@@ -93,8 +95,38 @@ public class UpstreamStageTraceTests
             Decision(1, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"integrated","repositories":[{"alias":"api","status":"Clean","integratedBranch":"codespace/integration/api"}]}}"""),
         };
 
-        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>())
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), Array.Empty<PublishManifest>())
             .ShouldContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void A_pushed_integration_manifest_evidences_integrate()
+    {
+        // The Integrate cell's SECOND ledger (P4, plan-map lane): a tape-less run whose git.integrate_run step
+        // recorded the run-level candidate row evidences the stage off that row alone.
+        var exercised = UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(),
+            new[] { IntegrationManifest(PublishState.Pushed, branch: "codespace/integration/r") });
+
+        exercised.ShouldBe(new HashSet<CompletionStage> { CompletionStage.Integrate });
+    }
+
+    [Theory]
+    [InlineData(PublishState.PatchOnly, "codespace/integration/r")]   // never arrived — no reviewable candidate
+    [InlineData(PublishState.Pushed, null)]                            // pushed-but-branchless attests nothing followable
+    public void A_candidate_that_never_arrived_stays_silent(PublishState state, string? branch)
+    {
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(),
+                new[] { IntegrationManifest(state, branch) })
+            .ShouldNotContain(CompletionStage.Integrate);
+    }
+
+    [Fact]
+    public void An_agent_kind_manifest_never_evidences_integrate()
+    {
+        // Per-agent pushes are fragments, not the candidate — only the run-level Integration row speaks for the cell.
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(),
+                new[] { IntegrationManifest(PublishState.Pushed, "codespace/agent/a", PublishManifestKind.Agent) })
+            .ShouldNotContain(CompletionStage.Integrate);
     }
 
     [Fact]
@@ -143,5 +175,11 @@ public class UpstreamStageTraceTests
     private static AttemptProjection Attempt() => new()
     {
         AttemptId = Guid.NewGuid(), UnitId = "s1", WorkUnit = null, AttemptOrdinal = 1, State = AttemptState.Settled,
+    };
+
+    private static PublishManifest IntegrationManifest(PublishState state, string? branch, PublishManifestKind kind = PublishManifestKind.Integration) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = kind, WorkflowRunId = Guid.NewGuid(),
+        RepositoryAlias = "primary", Branch = branch, PublishStateValue = state,
     };
 }
