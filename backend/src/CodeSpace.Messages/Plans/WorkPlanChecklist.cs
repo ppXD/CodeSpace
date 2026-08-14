@@ -104,8 +104,13 @@ public static class WorkPlanItemStates
     /// of <paramref name="acceptancePassed"/> — mirroring <c>SupervisorTurnService.Rehydrate.ClassifyUnitContradiction</c>'s
     /// identical carve-out.</para>
     /// </summary>
-    public static string Derive(string? agentStatus, bool? acceptancePassed) => agentStatus switch
+    public static string Derive(string? agentStatus, bool? acceptancePassed, Contracts.VerificationDisposition? acceptanceVerdict = null) => agentStatus switch
     {
+        // B2's invariant at the CHECKLIST grain: a human-waived unit is "a human must look", never a green.
+        // Without this arm a waived unit (Status=Succeeded, AcceptancePassed=null) read `null == false` as
+        // false and rendered Completed — the exact laundering the Waived state exists to forbid, surviving at
+        // the one surface the six gate doors don't cover.
+        _ when acceptanceVerdict == Contracts.VerificationDisposition.Waived => NeedsReview,
         null => Pending,
         nameof(AgentRunStatus.Queued) or nameof(AgentRunStatus.Running) => InProgress,
         nameof(AgentRunStatus.Succeeded) => acceptancePassed == false ? Failed : Completed,

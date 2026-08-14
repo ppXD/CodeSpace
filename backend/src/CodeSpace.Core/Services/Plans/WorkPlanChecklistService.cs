@@ -77,7 +77,7 @@ public sealed class WorkPlanChecklistService : IWorkPlanChecklistService, IScope
         return new WorkPlanChecklistItem
         {
             Item = item,
-            State = WorkPlanItemStates.Derive(attempt?.LatestStatus, attempt?.AcceptancePassed),
+            State = WorkPlanItemStates.Derive(attempt?.LatestStatus, attempt?.AcceptancePassed, attempt?.AcceptanceVerdict),
             AgentRunId = attempt?.AgentRunId,
             AcceptancePassed = attempt?.AcceptancePassed,
             AcceptanceDetail = attempt?.AcceptanceDetail,
