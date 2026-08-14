@@ -31,7 +31,7 @@ public class SessionManifestBranchesTests
     {
         var rows = new[] { Row("primary", "codespace/agent/x") };
 
-        SessionManifestBranches.ResolveSingleRepoBranch(rows).ShouldBe("codespace/agent/x");
+        SessionManifestBranches.ResolveSingleRepoBranch(rows)?.Branch.ShouldBe("codespace/agent/x");
         SessionManifestBranches.ResolveRepositoryBranches(rows).ShouldBeEmpty("exactly one live branch is the FLAT shape, never the per-repo array");
     }
 
@@ -80,7 +80,7 @@ public class SessionManifestBranchesTests
             Row("primary", "codespace/integration/run/turn1", kind: PublishManifestKind.Integration),
         };
 
-        SessionManifestBranches.ResolveSingleRepoBranch(rows).ShouldBe("codespace/integration/run/turn1");
+        SessionManifestBranches.ResolveSingleRepoBranch(rows)?.Branch.ShouldBe("codespace/integration/run/turn1");
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public class SessionManifestBranchesTests
         // A plain single-agent turn (no supervisor, nothing to fold) — its one Agent row IS the turn's outcome.
         var rows = new[] { Row("primary", "codespace/agent/solo", kind: PublishManifestKind.Agent) };
 
-        SessionManifestBranches.ResolveSingleRepoBranch(rows).ShouldBe("codespace/agent/solo");
+        SessionManifestBranches.ResolveSingleRepoBranch(rows)?.Branch.ShouldBe("codespace/agent/solo");
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class SessionManifestBranchesTests
             Row("primary", "codespace/agent/attempt-2-retry", repositoryId: repoId, createdDate: DateTimeOffset.UtcNow),
         };
 
-        SessionManifestBranches.ResolveSingleRepoBranch(rows).ShouldBe("codespace/agent/attempt-2-retry",
+        SessionManifestBranches.ResolveSingleRepoBranch(rows)?.Branch.ShouldBe("codespace/agent/attempt-2-retry",
             "two rows for the SAME repo (a retry) must collapse to one — the newest — never leave the single-repo case unresolved as if it were ambiguous");
     }
 

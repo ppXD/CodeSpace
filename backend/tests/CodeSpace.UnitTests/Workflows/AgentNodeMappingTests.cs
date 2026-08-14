@@ -154,7 +154,26 @@ public class AgentNodeMappingTests
     private static readonly Guid Primary = Guid.NewGuid();
     private static readonly Guid Api = Guid.NewGuid();
 
-    private static TaskBuildContext Context(IReadOnlyDictionary<Guid, string>? baseRefs, bool withRelated = true) => new()
+    [Fact]
+    public void BuildAgentInputs_threads_the_recovery_anchor_beside_a_session_base_ref()
+    {
+        // P4 (session branch recovery): the confirmed tip rides beside the soft session ref — the clone's detach
+        // anchor when the prior branch has vanished. Absent when the turn recorded no tip (legacy — recovery off).
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary", CommitSha = "abc123abc123" } }));
+
+        inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary");
+        inputs.GetProperty("baseRefRecoverySha").GetString().ShouldBe("abc123abc123");
+    }
+
+    [Fact]
+    public void BuildAgentInputs_omits_the_recovery_anchor_when_the_turn_recorded_no_tip()
+    {
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary" } }));
+
+        inputs.TryGetProperty("baseRefRecoverySha", out _).ShouldBeFalse("no recorded tip ⇒ recovery unavailable ⇒ the key is omitted (byte-identical to before it existed)");
+    }
+
+    private static TaskBuildContext Context(IReadOnlyDictionary<Guid, SessionStartRef>? baseRefs, bool withRelated = true) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent },
@@ -169,7 +188,7 @@ public class AgentNodeMappingTests
     [Fact]
     public void BuildAgentInputs_threads_per_repo_base_refs_onto_baseRef_and_related_ref()
     {
-        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, string> { [Primary] = "run-1/primary", [Api] = "run-1/api" }));
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary" }, [Api] = new() { Branch = "run-1/api" } }));
 
         inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary", "the primary's ref comes from the map keyed by its repo id");
         inputs.GetProperty("relatedRepositories")[0].GetProperty("ref").GetString().ShouldBe("run-1/api", "each related repo's ref comes from the map keyed by ITS repo id — no bleed");
@@ -180,7 +199,7 @@ public class AgentNodeMappingTests
     public void BuildAgentInputs_omits_refs_for_repos_absent_from_the_map()
     {
         // The primary has a prior branch; the related repo does NOT → only the primary carries a ref.
-        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, string> { [Primary] = "run-1/primary" }));
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary" } }));
 
         inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary");
         inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("a repo absent from the map carries no ref ⇒ it clones at its default branch");
@@ -192,7 +211,7 @@ public class AgentNodeMappingTests
     public void BuildAgentInputs_treats_a_blank_mapped_ref_as_absent(string blank)
     {
         // A blank value in the map (defensive) is folded to absent — the repo clones at its default branch.
-        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, string> { [Primary] = blank, [Api] = blank }));
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = blank }, [Api] = new() { Branch = blank } }));
 
         inputs.TryGetProperty("baseRef", out _).ShouldBeFalse("a blank mapped ref folds to absent (NullIfBlank) — no baseRef key");
         inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("a blank mapped ref for a related repo emits no ref key");
@@ -229,7 +248,7 @@ public class AgentNodeMappingTests
     {
         // A CONTINUED turn's prior produced branch carries the thread's own work — cloning the operator's original
         // base instead would silently discard every prior turn. The pin applies to the FRESH launch only.
-        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, string> { [Primary] = "run-1/primary" }) with
+        var inputs = AgentNodeMapping.BuildAgentInputs(Context(new Dictionary<Guid, SessionStartRef> { [Primary] = new() { Branch = "run-1/primary" } }) with
         {
             Seed = new TaskLaunchSeed { Goal = "g", SurfaceKind = "chat", TeamId = Guid.NewGuid(), BaseBranch = "release/2.x" },
         });

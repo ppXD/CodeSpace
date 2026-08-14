@@ -208,7 +208,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     }
 
     /// <summary>On a CONTINUE, the prior turn's produced branch for EACH repo the run touches (primary + related) — the projection clones each repo's workspace at its own ref. Empty on a fresh launch, an analysis-only run (no repos), or when no prior turn produced a branch for any (⇒ default branches — the safe fallback). A repo absent from the map clones at its default.</summary>
-    private async Task<IReadOnlyDictionary<Guid, string>> ResolveBaseRefsAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<Guid, SessionStartRef>> ResolveBaseRefsAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
     {
         if (request.ContinueSessionId is not { } sessionId) return EmptyBaseRefs;
 
@@ -222,7 +222,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         return await _sessionBranches.ResolveStartRefsAsync(sessionId, request.TeamId, scopeRepoIds, cancellationToken).ConfigureAwait(false);
     }
 
-    private static readonly IReadOnlyDictionary<Guid, string> EmptyBaseRefs = new Dictionary<Guid, string>();
+    private static readonly IReadOnlyDictionary<Guid, SessionStartRef> EmptyBaseRefs = new Dictionary<Guid, SessionStartRef>();
 
     /// <summary>
     /// Validates EVERY repo the run touches — the primary (seed's, else request's) PLUS each related (multi-repo) repo —

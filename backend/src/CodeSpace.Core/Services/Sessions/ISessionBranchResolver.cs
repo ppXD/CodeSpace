@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Tasks;
+
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
@@ -17,5 +19,5 @@ public interface ISessionBranchResolver
     /// branch is ABSENT from the result map (⇒ the caller clones it at its default branch — the safe fallback). Newest
     /// turn wins per repo. Team-scoped (defence in depth).
     /// </summary>
-    Task<IReadOnlyDictionary<Guid, string>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<Guid, SessionStartRef>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken);
 }

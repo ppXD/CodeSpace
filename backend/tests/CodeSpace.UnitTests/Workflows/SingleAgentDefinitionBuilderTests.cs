@@ -243,7 +243,7 @@ public class SingleAgentDefinitionBuilderTests
         {
             RepositoryId = primary,
             RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = related, Access = WorkspaceAccess.Write } },
-        }) with { BaseRefs = new Dictionary<Guid, string> { [primary] = "run-1/primary", [related] = "run-1/api" } };
+        }) with { BaseRefs = new Dictionary<Guid, SessionStartRef> { [primary] = new() { Branch = "run-1/primary" }, [related] = new() { Branch = "run-1/api" } } };
 
         var inputs = AgentInputsOf(Builder.Build(context));
 

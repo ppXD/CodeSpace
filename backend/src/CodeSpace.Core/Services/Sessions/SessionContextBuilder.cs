@@ -108,7 +108,7 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             var result = SessionTurnText.ReadResult(row.OutputsJson);
             if (result != null) sb.AppendLine($"Result: {SessionTurnText.Clip(result)}");
 
-            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id)) ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId.GetValueOrDefault(row.Id))?.Branch ?? SessionTurnText.ReadString(row.OutputsJson, "branch");
             if (branch != null) sb.AppendLine($"Produced branch: {branch}");
 
             if (assessmentsByRunId.TryGetValue(row.Id, out var recorded) && RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is { } completion)

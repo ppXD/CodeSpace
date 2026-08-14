@@ -36,11 +36,11 @@ public sealed record WorkspaceSpec
     /// <see cref="WorkspaceSpec"/> as a multi-repo one, with byte-identical execution. <paramref name="pinnedSha"/>
     /// (S1) pins the primary to an exact base commit (see <see cref="WorkspaceRepositorySpec.PinnedSha"/>).
     /// </summary>
-    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null, bool refSoftFallback = false, string? pinnedSha = null) => new()
+    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null, bool refSoftFallback = false, string? pinnedSha = null, string? refRecoverySha = null) => new()
     {
         Repositories = new[]
         {
-            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, RefSoftFallback = refSoftFallback, PinnedSha = pinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
+            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, RefSoftFallback = refSoftFallback, RefRecoverySha = refRecoverySha, PinnedSha = pinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
         },
         PrimaryAlias = DefaultAlias,
         CwdMode = WorkspaceCwdMode.Auto,
@@ -62,11 +62,11 @@ public sealed record WorkspaceSpec
     /// first authored occurrence win. Without this, the same repo would clone into two mount folders with conflicting
     /// access. Symmetric to the alias de-dup: a collision is collapsed, never a double-clone.</para>
     /// </summary>
-    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null)
+    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false, WorkspaceCwdMode cwdMode = WorkspaceCwdMode.Auto, string? primaryPinnedSha = null, string? primaryRefRecoverySha = null)
     {
         if (relatedRepositories.Count == 0) return null;
 
-        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, RefSoftFallback = primaryRefSoftFallback, PinnedSha = primaryPinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
+        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, RefSoftFallback = primaryRefSoftFallback, RefRecoverySha = primaryRefRecoverySha, PinnedSha = primaryPinnedSha, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
 
         var taken = new HashSet<string>(StringComparer.Ordinal) { DefaultAlias };
         var takenRepoIds = new HashSet<Guid> { primaryRepositoryId };
@@ -152,6 +152,10 @@ public sealed record WorkspaceRepositorySpec
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool RefSoftFallback { get; init; }
+
+    /// <summary>P4 (session branch recovery): the CONFIRMED commit the soft session ref pointed at when recorded — the immutable anchor the clone detaches onto when the prior branch has VANISHED from the remote (a merged-PR auto-delete), so the continuing turn still builds on the prior work instead of silently rebasing onto the default branch. Best-effort by contract (unlike <see cref="PinnedSha"/>, which fails loud): an unrecoverable anchor degrades to the default-branch fallback. Only meaningful alongside <see cref="RefSoftFallback"/>; omitted when null (byte-identical).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RefRecoverySha { get; init; }
 
     /// <summary>The subdirectory under the workspace root this repo clones into in a MULTI-repo workspace (defaults to <see cref="Alias"/> when null). Ignored for a single-repo workspace (which clones flat at the repo root).</summary>
     public string? Path { get; init; }

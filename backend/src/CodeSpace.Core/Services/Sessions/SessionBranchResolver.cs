@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Sessions;
@@ -27,7 +28,7 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
     /// <summary>Bound the newest-first scan — the latest produced branch is in a recent turn; an all-analysis tail beyond this is vanishingly rare and degrades to the safe default-branch fallback.</summary>
     internal const int MaxTurnsScanned = 50;
 
-    private static readonly IReadOnlyDictionary<Guid, string> Empty = new Dictionary<Guid, string>();
+    private static readonly IReadOnlyDictionary<Guid, SessionStartRef> Empty = new Dictionary<Guid, SessionStartRef>();
 
     public SessionBranchResolver(CodeSpaceDbContext db, IPublishManifestStore manifests)
     {
@@ -35,7 +36,7 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
         _manifests = manifests;
     }
 
-    public async Task<IReadOnlyDictionary<Guid, string>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken)
+    public async Task<IReadOnlyDictionary<Guid, SessionStartRef>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken)
     {
         if (repositoryIds.Count == 0) return Empty;
 
@@ -57,33 +58,33 @@ public sealed class SessionBranchResolver : ISessionBranchResolver, IScopedDepen
         var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(recent.Select(t => t.Row.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
 
         var wanted = new HashSet<Guid>(repositoryIds);
-        var resolved = new Dictionary<Guid, string>();
+        var resolved = new Dictionary<Guid, SessionStartRef>();
 
         foreach (var t in recent)   // newest turn first — the first turn that produced a repo's branch wins
         {
             if (resolved.Count == wanted.Count) break;
 
-            foreach (var (repoId, branch) in ProducedBranchesFor(t.Row.Id, t.Row.OutputsJson, t.Row.ScopeRepositoryIds, manifestsByRunId))
+            foreach (var (repoId, startRef) in ProducedBranchesFor(t.Row.Id, t.Row.OutputsJson, t.Row.ScopeRepositoryIds, manifestsByRunId))
             {
-                if (wanted.Contains(repoId) && !resolved.ContainsKey(repoId)) resolved[repoId] = branch;
+                if (wanted.Contains(repoId) && !resolved.ContainsKey(repoId)) resolved[repoId] = startRef;
             }
         }
 
         return resolved;
     }
 
-    /// <summary>One turn's (repositoryId, branch) pairs — the manifest (I2) when it has any live pushed branch for this run, else the legacy raw-JSON read.</summary>
-    private static IEnumerable<(Guid repoId, string branch)> ProducedBranchesFor(Guid runId, string outputsJson, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyDictionary<Guid, IReadOnlyList<Persistence.Entities.PublishManifest>> manifestsByRunId)
+    /// <summary>One turn's (repositoryId, start ref) pairs — the manifest (I2) when it has any live pushed branch for this run (carrying the confirmed sha, the recovery anchor), else the legacy raw-JSON read (branch name only — no recorded tip, recovery unavailable).</summary>
+    private static IEnumerable<(Guid repoId, SessionStartRef startRef)> ProducedBranchesFor(Guid runId, string outputsJson, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyDictionary<Guid, IReadOnlyList<Persistence.Entities.PublishManifest>> manifestsByRunId)
     {
         var manifests = manifestsByRunId.GetValueOrDefault(runId);
 
         var multiRepo = SessionManifestBranches.ResolveRepositoryBranches(manifests);
-        if (multiRepo.Count > 0) return multiRepo.Select(b => (b.RepositoryId, b.Branch));
+        if (multiRepo.Count > 0) return multiRepo.Select(b => (b.RepositoryId, new SessionStartRef { Branch = b.Branch, CommitSha = b.CommitSha }));
 
         var single = SessionManifestBranches.ResolveSingleRepoBranch(manifests);
-        if (single != null && scopeRepositoryIds.Count == 1) return new[] { (scopeRepositoryIds[0], single) };
+        if (single is { } s1 && scopeRepositoryIds.Count == 1) return new[] { (scopeRepositoryIds[0], new SessionStartRef { Branch = s1.Branch, CommitSha = s1.CommitSha }) };
 
-        return ReadProducedBranches(outputsJson, scopeRepositoryIds);
+        return ReadProducedBranches(outputsJson, scopeRepositoryIds).Select(b => (b.repoId, new SessionStartRef { Branch = b.branch }));
     }
 
     /// <summary>

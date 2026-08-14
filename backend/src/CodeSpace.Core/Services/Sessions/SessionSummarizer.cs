@@ -159,7 +159,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
             var result = SessionTurnText.ReadResult(t.OutputsJson);
             if (result != null) sb.AppendLine($"  Result: {SessionTurnText.Clip(result)}");
 
-            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId?.GetValueOrDefault(t.Id)) ?? SessionTurnText.ReadString(t.OutputsJson, "branch");
+            var branch = SessionManifestBranches.ResolveSingleRepoBranch(manifestsByRunId?.GetValueOrDefault(t.Id))?.Branch ?? SessionTurnText.ReadString(t.OutputsJson, "branch");
             if (branch != null) sb.AppendLine($"  Produced branch: {branch}");
         }
 
