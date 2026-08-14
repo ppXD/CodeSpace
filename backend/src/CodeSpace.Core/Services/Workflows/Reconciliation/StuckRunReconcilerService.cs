@@ -312,7 +312,6 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var strandedIds = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Status == WorkflowRunStatus.Suspended
                         && r.LastModifiedDate < threshold
-                        && r.CompletionParkedAt == null
                         && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
             .OrderBy(r => r.LastModifiedDate)
             .Take(BatchSize)
