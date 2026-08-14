@@ -58,15 +58,18 @@ public sealed class VariableService : IVariableService, IScopedDependency
         return rows.Select(MapToResolved).ToList();
     }
 
-    public async Task SetAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, string name, VariableValueType valueType, JsonElement value, string? description, Guid actorUserId, CancellationToken cancellationToken)
+    public async Task SetAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, string name, VariableValueType valueType, JsonElement? value, string? description, Guid actorUserId, CancellationToken cancellationToken)
     {
         var teamId = await EnsureScopeBelongsToTeamAsync(scope, scopeId, expectedTeamId, cancellationToken).ConfigureAwait(false);
+
         var existing = await LoadActiveRowAsync(scope, scopeId, name, cancellationToken).ConfigureAwait(false);
 
         if (existing != null)
             RotateInPlace(existing, valueType, value, description, actorUserId);
         else
-            CreateNew(scope, scopeId, teamId, name, valueType, value, description, actorUserId);
+            CreateNew(scope, scopeId, teamId, name, valueType,
+                value ?? throw new ArgumentException($"Variable '{name}' does not exist, so a value is required to create it.", nameof(value)),
+                description, actorUserId);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
@@ -172,12 +175,50 @@ public sealed class VariableService : IVariableService, IScopedDependency
         });
     }
 
-    private void RotateInPlace(Variable existing, VariableValueType valueType, JsonElement value, string? description, Guid actorUserId)
+    /// <summary>
+    /// Move a name onto the row that already holds the value. Its own operation rather than a flag on
+    /// <see cref="SetAsync"/>, because it is its own intent and the two share no arguments beyond the
+    /// coordinates.
+    ///
+    /// <para>The value columns are never read or rewritten, which is the whole point: a Secret
+    /// survives a rename because nothing has to reproduce it. The previous implementation was
+    /// delete-then-recreate in the client, and a client cannot recreate a Secret — it is never given
+    /// the plaintext — so every renamed secret became an encrypted empty string.</para>
+    /// </summary>
+    public async Task RenameAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, string from, string to, Guid actorUserId, CancellationToken cancellationToken)
     {
-        var (plain, encrypted) = EncodeValue(valueType, value);
-        existing.ValueType = valueType;
-        existing.ValuePlain = plain;
-        existing.ValueEncrypted = encrypted;
+        await EnsureScopeBelongsToTeamAsync(scope, scopeId, expectedTeamId, cancellationToken).ConfigureAwait(false);
+
+        if (string.Equals(from, to, StringComparison.Ordinal)) return;
+
+        var row = await LoadActiveRowAsync(scope, scopeId, from, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Variable '{from}' was not found, so it cannot be renamed to '{to}'.");
+
+        if (await LoadActiveRowAsync(scope, scopeId, to, cancellationToken).ConfigureAwait(false) != null)
+            throw new InvalidOperationException($"A variable named '{to}' already exists in this scope.");
+
+        row.Name = to;
+        row.LastModifiedDate = DateTimeOffset.UtcNow;
+        row.LastModifiedBy = actorUserId;
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Variable rename: scope={Scope} scopeId={ScopeId} {From} -> {To}", scope, scopeId, from, to);
+    }
+
+    private void RotateInPlace(Variable existing, VariableValueType valueType, JsonElement? value, string? description, Guid actorUserId)
+    {
+        // Only touch the value columns when a value was actually supplied. An edit to the description
+        // or the name must leave the stored value exactly as it was -- for a Secret there is no copy
+        // of it anywhere else, so overwriting it here destroys it permanently.
+        if (value.HasValue)
+        {
+            var (plain, encrypted) = EncodeValue(valueType, value.Value);
+            existing.ValueType = valueType;
+            existing.ValuePlain = plain;
+            existing.ValueEncrypted = encrypted;
+        }
+
         existing.Description = description;
         existing.LastModifiedDate = DateTimeOffset.UtcNow;
         existing.LastModifiedBy = actorUserId;

@@ -58,11 +58,14 @@ public interface IVariableService
         Guid expectedTeamId,
         string name,
         VariableValueType valueType,
-        JsonElement value,
+        JsonElement? value,
         string? description,
         Guid actorUserId,
         CancellationToken cancellationToken);
 
     /// <summary>Soft-deletes by tuple. No-op when nothing active exists for that tuple.</summary>
+    /// <summary>Move a name onto the row that already holds the value — the value never leaves the server, so a Secret survives.</summary>
+    Task RenameAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, string from, string to, Guid actorUserId, CancellationToken cancellationToken);
+
     Task DeleteAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, string name, Guid actorUserId, CancellationToken cancellationToken);
 }

@@ -76,6 +76,66 @@ public class VariableServiceFlowTests
         summary.ValuePlain.ShouldBeNull("ValuePlain must be NULL for Secret rows — the API surface never exposes plaintext");
     }
 
+    /// <summary>
+    /// A write that carries no value must leave the stored one alone. This is the whole reason the
+    /// value is optional: the panel edits a description on its own, and a Secret's plaintext is never
+    /// returned to a client, so a caller forced to supply one had nothing to supply but "" — which was
+    /// then encrypted over a credential no copy of existed anywhere.
+    /// </summary>
+    [Fact]
+    public async Task A_description_edit_does_not_touch_the_secret_it_cannot_see()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScope();
+        var sut = scope.Resolve<IVariableService>();
+
+        await sut.SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
+            Json("\"sk-ant-the-real-key\""), null, userId, CancellationToken.None);
+
+        await sut.SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
+            value: null, "Anthropic key for prod", userId, CancellationToken.None);
+
+        var resolved = await sut.GetAllForEngineAsync(VariableScope.Team, teamId, CancellationToken.None);
+
+        resolved.Single(v => v.Name == "API_KEY").Value.ToString().ShouldBe("sk-ant-the-real-key",
+            customMessage: "Editing the description destroyed the secret. A write with no value must not touch the value columns.");
+
+        var summary = await sut.GetAsync(VariableScope.Team, teamId, teamId, "API_KEY", CancellationToken.None);
+        summary!.Description.ShouldBe("Anthropic key for prod");
+    }
+
+    /// <summary>A rename moves the name onto the row that holds the value, so nothing has to reproduce a Secret.</summary>
+    [Fact]
+    public async Task A_rename_keeps_the_secret_it_cannot_reproduce()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScope();
+        var sut = scope.Resolve<IVariableService>();
+
+        await sut.SetAsync(VariableScope.Team, teamId, teamId, "depoyKey", VariableValueType.Secret,
+            Json("\"ghp_liveDeployToken\""), "CI deploy key", userId, CancellationToken.None);
+
+        await sut.RenameAsync(VariableScope.Team, teamId, teamId, "depoyKey", "deployKey", userId, CancellationToken.None);
+
+        var resolved = await sut.GetAllForEngineAsync(VariableScope.Team, teamId, CancellationToken.None);
+
+        resolved.Single(v => v.Name == "deployKey").Value.ToString().ShouldBe("ghp_liveDeployToken",
+            customMessage: "The rename lost the secret. It must move the name onto the existing row, never recreate it.");
+        resolved.ShouldNotContain(v => v.Name == "depoyKey");
+    }
+
+    /// <summary>A value-less write on a name that does not exist is a create with nothing to store — refuse it rather than inventing one.</summary>
+    [Fact]
+    public async Task Creating_a_variable_still_requires_a_value()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScope();
+        var sut = scope.Resolve<IVariableService>();
+
+        await Should.ThrowAsync<ArgumentException>(() => sut.SetAsync(VariableScope.Team, teamId, teamId, "NEVER_SET", VariableValueType.String,
+            value: null, "no value supplied", userId, CancellationToken.None));
+    }
+
     [Fact]
     public async Task Team_GetAllForEngineAsync_decrypts_secrets_and_parses_plain_values()
     {
