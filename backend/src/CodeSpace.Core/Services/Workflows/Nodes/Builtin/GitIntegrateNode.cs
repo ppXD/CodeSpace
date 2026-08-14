@@ -142,7 +142,8 @@ public sealed class GitIntegrateNode : INodeRuntime
             ? $"codespace/integration/{v.GetString()}"
             : $"codespace/integration/{context.NodeId}";
 
-    private static Dictionary<string, JsonElement> ProjectOutputs(IntegrationResult result) => new()
+    /// <summary>The one projection of an <see cref="IntegrationResult"/> into node outputs — shared with <c>git.integrate_run</c> so the two integrate nodes can never drift on the output contract.</summary>
+    internal static Dictionary<string, JsonElement> ProjectOutputs(IntegrationResult result) => new()
     {
         ["status"] = JsonSerializer.SerializeToElement(result.Status.ToString()),
         ["integratedBranch"] = JsonSerializer.SerializeToElement(result.IntegratedBranch),

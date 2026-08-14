@@ -36,6 +36,7 @@ public class PlanMapSynthDefinitionBuilderTests
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),
+        new GitIntegrateRunNode(null!, null!, null!, null!),
         new TerminalNode(),
     }));
 
@@ -72,6 +73,38 @@ public class PlanMapSynthDefinitionBuilderTests
 
         def.Edges.Select(e => (e.From, e.To)).ShouldBe(
             new[] { ("start", "planner"), ("planner", "map"), ("map", "synth"), ("synth", "done"), ("ms", "agent") }, ignoreOrder: true);
+    }
+
+    [Fact]
+    public void A_repo_bound_graph_integrates_before_the_narration_reduce()
+    {
+        // P4 (the plan-map integrated candidate): a repo-bound fan-out gains the run-sourced integrate step
+        // sequenced map → integrate → synth, and the done terminal surfaces the candidate (branch + status)
+        // as run outputs beside the narrated `combined`.
+        var repositoryId = Guid.NewGuid();
+        var def = Builder.Build(Context(new ResolvedAgentProfile { RepositoryId = repositoryId, Harness = "claude-code" }));
+
+        var integrate = def.Nodes.Single(n => n.Id == "integrate");
+        integrate.TypeKey.ShouldBe("git.integrate_run");
+        integrate.Inputs.GetProperty("repositoryId").GetString().ShouldBe(repositoryId.ToString());
+
+        def.Edges.Select(e => (e.From, e.To)).ShouldContain(("map", "integrate"));
+        def.Edges.Select(e => (e.From, e.To)).ShouldContain(("integrate", "synth"));
+        def.Edges.Select(e => (e.From, e.To)).ShouldNotContain(("map", "synth"));
+
+        var done = def.Nodes.Single(n => n.Id == "done").Inputs;
+        done.GetProperty("integrationStatus").GetString().ShouldBe("{{nodes.integrate.outputs.status}}");
+        done.GetProperty("integratedBranch").GetString().ShouldBe("{{nodes.integrate.outputs.integratedBranch}}");
+    }
+
+    [Fact]
+    public void A_repo_less_graph_stays_byte_identical_with_no_integrate_step()
+    {
+        var def = Builder.Build(Context());
+
+        def.Nodes.ShouldNotContain(n => n.Id == "integrate", customMessage: "a repo-less task has nothing to integrate — the graph must not change hash");
+        def.Edges.Select(e => (e.From, e.To)).ShouldContain(("map", "synth"));
+        def.Nodes.Single(n => n.Id == "done").Inputs.TryGetProperty("integrationStatus", out _).ShouldBeFalse();
     }
 
     [Fact]
