@@ -44,7 +44,8 @@ public static class UpstreamStageTrace
     /// <summary>The Integrate cell's two evidence ledgers: the supervisor tape's final reviewable head, OR a PUSHED run-level Integration manifest row with its branch named (a PatchOnly/branch-less row attests no reviewable candidate and stays silent).</summary>
     private static bool HasIntegratedCandidate(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyList<PublishManifest> integrationManifests) =>
         SupervisorOutcome.ReadFinalIntegratedBranch(decisions) is not null
-        || SupervisorOutcome.ReadFinalRepositoryBranches(decisions).Count > 0;
+        || SupervisorOutcome.ReadFinalRepositoryBranches(decisions).Count > 0
+        || integrationManifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
 
     /// <summary>The profile's Required upstream stages the trace does NOT evidence — non-empty means the Success claim skipped a declared stage and must park. A null trace (never derived — a legacy compose) evidences nothing: fail-close.</summary>
     public static IReadOnlyList<CompletionStage> MissingRequired(ModeProfile profile, IReadOnlySet<CompletionStage>? exercised) =>
