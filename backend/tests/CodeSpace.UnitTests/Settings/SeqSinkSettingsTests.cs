@@ -60,11 +60,31 @@ public class SeqSinkSettingsTests
         new SerilogApiKeySetting(empty).Value.ShouldBeNull();
     }
 
+    /// <summary>
+    /// The base file ships NO server. A deployment that has not named its Seq then gets honest
+    /// console-only logging and says so at startup.
+    ///
+    /// <para>It used to ship <c>http://localhost:5341</c>, which every deployed pod inherited and
+    /// which resolves inside the container to itself, where nothing listens. The batched sink retries
+    /// against nothing forever and the operator sees an empty Seq — indistinguishable from an
+    /// application with nothing to report. That cost a real incident: an error was in the pod's
+    /// console the whole time while Seq was searched and found clean.</para>
+    /// </summary>
     [Fact]
-    public void The_shipped_default_is_a_seq_on_the_developers_own_machine()
+    public void The_base_file_ships_no_seq_so_an_unconfigured_deployment_is_honest_about_it()
     {
-        new SerilogServerUrlSetting(ShippedApiConfiguration()).Value.ShouldBe("http://localhost:5341",
-            customMessage: "the committed Serilog:Seq:ServerUrl no longer points at the default local Seq port — a developer following the README would log to nowhere");
+        new SerilogServerUrlSetting(ShippedApiConfiguration()).Value.ShouldBeNullOrEmpty(
+            customMessage: "appsettings.json must not name a Seq. Any value here is inherited by every deployment that " +
+                           "does not override it, and a wrong one is worse than none: it makes an empty Seq look like silence.");
+    }
+
+    /// <summary>The developer convenience the base file gives up, kept where it cannot reach a deployment.</summary>
+    [Fact]
+    public void Development_still_points_at_the_local_seq_so_a_developer_configures_nothing()
+    {
+        new SerilogServerUrlSetting(ShippedDevelopmentConfiguration()).Value.ShouldBe("http://localhost:5341",
+            customMessage: "appsettings.Development.json is what makes a local Seq zero-config; without it a developer " +
+                           "following the README logs to nowhere.");
     }
 
     [Fact]
@@ -79,6 +99,13 @@ public class SeqSinkSettingsTests
     /// <summary>The configuration a developer actually boots on — the committed appsettings.json, nothing layered over it.</summary>
     private static IConfiguration ShippedApiConfiguration() =>
         new ConfigurationBuilder().AddJsonFile(LocateApiAppSettings(), optional: false).Build();
+
+    /// <summary>The configuration a DEVELOPER boots on — base plus the Development overlay, in the order the host layers them.</summary>
+    private static IConfiguration ShippedDevelopmentConfiguration() =>
+        new ConfigurationBuilder()
+            .AddJsonFile(LocateApiAppSettings(), optional: false)
+            .AddJsonFile(LocateApiAppSettings().Replace("appsettings.json", "appsettings.Development.json"), optional: false)
+            .Build();
 
     private static string LocateApiAppSettings()
     {

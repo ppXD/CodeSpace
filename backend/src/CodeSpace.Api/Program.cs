@@ -42,6 +42,16 @@ public class Program
 
         try
         {
+            // First line of every boot, on the console, which is the one sink that is always attached.
+            // It is what makes an empty Seq answerable: either this line names the server, and a missing
+            // event is a real gap worth chasing, or it says console-only and the search was never going
+            // to find anything.
+            var seqDestination = new SerilogServerUrlSetting(configuration).Value;
+            Log.Information("Running build {Build} in {Environment}; logging to console, searchable copy: {SeqDestination}",
+                BuildIdentity.Value,
+                environment,
+                string.IsNullOrWhiteSpace(seqDestination) ? "none — Seq is off, set " + SerilogServerUrlSetting.ConfigurationKey + " to enable it" : seqDestination);
+
             Log.Information("Configuring {Application} host...", application);
 
             new DbUpRunner(new CodeSpaceConnectionString(configuration).Value).Run();
@@ -84,8 +94,15 @@ public class Program
     private static Serilog.ILogger BuildLogger(IConfiguration configuration, string application)
     {
         var logger = new LoggerConfiguration()
+            // Levels come from Serilog:MinimumLevel in settings, so a deployment can turn a subsystem
+            // up to Debug without a rebuild. Read FIRST: the sinks below are added on top of whatever
+            // it configures rather than replaced by it.
+            .ReadFrom.Configuration(configuration)
             .Enrich.FromLogContext()
             .Enrich.WithProperty("Application", application)
+            // Which build produced this line. Without it, a log cannot answer the first question of
+            // any deployment incident -- is this pod even running the code I think it is.
+            .Enrich.WithProperty("Build", BuildIdentity.Value)
             .WriteTo.Console();
 
         var seqServerUrl = new SerilogServerUrlSetting(configuration).Value;

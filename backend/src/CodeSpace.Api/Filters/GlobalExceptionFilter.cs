@@ -15,15 +15,24 @@ namespace CodeSpace.Api.Filters;
 /// surface consults. What is left here is the one thing that is genuinely HTTP's business: which
 /// status number to write, and what a caller is allowed to be told.</para>
 ///
-/// <para>Nothing is logged here. <c>RequestFailureObserver</c> already recorded it at the severity
-/// the failure's kind implies, for every request on every transport; logging again would double every
-/// line and disagree about severity on half of them.</para>
+/// <para>It also records anything nobody else did. <c>RequestFailureObserver</c> covers every
+/// exception that escapes a MediatR HANDLER and marks it, so this stays quiet for those rather than
+/// doubling the line. What it does not cover is everything thrown OUTSIDE the pipeline — a controller
+/// around its <c>Send</c>, model binding, an auth filter, a middleware — and that gap was silent: the
+/// caller got a masked 500 and no log line existed anywhere, on any sink, so the failure was
+/// indistinguishable from one that never happened.</para>
 /// </summary>
 public sealed class GlobalExceptionFilter : IExceptionFilter
 {
+    private readonly ILogger<GlobalExceptionFilter> _logger;
+
+    public GlobalExceptionFilter(ILogger<GlobalExceptionFilter> logger) { _logger = logger; }
+
     public void OnException(ExceptionContext context)
     {
         var failure = FailureClassifier.Classify(context.Exception);
+
+        LogIfNobodyElseDid(context, failure);
 
         var body = new Dictionary<string, object?> { ["code"] = failure.Code, ["message"] = failure.ClientMessage };
 
@@ -42,6 +51,27 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
         // Without this MVC rethrows after the filter runs and the response becomes an unshaped 500,
         // discarding everything decided above.
         context.ExceptionHandled = true;
+    }
+
+    /// <summary>
+    /// Record the failure unless the MediatR observer already did. Same severity table, so a failure
+    /// does not change how loud it is depending on which layer happened to catch it.
+    /// </summary>
+    private void LogIfNobodyElseDid(ExceptionContext context, FailureClassification failure)
+    {
+        // The caller leaving is not a failure, and the observer skips it for the same reason.
+        if (context.Exception is OperationCanceledException) return;
+
+        if (FailureLogging.WasLogged(context.Exception)) return;
+
+        _logger.Log(
+            FailureLogging.SeverityFor(failure.Kind),
+            context.Exception,
+            "{Method} {Path} failed outside the request pipeline: {FailureKind}/{FailureCode}",
+            context.HttpContext.Request.Method,
+            context.HttpContext.Request.Path.Value,
+            failure.Kind,
+            failure.Code);
     }
 
     /// <summary>

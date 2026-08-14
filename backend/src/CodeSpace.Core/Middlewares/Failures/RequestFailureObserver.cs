@@ -44,7 +44,7 @@ public sealed class RequestFailureObserver<TRequest, TException> : IRequestExcep
         var failure = FailureClassifier.Classify(exception);
 
         _logger.Log(
-            SeverityFor(failure.Kind),
+            FailureLogging.SeverityFor(failure.Kind),
             exception,
             "{RequestName} failed: {FailureKind}/{FailureCode} user={UserId} team={TeamId}",
             typeof(TRequest).Name,
@@ -53,20 +53,11 @@ public sealed class RequestFailureObserver<TRequest, TException> : IRequestExcep
             _currentUser.Id,
             _currentTeam.Id);
 
+        // Tells the MVC filter this one is already accounted for. Without the mark it cannot tell
+        // "recorded here" from "thrown somewhere the pipeline never saw", and it has to assume the
+        // latter or those failures reach nobody.
+        FailureLogging.MarkLogged(exception);
+
         return Task.CompletedTask;
     }
-
-    /// <summary>
-    /// Severity follows what the failure MEANS, not where it happened. A refusal is the system working
-    /// and belongs at Information; only a broken invariant or a dependency outage is worth waking
-    /// someone for, and burying those under a stream of expected 403s is how that stops working.
-    /// </summary>
-    private static LogLevel SeverityFor(FailureKind kind) => kind switch
-    {
-        FailureKind.Internal => LogLevel.Error,
-        FailureKind.Unavailable => LogLevel.Error,
-        FailureKind.Conflict => LogLevel.Warning,
-        FailureKind.Exhausted => LogLevel.Warning,
-        _ => LogLevel.Information,
-    };
 }
