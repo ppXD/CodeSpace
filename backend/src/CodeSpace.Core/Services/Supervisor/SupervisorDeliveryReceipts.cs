@@ -13,7 +13,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// diffs), so its OUTPUT hashes carry only the candidate sha — a patch-only single-repo outcome mints no output
 /// receipt and its artifact obligation stays Unknown (owed), never fabricated. And an old tape whose results predate
 /// the publish-evidence mint yields delivery passes with no evidence ref, which admission caps at InfraUnknown —
-/// owed again. Both gaps err toward MORE unresolved, never a false all-clear.</para>
+/// owed again. TYPED artifact rows (DC-4's <c>artifact_manifest</c>) are DB-only facts the tape never carries, so a
+/// mid-run recital's output obligation stays Unknown where the terminal compose settles it from those rows. All
+/// three gaps err toward MORE unresolved, never a false all-clear.</para>
 /// </summary>
 public static class SupervisorDeliveryReceipts
 {

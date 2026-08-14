@@ -311,6 +311,14 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
 
         if (attemptsWithUnits.Count == 0) return;
 
+        // DC-4 slice 3: a staked OUTPUT obligation also settles from the attempt's TYPED artifact rows — the
+        // repo-less lane's captured deliverables (a report/diagram/dataset has no publish manifest to answer
+        // through). Same output-receipt rule as the git arm: captured BYTES only (`artifact:<sha256>` per current
+        // row), Unknown disposition, the kernel's hash-upgrade hook is the only lift. DB-only facts by nature —
+        // the tape-side mint (SupervisorDeliveryReceipts) honestly under-settles here, erring toward MORE
+        // unresolved, exactly like its documented patch-artifact gap.
+        await MintTypedArtifactOutputReceiptsAsync(runId, teamId, stakedOutput, attemptsWithUnits, cancellationToken).ConfigureAwait(false);
+
         var ids = attemptsWithUnits.Select(a => a.AttemptId).ToList();
         var manifests = await _db.PublishManifest.AsNoTracking()
             .Where(m => m.TeamId == teamId && m.AgentRunId != null && ids.Contains(m.AgentRunId.Value))
@@ -388,6 +396,49 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                         ObservedAt = DateTimeOffset.UtcNow,
                     }, cancellationToken).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>The typed-artifact half of the output bridge: one receipt per attempt carrying every CURRENT (unsuperseded) artifact row's content hash — exactly-once per (ref, attempt, null-target), evidence = the rows' own self-description in CAS.</summary>
+    private async Task MintTypedArtifactOutputReceiptsAsync(Guid runId, Guid teamId, HashSet<string> stakedOutput, IReadOnlyList<AttemptProjection> attemptsWithUnits, CancellationToken cancellationToken)
+    {
+        if (stakedOutput.Count == 0) return;
+
+        var ids = attemptsWithUnits.Select(a => a.AttemptId).ToList();
+        var artifactRows = await _db.ArtifactManifest.AsNoTracking()
+            .Where(m => m.TeamId == teamId && ids.Contains(m.AgentRunId) && m.SupersededByManifestId == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (artifactRows.Count == 0) return;
+
+        var existing = (await _contracts.ListReceiptsAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
+            .Where(r => r.Kind == ContractKinds.Output)
+            .Select(r => (r.RequirementRef, r.AttemptId, r.TargetRef))
+            .ToHashSet();
+
+        foreach (var attempt in attemptsWithUnits)
+        {
+            var outputRef = $"output:{attempt.WorkUnit!.UnitId}";
+            var rows = artifactRows.Where(m => m.AgentRunId == attempt.AttemptId).OrderBy(m => m.LogicalPath).ToList();
+
+            if (rows.Count == 0 || !stakedOutput.Contains(outputRef) || existing.Contains((outputRef, attempt.AttemptId, null))) continue;
+
+            var evidence = JsonSerializer.Serialize(rows.Select(m => new { path = m.LogicalPath, kind = m.Kind.ToString(), sha256 = m.Sha256, contentArtifactId = m.ContentArtifactId }), AgentJson.Options);
+            var evidenceRef = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(evidence), "application/json", cancellationToken).ConfigureAwait(false);
+
+            await _contracts.AppendReceiptAsync(runId, teamId, new ReceiptEnvelope
+            {
+                RequirementRef = outputRef,
+                Kind = ContractKinds.Output,
+                AttemptId = attempt.AttemptId,
+                WorkUnit = attempt.WorkUnit,
+                Disposition = VerificationDisposition.Unknown,
+                Authority = ContractAuthority.ServerPolicy,
+                EvidenceRef = evidenceRef,
+                EvaluatorVersion = DeliveryEvaluatorVersion,
+                ContentHashes = rows.Select(m => $"artifact:{m.Sha256}").ToList(),
+                ObservedAt = DateTimeOffset.UtcNow,
+            }, cancellationToken).ConfigureAwait(false);
         }
     }
 

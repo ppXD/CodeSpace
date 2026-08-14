@@ -208,6 +208,59 @@ public sealed class SingleAgentSpineFlowTests
     }
 
     [Fact]
+    public async Task A_typed_artifact_settles_the_output_on_a_repo_less_run()
+    {
+        // DC-4 slice 3: a REPO-LESS deliverable answers its staked OUTPUT through the typed artifact rows — no
+        // branch, no patch, no publish manifest anywhere; the captured report IS the produced bytes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        RunId = await SeedRunAsync(teamId, userId, WorkflowRunStatus.Running);
+
+        Guid agentRunId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().CreateAsync(Task_(), teamId, RunId, nodeId: "agent1", cancellationToken: CancellationToken.None);
+            agentRunId = run.Id;
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+
+            var agentRun = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+            agentRun.Status = AgentRunStatus.Succeeded;
+            agentRun.ResultJson = JsonSerializer.Serialize(new AgentRunResult
+            {
+                Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+                AcceptancePassed = true, AcceptanceDetail = "artifacts-present", AcceptanceEvidenceId = Guid.NewGuid(),
+                CapturedArtifactCount = 1,
+            }, AgentJson.Options);
+
+            db.ArtifactManifest.Add(new ArtifactManifest
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, WorkflowRunId = RunId, FenceEpoch = 1,
+                Kind = ArtifactManifestKind.Document, LogicalPath = "report.md", ContentArtifactId = Guid.NewGuid(),
+                Sha256 = "abc123def456", SizeBytes = 12, ContentType = "text/markdown",
+            });
+
+            var run = await db.WorkflowRun.SingleAsync(r => r.Id == RunId);
+            run.Status = WorkflowRunStatus.Success;
+
+            await db.SaveChangesAsync();
+        }
+
+        using var verify = _fixture.BeginScope();
+        var composed = await verify.Resolve<ICompletionAssessmentComposer>().ComposeAsync(RunId, teamId, CancellationToken.None);
+
+        composed!.Assessment.Verification.ShouldBe(VerificationDisposition.Passed);
+        composed.Assessment.Artifact.ShouldBe(ArtifactDisposition.Captured, "the typed artifact row's content hash settles the output — the repo-less lane's produced bytes");
+
+        var output = (await verify.Resolve<ICompletionContractStore>().ListReceiptsAsync(RunId, teamId, CancellationToken.None))
+            .Single(r => r.Kind == ContractKinds.Output);
+        output.ContentHashes.ShouldNotBeNull();
+        output.ContentHashes!.ShouldContain("artifact:abc123def456", customMessage: "the receipt attests the CAPTURED BYTES by their own hash");
+    }
+
+    [Fact]
     public async Task A_map_fans_its_items_into_distinct_units_and_the_run_folds_worst_first()
     {
         // P4-U2 (L2): each map item is its OWN unit with its own staked obligations — one failed item honestly
