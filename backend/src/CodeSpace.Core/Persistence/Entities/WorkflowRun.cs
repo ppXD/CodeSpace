@@ -117,6 +117,9 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// <summary>P2a: Legacy | Shadow | Enforced — stored as text, read fail-closed (unknown → Legacy). Enforced is only ever set by P2b's qualified-cohort rollout, never at generic creation.</summary>
     public string? CompletionEnforcementMode { get; set; }
 
+    /// <summary>P4 ("NeedsReview must be a durable Park"): when the completion authority last parked this run at the terminal boundary — the discriminator between a DELIBERATE park (a human's to look at; the stranded-run reconciler must not re-drive it) and a stranded suspension. Cleared by the operator's Continue (the one re-arbitration channel) and by any arbitrated terminal stamp.</summary>
+    public DateTimeOffset? CompletionParkedAt { get; set; }
+
     /// <summary>
     /// A1 (wire honesty): how the work actually ENDED, re-derived at the terminal write from the supervisor tape's
     /// last stop decision — <c>SupervisorOutcome.HonestOutcome</c>, whose vocabulary is <c>SupervisorStopKind</c>

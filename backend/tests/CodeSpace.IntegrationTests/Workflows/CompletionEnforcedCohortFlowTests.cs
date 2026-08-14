@@ -1,16 +1,22 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using System.Text.Json;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
@@ -102,6 +108,72 @@ public class CompletionEnforcedCohortFlowTests
         ex.Message.ShouldContain("Unknown completionMode 'yolo'");
     }
 
+    // ── P4: a completion park is DURABLE — the reconciler never re-drives it; Continue is the one channel ──
+
+    [Fact]
+    public async Task A_completion_park_is_durable_the_stranded_sweep_never_redrives_it()
+    {
+        // The parked run wears the stranded sweep's exact shape (Suspended, zero pending waits, past the grace
+        // window) — without the park stamp the reconciler would re-dispatch it into a re-walk → re-arbitrate →
+        // re-park churn loop forever, each cycle paying a full compose plus a live handoff probe.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
+        var runId = await RunManuallyAsync(teamId, userId, workflowId);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+        (await ReadRunAsync(runId)).CompletionParkedAt.ShouldNotBeNull("the terminal park must stamp its discriminator");
+
+        await BackdatePastStrandedGraceAsync(runId);
+
+        await ReconcileAsync();
+
+        var run = await ReadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Suspended, "a completion park is deliberate — the stranded sweep must skip it, never re-drive it");
+        run.CompletionParkedAt.ShouldNotBeNull("…and the park stamp must survive the sweep");
+    }
+
+    [Fact]
+    public async Task A_continued_park_re_arbitrates_to_success_once_the_contract_is_answered()
+    {
+        // THE loop-closer the durable park exists for: park → a human fixes the contract world → Continue →
+        // the replayed walk re-arbitrates against the then-current facts and terminalizes CleanSuccess. The runway:
+        // a supervisor-stamped Enforced run parks (nothing staked, no tape); the operator's world-fix stakes the
+        // full contract and lands the graded merged tape + a pushed manifest; Continue clears the stamp and the
+        // re-driven engine stamps Success.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
+        var runId = await RunManuallyAsync(teamId, userId, workflowId);
+        await StampProjectionKindAsync(runId, CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor);
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        var parked = await ReadRunAsync(runId);
+        parked.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        parked.CompletionParkedAt.ShouldNotBeNull();
+
+        var attemptId = await SeedGradedMergedTapeAsync(runId, teamId);
+        var repositoryId = await SeedRepositoryAsync(teamId);
+        await SeedManifestAsync(teamId, attemptId, repositoryId);
+        await StakeAsync(runId, teamId, "acceptance:s1", ContractKinds.Acceptance);
+        await StakeAsync(runId, teamId, "delivery:s1", ContractKinds.Delivery);
+        await StakeAsync(runId, teamId, "output:s1", ContractKinds.Output);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None))
+                .ShouldBeTrue("a completion-parked run is exactly what the operator's Continue exists to re-arbitrate");
+
+        (await ReadRunAsync(runId)).CompletionParkedAt.ShouldBeNull("Continue clears the stamp — a re-park must be a fresh decision, never a leftover");
+
+        await ForceEnqueuedAsync(runId);
+        await RunEngineAsync(runId);
+
+        var run = await ReadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Success, "the re-arbitration over the fixed contract world must terminalize CleanSuccess");
+        run.CompletionParkedAt.ShouldBeNull();
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
@@ -121,6 +193,116 @@ public class CompletionEnforcedCohortFlowTests
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IMediator>().Send(new RunWorkflowManuallyCommand { WorkflowId = workflowId, Payload = null });
+    }
+
+    private async Task<WorkflowRun> ReadRunAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+    }
+
+    private async Task BackdatePastStrandedGraceAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync(
+            "UPDATE workflow_run SET last_modified_date = {0} WHERE id = {1}",
+            DateTimeOffset.UtcNow - StuckRunReconcilerService.SuspendedStrandedAfter - TimeSpan.FromMinutes(5), runId);
+    }
+
+    private async Task ReconcileAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IMediator>().Send(new ReconcileStuckRunsCommand());
+    }
+
+    private async Task StampProjectionKindAsync(Guid runId, string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        run.ProjectionKind = kind;
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The canonical graded supervisor tape (plan → spawn(passed) → merge → stop) — the same shape <c>CompletionTerminalAuthorityFlowTests</c> seeds, landed AFTER the park as the human's world-fix.</summary>
+    private async Task<Guid> SeedGradedMergedTapeAsync(Guid runId, Guid teamId)
+    {
+        var attemptId = Guid.NewGuid();
+        var planId = Guid.NewGuid();
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Plan,
+            """{"subtasks":[{"id":"s1","title":"T","instruction":"fix it"}]}""",
+            $$"""{"planned":[],"count":1,"workPlanId":"{{planId}}","workPlanVersion":1}""");
+        await SeedDecisionAsync(runId, teamId, 2, SupervisorDecisionKinds.Spawn,
+            """{"subtaskIds":["s1"]}""",
+            JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = attemptId, status = "Succeeded", acceptancePassed = true, acceptanceDetail = (string?)null, acceptanceEvidenceId = (Guid?)Guid.NewGuid(), producedBranch = "codespace/agent/s1" } } }));
+        await SeedDecisionAsync(runId, teamId, 3, SupervisorDecisionKinds.Merge,
+            """{"branches":["codespace/agent/s1"]}""",
+            $$$"""{"integration":{"status":"integrated","integratedBranch":"codespace/integration/{{{runId:N}}}"}}""");
+        await SeedDecisionAsync(runId, teamId, 4, SupervisorDecisionKinds.Stop, "{}", "{}");
+        return attemptId;
+    }
+
+    private async Task SeedDecisionAsync(Guid runId, Guid teamId, int sequence, string kind, string payloadJson, string outcomeJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = sequence,
+            DecisionKind = kind, IdempotencyKey = $"{kind}-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedManifestAsync(Guid teamId, Guid agentRunId, Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.PublishManifest.Add(new PublishManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Kind = PublishManifestKind.Agent, AgentRunId = agentRunId, RepositoryId = repositoryId,
+            RepositoryAlias = "primary", Branch = "codespace/agent/s1", BaseSha = "b1", CommitSha = "c1",
+            PublishStateValue = PublishState.Pushed,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>A live team-bound repository — the handoff probe's reachability target.</summary>
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new ProviderInstance
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.GitLab, DisplayName = "instance",
+            BaseUrl = $"https://git-{suffix}.local", OauthClientId = "client", OauthClientSecretEnc = "enc",
+        };
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id,
+            ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = $"repo-{suffix}", FullPath = $"acme/repo-{suffix}",
+            DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git.local/acme/repo-{suffix}", Status = RepositoryStatus.Active,
+        };
+
+        db.ProviderInstance.Add(instance);
+        db.Repository.Add(repo);
+        await db.SaveChangesAsync();
+        return repo.Id;
+    }
+
+    private async Task StakeAsync(Guid runId, Guid teamId, string requirementRef, string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<Core.Services.Completion.ICompletionContractStore>().UpsertRequirementsAsync(runId, teamId, new[]
+        {
+            new RequirementEnvelope { RequirementRef = requirementRef, Kind = kind, Requiredness = Requiredness.Required, Authority = ContractAuthority.ModelProposal, ContractSchemaVersion = "1" },
+        }, CancellationToken.None);
     }
 
     /// <summary>Tests run the engine inline (no Hangfire worker), so the dispatcher's Pending→Enqueued CAS is mirrored directly — same discipline as <c>ErrorRoutingFlowTests.ReEnqueueAsync</c>.</summary>
