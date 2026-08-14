@@ -135,7 +135,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
             return NodeResult.Fail($"Branch integration failed: {ex.Message}");
         }
 
-        if (false)
+        if (result.Status == IntegrationStatus.Clean && result.IntegratedBranch is { Length: > 0 })
             await RecordIntegrationManifestAsync(runId, teamId, repoId, baseSha!, result, manifests, cancellationToken).ConfigureAwait(false);
 
         context.Logger.LogInformation("git.integrate_run on repo {RepoId}: {Status} ({Applied}/{Total} applied)", repoId, result.Status, result.AppliedCount, contributions.Count);
