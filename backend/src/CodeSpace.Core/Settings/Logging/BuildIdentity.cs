@@ -25,7 +25,11 @@ public static class BuildIdentity
 
     private static string Resolve()
     {
-        var assembly = Assembly.GetEntryAssembly() ?? typeof(BuildIdentity).Assembly;
+        // This assembly, deliberately, not Assembly.GetEntryAssembly(). The entry assembly is whatever
+        // launched the process, which under `dotnet test` is the VSTest host — it reported "17.12.0",
+        // a version belonging to Microsoft's tooling. Every host that matters ships this assembly, and
+        // it is the one built from this repository.
+        var assembly = typeof(BuildIdentity).Assembly;
 
         var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
 

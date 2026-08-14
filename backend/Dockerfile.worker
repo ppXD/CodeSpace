@@ -46,7 +46,17 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet restore CodeSpace.sln
-RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
+# The commit this image is built from, stamped into AssemblyInformationalVersion so BuildIdentity can
+# report it on every log line and on the boot banner. A deployment incident is not diagnosable until
+# a pod can say which code it is running; a bare "1.0.0" cannot.
+#
+# The arg is for pipelines that know the sha (CI passes it); the git fallback covers every other build,
+# because the whole source tree including .git is already in the context. "unknown" is the honest last
+# resort rather than a version that looks meaningful and is not.
+ARG SOURCE_REVISION_ID=""
+RUN SHA="${SOURCE_REVISION_ID:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}" \
+    && echo "Building from revision $SHA" \
+    && dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore -p:SourceRevisionId="$SHA"
 
 # ── 2. The Node-based harness CLIs, version-pinned (override at build time with --build-arg) ──
 # These two ARG defaults are the SINGLE SOURCE OF TRUTH for the pinned CLI versions. A test
