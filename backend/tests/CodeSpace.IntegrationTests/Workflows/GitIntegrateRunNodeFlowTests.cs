@@ -96,6 +96,110 @@ public class GitIntegrateRunNodeFlowTests
             .ShouldNotContain(m => m.Kind == PublishManifestKind.Integration, "nothing integrated ⇒ no candidate row");
     }
 
+    // ─── P4 "conflict ⇒ park": the opt-in approval park + the re-integrate resume ───
+
+    [Fact]
+    public async Task A_conflicted_first_pass_parks_on_an_approval_wait_naming_the_conflict()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator { Result = ConflictedResult() };
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId, parkOnConflict: true), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended, "a conflicted candidate must park for a human, never narrate past silently");
+        result.SuspendUntil!.Kind.ShouldBe(CodeSpace.Messages.Constants.WorkflowWaitKinds.Approval);
+        result.SuspendUntil.Payload.GetProperty("conflictedFiles")[0].GetString().ShouldBe("shared.txt");
+        result.SuspendUntil.Payload.GetProperty("fallbackBranches")[0].GetString().ShouldBe("codespace/agent/b");
+        result.SuspendUntil.Payload.GetProperty("prompt").GetString()!.ShouldContain("approve to retry");
+    }
+
+    [Fact]
+    public async Task An_approved_resume_re_integrates_and_a_repaired_world_lands_the_clean_candidate()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator
+        {
+            Result = IntegrationResult.Build(IntegrationStatus.Clean, $"codespace/integration/{runId:N}", new[]
+            {
+                new ContributionOutcome { Label = "agent#map#0", Disposition = ContributionDisposition.Applied },
+            }),
+        };
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId, parkOnConflict: true, resumePayload: """{"approved":true,"comment":"pushed a fix","by":"user-1"}"""), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "the resumed pass re-integrates — the human's repair made it clean");
+        result.Outputs["status"].GetString().ShouldBe("Clean");
+        result.Outputs["reviewApproved"].GetBoolean().ShouldBeTrue();
+        result.Outputs["reviewedBy"].GetString().ShouldBe("user-1");
+        integrator.Calls.ShouldBe(1, "the resumed pass really re-derived and re-integrated");
+
+        (await scope.Resolve<IPublishManifestStore>().ListForWorkflowRunAsync(runId, teamId, CancellationToken.None))
+            .Where(m => m.Kind == PublishManifestKind.Integration).ShouldHaveSingleItem("the repaired candidate records its row exactly like a first-pass clean");
+    }
+
+    [Fact]
+    public async Task A_still_conflicted_resume_completes_honestly_with_the_review_trail_never_a_loop()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator { Result = ConflictedResult() };
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId, parkOnConflict: true, resumePayload: """{"approved":false,"comment":"ship the fragments","by":"user-2"}"""), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "one park per run — a still-conflicted retry completes honestly instead of looping");
+        result.Outputs["status"].GetString().ShouldBe("Conflicted");
+        result.Outputs["reviewApproved"].GetBoolean().ShouldBeFalse();
+        result.Outputs["reviewComment"].GetString().ShouldBe("ship the fragments");
+
+        (await scope.Resolve<IPublishManifestStore>().ListForWorkflowRunAsync(runId, teamId, CancellationToken.None))
+            .ShouldNotContain(m => m.Kind == PublishManifestKind.Integration, "no clean candidate ⇒ no candidate row");
+    }
+
+    [Fact]
+    public async Task Without_the_opt_in_a_conflict_stays_a_routable_outcome()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, "map#0", minutesAgo: 5);
+        await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch: "codespace/agent/a");
+
+        using var scope = _fixture.BeginScope();
+        var node = new GitIntegrateRunNode(new RecordingIntegrator { Result = ConflictedResult() }, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "an authored graph without the opt-in keeps the conflict a branchable outcome — byte-identical to before the park existed");
+        result.Outputs["status"].GetString().ShouldBe("Conflicted");
+    }
+
+    private static IntegrationResult ConflictedResult() =>
+        IntegrationResult.Build(IntegrationStatus.Conflicted, null, new[]
+        {
+            new ContributionOutcome { Label = "agent#map#0", Disposition = ContributionDisposition.Applied },
+            new ContributionOutcome { Label = "agent#map#1", Disposition = ContributionDisposition.Conflicted, ConflictedFiles = new[] { "shared.txt" }, FallbackBranch = "codespace/agent/b", Reason = "textual conflict" },
+        }, "a contribution conflicted while integrating");
+
     // ─── Seeds ──────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedRunAsync(Guid teamId, Guid userId)
@@ -144,10 +248,11 @@ public class GitIntegrateRunNodeFlowTests
         }, CancellationToken.None);
     }
 
-    private static NodeRunContext Context(Guid repositoryId, Guid teamId, Guid runId) => new()
+    private static NodeRunContext Context(Guid repositoryId, Guid teamId, Guid runId, bool parkOnConflict = false, string? resumePayload = null) => new()
     {
         Inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = JsonSerializer.SerializeToElement(repositoryId.ToString()) },
-        Config = new Dictionary<string, JsonElement>(),
+        Config = parkOnConflict ? new Dictionary<string, JsonElement> { ["parkOnConflict"] = JsonSerializer.SerializeToElement(true) } : new Dictionary<string, JsonElement>(),
+        ResumePayload = resumePayload is null ? null : JsonDocument.Parse(resumePayload).RootElement.Clone(),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
         Scope = new NodeRunScope

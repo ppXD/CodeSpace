@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -23,6 +24,12 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// additionally records the run-level <c>Integration</c> manifest row — the durable "this run's unique integrated
 /// candidate" fact downstream consumers (PR-open, the completion protocol's Integrate stage) read from the
 /// ledger instead of re-deriving from node outputs.</para>
+///
+/// <para>P4 ("conflict ⇒ park"): with <c>parkOnConflict</c> config, a Conflicted first pass SUSPENDS the run on
+/// an Approval wait carrying the conflict detail — a human reviews the fragments instead of a silent green. The
+/// resumed pass re-derives and RE-INTEGRATES against then-current facts (the human may have pushed a fix or a
+/// reconciled branch), so an approve after a repair lands the Clean candidate; a still-conflicted retry
+/// completes honestly with the review trail on its outputs — one park per run, never a loop.</para>
 /// </summary>
 public sealed class GitIntegrateRunNode : INodeRuntime
 {
@@ -47,6 +54,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         Category = "Git",
         Kind = NodeKind.Regular,
         IconKey = "git-merge",
+        CanSuspend = true,
         Description = "Integrates every branch/patch this run's agents produced for one repository into a single reviewable branch, or fails safe (keeps them separate + reports the conflict).",
         // A clean integration pushes a branch — a permanent externally-visible side effect — so the engine refuses
         // auto-resume on abandoned runs / gates a re-run through the side-effect approval card (mirrors git.integrate).
@@ -54,7 +62,9 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
-              "properties": {},
+              "properties": {
+                "parkOnConflict": { "type": "boolean", "description": "When true, a conflicted integration parks the run on an approval wait carrying the conflict detail; the resumed pass re-integrates against then-current facts. Absent/false keeps the conflict a routable outcome." }
+              },
               "x-intent": "Integrate this run's agent work into {repositoryId}.",
               "x-intentPlaceholders": { "repositoryId": "a repository" }
             }
@@ -135,13 +145,49 @@ public sealed class GitIntegrateRunNode : INodeRuntime
             return NodeResult.Fail($"Branch integration failed: {ex.Message}");
         }
 
+        // P4 ("conflict ⇒ park"): a conflicted FIRST pass parks for a human when the graph opted in — the wait
+        // payload names the exact conflict so the review is actionable off the run surface. The resumed pass
+        // never re-parks: it re-integrated against then-current facts above, and either the human's repair made
+        // it Clean or the conflict completes honestly with the review trail on the outputs.
+        if (result.Status == IntegrationStatus.Conflicted && ParkOnConflict(context) && !context.ResumePayload.HasValue)
+        {
+            context.Logger.LogInformation("git.integrate_run on repo {RepoId}: Conflicted — parking for review ({Applied}/{Total} applied)", repoId, result.AppliedCount, contributions.Count);
+
+            return NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.Approval, Payload = ConflictReviewPayload(result) });
+        }
+
         if (result.Status == IntegrationStatus.Clean && result.IntegratedBranch is { Length: > 0 })
             await RecordIntegrationManifestAsync(runId, teamId, repoId, baseSha!, result, manifests, cancellationToken).ConfigureAwait(false);
 
         context.Logger.LogInformation("git.integrate_run on repo {RepoId}: {Status} ({Applied}/{Total} applied)", repoId, result.Status, result.AppliedCount, contributions.Count);
 
-        return NodeResult.Ok(GitIntegrateNode.ProjectOutputs(result));
+        var outputs = GitIntegrateNode.ProjectOutputs(result);
+
+        // The review trail rides the outputs on the resumed pass — who looked, what they said — so the terminal
+        // (and any downstream consumer) sees the conflict was REVIEWED, never silently narrated past.
+        if (context.ResumePayload is { } review)
+        {
+            outputs["reviewApproved"] = ReadOr(review, "approved", JsonSerializer.SerializeToElement(false));
+            outputs["reviewComment"] = ReadOr(review, "comment", JsonSerializer.SerializeToElement(""));
+            outputs["reviewedBy"] = ReadOr(review, "by", JsonSerializer.SerializeToElement(""));
+        }
+
+        return NodeResult.Ok(outputs);
     }
+
+    private static bool ParkOnConflict(NodeRunContext context) =>
+        context.Config.TryGetValue("parkOnConflict", out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>The approval wait's payload — the prompt the run surface renders verbatim plus the structured conflict detail (files + preserved fallback branches), so the reviewer acts without re-deriving anything.</summary>
+    private static JsonElement ConflictReviewPayload(IntegrationResult result) => JsonSerializer.SerializeToElement(new
+    {
+        prompt = $"Integration conflicted — {result.Reason ?? "contributions could not be combined onto one branch"}. Review the fragments (or push a fix), then approve to retry the integration.",
+        conflictedFiles = result.Outcomes.SelectMany(o => o.ConflictedFiles).Distinct().ToList(),
+        fallbackBranches = result.Outcomes.Where(o => o.FallbackBranch is not null).Select(o => o.FallbackBranch!).Distinct().ToList(),
+    });
+
+    private static JsonElement ReadOr(JsonElement obj, string key, JsonElement fallback) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) ? v.Clone() : fallback;
 
     /// <summary>The durable run-level candidate fact: one <c>Integration</c>-kind manifest row per (run, alias) — the ledger read downstream instead of node outputs. The commit sha is deliberately absent (the integrator reports the branch, not its head); the branch + base anchor the candidate.</summary>
     private async Task RecordIntegrationManifestAsync(Guid runId, Guid teamId, Guid repositoryId, string baseSha, IntegrationResult result, IReadOnlyList<Persistence.Entities.PublishManifest> manifests, CancellationToken cancellationToken)
