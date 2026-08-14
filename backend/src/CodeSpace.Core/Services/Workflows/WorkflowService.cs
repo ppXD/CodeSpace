@@ -876,7 +876,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// (<c>StuckRunReconcilerService.RedispatchStrandedSuspendedAsync</c>) — it drives the EXACT continuation a stranded
     /// run would otherwise wait for the ≤2-min sweep to perform. Only a STRANDED Suspended run (Suspended with NO pending
     /// wait) continues: one still parked on a pending wait (approval / timer / callback) is legitimately waiting and
-    /// resumes via /resume or its wait signal, not here.
+    /// resumes via /resume or its wait signal, not here. The twins deliberately DIVERGE on a completion-authority park
+    /// (P4 durable Park): the reconciler skips it, while this verb is THE re-arbitration channel — the operator fixes
+    /// the contract world, continues, and the replayed walk re-arbitrates against the then-current facts (clearing the
+    /// park stamp so a re-park is a fresh decision, never a leftover).
     /// </summary>
     private async Task<bool> ContinueStrandedSuspendedRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -889,7 +892,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // dispatcher's own Pending → Enqueued CAS is the final guard against a double-dispatch).
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == WorkflowRunStatus.Suspended)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Pending)
+                .SetProperty(r => r.CompletionParkedAt, (DateTimeOffset?)null), cancellationToken)
             .ConfigureAwait(false);
 
         if (flipped == 0) return false;

@@ -294,6 +294,11 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// always HAS a Pending wait → excluded. The threshold then excludes the sub-second resolve-then-
     /// flip window of a NORMAL last-wait resume (run momentarily Suspended with zero pending between
     /// the resolve CAS and the flip). So only a durably-stranded run survives both filters.</para>
+    /// <para>P4 ("NeedsReview must be a durable Park"): a run the completion authority parked at the
+    /// terminal boundary is Suspended with NO wait — exactly this sweep's shape — yet it is DELIBERATE,
+    /// not stranded: re-driving it would just re-walk → re-arbitrate → re-park forever (each cycle a
+    /// full compose plus a live handoff probe). <c>CompletionParkedAt</c> is the discriminator; the
+    /// operator's Continue verb is the one deliberate re-arbitration channel and clears it.</para>
     /// <para>We CAS Suspended → Pending FIRST (the dispatcher's CAS only matches Pending), then call
     /// DispatchAsync — exactly how the resume path flips then dispatches. The rowcount guard means a
     /// concurrent resume that already drove the run (its flip won) leaves us with 0 rows → we skip,
@@ -307,6 +312,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var strandedIds = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Status == WorkflowRunStatus.Suspended
                         && r.LastModifiedDate < threshold
+                        && r.CompletionParkedAt == null
                         && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
             .OrderBy(r => r.LastModifiedDate)
             .Take(BatchSize)

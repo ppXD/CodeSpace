@@ -918,6 +918,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 .SetProperty(r => r.Status, status)
                 .SetProperty(r => r.Error, error)
                 .SetProperty(r => r.Outcome, outcome)
+                .SetProperty(r => r.CompletionParkedAt, (DateTimeOffset?)null)
                 .SetProperty(r => r.CompletedAt, now), cancellationToken).ConfigureAwait(false);
 
         return updated == 1;
@@ -948,10 +949,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         if (arbitration.Status == WorkflowRunStatus.Suspended)
         {
-            // Parked, not completed: no CompletedAt, no completion ceremonies, no parent resume — a human (or an
-            // amended contract) resumes it; the replayed walk re-arbitrates against the then-current facts.
+            // Parked, not completed: no CompletedAt, no completion ceremonies, no parent resume. The stamp makes
+            // the park DURABLE (P4): the stranded-run reconciler skips stamped rows, so the one way back is the
+            // operator's Continue — fix the contract world, continue, and the replayed walk re-arbitrates against
+            // the then-current facts.
             run.Status = WorkflowRunStatus.Suspended;
             run.Error = arbitration.Reason;
+            run.CompletionParkedAt = DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -974,6 +978,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
                 run.Status = WorkflowRunStatus.Suspended;
                 run.Error = "completion-authority: the ledger moved at the terminal stamp itself — parked for review";
+                run.CompletionParkedAt = DateTimeOffset.UtcNow;
                 await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -984,6 +989,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             run.Status = status;
             run.Error = error;
             run.Outcome = outcome;
+            run.CompletionParkedAt = null;
             run.CompletedAt = DateTimeOffset.UtcNow;
             _db.Entry(run).State = Microsoft.EntityFrameworkCore.EntityState.Detached;
         }
@@ -992,6 +998,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             run.Status = status;
             run.Error = error;
             run.Outcome = outcome;
+            run.CompletionParkedAt = null;
             run.CompletedAt = DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
