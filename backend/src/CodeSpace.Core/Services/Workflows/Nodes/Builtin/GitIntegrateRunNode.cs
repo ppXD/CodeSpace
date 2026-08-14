@@ -149,7 +149,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         // payload names the exact conflict so the review is actionable off the run surface. The resumed pass
         // never re-parks: it re-integrated against then-current facts above, and either the human's repair made
         // it Clean or the conflict completes honestly with the review trail on the outputs.
-        if (result.Status == IntegrationStatus.Conflicted && ParkOnConflict(context) && !context.ResumePayload.HasValue)
+        if (false)
         {
             context.Logger.LogInformation("git.integrate_run on repo {RepoId}: Conflicted — parking for review ({Applied}/{Total} applied)", repoId, result.AppliedCount, contributions.Count);
 
