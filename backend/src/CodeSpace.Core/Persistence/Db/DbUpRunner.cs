@@ -47,7 +47,11 @@ public class DbUpRunner
 
         try
         {
-            Apply(BuildEngine().PerformUpgrade());
+            var engine = BuildEngine();
+
+            EnsureScriptsWereFound(engine);
+
+            Apply(engine.PerformUpgrade());
         }
         finally
         {
@@ -79,18 +83,22 @@ public class DbUpRunner
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// The script names DbUp would journal, without connecting to anything. Exists for
+    /// <c>MigrationDiscoveryTests</c>, which guards the two silent packaging failures: finding no
+    /// scripts at all, and finding each one twice under two provider-specific names.
+    /// </summary>
+    public static IReadOnlyList<string> DiscoverScriptNames() =>
+        new DbUpRunner(string.Empty).BuildEngine().GetDiscoveredScripts().Select(script => script.Name).ToList();
+
     private UpgradeEngine BuildEngine()
     {
         var assemblyLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? string.Empty;
-        var embeddedResourcePrefix = ScriptFolder.Replace(Path.DirectorySeparatorChar, '.');
 
         return DeployChanges.To.PostgresqlDatabase(_connectionString)
             .WithScriptsFromFileSystem(
                 Path.Combine(assemblyLocation, ScriptFolder),
                 new FileSystemScriptOptions { IncludeSubDirectories = true })
-            .WithScriptsAndCodeEmbeddedInAssembly(
-                typeof(DbUpRunner).Assembly,
-                s => s.StartsWith($"{typeof(DbUpRunner).Assembly.GetName().Name}.{embeddedResourcePrefix}"))
             // Disable $variable$ substitution — our PBKDF2 hash format uses '$' as a
             // section separator (pbkdf2$sha256$iter$salt$digest) and DbUp would otherwise
             // try to expand "$sha256$" as a variable lookup and abort.
@@ -98,6 +106,32 @@ public class DbUpRunner
             .WithTransaction()
             .LogToConsole()
             .Build();
+    }
+
+    /// <summary>
+    /// Refuse to "succeed" having found nothing to run.
+    ///
+    /// <para>The scripts reach the published image as content files copied next to the assembly. If
+    /// that copy is ever missing — a Dockerfile that publishes only the DLL, a trimmed layer, a
+    /// changed output path — DbUp discovers zero scripts, <c>PerformUpgrade</c> returns
+    /// <c>Successful = true</c> because nothing failed, and the process starts happily against a
+    /// database that was never migrated. Every failure after that is a confusing one about a missing
+    /// column, arriving from whichever request happens to touch it first, with nothing anywhere
+    /// naming the real cause.</para>
+    ///
+    /// <para>Zero is never legitimate: this repository has shipped migrations since 0001, so an
+    /// engine that can see the scripts always finds some, applied or not.</para>
+    /// </summary>
+    private static void EnsureScriptsWereFound(UpgradeEngine engine)
+    {
+        var discovered = engine.GetDiscoveredScripts().Count;
+
+        if (discovered > 0) return;
+
+        throw new InvalidOperationException(
+            $"DbUp found no migration scripts. Expected them beside the assembly in '{ScriptFolder}' or embedded in " +
+            $"{typeof(DbUpRunner).Assembly.GetName().Name}. Refusing to start rather than serve requests against a " +
+            "database nothing has migrated.");
     }
 
     private static void Apply(DatabaseUpgradeResult result)

@@ -48,6 +48,12 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Deliberately NOT also <EmbeddedResource>. DbUp journals a script by NAME, and the two
+         providers name the same file differently — "0001_initial.sql" from the file system,
+         "CodeSpace.Core.Persistence.DbUpFiles.0001_initial.sql" embedded. Adding the second source
+         makes every already-applied migration look unapplied under its new name, so the next deploy
+         re-runs the entire history against a live database. MigrationDiscoveryTests fails if anyone
+         adds it. -->
   </ItemGroup>
 
   <ItemGroup>

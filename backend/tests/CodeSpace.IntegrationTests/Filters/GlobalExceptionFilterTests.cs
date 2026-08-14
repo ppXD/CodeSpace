@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Filters;
@@ -149,7 +150,7 @@ public class GlobalExceptionFilterTests
 
     private static ObjectResult Run(Exception exception)
     {
-        var filter = new GlobalExceptionFilter();
+        var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);
         var actionContext = new ActionContext(new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
         var context = new ExceptionContext(actionContext, new List<IFilterMetadata>()) { Exception = exception };
 
