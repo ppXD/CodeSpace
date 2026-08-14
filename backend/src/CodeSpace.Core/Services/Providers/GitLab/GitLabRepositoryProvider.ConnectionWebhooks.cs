@@ -141,27 +141,24 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         return new RemoteWebhook { ExternalId = match.Id.ToString(), CallbackUrl = match.Url ?? callbackUrl, SubscribedEvents = ReadSubscribedEvents(match), Active = true };
     }
 
-    private static List<string> ReadSubscribedEvents(GitLabGroupHook hook)
-    {
-        var subscribed = new List<string>();
-
-        if (hook.PushEvents) subscribed.Add("push");
-        if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
-        if (hook.IssuesEvents) subscribed.Add("issue");
-
-        return subscribed;
-    }
+    private static List<string> ReadSubscribedEvents(GitLabGroupHook hook) =>
+        GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
 
     /// <summary>Same boolean-per-event shape the project endpoint takes, which is why the mapping reads the same as <c>BuildHookUpsert</c>.</summary>
-    private static object BuildGroupHookUpsert(WebhookRegistration request) => new
+    private static object BuildGroupHookUpsert(WebhookRegistration request)
     {
-        url = request.CallbackUrl,
-        token = request.Secret,
-        push_events = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
-        merge_requests_events = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
-        issues_events = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
-        enable_ssl_verification = true
-    };
+        var flags = GitLabHookEvents.Flags(request.SubscribedEvents);
+
+        return new
+        {
+            url = request.CallbackUrl,
+            token = request.Secret,
+            push_events = flags.Push,
+            merge_requests_events = flags.MergeRequests,
+            issues_events = flags.Issues,
+            enable_ssl_verification = true
+        };
+    }
 
     private sealed record GroupHookAnswer(HttpStatusCode Status, string Body);
 

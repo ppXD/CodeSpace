@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Providers.Events;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Webhooks.Registration;
@@ -48,6 +49,15 @@ public class ConnectionWebhookRegistrationFlowTests
         var created = provider.Requests.Single(r => r.Method == "POST");
         created.PathAndQuery.ShouldContain("/api/v4/groups/acme%2Fplatform/hooks",
             customMessage: "GitLab addresses a nested group by its URL-encoded full path; a raw slash resolves to a different route.");
+
+        // The events are the point of a hook, and they were the silent half. GitLab takes a boolean
+        // per event, and merge_requests_events went out false on every hook this system registered
+        // because the flag was derived by substring-matching "merge_request" against the raw name
+        // "Merge Request Hook". Nothing failed; pull-request triggers simply never fired.
+        created.Body.ShouldContain("\"merge_requests_events\":true",
+            customMessage: $"The group hook must subscribe to merge requests, or no pull-request trigger can fire. Sent: {created.Body}");
+        created.Body.ShouldContain("\"push_events\":true", customMessage: $"Sent: {created.Body}");
+        created.Body.ShouldContain("\"issues_events\":true", customMessage: $"Sent: {created.Body}");
     }
 
     [Fact]
@@ -204,7 +214,10 @@ public class ConnectionWebhookRegistrationFlowTests
             OwnerPath = ownerPath,
             CallbackUrl = $"https://codespace.test/api/webhooks/connection/{id}",
             SecretEnc = encryptor.Encrypt("connection-secret"),
-            SubscribedEvents = new List<string> { "push" },
+            // What the subscription registry actually produces. Seeding a convenient "push" here made
+            // this test unable to see the defect it was closest to: the registration went out with
+            // merge_requests_events false for years and nothing in the flow noticed.
+            SubscribedEvents = scope.Resolve<IProviderEventSubscriptionRegistry>().GetSubscribedRawEvents(provider).ToList(),
             RegistrationStatus = RepositoryWebhookRegistrationStatus.Pending
         });
 

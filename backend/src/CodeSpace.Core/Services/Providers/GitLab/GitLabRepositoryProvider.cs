@@ -1199,15 +1199,12 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             var hookUrl = hook.Url?.ToString();
             if (string.IsNullOrEmpty(hookUrl) || !string.Equals(hookUrl, callbackUrl, StringComparison.OrdinalIgnoreCase)) continue;
 
-            // GitLab ProjectHook doesn't expose the flag-style "subscribed_events"
-            // string array we model — events are individual booleans on the hook
-            // record. Surface the boolean → string mapping that mirrors what
-            // RegisterWebhookAsync set up, so a later code path can decide whether
-            // to re-register with a wider subscription if the set has grown.
-            var subscribed = new List<string>();
-            if (hook.PushEvents) subscribed.Add("push");
-            if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
-            if (hook.IssuesEvents) subscribed.Add("issue");
+            // GitLab ProjectHook doesn't expose the flag-style "subscribed_events" string array we
+            // model — events are individual booleans on the hook record. Named through the shared
+            // mapping so a hook read back here and one we staged locally describe their events
+            // identically; while this listed its own short names, "the set has grown" could never be
+            // decided by comparing them.
+            var subscribed = GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
 
             return new RemoteWebhook { ExternalId = hook.Id.ToString(), CallbackUrl = hookUrl, SubscribedEvents = subscribed, Active = true };
         }
@@ -1243,15 +1240,20 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         }
     }
 
-    private static ProjectHookUpsert BuildHookUpsert(WebhookRegistration request) => new()
+    private static ProjectHookUpsert BuildHookUpsert(WebhookRegistration request)
     {
-        Url = new Uri(request.CallbackUrl),
-        Token = request.Secret,
-        PushEvents = request.SubscribedEvents.Any(e => e.Contains("push", StringComparison.OrdinalIgnoreCase)),
-        MergeRequestsEvents = request.SubscribedEvents.Any(e => e.Contains("merge_request", StringComparison.OrdinalIgnoreCase)),
-        IssuesEvents = request.SubscribedEvents.Any(e => e.Contains("issue", StringComparison.OrdinalIgnoreCase)),
-        EnableSslVerification = true
-    };
+        var flags = GitLabHookEvents.Flags(request.SubscribedEvents);
+
+        return new ProjectHookUpsert
+        {
+            Url = new Uri(request.CallbackUrl),
+            Token = request.Secret,
+            PushEvents = flags.Push,
+            MergeRequestsEvents = flags.MergeRequests,
+            IssuesEvents = flags.Issues,
+            EnableSslVerification = true
+        };
+    }
 
     /// <summary>
     /// What we sent, for an operator to read months later. NGitLab hands back neither the URL it
