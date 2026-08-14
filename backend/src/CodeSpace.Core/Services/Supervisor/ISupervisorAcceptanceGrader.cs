@@ -26,6 +26,10 @@ public interface ISupervisorAcceptanceGrader
     /// </summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 
+    /// <summary>DC-4 slice 2 (the repo-less lane): grade the oracle DIRECTLY against an existing directory — the scratch workspace a repo-less run produced its declared deliverables in. The agent process has already exited, so grading its left-behind directory is equivalent to grading a clone of it; there is no git world to anchor an independent checkout on. Same per-kind oracles, same fail-closed posture.</summary>
+    Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
+        Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: directory grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
+
     /// <summary>P3a-3 (B+V0+): grade with ORACLE RESTORE — when the spec names <c>ProtectedPaths</c> and the attempt's base sha is known, the grader restores those paths from the base before running, voiding any candidate tamper of its own judge (recorded in the evidence). Default forwards to the plain overload (fakes and non-git graders are unaffected).</summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken) =>
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);

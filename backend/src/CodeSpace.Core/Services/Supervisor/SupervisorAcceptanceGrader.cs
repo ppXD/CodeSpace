@@ -93,6 +93,14 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
+    public async Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(directory))
+            return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
+
+        return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
     {
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-" + Guid.NewGuid().ToString("N"));
