@@ -119,9 +119,9 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         // while the prior is still current, and EF's statement ordering inside one SaveChanges is not a contract.
         // fresh.Id is pre-generated, so the pointer written first stays consistent; a crash between the steps
         // leaves a visibly dangling pointer (no current row) — fail-visible, and the next capture self-heals it.
-        if (false)
+        if (prior is not null)
         {
-            prior!.SupersededByManifestId = fresh.Id;
+            prior.SupersededByManifestId = fresh.Id;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
