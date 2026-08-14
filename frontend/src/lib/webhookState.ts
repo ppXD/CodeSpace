@@ -38,11 +38,19 @@ export function webhookState(hook: RepositoryWebhookDetail, provider: ProviderKi
 
 function deliveringState(hook: RepositoryWebhookDetail, provider: ProviderKind, now: number): WebhookState {
   const hookId = hook.externalId ? `${providerName(provider)} hook ${formatHookId(hook.externalId)}` : `Registered at ${providerName(provider)}`;
-  // "Registered but nothing has ever arrived" is the single most common way a hook is quietly broken
-  // — the provider accepted it and cannot reach us — so the row has to say so rather than fall silent.
-  const delivery = hook.lastReceivedDate ? `last delivery ${relativeTime(hook.lastReceivedDate, now)}` : "no event has arrived yet";
 
-  return { tone: "good", label: "Delivering", detail: `${hookId} · ${delivery}` };
+  // "Registered but nothing has ever arrived" is the single most common way a hook is quietly broken
+  // — the provider accepted it and cannot reach us — so it gets its own label rather than borrowing
+  // the proven one.
+  //
+  // It used to read "Delivering · no event has arrived yet", which is a badge and its own caption
+  // contradicting each other, and which made the setup steps below it wrong too: they promise the row
+  // "turns to Delivering once the first event lands" while it already said Delivering. Registration
+  // is something WE did; delivery is something only the provider can demonstrate, and the row must
+  // not claim the second on the strength of the first.
+  if (!hook.lastReceivedDate) return { tone: "work", label: "Ready", detail: `${hookId} · waiting for the first event` };
+
+  return { tone: "good", label: "Delivering", detail: `${hookId} · last delivery ${relativeTime(hook.lastReceivedDate, now)}` };
 }
 
 function registeringState(hook: RepositoryWebhookDetail, now: number): WebhookState {
