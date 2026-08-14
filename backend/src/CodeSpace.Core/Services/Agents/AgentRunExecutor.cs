@@ -224,11 +224,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
-            // DC-4 slice 2: a REPO-LESS run with an acceptance contract still needs a WORLD — a scratch working
-            // directory the harness runs in, the declared-artifact capture reads from, and the oracle grades
-            // against. Without it the deliverable dies with the process and the contract fails closed on
-            // "no-branch-or-repo". A repo-less run WITHOUT a contract keeps today's null workspace byte-identically.
-            workspace ??= task.Acceptance is not null ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
+            // DC-4 slice 2: a REPO-LESS run with a DELIVERABLE-shaped contract (ArtifactPresent/LlmJudge — the
+            // kinds whose Command is a path list) still needs a WORLD — a scratch working directory the harness
+            // runs in, the declared-artifact capture reads from, and the oracle grades against. Without it the
+            // deliverable dies with the process and the contract fails closed on "no-branch-or-repo". A TestsPass
+            // contract presupposes a code world — running its argv in an empty scratch would be a category error
+            // (a bare `exit 0` check would even pass vacuously) — so it keeps failing closed, and a repo-less run
+            // without a contract keeps today's null workspace, both byte-identically.
+            workspace ??= Publish.ArtifactManifestStore.DeclaredDeliverablePaths(task).Count > 0 ? Workspace.ScratchWorkspaceHandle.Create(agentRunId) : null;
 
             // The primary repo's directory + cloned base SHA, stamped onto the durable handle at launch so a
             // re-attach can capture the diff even after the live workspace handle object dies with this worker.
