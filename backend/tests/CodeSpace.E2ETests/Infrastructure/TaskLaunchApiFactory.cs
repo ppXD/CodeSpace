@@ -72,6 +72,9 @@ public sealed class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.P
         await drop.ExecuteNonQueryAsync();
     }
 
+    /// <summary>The per-run test database, so a sibling factory can host the same app in a different role against the same data.</summary>
+    public string ConnectionString => _testConnectionString;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
