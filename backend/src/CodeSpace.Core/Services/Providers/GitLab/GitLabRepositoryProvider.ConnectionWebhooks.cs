@@ -145,19 +145,24 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
 
     /// <summary>Same boolean-per-event shape the project endpoint takes, which is why the mapping reads the same as <c>BuildHookUpsert</c>.</summary>
+    /// <summary>
+    /// Every event a group hook can carry, subscribed. See <see cref="GitLabHookEvents.GroupHookAttributes"/>
+    /// for why the set is the provider's rather than the three this system reads. Built as a
+    /// dictionary because the attribute list is data, and an anonymous type would have to restate it
+    /// as sixteen hand-written properties that can drift from it.
+    /// </summary>
     private static object BuildGroupHookUpsert(WebhookRegistration request)
     {
-        var flags = GitLabHookEvents.Flags(request.SubscribedEvents);
-
-        return new
+        var body = new Dictionary<string, object>
         {
-            url = request.CallbackUrl,
-            token = request.Secret,
-            push_events = flags.Push,
-            merge_requests_events = flags.MergeRequests,
-            issues_events = flags.Issues,
-            enable_ssl_verification = true
+            ["url"] = request.CallbackUrl,
+            ["token"] = request.Secret,
+            ["enable_ssl_verification"] = true
         };
+
+        foreach (var attribute in GitLabHookEvents.GroupHookAttributes) body[attribute] = true;
+
+        return body;
     }
 
     private sealed record GroupHookAnswer(HttpStatusCode Status, string Body);

@@ -1217,42 +1217,63 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
         var upsert = BuildHookUpsert(request);
+        var payload = JsonSerializer.Serialize(upsert);
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/hooks";
 
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), _ =>
+            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
-                var created = client.GetRepository(projectId).ProjectHooks.Create(upsert);
+                using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
+                message.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+                message.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-                return Task.FromResult(new RemoteWebhook
+                using var response = await _countsHttpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                    throw new ProviderWebhookRegistrationException(
+                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {body}"), CaptureHookRequest("POST", host, projectId, token, payload)),
+                        new HttpRequestException($"{(int)response.StatusCode}: {body}"));
+
+                return new RemoteWebhook
                 {
-                    ExternalId = created.Id.ToString(),
+                    ExternalId = JsonDocument.Parse(body).RootElement.GetProperty("id").GetRawText(),
                     CallbackUrl = request.CallbackUrl,
-                    SubscribedEvents = request.SubscribedEvents.ToList(),
+                    SubscribedEvents = GitLabHookEvents.ProjectHookAttributes.ToList(),
                     Active = true
-                });
+                };
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            var sent = CaptureHookRequest("POST", host, projectId, token, JsonSerializer.Serialize(upsert, _snakeCaseJson));
+            var sent = CaptureHookRequest("POST", host, projectId, token, payload);
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent), ex);
         }
     }
 
-    private static ProjectHookUpsert BuildHookUpsert(WebhookRegistration request)
+    /// <summary>
+    /// Every event a project hook can carry, subscribed. See
+    /// <see cref="GitLabHookEvents.ProjectHookAttributes"/> for why the set is the provider's rather
+    /// than the three this system reads.
+    ///
+    /// <para>NGitLab's <c>ProjectHookUpsert</c> types only a handful of the booleans, so the ones it
+    /// does expose are set here and the rest are unreachable through it. That is why registration
+    /// posts the body itself — a typed model that silently omits an attribute is the same failure as
+    /// a substring test that silently omits one.</para>
+    /// </summary>
+    private static Dictionary<string, object> BuildHookUpsert(WebhookRegistration request)
     {
-        var flags = GitLabHookEvents.Flags(request.SubscribedEvents);
-
-        return new ProjectHookUpsert
+        var body = new Dictionary<string, object>
         {
-            Url = new Uri(request.CallbackUrl),
-            Token = request.Secret,
-            PushEvents = flags.Push,
-            MergeRequestsEvents = flags.MergeRequests,
-            IssuesEvents = flags.Issues,
-            EnableSslVerification = true
+            ["url"] = request.CallbackUrl,
+            ["token"] = request.Secret,
+            ["enable_ssl_verification"] = true
         };
+
+        foreach (var attribute in GitLabHookEvents.ProjectHookAttributes) body[attribute] = true;
+
+        return body;
     }
 
     /// <summary>

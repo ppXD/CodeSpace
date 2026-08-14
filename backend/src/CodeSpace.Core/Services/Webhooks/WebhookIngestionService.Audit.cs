@@ -18,6 +18,9 @@ public sealed partial class WebhookIngestionService
     /// <summary>How long one unbound repository's refusals collapse into a single audit row. See <see cref="AuditRepositoryNotBoundAsync"/>.</summary>
     private static readonly TimeSpan UnboundAuditWindow = TimeSpan.FromDays(1);
 
+    /// <summary>How long one event type nothing acts on collapses into a single audit row. See <see cref="AuditEventNotMappedAsync"/>.</summary>
+    private static readonly TimeSpan UnmappedAuditWindow = TimeSpan.FromDays(1);
+
     private async Task EnsureActiveOrAuditAsync(bool active, IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
         if (active) return;
@@ -116,24 +119,63 @@ public sealed partial class WebhookIngestionService
     }
 
     /// <summary>
-    /// Payload parsed fine but the normalizer returned null — a valid provider event we don't
-    /// track (e.g. a "deployment" event for a repo subscribed only to PRs). Audited so operators
-    /// can answer "I sent X but nothing happened" without reading server logs.
+    /// Payload parsed fine but the normalizer returned null — a valid provider event we do not act
+    /// on. Audited so an operator can answer "I sent X and nothing happened" without reading server
+    /// logs.
+    ///
+    /// <para>Recorded at most ONCE per (hook, event type) per <see cref="UnmappedAuditWindow"/>, for
+    /// the same reason the unbound case is: hooks now subscribe to everything the provider offers,
+    /// so that a capability added later needs no visit to every hook to start receiving its events.
+    /// The direct consequence is that MOST deliveries are events nothing acts on — a label edit, a
+    /// check run, a branch protection change — and a row per delivery would add thousands a day to
+    /// the same table the real refusals live in, burying them.</para>
+    ///
+    /// <para>One row a day per event type still answers the operator's question ("deployment events
+    /// are arriving and nothing handles them"), and answers it better than ten thousand identical
+    /// rows. The suppression rides the auditor's idempotency key rather than a read-then-write, so
+    /// two deliveries landing together cannot both decide they are the first.</para>
     /// </summary>
     private async Task AuditEventNotMappedAsync(IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Webhook {WebhookId} payload not mapped to a tracked event type", subject.WebhookId);
+        var eventType = ReadEventType(headers);
+
+        _logger.LogInformation("Webhook {WebhookId} delivered {EventType}, which nothing acts on", subject.WebhookId, eventType);
 
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = subject.TeamId,
             RepositoryId = subject.RepositoryId,
             Reason = WorkflowRunRequestRejectionReasons.EventNotMapped,
-            Detail = $"normalizer for provider {subject.Provider} returned null for this payload",
+            Detail = $"nothing acts on {eventType} from {subject.Provider}",
             SourceType = BuildSourceType(subject),
             ExternalEventId = TryExtractDeliveryId(headers),    // sig already passed, headers are trusted
+            DedupKey = BuildUnmappedDedupKey(subject.WebhookId, eventType),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>One key per (hook, event type, window) — see <see cref="AuditEventNotMappedAsync"/>.</summary>
+    private static string BuildUnmappedDedupKey(Guid webhookId, string eventType)
+    {
+        var window = DateTimeOffset.UtcNow.Ticks / UnmappedAuditWindow.Ticks;
+
+        return $"unmapped:{webhookId}:{eventType}:{window}";
+    }
+
+    /// <summary>
+    /// The provider's own name for what it just sent — <c>X-GitHub-Event</c> or <c>X-Gitlab-Event</c>.
+    /// It is what makes one collapsed row per day USEFUL rather than merely quiet: "nothing acts on
+    /// check_run" is actionable, "a payload was not mapped" is not.
+    /// </summary>
+    private static string ReadEventType(IReadOnlyDictionary<string, string> headers)
+    {
+        foreach (var name in new[] { "X-GitHub-Event", "X-Gitlab-Event" })
+        {
+            var match = headers.FirstOrDefault(h => string.Equals(h.Key, name, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(match.Value)) return match.Value;
+        }
+
+        return "an unnamed event";
     }
 
     /// <summary>

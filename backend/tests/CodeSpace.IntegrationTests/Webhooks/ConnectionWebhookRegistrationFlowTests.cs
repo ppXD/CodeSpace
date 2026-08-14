@@ -54,10 +54,13 @@ public class ConnectionWebhookRegistrationFlowTests
         // per event, and merge_requests_events went out false on every hook this system registered
         // because the flag was derived by substring-matching "merge_request" against the raw name
         // "Merge Request Hook". Nothing failed; pull-request triggers simply never fired.
-        created.Body.ShouldContain("\"merge_requests_events\":true",
-            customMessage: $"The group hook must subscribe to merge requests, or no pull-request trigger can fire. Sent: {created.Body}");
-        created.Body.ShouldContain("\"push_events\":true", customMessage: $"Sent: {created.Body}");
-        created.Body.ShouldContain("\"issues_events\":true", customMessage: $"Sent: {created.Body}");
+        // Every documented group attribute, on the wire. A hook cannot be re-synced once registered,
+        // so anything left out here needs a hand visit to every hook the day something reads it.
+        foreach (var attribute in CodeSpace.Core.Services.Providers.GitLab.GitLabHookEvents.GroupHookAttributes)
+        {
+            created.Body.ShouldContain($"\"{attribute}\":true",
+                customMessage: $"The group hook must subscribe to {attribute}. Sent: {created.Body}");
+        }
     }
 
     [Fact]

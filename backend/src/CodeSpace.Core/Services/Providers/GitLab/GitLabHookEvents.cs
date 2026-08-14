@@ -32,6 +32,33 @@ public static class GitLabHookEvents
     public static IReadOnlyList<string> All { get; } = new[] { Push, MergeRequest, Issue };
 
     /// <summary>
+    /// Every boolean a GitLab hook takes, per the Project and Group webhooks APIs, all set true.
+    ///
+    /// <para>Hooks subscribe to everything the provider offers rather than to the three events this
+    /// system currently reads, because there is no way to re-sync an already-registered hook: a
+    /// capability added later would otherwise need a hand visit to every hook that already exists,
+    /// on every installation. Subscribing wide once is the cheaper side of that trade — the cost is
+    /// deliveries nothing acts on, which are collapsed to one audit row per event type per day
+    /// rather than accumulating like anomalies.</para>
+    ///
+    /// <para>Group hooks accept four the project endpoint does not — <c>milestone</c>,
+    /// <c>subgroup</c>, <c>member</c>, <c>project</c> — so the two lists are separate. GitLab
+    /// ignores an unknown attribute rather than failing, but sending a project-only body to a group
+    /// would silently under-subscribe, which is the whole class of bug this file exists to end.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ProjectHookAttributes { get; } = new[]
+    {
+        "push_events", "tag_push_events", "issues_events", "confidential_issues_events",
+        "merge_requests_events", "note_events", "confidential_note_events", "job_events",
+        "pipeline_events", "wiki_page_events", "deployment_events", "feature_flag_events",
+        "releases_events", "emoji_events", "resource_access_token_events", "vulnerability_events"
+    };
+
+    /// <summary>The project set plus the four only a group hook accepts. See <see cref="ProjectHookAttributes"/>.</summary>
+    public static IReadOnlyList<string> GroupHookAttributes { get; } =
+        ProjectHookAttributes.Concat(new[] { "milestone_events", "subgroup_events", "member_events", "project_events" }).ToList();
+
+    /// <summary>
     /// Which flags to send for a subscription set. Exact matching on the raw names — a name that is
     /// not one of <see cref="All"/> throws, because the alternative is a hook that quietly does not
     /// carry it.
