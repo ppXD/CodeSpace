@@ -89,6 +89,45 @@ public class WebhookIngestionAuditFlowTests
         rejected.Error.ShouldContain(WorkflowRunRequestRejectionReasons.WebhookInactive);
     }
 
+    /// <summary>
+    /// The sibling above calls the ingestion service directly, which is NOT how a delivery
+    /// arrives: the controller sends <c>ReceiveWebhookCommand</c>, and the mediator wraps every
+    /// command in a transaction that rolls back when the handler throws. Every rejection here
+    /// reports itself by throwing — so an audit written on the request's own DbContext is erased
+    /// by the failure it documents, and the whole rejected-deliveries feature records nothing in
+    /// production while its direct-call tests stay green.
+    ///
+    /// <para>This test drives the real path. It fails if <c>IngestionAuditor</c> ever goes back
+    /// to writing through the injected context.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_rejection_audit_survives_the_mediator_transaction_that_the_rejection_rolls_back()
+    {
+        var (teamId, webhookId) = await SeedInactiveWebhookAsync();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var mediator = scope.Resolve<MediatR.IMediator>();
+            await Should.ThrowAsync<InvalidOperationException>(() => mediator.Send(new CodeSpace.Messages.Commands.Webhooks.ReceiveWebhookCommand
+            {
+                WebhookId = webhookId,
+                Body = "{}",
+                Headers = new Dictionary<string, string>()
+            }));
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var rejected = await db.WorkflowRunRequest.AsNoTracking()
+            .SingleOrDefaultAsync(r => r.TeamId == teamId && r.Status == WorkflowRunRequestStatus.Rejected);
+
+        rejected.ShouldNotBeNull(
+            customMessage: "No audit row survived ReceiveWebhookCommand. The auditor must write on its own " +
+                           "connection; writing through the request's DbContext puts the row inside the " +
+                           "transaction that the rejection's throw rolls back.");
+        rejected.Error.ShouldContain(WorkflowRunRequestRejectionReasons.WebhookInactive);
+    }
+
     [Fact]
     public async Task Auditor_writes_signature_invalid_row_directly()
     {

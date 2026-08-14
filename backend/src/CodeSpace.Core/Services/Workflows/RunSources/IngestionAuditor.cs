@@ -10,19 +10,25 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Workflows.RunSources;
 
 /// <summary>
-/// One DB write per call, scoped to its own SaveChanges so the audit row commits even if the
+/// One DB write per call, on a connection of its own, so the audit row commits even when the
 /// caller's enclosing transaction later rolls back. This is what makes signature-fail /
 /// no-match rejections SURVIVE the controller's 401 — operator debugging is built on these
 /// surviving rows.
+///
+/// <para>The separate connection is the whole mechanism, not an optimisation. Every rejection
+/// this class records is reported to its caller by throwing, and the mediator's transactional
+/// middleware rolls back on a throw — so an audit written through the request's own DbContext
+/// would be erased by the very failure it documents. A row about a failure must not be owned
+/// by that failure's transaction.</para>
 /// </summary>
 public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
 {
-    private readonly CodeSpaceDbContext _db;
+    private readonly DbContextOptions<CodeSpaceDbContext> _options;
     private readonly ILogger<IngestionAuditor> _logger;
 
-    public IngestionAuditor(CodeSpaceDbContext db, ILogger<IngestionAuditor> logger)
+    public IngestionAuditor(DbContextOptions<CodeSpaceDbContext> options, ILogger<IngestionAuditor> logger)
     {
-        _db = db;
+        _options = options;
         _logger = logger;
     }
 
@@ -103,11 +109,16 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
     /// </summary>
     private async Task SaveAuditRowAsync(WorkflowRunRequest row, string sourceType, string? externalEventId, CancellationToken cancellationToken)
     {
-        _db.WorkflowRunRequest.Add(row);
+        // Deliberately NOT the request's injected DbContext — see the class remarks. A context
+        // built from the shared options opens its own connection, so this insert commits on its
+        // own and is untouched by the caller's rollback.
+        await using var db = new CodeSpaceDbContext(_options, currentUser: null, botVisibility: null);
+
+        db.WorkflowRunRequest.Add(row);
 
         try
         {
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation(
                 "Ingestion audit: wrote Rejected request {RequestId} (source={SourceType}, externalId={ExternalEventId})",
                 row.Id, sourceType, externalEventId ?? "<none>");
@@ -115,9 +126,7 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
             // Provider retry hit the same (source_type, external_event_id) — the existing
-            // audit row already captures this rejection. Detach the now-orphaned tracked
-            // entity so subsequent SaveChanges don't re-attempt the insert.
-            _db.Entry(row).State = EntityState.Detached;
+            // audit row already captures this rejection.
             _logger.LogDebug(
                 "Ingestion audit: duplicate retry for (source={SourceType}, externalId={ExternalEventId}); existing row preserved",
                 sourceType, externalEventId);
