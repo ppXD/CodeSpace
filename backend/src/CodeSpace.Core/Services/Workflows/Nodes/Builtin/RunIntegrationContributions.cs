@@ -36,6 +36,7 @@ public static class RunIntegrationContributions
                 ProducedBranch = pair.Manifest.Branch,
                 SourceRepositoryId = repositoryId,
             })
+            .Take(1)
             .ToList();
     }
 
