@@ -297,7 +297,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     {
         var url = BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
 
-        var (checkoutRef, softRefFellBack) = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
+        var (checkoutRef, softRefFellBack, remoteTip) = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
 
         var args = new List<string> { "clone" };
 
@@ -316,6 +316,56 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             await MaterializePinAsync(request, directory, cancellationToken).ConfigureAwait(false);
         else if (softRefFellBack && !string.IsNullOrWhiteSpace(request.RefRecoverySha))
             await MaterializeRecoveryAsync(request, directory, cancellationToken).ConfigureAwait(false);
+        else if (!softRefFellBack && !string.IsNullOrWhiteSpace(request.DefaultRef) && !string.IsNullOrWhiteSpace(request.RefRecoverySha)
+                 && remoteTip is not null && !remoteTip.StartsWith(request.RefRecoverySha!, StringComparison.OrdinalIgnoreCase))
+            await DetectAndRecoverDivergenceAsync(request, directory, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P4 (session branch recovery, the FORCE-PUSH half): the soft session ref still EXISTS but its remote tip is no
+    /// longer the recorded anchor — the branch either moved FORWARD (another turn / a human pushed on top: the anchor
+    /// is an ancestor of the new tip, the thread is intact, keep the tip) or was REWRITTEN (a force-push orphaned the
+    /// anchor: continuing on the new tip silently drops the session's own recorded work — detach back onto the
+    /// anchor, loudly). Until this check a rewrite was COMPLETELY silent — the name-existence probe passed and the
+    /// clone took whatever history replaced the thread. Best-effort like every recovery rung: an unfetchable anchor
+    /// stays on the tip with a loud warning, never a failed provision. Costs nothing when the tip still equals the
+    /// anchor (the caller's fast-path compare) — only a genuinely moved branch pays the ancestry check.
+    /// </summary>
+    private async Task DetectAndRecoverDivergenceAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    {
+        var sha = request.RefRecoverySha!;
+
+        await FetchCommitBestEffortAsync(directory, sha, request.Depth, cancellationToken).ConfigureAwait(false);
+
+        if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' moved and its recorded tip {Sha} could not be fetched to arbitrate — continuing on the branch's current tip; if the branch was rewritten, the session's prior work is not in this workspace", request.Ref, sha);
+            return;
+        }
+
+        var ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, cancellationToken).ConfigureAwait(false);
+
+        // A SHALLOW clone can hold the anchor OBJECT (fetched by sha) without the CONNECTING history, so a genuine
+        // forward move reads as "not an ancestor" through the shallow boundary — a false-positive rewrite that would
+        // wrongly detach the continue backwards. Deepen once and re-arbitrate before believing a divergence verdict.
+        if (ancestry.Status != SandboxStatus.Success && await IsShallowAsync(directory, cancellationToken).ConfigureAwait(false))
+        {
+            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
+            ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (ancestry.Status == SandboxStatus.Success)
+        {
+            _logger.LogInformation("Session continuity: the prior branch '{PriorRef}' moved forward past the recorded tip {Sha} (still an ancestor) — continuing on the branch tip", request.Ref, sha);
+            return;
+        }
+
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, cancellationToken).ConfigureAwait(false);
+
+        if (checkout.Status == SandboxStatus.Success)
+            _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' was REWRITTEN (its tip no longer descends from the recorded tip {Sha}) — recovered the session's prior work by detaching at the anchor; the rewritten branch is untouched on the remote", request.Ref, sha);
+        else
+            _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' was REWRITTEN and the recorded tip {Sha} could not be checked out — continuing on the branch's current tip; the session's prior work is not in this workspace", request.Ref, sha);
     }
 
     /// <summary>
@@ -377,6 +427,9 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             throw new WorkspaceException($"the pinned base commit '{pin}' could not be checked out (exit {checkout.ExitCode}): {Redact(Summarize(checkout.Stderr), request.Token)} — the pin guarantees every participant sees the SAME immutable base; a stale or unpushed pin must fail the provision, never silently fall back to the tip");
     }
 
+    private async Task<bool> IsShallowAsync(string directory, CancellationToken cancellationToken) =>
+        (await RunGitAsync(new[] { "-C", directory, "rev-parse", "--is-shallow-repository" }, cancellationToken).ConfigureAwait(false)).Stdout.Trim() == "true";
+
     private async Task<bool> CommitExistsLocallyAsync(string directory, string sha, CancellationToken cancellationToken) =>
         (await RunGitAsync(new[] { "-C", directory, "rev-parse", "--verify", "--quiet", $"{sha}^{{commit}}" }, cancellationToken).ConfigureAwait(false)).Status == SandboxStatus.Success;
 
@@ -387,30 +440,37 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// default branch itself, or any ref with no fallback) is returned verbatim, so an explicit ref is never silently
     /// rewritten and the clone fails loud if it is gone. Byte-identical to before for every hard ref (no pre-flight runs).
     /// </summary>
-    private async Task<(string? CheckoutRef, bool SoftRefFellBack)> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
+    private async Task<(string? CheckoutRef, bool SoftRefFellBack, string? RemoteTip)> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Ref) || string.IsNullOrWhiteSpace(request.DefaultRef) || string.Equals(request.Ref, request.DefaultRef, StringComparison.Ordinal))
-            return (request.Ref, false);
+            return (request.Ref, false, null);
 
-        if (await RefExistsOnRemoteAsync(url, request.Ref!, cancellationToken).ConfigureAwait(false))
-            return (request.Ref, false);
+        var (exists, remoteTip) = await ProbeRemoteRefAsync(url, request.Ref!, cancellationToken).ConfigureAwait(false);
+
+        if (exists) return (request.Ref, false, remoteTip);
 
         _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' no longer exists on the remote for {RepositoryUrl}; starting the continuing run from the default branch '{DefaultRef}' instead", request.Ref, request.RepositoryUrl, request.DefaultRef);
 
-        return (request.DefaultRef, true);
+        return (request.DefaultRef, true, null);
     }
 
     /// <summary>
-    /// True when <paramref name="ref"/> resolves to a ref (branch or tag) on the remote. Only a clean PROBE that
-    /// definitively finds NO matching ref (ls-remote succeeds with empty output) returns false → the soft fallback
-    /// fires; a transient git / network failure of the probe is treated as PRESENT (return true) so a flaky probe never
-    /// silently downgrades a continuing run to the default branch — the clone itself then surfaces any real failure.
+    /// Whether <paramref name="ref"/> resolves on the remote, and (when the probe succeeded) the TIP sha it points
+    /// at — the divergence check's free input (the same ls-remote already paid for existence). Only a clean probe
+    /// that definitively finds NO matching ref returns (false, _) → the soft fallback fires; a transient git /
+    /// network failure is treated as PRESENT with an UNKNOWN tip (true, null) so a flaky probe never silently
+    /// downgrades a continuing run — and an unknown tip also skips the divergence check (fail-safe both ways).
     /// </summary>
-    private async Task<bool> RefExistsOnRemoteAsync(string url, string @ref, CancellationToken cancellationToken)
+    private async Task<(bool Exists, string? Tip)> ProbeRemoteRefAsync(string url, string @ref, CancellationToken cancellationToken)
     {
         var result = await RunGitAsync(new[] { "ls-remote", url, @ref }, cancellationToken).ConfigureAwait(false);
 
-        return result.Status != SandboxStatus.Success || !string.IsNullOrWhiteSpace(result.Stdout);
+        if (result.Status != SandboxStatus.Success) return (true, null);
+        if (string.IsNullOrWhiteSpace(result.Stdout)) return (false, null);
+
+        var tip = result.Stdout.TrimStart().Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+
+        return (true, string.IsNullOrWhiteSpace(tip) ? null : tip.Trim().ToLowerInvariant());
     }
 
     /// <summary>
